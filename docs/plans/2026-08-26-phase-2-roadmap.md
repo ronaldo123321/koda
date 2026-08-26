@@ -44,7 +44,7 @@ Status: Complete (2026-08-26)
 
 ### Phase 2C: context budgets and compaction
 
-Status: Next
+Status: In progress
 
 - Build a provider-neutral ContextEngine.
 - Use measured usage plus conservative estimates for preflight budgets.
