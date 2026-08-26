@@ -28,6 +28,7 @@ import {
   JsonlEventStore,
   ReadOnlyWorkspace,
   ThreadLease,
+  ThreadMetadataIndex,
   ThreadRecoveryError,
   WorkspaceCommandRunner,
   assertResumeWorkspace,
@@ -138,6 +139,7 @@ export async function runCommand(
   }
 
   let lease: ThreadLease | undefined;
+  let indexedThreadId: ReturnType<typeof threadIdSchema.parse> | undefined;
   try {
     const workspace = await dependencies.openWorkspace(configuration.cwd);
     const repositoryInstructions = await loadRepositoryInstructions(
@@ -162,6 +164,7 @@ export async function runCommand(
       `${ids.threadId}.jsonl`,
     );
     lease = await ThreadLease.acquire(eventLogPath);
+    indexedThreadId = ids.threadId;
     const eventStore = new JsonlEventStore(eventLogPath);
     const artifactStore = await ArtifactStore.open(
       join(configuration.kodaHome, "artifacts"),
@@ -294,6 +297,30 @@ export async function runCommand(
         context.stderr.write(
           `[koda] warning: thread lease cleanup failed: ${message}\n`,
         );
+      }
+    }
+    if (indexedThreadId !== undefined) {
+      let metadataIndex: ThreadMetadataIndex | undefined;
+      try {
+        metadataIndex = await ThreadMetadataIndex.open(configuration.kodaHome);
+        if (metadataIndex.recovery !== undefined) {
+          context.stderr.write(
+            `[koda] warning: rebuilt a corrupt metadata database; preserved it at ${metadataIndex.recovery.databaseBackup}\n`,
+          );
+        }
+        const refresh = await metadataIndex.refreshThread(indexedThreadId);
+        for (const diagnostic of refresh.diagnostics) {
+          context.stderr.write(
+            `[koda] warning: metadata index: ${diagnostic.logFile}: ${diagnostic.message}\n`,
+          );
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        context.stderr.write(
+          `[koda] warning: thread metadata refresh failed: ${message}\n`,
+        );
+      } finally {
+        metadataIndex?.close();
       }
     }
   }

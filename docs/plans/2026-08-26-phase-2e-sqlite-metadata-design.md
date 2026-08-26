@@ -1,6 +1,6 @@
 # Koda Phase 2E: Rebuildable SQLite Thread Metadata
 
-- Status: Accepted for implementation
+- Status: Implemented (2026-08-26)
 - Date: 2026-08-26
 - Depends on: Phase 2D durable side-effect and process lifecycle recovery
 - Scope: rebuildable local thread metadata, post-run projection, and credential-free `thread list/show` commands
@@ -91,4 +91,4 @@ Phase 2E is complete when `state.db` can be deleted or corrupted and rebuilt sol
 - Provider pricing tables and monetary cost materialization: a later accounting slice after versioned pricing inputs exist.
 - Incremental event-tail projection using `indexed_bytes`: future optimization after profiling.
 - Transcript full-text search or embeddings: not part of the metadata index.
-- Artifact reference-aware garbage collection: Phase 2F or a dedicated storage-maintenance slice.
+- Artifact reference-aware garbage collection: Phase 2F. **Moved from the earlier Phase 2E expectation.**

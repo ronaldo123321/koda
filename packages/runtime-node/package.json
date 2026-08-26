@@ -19,9 +19,11 @@
   "dependencies": {
     "@koda/agent-core": "workspace:*",
     "@koda/protocol": "workspace:*",
+    "better-sqlite3": "^13.0.3",
     "zod": "^4.1.5"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^22.18.0"
   }
 }

@@ -95,6 +95,8 @@ describe("JsonlEventStore", () => {
     await expect(store.readAll()).resolves.toEqual({
       events: [started, completed],
       diagnostics: [],
+      sourceBytes: expect.any(Number),
+      indexedBytes: expect.any(Number),
     });
   });
 
@@ -107,6 +109,8 @@ describe("JsonlEventStore", () => {
     await expect(store.readAll()).resolves.toEqual({
       events: [started],
       diagnostics: [],
+      sourceBytes: Buffer.byteLength(JSON.stringify(started)),
+      indexedBytes: Buffer.byteLength(JSON.stringify(started)),
     });
     await store.prepareForAppend({ discardPartialTrailingLine: false });
     await store.append(completed);
@@ -114,6 +118,8 @@ describe("JsonlEventStore", () => {
     await expect(store.readAll()).resolves.toEqual({
       events: [started, completed],
       diagnostics: [],
+      sourceBytes: expect.any(Number),
+      indexedBytes: expect.any(Number),
     });
   });
 });

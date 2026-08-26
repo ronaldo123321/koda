@@ -32,6 +32,20 @@ export class ConfigurationError extends Error {
   }
 }
 
+export function resolveKodaHome(environment: NodeJS.ProcessEnv): string {
+  return resolve(environment.KODA_HOME?.trim() || resolve(homedir(), ".koda"));
+}
+
+export function parseLocalThreadId(input: string): ThreadId {
+  const candidate = input.trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u.test(candidate)) {
+    throw new ConfigurationError(
+      "Thread ID must use 1-128 letters, digits, underscores, or hyphens and cannot contain path syntax.",
+    );
+  }
+  return threadIdSchema.parse(candidate);
+}
+
 export function resolveRunConfiguration(
   input: RunConfigurationInput,
   environment: NodeJS.ProcessEnv,
@@ -56,9 +70,7 @@ export function resolveRunConfiguration(
     );
   }
   const cwd = resolve(processDirectory, input.cwd?.trim() || ".");
-  const kodaHome = resolve(
-    environment.KODA_HOME?.trim() || resolve(homedir(), ".koda"),
-  );
+  const kodaHome = resolveKodaHome(environment);
   const contextWindowTokens = parsePositiveInteger(
     environment.KODA_CONTEXT_WINDOW_TOKENS,
     "KODA_CONTEXT_WINDOW_TOKENS",
@@ -80,13 +92,13 @@ export function resolveRunConfiguration(
 
   let resumeThreadId: ThreadId | undefined;
   if (input.resume !== undefined) {
-    const candidate = input.resume.trim();
-    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u.test(candidate)) {
+    try {
+      resumeThreadId = parseLocalThreadId(input.resume);
+    } catch {
       throw new ConfigurationError(
         "Resume thread ID must use 1-128 letters, digits, underscores, or hyphens and cannot contain path syntax.",
       );
     }
-    resumeThreadId = threadIdSchema.parse(candidate);
   }
 
   return {

@@ -1,6 +1,6 @@
 # Koda Phase 2 Reliability Roadmap
 
-- Status: In progress — Phase 2A through 2D complete; Phase 2E next
+- Status: In progress — Phase 2A through 2E complete; Phase 2F next
 - Date: 2026-08-26
 - Depends on: Phase 1D repository context and token accounting
 
@@ -63,18 +63,21 @@ Status: Complete (2026-08-26)
 
 ### Phase 2E: SQLite metadata index
 
-Status: Next
+Status: Complete (2026-08-26)
 
-- Materialize thread status, timestamps, model, workspace, usage, and log offsets.
-- Rebuild the index entirely from JSONL.
-- Add thread list/show commands without making SQLite authoritative.
+- Materialize thread status, timestamps, model, workspace, usage, event counts, and valid log offsets.
+- Refresh changed logs by source fingerprint and rebuild the entire index from JSONL.
+- Quarantine corrupt databases while keeping individual invalid logs inspectable.
+- Add credential-free thread list/show commands without making SQLite authoritative.
+- Keep post-run projection best effort so a derived-store failure never changes the durable turn result.
 
 ### Phase 2F: scenario evaluations
 
-Status: Planned
+Status: Next
 
 - Add binary end-to-end assertions for recovery, compaction, prompt injection, cancellation, output artifacts, and uncertain side effects.
 - Publish deterministic fixtures and regression commands.
+- Add reference-aware artifact garbage collection with deterministic reachability and recovery coverage. **Moved from the earlier Phase 2E expectation.**
 
 ## Phase 2 exit criterion
 

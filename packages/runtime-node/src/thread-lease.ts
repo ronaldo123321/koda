@@ -17,6 +17,10 @@ export interface ThreadLeaseOptions {
   isProcessAlive?: (pid: number) => boolean;
 }
 
+export interface ThreadLeaseInspectionOptions {
+  isProcessAlive?: (pid: number) => boolean;
+}
+
 export class ThreadLease {
   private released = false;
 
@@ -68,6 +72,27 @@ export class ThreadLease {
     );
   }
 
+  public static async isActive(
+    eventLogPath: string,
+    options: ThreadLeaseInspectionOptions = {},
+  ): Promise<boolean> {
+    const path = `${eventLogPath}.lock`;
+    let content: string;
+    try {
+      content = await readFile(path, "utf8");
+    } catch (error) {
+      if (isNodeError(error, "ENOENT")) {
+        return false;
+      }
+      throw error;
+    }
+    const record = parseLease(content);
+    if (record === undefined) {
+      return true;
+    }
+    return (options.isProcessAlive ?? isProcessAlive)(record.pid);
+  }
+
   public async release(): Promise<void> {
     if (this.released) {
       return;
@@ -90,6 +115,10 @@ async function readLease(path: string): Promise<ThreadLeaseRecord | undefined> {
     }
     throw error;
   }
+  return parseLease(content);
+}
+
+function parseLease(content: string): ThreadLeaseRecord | undefined {
   try {
     const value = JSON.parse(content) as Partial<ThreadLeaseRecord>;
     return typeof value.pid === "number" &&

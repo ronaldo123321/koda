@@ -7,7 +7,7 @@
 
 ## Roadmap status: Phase 2 active
 
-Phase 0 and Phase 1A through 1D are complete. Phase 2A provides durable local transcript replay, safe interrupted-turn recovery, context snapshots, continuous event sequencing, `--resume`, and single-host writer leases. Phase 2B adds content-addressed output artifacts, uniform model-facing byte budgets, bounded artifact retrieval, recovery diagnostics, and provider-output limits. Phase 2C adds provider-neutral context budgets, measured estimate calibration, append-only compaction, scoped nested repository instructions, and resume provenance. Phase 2D adds a durable side-effect boundary, owned process trees, bounded termination escalation, lifecycle events, and structured interrupted-operation evidence. Phase 2E SQLite metadata is next. All work moved to later phases remains listed explicitly in the Phase 2 reliability roadmap and the revised phase sections below.
+Phase 0 and Phase 1A through 1D are complete. Phase 2A provides durable local transcript replay, safe interrupted-turn recovery, context snapshots, continuous event sequencing, `--resume`, and single-host writer leases. Phase 2B adds content-addressed output artifacts, uniform model-facing byte budgets, bounded artifact retrieval, recovery diagnostics, and provider-output limits. Phase 2C adds provider-neutral context budgets, measured estimate calibration, append-only compaction, scoped nested repository instructions, and resume provenance. Phase 2D adds a durable side-effect boundary, owned process trees, bounded termination escalation, lifecycle events, and structured interrupted-operation evidence. Phase 2E adds rebuildable SQLite thread metadata, corrupt-database quarantine, source-fingerprint refresh, and credential-free list/show commands. Phase 2F scenario evaluations are next. All work moved to later phases remains listed explicitly in the Phase 2 reliability roadmap and the revised phase sections below.
 
 ## Roadmap revision: Phase 1 closeout
 
@@ -287,7 +287,7 @@ Each thread owns an ordered JSONL log:
 
 Events include a schema version, sequence number, timestamp, thread ID, optional turn ID, type, and typed payload. Appends are serialized per thread. A partial trailing line is ignored during recovery and reported as a diagnostic.
 
-SQLite stores thread listings, status, timestamps, provider/model metadata, usage totals, parent-child relationships, and event-log offsets. Storage is hidden behind `StateStore`, allowing `better-sqlite3` to be replaced when Node's built-in SQLite API becomes fully stable.
+SQLite stores rebuildable thread listings, status, timestamps, provider/model metadata, usage totals, and event-log offsets. `ThreadMetadataIndex` isolates `better-sqlite3`, allowing the backend to move to Node's built-in SQLite API when it is stable across Koda's supported Node range. Parent-child relationships are not synthesized without durable fork provenance and remain Phase 5 work.
 
 On recovery, a started but unfinished turn becomes interrupted. A started but unfinished side-effecting tool call is not automatically retried; the model and user receive an interruption record.
 
@@ -390,14 +390,15 @@ Moved from Phase 1 to Phase 3: the Anthropic adapter, Ink terminal UI, and long-
 
 ### Phase 2: reliability
 
-Status: **In progress; Phase 2A through 2D are complete and Phase 2E SQLite metadata is next.**
+Status: **In progress; Phase 2A through 2E are complete and Phase 2F scenario evaluations are next.**
 
 - Resume and recovery.
 - Context compaction.
 - Output artifacts and truncation.
 - Durable side-effect boundaries and process-tree cancellation with explicit termination evidence.
-- SQLite metadata index, including materialized thread usage and optional cost metadata.
+- Rebuildable SQLite metadata index with materialized thread usage. Monetary cost metadata is deferred until a versioned pricing source exists.
 - Scenario evaluation suite.
+- Reference-aware artifact garbage collection. **Moved from the earlier Phase 2E expectation to Phase 2F.**
 - Nested instruction scoping and instruction-snapshot validation during resume.
 - Recovery records for uncertain mutations. Automatic rollback and multi-file transactions remain Phase 3 work.
 
@@ -423,6 +424,7 @@ Status: **In progress; Phase 2A through 2D are complete and Phase 2E SQLite meta
 ### Phase 5: multi-agent and curated memory
 
 - Child threads, registry, mailbox, wait, and interrupt.
+- Durable fork provenance and parent/child thread lineage queries.
 - Read-only delegation and Git-worktree write isolation.
 - User-visible project notes and later measured retrieval features.
 

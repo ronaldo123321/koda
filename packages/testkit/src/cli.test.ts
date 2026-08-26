@@ -9,6 +9,7 @@ import {
 import type { ModelProvider } from "@koda/agent-core";
 import {
   artifactReferenceSchema,
+  agentEventSchema,
   itemIdSchema,
   threadIdSchema,
   toolCallIdSchema,
@@ -16,12 +17,17 @@ import {
   type ArtifactId,
 } from "@koda/protocol";
 import { ScriptedModelProvider } from "@koda/providers";
-import { JsonlEventStore, ReadOnlyWorkspace } from "@koda/runtime-node";
+import {
+  JsonlEventStore,
+  ReadOnlyWorkspace,
+  ThreadMetadataIndex,
+} from "@koda/runtime-node";
 import {
   access,
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -309,6 +315,14 @@ describe("Phase 1A CLI", () => {
     expect(stdout.value).toBe("This is a test repository.\n");
     expect(stderr.value).toContain("using read_file");
     expect(stderr.value).toContain("read_file completed");
+    const metadataIndex = await ThreadMetadataIndex.open(kodaHome);
+    expect(metadataIndex.get(threadIdSchema.parse("cli-thread"))).toMatchObject(
+      {
+        status: "completed",
+        workspaceRoot: await realpath(workspaceRoot),
+      },
+    );
+    metadataIndex.close();
   });
 
   it("cancels an in-flight turn through the caller signal", async () => {
@@ -1068,5 +1082,188 @@ describe("Phase 1A CLI", () => {
     expect(stdout.value).toContain("--model <model>");
     expect(stdout.value).toContain("--approval-mode <mode>");
     expect(stdout.value).toContain("--resume <thread-id>");
+  });
+
+  it("lists and shows indexed threads without provider credentials", async () => {
+    const root = await mkdtemp(join(tmpdir(), "koda-thread-cli-"));
+    temporaryDirectories.push(root);
+    const kodaHome = join(root, "state");
+    const workspaceRoot = join(root, "repo");
+    await mkdir(workspaceRoot);
+    const canonicalWorkspaceRoot = await realpath(workspaceRoot);
+    const threadId = threadIdSchema.parse("thread-query-cli");
+    const turnId = turnIdSchema.parse("thread-query-turn");
+    const store = new JsonlEventStore(
+      join(kodaHome, "threads", `${threadId}.jsonl`),
+    );
+    await store.append(
+      agentEventSchema.parse({
+        schemaVersion: 1,
+        sequence: 0,
+        timestamp: "2026-08-26T04:00:00.000Z",
+        threadId,
+        turnId,
+        type: "turn.started",
+        payload: {},
+      }),
+    );
+    await store.append(
+      agentEventSchema.parse({
+        schemaVersion: 1,
+        sequence: 1,
+        timestamp: "2026-08-26T04:00:01.000Z",
+        threadId,
+        turnId,
+        type: "turn.context",
+        payload: {
+          provider: "openai",
+          model: "offline-query-model",
+          workspaceRoot: canonicalWorkspaceRoot,
+          approvalMode: "never",
+          instructionsSha256: "a".repeat(64),
+          repositoryInstructions: [],
+        },
+      }),
+    );
+    await store.append(
+      agentEventSchema.parse({
+        schemaVersion: 1,
+        sequence: 2,
+        timestamp: "2026-08-26T04:00:02.000Z",
+        threadId,
+        turnId,
+        type: "turn.completed",
+        payload: { steps: 1 },
+      }),
+    );
+
+    const listStdout = new MemoryWriter();
+    const listStderr = new MemoryWriter();
+    let listExitCode = -1;
+    const listProgram = createProgram({
+      environment: { KODA_HOME: kodaHome },
+      processDirectory: root,
+      stdout: listStdout,
+      stderr: listStderr,
+      setExitCode: (code) => {
+        listExitCode = code;
+      },
+    });
+    await listProgram.parseAsync([
+      "node",
+      "koda",
+      "thread",
+      "list",
+      "--workspace",
+      workspaceRoot,
+      "--limit",
+      "1",
+    ]);
+
+    expect(listExitCode).toBe(0);
+    expect(listStdout.value).toContain("THREAD ID\tSTATUS");
+    expect(listStdout.value).toContain(
+      `${threadId}\tcompleted\t2026-08-26T04:00:02.000Z\toffline-query-model`,
+    );
+    expect(listStderr.value).toBe("");
+
+    const showStdout = new MemoryWriter();
+    let showExitCode = -1;
+    const showProgram = createProgram({
+      environment: { KODA_HOME: kodaHome },
+      processDirectory: root,
+      stdout: showStdout,
+      stderr: new MemoryWriter(),
+      setExitCode: (code) => {
+        showExitCode = code;
+      },
+    });
+    await showProgram.parseAsync(["node", "koda", "thread", "show", threadId]);
+
+    expect(showExitCode).toBe(0);
+    expect(showStdout.value).toContain(`Thread: ${threadId}`);
+    expect(showStdout.value).toContain("Status: completed");
+    expect(showStdout.value).toContain("Model: offline-query-model");
+
+    const missingStderr = new MemoryWriter();
+    let missingExitCode = -1;
+    const missingProgram = createProgram({
+      environment: { KODA_HOME: kodaHome },
+      processDirectory: root,
+      stdout: new MemoryWriter(),
+      stderr: missingStderr,
+      setExitCode: (code) => {
+        missingExitCode = code;
+      },
+    });
+    await missingProgram.parseAsync([
+      "node",
+      "koda",
+      "thread",
+      "show",
+      "missing-thread",
+    ]);
+    expect(missingExitCode).toBe(3);
+    expect(missingStderr.value).toContain("was not found");
+  });
+
+  it("keeps a completed run successful when metadata refresh fails", async () => {
+    const root = await mkdtemp(join(tmpdir(), "koda-index-warning-cli-"));
+    temporaryDirectories.push(root);
+    const workspaceRoot = join(root, "repo");
+    const kodaHome = join(root, "state");
+    await mkdir(workspaceRoot);
+    await mkdir(join(kodaHome, "state.db"), { recursive: true });
+    const provider = new ScriptedModelProvider([
+      {
+        events: [
+          { type: "assistant_delta", text: "Durable answer." },
+          { type: "completed", finishReason: "stop" },
+        ],
+      },
+    ]);
+    const dependencies: RunCommandDependencies = {
+      openWorkspace: (path) => ReadOnlyWorkspace.open(path),
+      createProvider: () => provider,
+      createApprovalBroker: () => ({
+        request: async () => ({ decision: "rejected" }),
+      }),
+      createIds: () => ({
+        threadId: threadIdSchema.parse("metadata-warning-thread"),
+        turnId: turnIdSchema.parse("metadata-warning-turn"),
+        itemIds: new DeterministicItemIdFactory("metadata-warning-item"),
+      }),
+    };
+    const stderr = new MemoryWriter();
+
+    await expect(
+      runCommand(
+        {
+          prompt: "Complete despite derived-store failure.",
+          cwd: workspaceRoot,
+          signal: new AbortController().signal,
+        },
+        {
+          environment: {
+            OPENAI_API_KEY: "offline-test-key",
+            KODA_HOME: kodaHome,
+          },
+          processDirectory: root,
+          stdout: new MemoryWriter(),
+          stderr,
+        },
+        dependencies,
+      ),
+    ).resolves.toBe(0);
+    expect(stderr.value).toContain("thread metadata refresh failed");
+    await expect(
+      new JsonlEventStore(
+        join(kodaHome, "threads", "metadata-warning-thread.jsonl"),
+      ).readAll(),
+    ).resolves.toMatchObject({
+      events: expect.arrayContaining([
+        expect.objectContaining({ type: "turn.completed" }),
+      ]),
+    });
   });
 });

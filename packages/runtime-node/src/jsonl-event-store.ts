@@ -4,6 +4,11 @@ import { dirname } from "node:path";
 import type { EventReader, EventReadResult, EventSink } from "@koda/agent-core";
 import { agentEventSchema, type AgentEvent } from "@koda/protocol";
 
+export interface JsonlEventReadResult extends EventReadResult {
+  sourceBytes: number;
+  indexedBytes: number;
+}
+
 export class EventLogCorruptionError extends Error {
   public constructor(
     message: string,
@@ -30,20 +35,32 @@ export class JsonlEventStore implements EventSink, EventReader {
     await this.writeChain;
   }
 
-  public async readAll(): Promise<EventReadResult> {
+  public async readAll(): Promise<JsonlEventReadResult> {
     await this.writeChain;
-    let content: string;
+    let bytes: Buffer;
     try {
-      content = await readFile(this.filePath, "utf8");
+      bytes = await readFile(this.filePath);
     } catch (error) {
       if (isNodeError(error) && error.code === "ENOENT") {
-        return { events: [], diagnostics: [] };
+        return {
+          events: [],
+          diagnostics: [],
+          sourceBytes: 0,
+          indexedBytes: 0,
+        };
       }
       throw error;
     }
 
+    const sourceBytes = bytes.byteLength;
+    const content = bytes.toString("utf8");
     if (content.length === 0) {
-      return { events: [], diagnostics: [] };
+      return {
+        events: [],
+        diagnostics: [],
+        sourceBytes,
+        indexedBytes: 0,
+      };
     }
 
     const hasTrailingNewline = content.endsWith("\n");
@@ -54,6 +71,7 @@ export class JsonlEventStore implements EventSink, EventReader {
 
     const events: AgentEvent[] = [];
     const diagnostics: EventReadResult["diagnostics"] = [];
+    let indexedBytes = sourceBytes;
 
     for (const [index, line] of lines.entries()) {
       const lineNumber = index + 1;
@@ -70,6 +88,7 @@ export class JsonlEventStore implements EventSink, EventReader {
       } catch (error) {
         const isPartialTail = index === lines.length - 1 && !hasTrailingNewline;
         if (isPartialTail) {
+          indexedBytes = bytes.lastIndexOf(10) + 1;
           diagnostics.push({
             code: "PARTIAL_TRAILING_LINE",
             message: `Ignored a partial trailing event at line ${lineNumber}.`,
@@ -87,6 +106,7 @@ export class JsonlEventStore implements EventSink, EventReader {
       if (!parsedEvent.success) {
         const isPartialTail = index === lines.length - 1 && !hasTrailingNewline;
         if (isPartialTail) {
+          indexedBytes = bytes.lastIndexOf(10) + 1;
           diagnostics.push({
             code: "PARTIAL_TRAILING_LINE",
             message: `Ignored a partial trailing event at line ${lineNumber}.`,
@@ -119,7 +139,7 @@ export class JsonlEventStore implements EventSink, EventReader {
       events.push(parsedEvent.data);
     }
 
-    return { events, diagnostics };
+    return { events, diagnostics, sourceBytes, indexedBytes };
   }
 
   public async prepareForAppend(options: {

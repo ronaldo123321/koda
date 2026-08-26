@@ -2,6 +2,10 @@ import { Command, Option } from "commander";
 
 import type { TextWriter } from "./console-event-sink.js";
 import { runCommand, type RunCommandInput } from "./run-command.js";
+import {
+  runThreadListCommand,
+  runThreadShowCommand,
+} from "./thread-command.js";
 
 export interface ProgramRuntime {
   environment: NodeJS.ProcessEnv;
@@ -87,6 +91,39 @@ export function createProgram(runtime: ProgramRuntime): Command {
         }
       },
     );
+
+  const thread = program
+    .command("thread")
+    .description("Inspect local Koda thread metadata");
+  thread
+    .command("list")
+    .description("List local Koda threads")
+    .option("--limit <count>", "maximum threads to show", "50")
+    .option("--workspace <directory>", "filter by canonical workspace")
+    .action(async (options: { limit?: string; workspace?: string }) => {
+      runtime.setExitCode(
+        await runThreadListCommand(options, {
+          environment: runtime.environment,
+          processDirectory: runtime.processDirectory,
+          stdout: runtime.stdout,
+          stderr: runtime.stderr,
+        }),
+      );
+    });
+  thread
+    .command("show")
+    .description("Show one local Koda thread")
+    .argument("<thread-id>", "Koda thread ID")
+    .action(async (threadId: string) => {
+      runtime.setExitCode(
+        await runThreadShowCommand(threadId, {
+          environment: runtime.environment,
+          processDirectory: runtime.processDirectory,
+          stdout: runtime.stdout,
+          stderr: runtime.stderr,
+        }),
+      );
+    });
 
   return program;
 }
