@@ -93,5 +93,6 @@ pnpm test
 - [Phase 1D context and accounting design](docs/plans/2026-08-26-phase-1d-context-accounting-design.md)
 - [Phase 2 reliability roadmap](docs/plans/2026-08-26-phase-2-roadmap.md)
 - [Phase 2A durable resume and recovery design](docs/plans/2026-08-26-phase-2a-resume-recovery-design.md)
+- [Phase 2B artifacts and output budgets design](docs/plans/2026-08-26-phase-2b-artifacts-output-budgets-design.md)
 
 The model can propose actions, but the Koda runtime owns validation, policy, approval, and execution. User interfaces consume typed events and do not own agent state.

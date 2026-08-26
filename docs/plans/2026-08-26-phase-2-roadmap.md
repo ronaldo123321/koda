@@ -35,7 +35,7 @@ Status: Complete (2026-08-26)
 
 ### Phase 2B: artifacts and output budgets
 
-Status: Next
+Status: In progress
 
 - Store oversized tool output as content-addressed artifacts.
 - Keep bounded prompt-facing excerpts with byte counts and hashes.
