@@ -1,6 +1,6 @@
 # Koda Phase 1D: Repository Instructions and Token Accounting
 
-- Status: Accepted for implementation
+- Status: Implemented
 - Date: 2026-08-26
 - Depends on: Phase 1C approval-gated structured commands
 - Scope: bounded root instruction files, provider-neutral usage records, turn aggregation, and an explicit Phase 1 roadmap closeout

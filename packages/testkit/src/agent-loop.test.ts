@@ -105,6 +105,107 @@ describe("AgentLoop", () => {
     expect(events.events.map((event) => event.sequence)).toEqual([
       0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
     ]);
+    expect(result.usage).toEqual({
+      modelRequests: 2,
+      reportedRequests: 0,
+      tokens: {
+        inputTokens: 0,
+        cachedInputTokens: 0,
+        cacheWriteInputTokens: 0,
+        outputTokens: 0,
+        reasoningOutputTokens: 0,
+        totalTokens: 0,
+      },
+    });
+  });
+
+  it("records per-step usage and aggregates a multi-step turn", async () => {
+    const events = new MemoryEventStore();
+    const provider = new ScriptedModelProvider([
+      {
+        events: [
+          {
+            type: "tool_call",
+            callId: toolCallIdSchema.parse("usage-call"),
+            name: "echo",
+            arguments: { text: "measure" },
+          },
+          {
+            type: "completed",
+            finishReason: "tool_calls",
+            responseId: "usage-response-1",
+            usage: {
+              inputTokens: 100,
+              cachedInputTokens: 60,
+              cacheWriteInputTokens: 5,
+              outputTokens: 20,
+              reasoningOutputTokens: 8,
+              totalTokens: 120,
+            },
+          },
+        ],
+      },
+      {
+        events: [
+          { type: "assistant_delta", text: "Measured." },
+          {
+            type: "completed",
+            finishReason: "stop",
+            responseId: "usage-response-2",
+            usage: {
+              inputTokens: 140,
+              cachedInputTokens: 90,
+              cacheWriteInputTokens: 0,
+              outputTokens: 30,
+              reasoningOutputTokens: 10,
+              totalTokens: 170,
+            },
+          },
+        ],
+      },
+    ]);
+
+    const result = await new AgentLoop({
+      provider,
+      tools: createTools(),
+      events,
+      ids: new DeterministicItemIdFactory(),
+      clock: new FixedClock(),
+    }).runTurn({ threadId, turnId, userInput: "Measure usage." });
+
+    expect(result.usage).toEqual({
+      modelRequests: 2,
+      reportedRequests: 2,
+      tokens: {
+        inputTokens: 240,
+        cachedInputTokens: 150,
+        cacheWriteInputTokens: 5,
+        outputTokens: 50,
+        reasoningOutputTokens: 18,
+        totalTokens: 290,
+      },
+    });
+    const usageEvents = events.events.filter(
+      (event) => event.type === "model.usage",
+    );
+    expect(usageEvents).toHaveLength(2);
+    expect(usageEvents[0]).toMatchObject({
+      payload: {
+        step: 1,
+        responseId: "usage-response-1",
+        usage: { totalTokens: 120 },
+      },
+    });
+    expect(events.events.at(-1)).toMatchObject({
+      type: "turn.completed",
+      payload: {
+        usage: {
+          modelRequests: 2,
+          reportedRequests: 2,
+          tokens: { totalTokens: 290 },
+        },
+      },
+    });
   });
 
   it("returns invalid tool arguments to the model as an observation", async () => {

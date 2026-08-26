@@ -6,6 +6,7 @@ import type {
 } from "@koda/agent-core";
 import {
   jsonObjectSchema,
+  tokenUsageSchema,
   toolCallIdSchema,
   type ConversationItem,
   type ToolResultItem,
@@ -157,10 +158,12 @@ export class OpenAIResponsesProvider implements ModelProvider {
           for (const item of request.items) {
             session.submittedItemIds.add(item.id);
           }
+          const usage = normalizeOpenAIUsage(event.response.usage);
           yield {
             type: "completed",
             finishReason: functionCallCount > 0 ? "tool_calls" : "stop",
             responseId: event.response.id,
+            ...(usage === undefined ? {} : { usage }),
           };
         }
       }
@@ -350,4 +353,28 @@ function parseFunctionArguments(argumentsText: string, toolName: string) {
     );
   }
   return result.data;
+}
+
+function normalizeOpenAIUsage(
+  usage: OpenAI.Responses.ResponseUsage | undefined,
+) {
+  if (usage === undefined) {
+    return undefined;
+  }
+  const normalized = tokenUsageSchema.safeParse({
+    inputTokens: usage.input_tokens,
+    cachedInputTokens: usage.input_tokens_details?.cached_tokens ?? 0,
+    cacheWriteInputTokens: usage.input_tokens_details?.cache_write_tokens ?? 0,
+    outputTokens: usage.output_tokens,
+    reasoningOutputTokens: usage.output_tokens_details?.reasoning_tokens ?? 0,
+    totalTokens: usage.total_tokens,
+  });
+  if (!normalized.success) {
+    throw new OpenAIProviderError(
+      "OPENAI_INVALID_USAGE",
+      "OpenAI returned invalid token usage metadata.",
+      { cause: normalized.error },
+    );
+  }
+  return normalized.data;
 }

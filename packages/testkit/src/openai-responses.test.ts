@@ -302,6 +302,96 @@ describe("OpenAIResponsesProvider", () => {
     ]);
   });
 
+  it("normalizes token usage from a completed response", async () => {
+    const client = new FakeOpenAIClient([
+      [
+        streamEvent({
+          type: "response.completed",
+          response: {
+            id: "resp-usage",
+            usage: {
+              input_tokens: 120,
+              input_tokens_details: {
+                cached_tokens: 80,
+                cache_write_tokens: 10,
+              },
+              output_tokens: 30,
+              output_tokens_details: { reasoning_tokens: 12 },
+              total_tokens: 150,
+            },
+          },
+        }),
+      ],
+    ]);
+    const provider = new OpenAIResponsesProvider({
+      client,
+      model: "gpt-5.6-terra",
+      instructions: "Inspect.",
+    });
+
+    await expect(
+      collect(provider, {
+        threadId,
+        turnId,
+        step: 1,
+        items: [userItem],
+        tools: [toolDefinition],
+      }),
+    ).resolves.toEqual([
+      {
+        type: "completed",
+        finishReason: "stop",
+        responseId: "resp-usage",
+        usage: {
+          inputTokens: 120,
+          cachedInputTokens: 80,
+          cacheWriteInputTokens: 10,
+          outputTokens: 30,
+          reasoningOutputTokens: 12,
+          totalTokens: 150,
+        },
+      },
+    ]);
+  });
+
+  it("rejects invalid provider token usage", async () => {
+    const client = new FakeOpenAIClient([
+      [
+        streamEvent({
+          type: "response.completed",
+          response: {
+            id: "resp-invalid-usage",
+            usage: {
+              input_tokens: -1,
+              input_tokens_details: {
+                cached_tokens: 0,
+                cache_write_tokens: 0,
+              },
+              output_tokens: 1,
+              output_tokens_details: { reasoning_tokens: 0 },
+              total_tokens: 0,
+            },
+          },
+        }),
+      ],
+    ]);
+    const provider = new OpenAIResponsesProvider({
+      client,
+      model: "gpt-5.6-terra",
+      instructions: "Inspect.",
+    });
+
+    await expect(
+      collect(provider, {
+        threadId,
+        turnId,
+        step: 1,
+        items: [userItem],
+        tools: [toolDefinition],
+      }),
+    ).rejects.toMatchObject({ code: "OPENAI_INVALID_USAGE" });
+  });
+
   it("forwards the caller abort signal to the OpenAI SDK", async () => {
     const client = new FakeOpenAIClient([[completedEvent("resp-signal")]]);
     const provider = new OpenAIResponsesProvider({

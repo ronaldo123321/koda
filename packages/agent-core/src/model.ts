@@ -4,6 +4,7 @@ import type {
   ThreadId,
   ToolCallId,
   TurnId,
+  TokenUsage,
 } from "@koda/protocol";
 
 export interface ModelToolDefinition {
@@ -32,6 +33,7 @@ export type ModelEvent =
       type: "completed";
       finishReason: "stop" | "tool_calls";
       responseId?: string;
+      usage?: TokenUsage;
     };
 
 export interface ModelProvider {

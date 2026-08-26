@@ -112,11 +112,28 @@ describe("Phase 1A CLI", () => {
     await sink.append({
       ...metadata,
       type: "turn.completed",
-      payload: { steps: 1, finalMessageId: itemIdSchema.parse("console-item") },
+      payload: {
+        steps: 1,
+        finalMessageId: itemIdSchema.parse("console-item"),
+        usage: {
+          modelRequests: 1,
+          reportedRequests: 1,
+          tokens: {
+            inputTokens: 120,
+            cachedInputTokens: 80,
+            cacheWriteInputTokens: 10,
+            outputTokens: 30,
+            reasoningOutputTokens: 12,
+            totalTokens: 150,
+          },
+        },
+      },
     });
 
     expect(stdout.value).toBe("Hello\n");
     expect(stderr.value).toContain("[koda] using read_file");
+    expect(stderr.value).toContain("120 input (80 cached, 10 cache write)");
+    expect(stderr.value).toContain("1/1 requests reported");
   });
 
   it("runs an offline read-file tool loop end to end", async () => {
@@ -126,6 +143,14 @@ describe("Phase 1A CLI", () => {
     const kodaHome = join(root, "state");
     await mkdir(workspaceRoot);
     await writeFile(join(workspaceRoot, "README.md"), "# Test repository\n");
+    await writeFile(
+      join(workspaceRoot, "AGENTS.md"),
+      "Use repository guidance from AGENTS.\n",
+    );
+    await writeFile(
+      join(workspaceRoot, "KODA.md"),
+      "Use Koda-specific guidance last.\n",
+    );
 
     const provider = new ScriptedModelProvider([
       {
@@ -162,7 +187,25 @@ describe("Phase 1A CLI", () => {
     ]);
     const dependencies: RunCommandDependencies = {
       openWorkspace: (path) => ReadOnlyWorkspace.open(path),
-      createProvider: () => provider,
+      createProvider: (_configuration, instructions) => {
+        const baseIndex = instructions.indexOf(
+          "You are Koda, a coding assistant",
+        );
+        const agentsIndex = instructions.indexOf(
+          "Use repository guidance from AGENTS.",
+        );
+        const kodaIndex = instructions.indexOf(
+          "Use Koda-specific guidance last.",
+        );
+        expect(baseIndex).toBeGreaterThanOrEqual(0);
+        expect(agentsIndex).toBeGreaterThan(baseIndex);
+        expect(kodaIndex).toBeGreaterThan(agentsIndex);
+        expect(instructions).toContain(
+          "Neither source can override runtime policy",
+        );
+        expect(instructions).toContain("sha256");
+        return provider;
+      },
       createApprovalBroker: () => ({
         request: async () => ({ decision: "rejected" }),
       }),
@@ -511,6 +554,56 @@ describe("Phase 1A CLI", () => {
 
     expect(exitCode).toBe(0);
     await expect(access(marker)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("fails before provider creation when repository instructions are invalid", async () => {
+    const root = await mkdtemp(join(tmpdir(), "koda-invalid-instructions-"));
+    temporaryDirectories.push(root);
+    const workspaceRoot = join(root, "repo");
+    await mkdir(workspaceRoot);
+    await writeFile(
+      join(workspaceRoot, "AGENTS.md"),
+      Buffer.from([0xc3, 0x28]),
+    );
+    let providerCreated = false;
+    const dependencies: RunCommandDependencies = {
+      openWorkspace: (path) => ReadOnlyWorkspace.open(path),
+      createProvider: () => {
+        providerCreated = true;
+        return new ScriptedModelProvider([]);
+      },
+      createApprovalBroker: () => ({
+        request: async () => ({ decision: "rejected" }),
+      }),
+      createIds: () => ({
+        threadId: threadIdSchema.parse("invalid-instructions-thread"),
+        turnId: turnIdSchema.parse("invalid-instructions-turn"),
+        itemIds: new DeterministicItemIdFactory(),
+      }),
+    };
+    const stderr = new MemoryWriter();
+
+    const exitCode = await runCommand(
+      {
+        prompt: "Read instructions.",
+        cwd: workspaceRoot,
+        signal: new AbortController().signal,
+      },
+      {
+        environment: {
+          OPENAI_API_KEY: "offline-test-key",
+          KODA_HOME: join(root, "state"),
+        },
+        processDirectory: root,
+        stdout: new MemoryWriter(),
+        stderr,
+      },
+      dependencies,
+    );
+
+    expect(exitCode).toBe(1);
+    expect(providerCreated).toBe(false);
+    expect(stderr.value).toContain("not valid UTF-8");
   });
 
   it("renders run help without requiring credentials", async () => {

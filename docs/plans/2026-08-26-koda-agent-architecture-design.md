@@ -104,7 +104,7 @@ Koda runs locally by default. Model inference may be remote, while repository ac
 ```text
 +---------------------------------------------------------+
 | apps/cli                                                |
-| command parsing, Ink UI, approval UI, event reducer     |
+| command parsing, line UI, approval UI; future Ink       |
 +------------------------------+--------------------------+
                                | commands / events
 +------------------------------v--------------------------+
@@ -124,7 +124,7 @@ Koda runs locally by default. Model inference may be remote, while repository ac
                     |                      |
 +-------------------v-----+    +-----------v--------------+
 | runtime-node             |    | providers                |
-| fs, git, process, store  |    | OpenAI, Anthropic, fake |
+| fs, git, process, store  |    | OpenAI, fake; future Anthropic |
 +-------------------+-----+    +--------------------------+
                     |
           future Rust koda-exec
@@ -358,6 +358,8 @@ Koda will not depend on LangChain for its main loop. The core orchestration is s
 
 ### Phase 0: deterministic foundation
 
+Status: **Complete.**
+
 - Workspace and package scaffolding.
 - Versioned protocol schemas.
 - Append-only in-memory and JSONL event sinks.
@@ -370,6 +372,8 @@ Exit criterion: the scripted model requests a tool, receives its result, produce
 
 ### Phase 1: usable local agent
 
+Status: **Complete through Phase 1D under the revised OpenAI-first scope.**
+
 - OpenAI adapter and a line-oriented terminal CLI.
 - Repository read/search/edit/exec tools.
 - Policy and approval UI.
@@ -379,11 +383,13 @@ Moved from Phase 1 to Phase 3: the Anthropic adapter, Ink terminal UI, and long-
 
 ### Phase 2: reliability
 
+Status: **Next.**
+
 - Resume and recovery.
 - Context compaction.
 - Output artifacts and truncation.
 - Process-tree cancellation.
-- SQLite metadata index.
+- SQLite metadata index, including materialized thread usage and optional cost metadata.
 - Scenario evaluation suite.
 - Nested instruction scoping and instruction-snapshot validation during resume.
 - Git rollback or recovery records for uncertain mutations.

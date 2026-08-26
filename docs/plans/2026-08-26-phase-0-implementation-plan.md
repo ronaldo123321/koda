@@ -52,13 +52,17 @@ Build the smallest deterministic vertical slice of Koda's agent harness: a user 
 - Test JSONL append/read and partial trailing-line recovery.
 - Run format checks, type checking, build, and tests.
 
-## Deliberate deferrals
+## Deliberate-deferral disposition
 
-- Real provider API calls.
-- Ink UI.
-- Repository mutation tools.
-- Approval prompts and sandboxing.
-- SQLite metadata.
-- Compaction and multi-agent execution.
+These were excluded so Phase 0 could validate the hardest architectural seam—the deterministic orchestration loop—before adding product surface area. Their destinations are now explicit:
 
-These are excluded so Phase 0 validates the hardest architectural seam—the deterministic orchestration loop—before adding product surface area.
+| Item                      | Disposition                                                       |
+| ------------------------- | ----------------------------------------------------------------- |
+| Real provider API calls   | OpenAI completed in Phase 1A; Anthropic is scheduled for Phase 3. |
+| Ink UI                    | Phase 3; moved from the original Phase 1 roadmap.                 |
+| Repository mutation tools | Completed in Phase 1B.                                            |
+| Approval prompts          | Completed in Phase 1B and generalized in Phase 1C.                |
+| Strong sandboxing         | Phase 4.                                                          |
+| SQLite metadata           | Phase 2.                                                          |
+| Context compaction        | Phase 2.                                                          |
+| Multi-agent execution     | Phase 5.                                                          |

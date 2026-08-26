@@ -7,6 +7,7 @@ import {
   turnIdSchema,
 } from "./ids.js";
 import { conversationItemSchema } from "./items.js";
+import { tokenUsageSchema, turnUsageSchema } from "./usage.js";
 
 const metadataShape = {
   schemaVersion: z.literal(1),
@@ -26,6 +27,15 @@ export const agentEventSchema = z.discriminatedUnion("type", [
     ...metadataShape,
     type: z.literal("assistant.delta"),
     payload: z.object({ text: z.string().min(1) }),
+  }),
+  z.object({
+    ...metadataShape,
+    type: z.literal("model.usage"),
+    payload: z.object({
+      step: z.number().int().positive(),
+      responseId: z.string().min(1).optional(),
+      usage: tokenUsageSchema,
+    }),
   }),
   z.object({
     ...metadataShape,
@@ -76,12 +86,16 @@ export const agentEventSchema = z.discriminatedUnion("type", [
     payload: z.object({
       finalMessageId: itemIdSchema.optional(),
       steps: z.number().int().positive(),
+      usage: turnUsageSchema.optional(),
     }),
   }),
   z.object({
     ...metadataShape,
     type: z.literal("turn.cancelled"),
-    payload: z.object({ reason: z.string() }),
+    payload: z.object({
+      reason: z.string(),
+      usage: turnUsageSchema.optional(),
+    }),
   }),
   z.object({
     ...metadataShape,
@@ -89,6 +103,7 @@ export const agentEventSchema = z.discriminatedUnion("type", [
     payload: z.object({
       code: z.string().min(1),
       message: z.string(),
+      usage: turnUsageSchema.optional(),
     }),
   }),
 ]);

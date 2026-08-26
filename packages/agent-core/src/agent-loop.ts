@@ -8,7 +8,9 @@ import {
   type AssistantMessageItem,
   type ConversationItem,
   type ItemId,
+  type TokenUsage,
   type ThreadId,
+  type TurnUsage,
   type TurnId,
 } from "@koda/protocol";
 
@@ -59,18 +61,21 @@ export type RunTurnResult =
       steps: number;
       items: readonly ConversationItem[];
       finalMessage?: AssistantMessageItem;
+      usage: TurnUsage;
     }
   | {
       status: "cancelled";
       steps: number;
       items: readonly ConversationItem[];
       reason: string;
+      usage: TurnUsage;
     }
   | {
       status: "failed";
       steps: number;
       items: readonly ConversationItem[];
       error: { code: string; message: string };
+      usage: TurnUsage;
     };
 
 const DEFAULT_MAX_STEPS = 8;
@@ -109,6 +114,7 @@ export class AgentLoop {
       input.turnId,
     );
     const items: ConversationItem[] = [];
+    const usage = emptyTurnUsage();
     let completedSteps = 0;
 
     await recorder.record({ type: "turn.started", payload: {} });
@@ -125,16 +131,19 @@ export class AgentLoop {
     });
 
     if (signal.aborted) {
-      return this.cancel(recorder, items, completedSteps, signal.reason);
+      return this.cancel(recorder, items, completedSteps, signal.reason, usage);
     }
 
     for (let step = 1; step <= this.maxSteps; step += 1) {
       completedSteps = step;
+      usage.modelRequests += 1;
       let assistantText = "";
       const toolCalls: Extract<ModelEvent, { type: "tool_call" }>[] = [];
       let completedEventSeen = false;
       let finishReason:
         Extract<ModelEvent, { type: "completed" }>["finishReason"] | undefined;
+      let responseId: string | undefined;
+      let stepUsage: TokenUsage | undefined;
 
       try {
         for await (const event of this.provider.stream(
@@ -155,6 +164,7 @@ export class AgentLoop {
               completedSteps,
               "MODEL_PROTOCOL_ERROR",
               "The provider emitted an event after the completed event.",
+              usage,
             );
           }
           if (event.type === "assistant_delta") {
@@ -170,11 +180,19 @@ export class AgentLoop {
           } else if (event.type === "completed") {
             completedEventSeen = true;
             finishReason = event.finishReason;
+            responseId = event.responseId;
+            stepUsage = event.usage;
           }
         }
       } catch (error) {
         if (signal.aborted) {
-          return this.cancel(recorder, items, completedSteps, signal.reason);
+          return this.cancel(
+            recorder,
+            items,
+            completedSteps,
+            signal.reason,
+            usage,
+          );
         }
         return this.fail(
           recorder,
@@ -182,6 +200,7 @@ export class AgentLoop {
           completedSteps,
           "MODEL_ERROR",
           error instanceof Error ? error.message : String(error),
+          usage,
         );
       }
 
@@ -192,7 +211,20 @@ export class AgentLoop {
           completedSteps,
           "MODEL_PROTOCOL_ERROR",
           "The provider stream ended without a completed event.",
+          usage,
         );
+      }
+
+      if (stepUsage !== undefined) {
+        addTokenUsage(usage, stepUsage);
+        await recorder.record({
+          type: "model.usage",
+          payload: {
+            step,
+            usage: stepUsage,
+            ...(responseId === undefined ? {} : { responseId }),
+          },
+        });
       }
 
       if (
@@ -205,6 +237,7 @@ export class AgentLoop {
           completedSteps,
           "MODEL_PROTOCOL_ERROR",
           `The provider finish reason '${finishReason}' does not match the emitted tool calls.`,
+          usage,
         );
       }
 
@@ -224,7 +257,13 @@ export class AgentLoop {
 
       for (const call of toolCalls) {
         if (signal.aborted) {
-          return this.cancel(recorder, items, completedSteps, signal.reason);
+          return this.cancel(
+            recorder,
+            items,
+            completedSteps,
+            signal.reason,
+            usage,
+          );
         }
 
         const callItem = toolCallItemSchema.parse({
@@ -263,7 +302,13 @@ export class AgentLoop {
                 );
         } catch (error) {
           if (signal.aborted) {
-            return this.cancel(recorder, items, completedSteps, signal.reason);
+            return this.cancel(
+              recorder,
+              items,
+              completedSteps,
+              signal.reason,
+              usage,
+            );
           }
           result = {
             status: "error",
@@ -296,7 +341,7 @@ export class AgentLoop {
           : { steps: completedSteps };
         await recorder.record({
           type: "turn.completed",
-          payload,
+          payload: { ...payload, usage: copyTurnUsage(usage) },
         });
         return finalMessage
           ? {
@@ -304,8 +349,14 @@ export class AgentLoop {
               steps: completedSteps,
               items,
               finalMessage,
+              usage: copyTurnUsage(usage),
             }
-          : { status: "completed", steps: completedSteps, items };
+          : {
+              status: "completed",
+              steps: completedSteps,
+              items,
+              usage: copyTurnUsage(usage),
+            };
       }
     }
 
@@ -315,6 +366,7 @@ export class AgentLoop {
       completedSteps,
       "MAX_STEPS_EXCEEDED",
       `The turn exceeded the configured limit of ${this.maxSteps} model steps.`,
+      usage,
     );
   }
 
@@ -443,6 +495,7 @@ export class AgentLoop {
     items: ConversationItem[],
     steps: number,
     reason: unknown,
+    usage: TurnUsage,
   ): Promise<RunTurnResult> {
     const message =
       typeof reason === "string" && reason.length > 0
@@ -450,9 +503,15 @@ export class AgentLoop {
         : "The turn was cancelled.";
     await recorder.record({
       type: "turn.cancelled",
-      payload: { reason: message },
+      payload: { reason: message, usage: copyTurnUsage(usage) },
     });
-    return { status: "cancelled", steps, items, reason: message };
+    return {
+      status: "cancelled",
+      steps,
+      items,
+      reason: message,
+      usage: copyTurnUsage(usage),
+    };
   }
 
   private async fail(
@@ -461,11 +520,51 @@ export class AgentLoop {
     steps: number,
     code: string,
     message: string,
+    usage: TurnUsage,
   ): Promise<RunTurnResult> {
     await recorder.record({
       type: "turn.failed",
-      payload: { code, message },
+      payload: { code, message, usage: copyTurnUsage(usage) },
     });
-    return { status: "failed", steps, items, error: { code, message } };
+    return {
+      status: "failed",
+      steps,
+      items,
+      error: { code, message },
+      usage: copyTurnUsage(usage),
+    };
   }
+}
+
+function emptyTurnUsage(): TurnUsage {
+  return {
+    modelRequests: 0,
+    reportedRequests: 0,
+    tokens: {
+      inputTokens: 0,
+      cachedInputTokens: 0,
+      cacheWriteInputTokens: 0,
+      outputTokens: 0,
+      reasoningOutputTokens: 0,
+      totalTokens: 0,
+    },
+  };
+}
+
+function addTokenUsage(summary: TurnUsage, usage: TokenUsage): void {
+  summary.reportedRequests += 1;
+  summary.tokens.inputTokens += usage.inputTokens;
+  summary.tokens.cachedInputTokens += usage.cachedInputTokens;
+  summary.tokens.cacheWriteInputTokens += usage.cacheWriteInputTokens;
+  summary.tokens.outputTokens += usage.outputTokens;
+  summary.tokens.reasoningOutputTokens += usage.reasoningOutputTokens;
+  summary.tokens.totalTokens += usage.totalTokens;
+}
+
+function copyTurnUsage(usage: TurnUsage): TurnUsage {
+  return {
+    modelRequests: usage.modelRequests,
+    reportedRequests: usage.reportedRequests,
+    tokens: { ...usage.tokens },
+  };
 }

@@ -36,21 +36,46 @@ export class ConsoleEventSink implements EventSink {
 
     if (event.type === "turn.failed") {
       this.writeDiagnostic(`${event.payload.code}: ${event.payload.message}`);
+      this.writeUsage(event.payload.usage);
       return;
     }
 
     if (event.type === "turn.cancelled") {
       this.writeDiagnostic(event.payload.reason);
+      this.writeUsage(event.payload.usage);
       return;
     }
 
-    if (event.type === "turn.completed" && !this.answerEndsWithNewline) {
-      this.options.stdout.write("\n");
-      this.answerEndsWithNewline = true;
+    if (event.type === "turn.completed") {
+      if (!this.answerEndsWithNewline) {
+        this.options.stdout.write("\n");
+        this.answerEndsWithNewline = true;
+      }
+      this.writeUsage(event.payload.usage);
     }
   }
 
   private writeDiagnostic(message: string): void {
     this.options.stderr.write(`[koda] ${message}\n`);
+  }
+
+  private writeUsage(
+    usage:
+      | Extract<AgentEvent, { type: "turn.completed" }>["payload"]["usage"]
+      | undefined,
+  ): void {
+    if (usage === undefined) {
+      return;
+    }
+    if (usage.reportedRequests === 0) {
+      this.writeDiagnostic(
+        `token usage unavailable; 0/${usage.modelRequests} requests reported`,
+      );
+      return;
+    }
+    const tokens = usage.tokens;
+    this.writeDiagnostic(
+      `tokens: ${tokens.inputTokens} input (${tokens.cachedInputTokens} cached, ${tokens.cacheWriteInputTokens} cache write), ${tokens.outputTokens} output (${tokens.reasoningOutputTokens} reasoning), ${tokens.totalTokens} total; ${usage.reportedRequests}/${usage.modelRequests} requests reported`,
+    );
   }
 }
