@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { artifactSha256Schema } from "./artifacts.js";
+import { modelProviderIdSchema } from "./providers.js";
 
 export const repositoryInstructionSnapshotSchema = z.object({
   path: z.string().min(1),
@@ -10,7 +11,7 @@ export const repositoryInstructionSnapshotSchema = z.object({
 });
 
 export const turnContextSnapshotSchema = z.object({
-  provider: z.string().min(1),
+  provider: modelProviderIdSchema,
   model: z.string().min(1),
   workspaceRoot: z.string().min(1),
   approvalMode: z.enum(["on-request", "never"]),

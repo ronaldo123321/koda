@@ -416,7 +416,7 @@ describe("OpenAIResponsesProvider", () => {
         tools: [toolDefinition],
       }),
     ).rejects.toMatchObject({
-      code: "OPENAI_INVALID_FUNCTION_ARGUMENTS",
+      code: "PROVIDER_OUTPUT_INVALID",
     });
   });
 
@@ -569,7 +569,7 @@ describe("OpenAIResponsesProvider", () => {
         items: [userItem],
         tools: [toolDefinition],
       }),
-    ).rejects.toMatchObject({ code: "OPENAI_INVALID_USAGE" });
+    ).rejects.toMatchObject({ code: "PROVIDER_OUTPUT_INVALID" });
   });
 
   it("forwards the caller abort signal to the OpenAI SDK", async () => {
@@ -604,14 +604,14 @@ describe("OpenAIResponsesProvider", () => {
           error: { code: "server_error", message: "Provider failed." },
         },
       }),
-      code: "server_error",
+      code: "PROVIDER_REQUEST_FAILED",
     },
     {
       event: streamEvent({
         type: "response.incomplete",
         response: {},
       }),
-      code: "OPENAI_RESPONSE_INCOMPLETE",
+      code: "PROVIDER_OUTPUT_INVALID",
     },
   ])("maps failed provider streams to $code", async ({ event, code }) => {
     const client = new FakeOpenAIClient([[event]]);

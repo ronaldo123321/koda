@@ -3,6 +3,7 @@ import { z } from "zod";
 import { artifactIdSchema } from "./artifacts.js";
 import { itemIdSchema, toolCallIdSchema, turnIdSchema } from "./ids.js";
 import { jsonObjectSchema, jsonValueSchema } from "./json.js";
+import { modelProviderIdSchema, providerStateSchema } from "./providers.js";
 
 export const userMessageItemSchema = z.object({
   type: z.literal("user_message"),
@@ -15,6 +16,26 @@ export const assistantMessageItemSchema = z.object({
   id: itemIdSchema,
   content: z.string(),
 });
+
+export const providerStateItemSchema = z
+  .object({
+    type: z.literal("provider_state"),
+    id: itemIdSchema,
+    provider: modelProviderIdSchema,
+    data: jsonObjectSchema,
+  })
+  .strict()
+  .superRefine((item, context) => {
+    const result = providerStateSchema.safeParse({
+      provider: item.provider,
+      data: item.data,
+    });
+    if (!result.success) {
+      for (const issue of result.error.issues) {
+        context.addIssue({ ...issue, path: ["data", ...issue.path] });
+      }
+    }
+  });
 
 export const toolCallItemSchema = z.object({
   type: z.literal("tool_call"),
@@ -119,6 +140,7 @@ export const recoveryItemSchema = z.object({
 export const conversationItemSchema = z.discriminatedUnion("type", [
   userMessageItemSchema,
   assistantMessageItemSchema,
+  providerStateItemSchema,
   toolCallItemSchema,
   toolResultItemSchema,
   approvalItemSchema,
@@ -128,6 +150,7 @@ export const conversationItemSchema = z.discriminatedUnion("type", [
 
 export type UserMessageItem = z.infer<typeof userMessageItemSchema>;
 export type AssistantMessageItem = z.infer<typeof assistantMessageItemSchema>;
+export type ProviderStateItem = z.infer<typeof providerStateItemSchema>;
 export type ToolCallItem = z.infer<typeof toolCallItemSchema>;
 export type ToolResultItem = z.infer<typeof toolResultItemSchema>;
 export type ApprovalItem = z.infer<typeof approvalItemSchema>;

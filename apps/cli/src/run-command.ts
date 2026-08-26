@@ -9,7 +9,7 @@ import {
   type AgentEvent,
   type ItemId,
 } from "@koda/protocol";
-import { createOpenAIResponsesProvider } from "@koda/providers";
+import { createRegisteredProvider } from "@koda/providers";
 import { ReadOnlyWorkspace } from "@koda/runtime-node";
 
 import { ConfigurationError } from "./config.js";
@@ -21,6 +21,7 @@ export interface RunCommandInput {
   prompt: string;
   cwd?: string;
   model?: string;
+  provider?: string;
   resume?: string;
   signal: AbortSignal;
 }
@@ -40,11 +41,11 @@ export interface RunCommandDependencies extends KodaApplicationDependencies {
 const productionDependencies: RunCommandDependencies = {
   openWorkspace: (root) => ReadOnlyWorkspace.open(root),
   createProvider: (configuration, instructions) =>
-    createOpenAIResponsesProvider({
+    createRegisteredProvider({
+      provider: configuration.provider,
       apiKey: configuration.apiKey,
       model: configuration.model,
       instructions,
-      reasoningEffort: "medium",
       maxOutputTokens: configuration.maxOutputTokens,
     }),
   createApprovalBroker: (context) =>
@@ -84,6 +85,7 @@ export async function runCommand(
           : { approvalMode: input.approvalMode }),
         ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
         ...(input.model === undefined ? {} : { model: input.model }),
+        ...(input.provider === undefined ? {} : { provider: input.provider }),
         ...(input.resume === undefined ? {} : { resume: input.resume }),
       },
       {

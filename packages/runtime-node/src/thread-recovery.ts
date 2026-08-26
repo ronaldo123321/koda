@@ -370,6 +370,50 @@ function validateCompactionHistory(history: readonly ConversationItem[]): void {
         );
       }
     }
+
+    for (const [
+      providerStateIndex,
+      providerState,
+    ] of precedingItems.entries()) {
+      if (providerState.type !== "provider_state") {
+        continue;
+      }
+      const stateStepItems: ConversationItem[] = [providerState];
+      let cursor = providerStateIndex + 1;
+      let followingCalls = 0;
+      while (precedingItems[cursor]?.type === "tool_call") {
+        const call = precedingItems[cursor];
+        if (call?.type !== "tool_call") {
+          break;
+        }
+        const related = precedingItems.filter(
+          (preceding) =>
+            (preceding.type === "tool_call" ||
+              preceding.type === "approval" ||
+              preceding.type === "tool_result") &&
+            preceding.callId === call.callId,
+        );
+        stateStepItems.push(...related);
+        followingCalls += 1;
+        cursor += related.length;
+      }
+      if (followingCalls === 0) {
+        throw invalidLog(
+          `Compaction '${item.id}' retains provider state '${providerState.id}' without a following tool call.`,
+        );
+      }
+      const retainedStateStepItems = stateStepItems.filter((stateStepItem) =>
+        retainedIds.has(stateStepItem.id),
+      );
+      if (
+        retainedStateStepItems.length > 0 &&
+        retainedStateStepItems.length !== stateStepItems.length
+      ) {
+        throw invalidLog(
+          `Compaction '${item.id}' retains only part of provider state step '${providerState.id}'.`,
+        );
+      }
+    }
   }
 }
 

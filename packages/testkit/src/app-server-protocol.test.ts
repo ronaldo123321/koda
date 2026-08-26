@@ -43,14 +43,15 @@ describe("app-server protocol", () => {
   it("validates method parameters without accepting transport secrets", () => {
     expect(
       initializeParamsSchema.parse({
-        protocolVersion: 1,
+        protocolVersion: APP_SERVER_PROTOCOL_VERSION,
         client: { name: "desktop" },
       }),
-    ).toMatchObject({ protocolVersion: 1 });
+    ).toMatchObject({ protocolVersion: APP_SERVER_PROTOCOL_VERSION });
     expect(
       turnStartParamsSchema.parse({
         prompt: "Inspect the repository.",
         cwd: ".",
+        provider: "deepseek",
         approvalMode: "on-request",
       }),
     ).not.toHaveProperty("apiKey");
@@ -58,6 +59,12 @@ describe("app-server protocol", () => {
       turnStartParamsSchema.parse({
         prompt: "Inspect.",
         apiKey: "must-not-cross-protocol",
+      }),
+    ).toThrow();
+    expect(() =>
+      turnStartParamsSchema.parse({
+        prompt: "Inspect.",
+        provider: "custom-provider",
       }),
     ).toThrow();
     expect(() =>

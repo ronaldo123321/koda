@@ -1,6 +1,6 @@
 # Koda Phase 3C: Explicit Multi-Provider Runtime
 
-- Status: Approved for implementation (2026-08-26)
+- Status: Implemented and verified (2026-08-26)
 - Date: 2026-08-26
 - Depends on: Phase 3A transport-neutral application boundary and Phase 3B external tool lifecycle
 - Scope: explicit provider selection, five named provider profiles, provider-specific conversation projection, durable reasoning continuity, normalized usage and errors, and app-server protocol v2

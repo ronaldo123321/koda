@@ -577,6 +577,57 @@ describe("recoverThread", () => {
       expect.objectContaining({ code: "THREAD_LOG_INVALID" }),
     );
   });
+
+  it("rejects a compaction that drops provider state but retains its tool step", () => {
+    const callId = toolCallIdSchema.parse("partial-state-call");
+    const latestUserId = itemIdSchema.parse("partial-state-user");
+    const callItemId = itemIdSchema.parse("partial-state-call-item");
+    const resultItemId = itemIdSchema.parse("partial-state-result-item");
+    const events = [
+      event(0, "turn.started", {}),
+      contextEvent(1),
+      recorded(2, {
+        type: "user_message",
+        id: latestUserId,
+        content: "Inspect with provider state.",
+      }),
+      recorded(3, {
+        type: "provider_state",
+        id: itemIdSchema.parse("partial-provider-state"),
+        provider: "deepseek",
+        data: { reasoning_content: "inspect first" },
+      }),
+      recorded(4, {
+        type: "tool_call",
+        id: callItemId,
+        callId,
+        name: "read_file",
+        arguments: { path: "README.md" },
+      }),
+      recorded(5, {
+        type: "tool_result",
+        id: resultItemId,
+        callId,
+        name: "read_file",
+        status: "success",
+        output: { content: "# Koda" },
+      }),
+      recorded(6, {
+        type: "compaction",
+        id: itemIdSchema.parse("partial-state-compaction"),
+        reason: "context_budget",
+        retainedItemIds: [latestUserId, callItemId, resultItemId],
+        estimatedTokensBefore: 1_000,
+        estimatedTokensAfter: 300,
+        summary: compactionSummary(),
+      }),
+      event(7, "turn.completed", { steps: 1 }),
+    ];
+
+    expect(() => recoverThread(readResult(events), threadId)).toThrowError(
+      expect.objectContaining({ code: "THREAD_LOG_INVALID" }),
+    );
+  });
 });
 
 function compactionSummary() {

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
+import { APP_SERVER_PROTOCOL_VERSION } from "@koda/protocol";
 
 const temporaryDirectories: string[] = [];
 
@@ -42,7 +43,7 @@ describe("app-server subprocess", () => {
     child.stdin.end(
       [
         request(1, "initialize", {
-          protocolVersion: 1,
+          protocolVersion: APP_SERVER_PROTOCOL_VERSION,
           client: { name: "smoke-test" },
         }),
         request(2, "thread/list", {}),
@@ -65,7 +66,9 @@ describe("app-server subprocess", () => {
       .map((line) => JSON.parse(line) as Record<string, unknown>);
     expect(messages).toHaveLength(3);
     expect(messages.map((message) => message.id)).toEqual([1, 2, 3]);
-    expect(messages[0]?.result).toMatchObject({ protocolVersion: 1 });
+    expect(messages[0]?.result).toMatchObject({
+      protocolVersion: APP_SERVER_PROTOCOL_VERSION,
+    });
     expect(messages[1]?.result).toMatchObject({ threads: [] });
     expect(messages[2]?.result).toEqual({});
   });

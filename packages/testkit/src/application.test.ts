@@ -185,6 +185,81 @@ describe("KodaApplication", () => {
     });
   });
 
+  it("rejects cross-provider resume before creating another provider", async () => {
+    const fixture = await createFixture();
+    const threadId = threadIdSchema.parse("provider-resume-thread");
+    let providerCreations = 0;
+    let turnCursor = 0;
+    const provider = new ScriptedModelProvider([
+      {
+        events: [
+          { type: "assistant_delta", text: "Anthropic turn." },
+          { type: "completed", finishReason: "stop" },
+        ],
+      },
+    ]);
+    const application = new KodaApplication({
+      environment: {
+        ANTHROPIC_API_KEY: "offline-anthropic-key",
+        DEEPSEEK_API_KEY: "offline-deepseek-key",
+        KODA_HOME: fixture.kodaHome,
+      },
+      processDirectory: fixture.root,
+      dependencies: {
+        openWorkspace: (root) => ReadOnlyWorkspace.open(root),
+        createProvider: () => {
+          providerCreations += 1;
+          return provider;
+        },
+        createIds: (resumeThreadId) => {
+          turnCursor += 1;
+          return {
+            threadId: resumeThreadId ?? threadId,
+            turnId: turnIdSchema.parse(`provider-resume-turn-${turnCursor}`),
+            itemIds: new DeterministicItemIdFactory(
+              `provider-resume-item-${turnCursor}`,
+            ),
+          };
+        },
+      },
+    });
+    const client: TurnClient = {
+      events: { append: async () => undefined },
+      approvals: rejectApprovals(),
+    };
+
+    const first = application.startTurn(
+      {
+        prompt: "Start with Anthropic.",
+        cwd: fixture.workspaceRoot,
+        provider: "anthropic",
+      },
+      client,
+    );
+    await expect(first.completion).resolves.toMatchObject({
+      status: "completed",
+    });
+
+    const resumed = application.startTurn(
+      {
+        prompt: "Try to switch.",
+        cwd: fixture.workspaceRoot,
+        provider: "deepseek",
+        resume: threadId,
+      },
+      client,
+    );
+    await expect(resumed.completion).resolves.toMatchObject({
+      status: "failed",
+      error: {
+        code: "INVALID_CONFIGURATION",
+        message:
+          "Thread provider 'anthropic' cannot be resumed with provider 'deepseek'.",
+      },
+    });
+    expect(providerCreations).toBe(1);
+  });
+
   it("allows the thread lease to reject a concurrent same-thread turn", async () => {
     const fixture = await createFixture();
     let started: (() => void) | undefined;

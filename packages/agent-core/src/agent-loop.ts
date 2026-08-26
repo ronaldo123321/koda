@@ -4,12 +4,15 @@ import {
   collectArtifactReferences,
   conversationItemSchema,
   itemIdSchema,
+  providerStateBytes,
+  providerStateItemSchema,
   toolCallItemSchema,
   toolResultItemSchema,
   userMessageItemSchema,
   type AssistantMessageItem,
   type ConversationItem,
   type ItemId,
+  type ProviderState,
   type TokenUsage,
   type ThreadId,
   type TurnContextSnapshot,
@@ -217,6 +220,7 @@ export class AgentLoop {
       let finishReason:
         Extract<ModelEvent, { type: "completed" }>["finishReason"] | undefined;
       let responseId: string | undefined;
+      let providerState: ProviderState | undefined;
       let stepUsage: TokenUsage | undefined;
       let modelOutputBytes = 0;
 
@@ -275,9 +279,23 @@ export class AgentLoop {
             }
             toolCalls.push(event);
           } else if (event.type === "completed") {
+            if (event.providerState !== undefined) {
+              modelOutputBytes += providerStateBytes(event.providerState);
+              if (modelOutputBytes > this.maxModelOutputBytes) {
+                return this.fail(
+                  recorder,
+                  items,
+                  completedSteps,
+                  "MODEL_OUTPUT_LIMIT_EXCEEDED",
+                  `The provider output exceeded the ${this.maxModelOutputBytes}-byte limit for one model step.`,
+                  usage,
+                );
+              }
+            }
             completedEventSeen = true;
             finishReason = event.finishReason;
             responseId = event.responseId;
+            providerState = event.providerState;
             stepUsage = event.usage;
           }
         }
@@ -295,7 +313,7 @@ export class AgentLoop {
           recorder,
           items,
           completedSteps,
-          "MODEL_ERROR",
+          providerErrorCode(error),
           error instanceof Error ? error.message : String(error),
           usage,
         );
@@ -335,7 +353,8 @@ export class AgentLoop {
 
       if (
         (finishReason === "tool_calls" && toolCalls.length === 0) ||
-        (finishReason === "stop" && toolCalls.length > 0)
+        (finishReason === "stop" && toolCalls.length > 0) ||
+        (providerState !== undefined && finishReason !== "tool_calls")
       ) {
         return this.fail(
           recorder,
@@ -358,6 +377,31 @@ export class AgentLoop {
         await recorder.record({
           type: "item.recorded",
           payload: { item: finalMessage },
+        });
+      }
+
+      if (providerState !== undefined) {
+        const parsedStateItem = providerStateItemSchema.safeParse({
+          type: "provider_state",
+          id: this.ids.next(),
+          provider: providerState.provider,
+          data: providerState.data,
+        });
+        if (!parsedStateItem.success) {
+          return this.fail(
+            recorder,
+            items,
+            completedSteps,
+            "PROVIDER_OUTPUT_INVALID",
+            "The provider returned invalid continuation state.",
+            usage,
+          );
+        }
+        const stateItem = parsedStateItem.data;
+        items.push(stateItem);
+        await recorder.record({
+          type: "item.recorded",
+          payload: { item: stateItem },
         });
       }
 
@@ -743,6 +787,18 @@ export class AgentLoop {
       usage: copyTurnUsage(usage),
     };
   }
+}
+
+function providerErrorCode(error: unknown): string {
+  if (
+    error instanceof Error &&
+    "code" in error &&
+    typeof (error as { code?: unknown }).code === "string" &&
+    (error as { code: string }).code.startsWith("PROVIDER_")
+  ) {
+    return (error as { code: string }).code;
+  }
+  return "MODEL_ERROR";
 }
 
 function emptyTurnUsage(): TurnUsage {

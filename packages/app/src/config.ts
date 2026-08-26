@@ -5,12 +5,19 @@ import {
   DEFAULT_CONTEXT_SAFETY_MARGIN_TOKENS,
   type ApprovalMode,
 } from "@koda/agent-core";
-import { threadIdSchema, type ThreadId } from "@koda/protocol";
+import {
+  modelProviderIdSchema,
+  threadIdSchema,
+  type ModelProviderId,
+  type ThreadId,
+} from "@koda/protocol";
+import { getBuiltInProviderProfile } from "@koda/providers";
 
 export interface RunConfigurationInput {
   approvalMode?: string;
   cwd?: string;
   model?: string;
+  provider?: string;
   resume?: string;
 }
 
@@ -20,6 +27,7 @@ export interface RunConfiguration {
   cwd: string;
   kodaHome: string;
   model: string;
+  provider: ModelProviderId;
   contextWindowTokens: number;
   maxOutputTokens: number;
   resumeThreadId?: ThreadId;
@@ -53,15 +61,28 @@ export function resolveRunConfiguration(
   environment: NodeJS.ProcessEnv,
   processDirectory: string,
 ): RunConfiguration {
-  const apiKey = environment.OPENAI_API_KEY?.trim();
+  const providerValue =
+    input.provider?.trim() || environment.KODA_PROVIDER?.trim() || "openai";
+  const parsedProvider = modelProviderIdSchema.safeParse(providerValue);
+  if (!parsedProvider.success) {
+    throw new ConfigurationError(
+      "Provider must be one of: openai, anthropic, deepseek, kimi, glm.",
+    );
+  }
+  const provider = parsedProvider.data;
+  const providerProfile = getBuiltInProviderProfile(provider);
+  const apiKey =
+    environment[providerProfile.credentialEnvironmentVariable]?.trim();
   if (apiKey === undefined || apiKey.length === 0) {
     throw new ConfigurationError(
-      "OPENAI_API_KEY is required. Set it in the environment before running Koda.",
+      `${providerProfile.credentialEnvironmentVariable} is required for provider '${provider}'. Set it in the environment before running Koda.`,
     );
   }
 
   const model =
-    input.model?.trim() || environment.KODA_MODEL?.trim() || "gpt-5.6-terra";
+    input.model?.trim() ||
+    environment.KODA_MODEL?.trim() ||
+    providerProfile.defaultModel;
   const approvalMode =
     input.approvalMode?.trim() ||
     environment.KODA_APPROVAL_MODE?.trim() ||
@@ -109,6 +130,7 @@ export function resolveRunConfiguration(
     cwd,
     kodaHome,
     model,
+    provider,
     contextWindowTokens,
     maxOutputTokens,
     ...(resumeThreadId === undefined ? {} : { resumeThreadId }),

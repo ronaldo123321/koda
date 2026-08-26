@@ -11,7 +11,7 @@ import {
   type JsonValue,
   type ToolResultItem,
 } from "@koda/protocol";
-import { ScriptedModelProvider } from "@koda/providers";
+import { ProviderError, ScriptedModelProvider } from "@koda/providers";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
@@ -437,6 +437,126 @@ describe("AgentLoop", () => {
     );
   });
 
+  it("persists provider continuation state before executing its tool step", async () => {
+    const events = new MemoryEventStore();
+    const callId = toolCallIdSchema.parse("state-call");
+    const provider = new ScriptedModelProvider([
+      {
+        events: [
+          { type: "assistant_delta", text: "I will inspect it." },
+          {
+            type: "tool_call",
+            callId,
+            name: "echo",
+            arguments: { text: "stateful" },
+          },
+          {
+            type: "completed",
+            finishReason: "tool_calls",
+            providerState: {
+              provider: "anthropic",
+              data: {
+                blocks: [
+                  {
+                    type: "thinking",
+                    thinking: "inspect first",
+                    signature: "opaque-signature",
+                  },
+                ],
+              },
+            },
+          },
+        ],
+      },
+      {
+        assertRequest: (request) => {
+          expect(request.items.map((item) => item.type)).toEqual([
+            "user_message",
+            "assistant_message",
+            "provider_state",
+            "tool_call",
+            "tool_result",
+          ]);
+          expect(request.items[2]).toMatchObject({
+            provider: "anthropic",
+            data: {
+              blocks: [
+                {
+                  type: "thinking",
+                  signature: "opaque-signature",
+                },
+              ],
+            },
+          });
+        },
+        events: [
+          { type: "assistant_delta", text: "Done." },
+          { type: "completed", finishReason: "stop" },
+        ],
+      },
+    ]);
+
+    const result = await new AgentLoop({
+      provider,
+      tools: createTools(),
+      events,
+      ids: new DeterministicItemIdFactory("state-item"),
+      clock: new FixedClock(),
+    }).runTurn({ threadId, turnId, userInput: "Inspect statefully." });
+
+    expect(result.status).toBe("completed");
+    const recordedTypes = events.events
+      .filter((event) => event.type === "item.recorded")
+      .map((event) => event.payload.item.type);
+    expect(recordedTypes).toEqual([
+      "user_message",
+      "assistant_message",
+      "provider_state",
+      "tool_call",
+      "tool_result",
+      "assistant_message",
+    ]);
+  });
+
+  it("rejects oversized provider state before any tool execution", async () => {
+    const events = new MemoryEventStore();
+    const result = await new AgentLoop({
+      provider: new ScriptedModelProvider([
+        {
+          events: [
+            {
+              type: "tool_call",
+              callId: toolCallIdSchema.parse("oversized-state-call"),
+              name: "echo",
+              arguments: { text: "safe" },
+            },
+            {
+              type: "completed",
+              finishReason: "tool_calls",
+              providerState: {
+                provider: "deepseek",
+                data: { reasoning_content: "x".repeat(100) },
+              },
+            },
+          ],
+        },
+      ]),
+      tools: createTools(),
+      events,
+      ids: new DeterministicItemIdFactory("oversized-state-item"),
+      clock: new FixedClock(),
+      maxModelOutputBytes: 80,
+    }).runTurn({ threadId, turnId, userInput: "Do not execute." });
+
+    expect(result).toMatchObject({
+      status: "failed",
+      error: { code: "MODEL_OUTPUT_LIMIT_EXCEEDED" },
+    });
+    expect(events.events.some((event) => event.type === "tool.started")).toBe(
+      false,
+    );
+  });
+
   it("records per-step usage and aggregates a multi-step turn", async () => {
     const events = new MemoryEventStore();
     const provider = new ScriptedModelProvider([
@@ -664,6 +784,33 @@ describe("AgentLoop", () => {
       error: { code: "MODEL_PROTOCOL_ERROR" },
     });
     expect(events.events.at(-1)?.type).toBe("turn.failed");
+  });
+
+  it("preserves stable provider error codes in the durable terminal event", async () => {
+    const events = new MemoryEventStore();
+    const result = await new AgentLoop({
+      provider: {
+        stream: async function* () {
+          throw new ProviderError(
+            "PROVIDER_RATE_LIMITED",
+            "The provider rate-limited the request.",
+          );
+        },
+      },
+      tools: createTools(),
+      events,
+      ids: new DeterministicItemIdFactory("provider-error-item"),
+      clock: new FixedClock(),
+    }).runTurn({ threadId, turnId, userInput: "Try once." });
+
+    expect(result).toMatchObject({
+      status: "failed",
+      error: { code: "PROVIDER_RATE_LIMITED" },
+    });
+    expect(events.events.at(-1)).toMatchObject({
+      type: "turn.failed",
+      payload: { code: "PROVIDER_RATE_LIMITED" },
+    });
   });
 
   it("records cancellation as an explicit terminal result", async () => {

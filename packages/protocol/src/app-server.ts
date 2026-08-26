@@ -4,8 +4,9 @@ import { agentEventSchema } from "./events.js";
 import { threadIdSchema, toolCallIdSchema, turnIdSchema } from "./ids.js";
 import { jsonValueSchema } from "./json.js";
 import { tokenUsageSchema } from "./usage.js";
+import { modelProviderIdSchema, providerMetadataSchema } from "./providers.js";
 
-export const APP_SERVER_PROTOCOL_VERSION = 1 as const;
+export const APP_SERVER_PROTOCOL_VERSION = 2 as const;
 
 export const APP_SERVER_RPC_ERROR_CODE = {
   PARSE: -32700,
@@ -106,6 +107,7 @@ export const initializeResultSchema = z
         durableEventNotifications: z.literal(true),
       })
       .strict(),
+    providers: z.array(providerMetadataSchema).min(1),
   })
   .strict();
 
@@ -151,7 +153,7 @@ export const threadMetadataSchema = z
     createdAt: z.string().datetime({ offset: true }),
     updatedAt: z.string().datetime({ offset: true }),
     lastTurnId: turnIdSchema.optional(),
-    provider: z.string().optional(),
+    provider: modelProviderIdSchema.optional(),
     model: z.string().optional(),
     workspaceRoot: z.string().optional(),
     approvalMode: z.string().optional(),
@@ -193,6 +195,7 @@ export const turnStartParamsSchema = z
     prompt: z.string().min(1),
     cwd: z.string().min(1).optional(),
     model: z.string().min(1).optional(),
+    provider: modelProviderIdSchema.optional(),
     resumeThreadId: z
       .string()
       .regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u)

@@ -353,34 +353,67 @@ function groupConversationItems(
         `Context contains an orphan ${item.type} item.`,
       );
     }
+    if (item.type === "provider_state") {
+      const grouped: ConversationItem[] = [item];
+      let cursor = index + 1;
+      while (items[cursor]?.type === "tool_call") {
+        const toolGroup = collectToolGroup(items, cursor);
+        grouped.push(...toolGroup.items);
+        cursor = toolGroup.nextIndex;
+      }
+      if (!grouped.some((entry) => entry.type === "tool_call")) {
+        throw new ContextBudgetError(
+          "CONTEXT_COMPACTION_INVALID",
+          `Provider state '${item.id}' has no following tool call.`,
+        );
+      }
+      groups.push({ items: grouped });
+      index = cursor - 1;
+      continue;
+    }
     if (item.type !== "tool_call") {
       groups.push({ items: [item] });
       continue;
     }
-    const grouped: ConversationItem[] = [item];
-    let cursor = index + 1;
-    while (cursor < items.length) {
-      const related = items[cursor];
-      if (
-        related === undefined ||
-        (related.type !== "approval" && related.type !== "tool_result") ||
-        related.callId !== item.callId
-      ) {
-        break;
-      }
-      grouped.push(related);
-      cursor += 1;
-    }
-    if (!grouped.some((entry) => entry.type === "tool_result")) {
-      throw new ContextBudgetError(
-        "CONTEXT_COMPACTION_INVALID",
-        `Tool call '${item.callId}' has no result in model context.`,
-      );
-    }
-    groups.push({ items: grouped });
-    index = cursor - 1;
+    const toolGroup = collectToolGroup(items, index);
+    groups.push({ items: toolGroup.items });
+    index = toolGroup.nextIndex - 1;
   }
   return groups;
+}
+
+function collectToolGroup(
+  items: readonly ConversationItem[],
+  index: number,
+): { items: ConversationItem[]; nextIndex: number } {
+  const item = items[index];
+  if (item?.type !== "tool_call") {
+    throw new ContextBudgetError(
+      "CONTEXT_COMPACTION_INVALID",
+      "Expected a tool call while grouping model context.",
+    );
+  }
+  const grouped: ConversationItem[] = [item];
+  let cursor = index + 1;
+  while (cursor < items.length) {
+    const related = items[cursor];
+    if (
+      related === undefined ||
+      (related.type !== "approval" && related.type !== "tool_result") ||
+      related.callId !== item.callId
+    ) {
+      break;
+    }
+    grouped.push(related);
+    cursor += 1;
+  }
+  if (!grouped.some((entry) => entry.type === "tool_result")) {
+    throw new ContextBudgetError(
+      "CONTEXT_COMPACTION_INVALID",
+      `Tool call '${item.callId}' has no result in model context.`,
+    );
+  }
+  return { items: grouped, nextIndex: cursor };
 }
 
 function findLatestUserGroup(groups: readonly ItemGroup[]): number {

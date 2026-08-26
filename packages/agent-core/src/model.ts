@@ -1,6 +1,7 @@
 import type {
   ConversationItem,
   JsonObject,
+  ProviderState,
   ThreadId,
   ToolCallId,
   TurnId,
@@ -33,6 +34,7 @@ export type ModelEvent =
       type: "completed";
       finishReason: "stop" | "tool_calls";
       responseId?: string;
+      providerState?: ProviderState;
       usage?: TokenUsage;
     };
 

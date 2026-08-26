@@ -40,7 +40,16 @@ export function createProgram(runtime: ProgramRuntime): Command {
     .description("Run one coding-agent turn")
     .argument("<prompt...>", "task for Koda")
     .option("-C, --cwd <directory>", "workspace directory")
-    .option("-m, --model <model>", "OpenAI model ID")
+    .option("-m, --model <model>", "model ID for the selected provider")
+    .addOption(
+      new Option("-p, --provider <provider>", "model provider").choices([
+        "openai",
+        "anthropic",
+        "deepseek",
+        "kimi",
+        "glm",
+      ]),
+    )
     .option("--resume <thread-id>", "resume an existing Koda thread")
     .addOption(
       new Option(
@@ -55,6 +64,7 @@ export function createProgram(runtime: ProgramRuntime): Command {
           approvalMode?: string;
           cwd?: string;
           model?: string;
+          provider?: string;
           resume?: string;
         },
       ) => {
@@ -77,6 +87,9 @@ export function createProgram(runtime: ProgramRuntime): Command {
               : { approvalMode: options.approvalMode }),
             ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
             ...(options.model === undefined ? {} : { model: options.model }),
+            ...(options.provider === undefined
+              ? {}
+              : { provider: options.provider }),
             ...(options.resume === undefined ? {} : { resume: options.resume }),
           };
           const exitCode = await runCommand(input, {

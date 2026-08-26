@@ -67,6 +67,7 @@ describe("Phase 1A CLI", () => {
       "/workspace",
     );
     expect(fromEnvironment.model).toBe("environment-model");
+    expect(fromEnvironment.provider).toBe("openai");
     expect(fromEnvironment.approvalMode).toBe("on-request");
     expect(fromEnvironment.contextWindowTokens).toBe(128_000);
     expect(fromEnvironment.maxOutputTokens).toBe(16_384);
@@ -106,6 +107,48 @@ describe("Phase 1A CLI", () => {
         "/workspace",
       ),
     ).toThrow("Resume thread ID");
+    expect(
+      resolveRunConfiguration(
+        {},
+        {
+          KODA_PROVIDER: "anthropic",
+          ANTHROPIC_API_KEY: "anthropic-key",
+        },
+        "/workspace",
+      ),
+    ).toMatchObject({
+      provider: "anthropic",
+      model: "claude-sonnet-5",
+      apiKey: "anthropic-key",
+    });
+    expect(
+      resolveRunConfiguration(
+        { provider: "kimi" },
+        {
+          OPENAI_API_KEY: "must-not-be-selected",
+          MOONSHOT_API_KEY: "moonshot-key",
+        },
+        "/workspace",
+      ),
+    ).toMatchObject({
+      provider: "kimi",
+      model: "kimi-k2.6",
+      apiKey: "moonshot-key",
+    });
+    expect(() =>
+      resolveRunConfiguration(
+        { provider: "glm" },
+        { OPENAI_API_KEY: "wrong-provider-key" },
+        "/workspace",
+      ),
+    ).toThrow("ZAI_API_KEY is required for provider 'glm'");
+    expect(() =>
+      resolveRunConfiguration(
+        { provider: "unknown" },
+        { OPENAI_API_KEY: "test-key" },
+        "/workspace",
+      ),
+    ).toThrow("Provider must be one of");
     expect(
       resolveRunConfiguration(
         {},

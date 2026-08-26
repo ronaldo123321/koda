@@ -1,6 +1,6 @@
 # Koda Phase 3 Extensibility Roadmap
 
-- Status: In progress — Phase 3A and Phase 3B implemented; Phase 3C approved (2026-08-26)
+- Status: In progress — Phase 3A, Phase 3B, and Phase 3C implemented (2026-08-26)
 - Date: 2026-08-26
 - Depends on: Phase 2 reliability closure
 - Scope: stable client/tool/provider extension boundaries without weakening the local runtime's durable state and approval guarantees
@@ -38,14 +38,14 @@ The detailed contract, security model, verification matrix, and deferred boundar
 
 ## Phase 3C: explicit multi-provider runtime
 
-Status: **Approved for implementation.**
+Status: **Complete.**
 
-- Add explicit selection across OpenAI, Anthropic, DeepSeek, Kimi, and GLM through a named provider registry.
-- Keep OpenAI on Responses, add an Anthropic Messages adapter, and share reviewed Chat Completions mechanics across separate DeepSeek, Kimi, and GLM profiles.
-- Preserve required thinking and reasoning continuity in bounded, provider-tagged durable state without storing raw vendor responses.
-- Normalize tool calls, usage, stop reasons, cancellation, and errors behind the existing model-provider boundary.
-- Move the strict local app-server contract to protocol v2 with provider selection and discovery metadata.
-- Add offline provider conformance scenarios covering tools, usage, cancellation, compaction, recovery, and state corruption.
+- Add explicit selection across OpenAI, Anthropic, DeepSeek, Kimi, and GLM through a named provider registry. **Completed with provider-specific credentials, defaults, and fixed reviewed endpoints.**
+- Keep OpenAI on Responses, add an Anthropic Messages adapter, and share reviewed Chat Completions mechanics across separate DeepSeek, Kimi, and GLM profiles. **Completed with official Anthropic and OpenAI SDKs.**
+- Preserve required thinking and reasoning continuity in bounded, provider-tagged durable state without storing raw vendor responses. **Completed with a 256 KiB hard limit and atomic tool-step compaction.**
+- Normalize tool calls, usage, stop reasons, cancellation, and errors behind the existing model-provider boundary. **Completed with stable `PROVIDER_*` failures.**
+- Move the strict local app-server contract to protocol v2 with provider selection and discovery metadata. **Completed without a parallel pre-release v1 stack.**
+- Add offline provider conformance scenarios covering tools, usage, cancellation, compaction, recovery, and state corruption. **Completed within the 198-test offline suite and existing 6-scenario reliability gate.**
 
 The complete contract, configuration table, recovery rules, verification matrix, and deferred boundaries are in the [Phase 3C multi-provider design](2026-08-26-phase-3c-multi-provider-design.md).
 

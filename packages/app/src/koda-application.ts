@@ -24,10 +24,15 @@ import {
   turnIdSchema,
   type ConversationItem,
   type ItemId,
+  type ModelProviderId,
+  type ProviderMetadata,
   type ThreadId,
   type TurnId,
 } from "@koda/protocol";
-import { createOpenAIResponsesProvider } from "@koda/providers";
+import {
+  BUILT_IN_PROVIDER_METADATA,
+  createRegisteredProvider,
+} from "@koda/providers";
 import {
   ArtifactGarbageCollectionError,
   ArtifactMaintenanceLease,
@@ -65,6 +70,7 @@ export interface StartTurnInput {
   prompt: string;
   cwd?: string;
   model?: string;
+  provider?: string;
   resume?: string;
 }
 
@@ -131,11 +137,11 @@ export interface KodaApplicationDependencies {
 const productionDependencies: KodaApplicationDependencies = {
   openWorkspace: (root) => ReadOnlyWorkspace.open(root),
   createProvider: (configuration, instructions) =>
-    createOpenAIResponsesProvider({
+    createRegisteredProvider({
+      provider: configuration.provider,
       apiKey: configuration.apiKey,
       model: configuration.model,
       instructions,
-      reasoningEffort: "medium",
       maxOutputTokens: configuration.maxOutputTokens,
     }),
   createIds: (resumeThreadId) => ({
@@ -164,6 +170,7 @@ export class KodaApplication {
           : { approvalMode: input.approvalMode }),
         ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
         ...(input.model === undefined ? {} : { model: input.model }),
+        ...(input.provider === undefined ? {} : { provider: input.provider }),
         ...(input.resume === undefined ? {} : { resume: input.resume }),
       },
       this.environment,
@@ -194,6 +201,10 @@ export class KodaApplication {
         return true;
       },
     };
+  }
+
+  public listProviders(): readonly ProviderMetadata[] {
+    return BUILT_IN_PROVIDER_METADATA;
   }
 
   public async listThreads(
@@ -288,6 +299,10 @@ export class KodaApplication {
         const readResult = await eventStore.readAll();
         const recovered = recoverThread(readResult, ids.threadId);
         assertResumeWorkspace(recovered, workspace.root);
+        assertResumeProvider(
+          recovered.context.provider,
+          configuration.provider,
+        );
         history = recovered.history;
         const unavailableArtifacts = await artifactStore.findUnavailable(
           history.flatMap((item) =>
@@ -380,7 +395,7 @@ export class KodaApplication {
         prefaceItems,
         initialSequence,
         context: turnContextSnapshotSchema.parse({
-          provider: "openai",
+          provider: configuration.provider,
           model: configuration.model,
           workspaceRoot: workspace.root,
           approvalMode: configuration.approvalMode,
@@ -545,6 +560,17 @@ function applicationError(error: unknown): { code: string; message: string } {
       ? error.code
       : "APPLICATION_ERROR";
   return { code, message: errorMessage(error) };
+}
+
+function assertResumeProvider(
+  previous: ModelProviderId,
+  selected: ModelProviderId,
+): void {
+  if (previous !== selected) {
+    throw new ConfigurationError(
+      `Thread provider '${previous}' cannot be resumed with provider '${selected}'.`,
+    );
+  }
 }
 
 async function emitDiagnostic(

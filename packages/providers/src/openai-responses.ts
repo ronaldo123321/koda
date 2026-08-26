@@ -13,6 +13,12 @@ import {
 } from "@koda/protocol";
 import OpenAI from "openai";
 
+import {
+  ProviderError,
+  mapProviderRequestError,
+  type ProviderErrorCode,
+} from "./errors.js";
+
 export type OpenAIReasoningEffort =
   "none" | "low" | "medium" | "high" | "xhigh" | "max";
 
@@ -48,13 +54,13 @@ interface TurnSession {
   failed: boolean;
 }
 
-export class OpenAIProviderError extends Error {
+export class OpenAIProviderError extends ProviderError {
   public constructor(
-    public readonly code: string,
+    code: ProviderErrorCode,
     message: string,
     options?: ErrorOptions,
   ) {
-    super(message, options);
+    super(code, message, options);
     this.name = "OpenAIProviderError";
   }
 }
@@ -144,21 +150,21 @@ export class OpenAIResponsesProvider implements ModelProvider {
 
         if (event.type === "error") {
           throw new OpenAIProviderError(
-            event.code ?? "OPENAI_STREAM_ERROR",
-            event.message,
+            "PROVIDER_REQUEST_FAILED",
+            "The OpenAI response stream reported an error.",
           );
         }
 
         if (event.type === "response.failed") {
           throw new OpenAIProviderError(
-            event.response.error?.code ?? "OPENAI_RESPONSE_FAILED",
-            event.response.error?.message ?? "The OpenAI response failed.",
+            "PROVIDER_REQUEST_FAILED",
+            "The OpenAI response failed.",
           );
         }
 
         if (event.type === "response.incomplete") {
           throw new OpenAIProviderError(
-            "OPENAI_RESPONSE_INCOMPLETE",
+            "PROVIDER_OUTPUT_INVALID",
             "The OpenAI response ended before it completed.",
           );
         }
@@ -166,7 +172,7 @@ export class OpenAIResponsesProvider implements ModelProvider {
         if (event.type === "response.completed") {
           if (completed) {
             throw new OpenAIProviderError(
-              "OPENAI_PROTOCOL_ERROR",
+              "PROVIDER_PROTOCOL_ERROR",
               "OpenAI emitted more than one response.completed event.",
             );
           }
@@ -188,7 +194,7 @@ export class OpenAIResponsesProvider implements ModelProvider {
 
       if (!completed) {
         throw new OpenAIProviderError(
-          "OPENAI_PROTOCOL_ERROR",
+          "PROVIDER_PROTOCOL_ERROR",
           "The OpenAI stream ended without response.completed.",
         );
       }
@@ -201,15 +207,7 @@ export class OpenAIResponsesProvider implements ModelProvider {
       if (error instanceof OpenAIProviderError) {
         throw error;
       }
-      throw new OpenAIProviderError(
-        signal.aborted ? "OPENAI_REQUEST_CANCELLED" : "OPENAI_REQUEST_FAILED",
-        signal.aborted
-          ? "The OpenAI request was cancelled."
-          : error instanceof Error
-            ? error.message
-            : String(error),
-        { cause: error },
-      );
+      throw mapProviderRequestError("OpenAI", error, signal);
     } finally {
       session.inFlight = false;
     }
@@ -222,7 +220,7 @@ export class OpenAIResponsesProvider implements ModelProvider {
     }
     if (step !== 1) {
       throw new OpenAIProviderError(
-        "OPENAI_SESSION_MISSING",
+        "PROVIDER_PROTOCOL_ERROR",
         `Model step ${step} has no previous OpenAI response session.`,
       );
     }
@@ -239,25 +237,25 @@ export class OpenAIResponsesProvider implements ModelProvider {
   private assertSessionCanStart(session: TurnSession, step: number): void {
     if (session.failed) {
       throw new OpenAIProviderError(
-        "OPENAI_SESSION_FAILED",
+        "PROVIDER_PROTOCOL_ERROR",
         "This OpenAI turn session previously failed and cannot be continued.",
       );
     }
     if (session.inFlight) {
       throw new OpenAIProviderError(
-        "OPENAI_SESSION_BUSY",
+        "PROVIDER_PROTOCOL_ERROR",
         "A model request is already running for this turn.",
       );
     }
     if (step !== session.lastCompletedStep + 1) {
       throw new OpenAIProviderError(
-        "OPENAI_STEP_OUT_OF_ORDER",
+        "PROVIDER_PROTOCOL_ERROR",
         `Expected model step ${session.lastCompletedStep + 1}, received ${step}.`,
       );
     }
     if (step > 1 && session.previousResponseId === undefined) {
       throw new OpenAIProviderError(
-        "OPENAI_RESPONSE_ID_MISSING",
+        "PROVIDER_PROTOCOL_ERROR",
         "A follow-up model step requires a previous OpenAI response ID.",
       );
     }
@@ -285,7 +283,7 @@ export class OpenAIResponsesProvider implements ModelProvider {
     }
     if (input.length === 0) {
       throw new OpenAIProviderError(
-        "OPENAI_FOLLOW_UP_EMPTY",
+        "PROVIDER_PROTOCOL_ERROR",
         "A follow-up OpenAI request has no new tool results or user input.",
       );
     }
@@ -298,7 +296,7 @@ export class OpenAIResponsesProvider implements ModelProvider {
     const replay = toOpenAIReplayInput(items);
     if (!items.some((item) => item.type === "user_message")) {
       throw new OpenAIProviderError(
-        "OPENAI_INPUT_EMPTY",
+        "PROVIDER_OUTPUT_INVALID",
         "An OpenAI response chain requires a user message.",
       );
     }
@@ -390,7 +388,7 @@ function parseFunctionArguments(argumentsText: string, toolName: string) {
     parsed = JSON.parse(argumentsText);
   } catch (error) {
     throw new OpenAIProviderError(
-      "OPENAI_INVALID_FUNCTION_ARGUMENTS",
+      "PROVIDER_OUTPUT_INVALID",
       `OpenAI returned invalid JSON arguments for '${toolName}'.`,
       { cause: error },
     );
@@ -398,7 +396,7 @@ function parseFunctionArguments(argumentsText: string, toolName: string) {
   const result = jsonObjectSchema.safeParse(parsed);
   if (!result.success) {
     throw new OpenAIProviderError(
-      "OPENAI_INVALID_FUNCTION_ARGUMENTS",
+      "PROVIDER_OUTPUT_INVALID",
       `OpenAI returned non-object arguments for '${toolName}'.`,
     );
   }
@@ -421,7 +419,7 @@ function normalizeOpenAIUsage(
   });
   if (!normalized.success) {
     throw new OpenAIProviderError(
-      "OPENAI_INVALID_USAGE",
+      "PROVIDER_OUTPUT_INVALID",
       "OpenAI returned invalid token usage metadata.",
       { cause: normalized.error },
     );

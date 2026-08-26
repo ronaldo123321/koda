@@ -17,6 +17,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.120.0",
     "@koda/agent-core": "workspace:*",
     "@koda/protocol": "workspace:*",
     "openai": "^7.5.0"

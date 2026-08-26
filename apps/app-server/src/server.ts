@@ -217,6 +217,7 @@ export class KodaAppServer {
           interactiveApproval: true,
           durableEventNotifications: true,
         },
+        providers: this.application.listProviders(),
       }),
     );
   }
@@ -265,6 +266,7 @@ export class KodaAppServer {
           prompt: input.prompt,
           ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
           ...(input.model === undefined ? {} : { model: input.model }),
+          ...(input.provider === undefined ? {} : { provider: input.provider }),
           ...(input.resumeThreadId === undefined
             ? {}
             : { resume: input.resumeThreadId }),

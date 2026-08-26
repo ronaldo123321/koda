@@ -6,13 +6,15 @@ The project is building the control plane around a coding model: typed conversat
 
 ## Current status
 
-Phase 3B is complete. It adds local MCP stdio tool integration on top of the Phase 3A transport-neutral application layer and the completed Phase 0 through Phase 2 runtime:
+Phase 3C is implemented. It adds an explicit five-provider runtime on top of the Phase 3A transport-neutral application layer, the Phase 3B local MCP client, and the completed Phase 0 through Phase 2 runtime:
 
 - Versioned Thread, Turn, Item, and Agent Event schemas.
 - A provider-neutral streaming model interface.
 - A runtime-validated tool registry.
 - A model -> tool -> model agent loop.
-- An OpenAI Responses API adapter with streamed text and function calls.
+- An OpenAI Responses adapter, an Anthropic Messages adapter, and reviewed DeepSeek, Kimi, and GLM Chat Completions profiles.
+- Explicit provider selection, provider-specific credentials and defaults, normalized usage/errors, and offline adapter conformance tests.
+- Bounded durable provider continuation state for signed Anthropic thinking blocks and domestic-provider `reasoning_content` across tool rounds, compaction, and recovery.
 - Workspace-confined `list_files`, `read_file`, and literal `search_text` tools.
 - A one-file `apply_patch` tool for exact UTF-8 creates and replacements.
 - Runtime write policy, durable approval events, and terminal patch previews.
@@ -56,17 +58,37 @@ Phase 3B is complete. It adds local MCP stdio tool integration on top of the Pha
 - MCP call timeouts, turn cancellation, reverse-order child cleanup, bounded binary/result normalization, artifact-backed large output, and conservative interrupted-call recovery.
 - Offline provider, runtime, CLI, and deterministic agent-loop tests.
 
-Provider-assisted semantic compaction, exact provider tokenizers, the Anthropic adapter, Ink UI, richer patch operations, artifact client APIs, interactive process UX, and the non-Tool MCP capability surface remain later Phase 3 slices. Remote MCP/HTTP/OAuth, shared or remote artifact stores, remote app-server transports, strong sandboxing, Windows Job Objects, crash-surviving supervision, the Rust executor, and any high-risk shell-string support remain Phase 4 work. Parent/child thread lineage and multi-agent scenario matrices remain Phase 5 work. Workspace writes, process execution, and MCP tools not explicitly classified as read require approval by default.
+Provider-assisted semantic compaction, exact provider tokenizers and pricing, custom endpoints/profiles, automatic routing/fallback, cross-provider resume, additional providers, Ink UI, richer patch operations, artifact client APIs, interactive process UX, and the non-Tool MCP capability surface remain later Phase 3 slices. Remote MCP/HTTP/OAuth, shared or remote artifact stores, remote app-server transports, strong sandboxing, Windows Job Objects, crash-surviving supervision, the Rust executor, and any high-risk shell-string support remain Phase 4 work. Parent/child thread lineage and multi-agent scenario matrices remain Phase 5 work. Workspace writes, process execution, and MCP tools not explicitly classified as read require approval by default.
 
 ## Run the CLI
 
-Build Koda, provide an OpenAI API key, and run one task against a workspace:
+Build Koda, provide the credential for one built-in provider, and run one task against a workspace. OpenAI remains the default:
 
 ```bash
 pnpm build
 export OPENAI_API_KEY=...
 node apps/cli/dist/main.js run "explain this repository" --cwd .
 ```
+
+Select another provider with `--provider` or `KODA_PROVIDER`:
+
+```bash
+export ANTHROPIC_API_KEY=...
+node apps/cli/dist/main.js run "explain this repository" --cwd . --provider anthropic
+
+export DEEPSEEK_API_KEY=...
+node apps/cli/dist/main.js run "explain this repository" --cwd . --provider deepseek
+```
+
+| Provider    | Credential          | Default model     |
+| ----------- | ------------------- | ----------------- |
+| `openai`    | `OPENAI_API_KEY`    | `gpt-5.6-terra`   |
+| `anthropic` | `ANTHROPIC_API_KEY` | `claude-sonnet-5` |
+| `deepseek`  | `DEEPSEEK_API_KEY`  | `deepseek-v4-pro` |
+| `kimi`      | `MOONSHOT_API_KEY`  | `kimi-k2.6`       |
+| `glm`       | `ZAI_API_KEY`       | `glm-5.2`         |
+
+Only the selected provider's credential is required. `--model` or `KODA_MODEL` overrides that provider's default. Resume a thread with the same provider; Koda rejects cross-provider resume before issuing a model request.
 
 Koda prints the generated thread ID at turn start. Continue it from a later CLI process with the same canonical workspace:
 
@@ -96,11 +118,11 @@ OPENAI_API_KEY=... node apps/app-server/dist/main.js
 The process accepts one JSON-RPC 2.0 object per UTF-8 line. `initialize` must be the first request:
 
 ```json
-{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"client":{"name":"my-koda-client","version":"0.1.0"}}}
-{"jsonrpc":"2.0","id":2,"method":"turn/start","params":{"prompt":"explain this repository","cwd":"."}}
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":2,"client":{"name":"my-koda-client","version":"0.1.0"}}}
+{"jsonrpc":"2.0","id":2,"method":"turn/start","params":{"prompt":"explain this repository","cwd":".","provider":"openai"}}
 ```
 
-Responses and `turn/event` / `turn/finished` notifications use stdout exclusively; diagnostics use stderr. Clients answer an `approval.requested` event with `approval/resolve`, may stop a live turn with `turn/cancel`, and should finish with `shutdown`. Provider credentials are server configuration and are never protocol fields.
+The v2 initialize result advertises the supported providers, credential environment-variable names, and default models. Responses and `turn/event` / `turn/finished` notifications use stdout exclusively; diagnostics use stderr. Clients answer an `approval.requested` event with `approval/resolve`, may stop a live turn with `turn/cancel`, and should finish with `shutdown`. Provider credentials are server configuration and are never protocol fields.
 
 ## Configure local MCP tools
 
@@ -138,13 +160,13 @@ node apps/cli/dist/main.js artifact gc --delete --min-age-hours 24
 
 GC derives reachability from every valid JSONL event rather than SQLite. It refuses to delete anything while a thread is active or when a log is partial, corrupt, unsafe, or unreadable. The default minimum age is 24 hours; dry-run is always the default.
 
-Resume reads and validates the local JSONL log, rebuilds provider-neutral history, and starts a fresh OpenAI response chain. A legacy log without a context snapshot, a different workspace, a busy thread, or an invalid log fails closed. If the prior process stopped during a tool call, Koda reports the durable effect and process evidence it has and does not execute the call again automatically. It never sends a signal using only a PID recovered from an earlier process because operating systems can reuse PIDs.
+Resume reads and validates the local JSONL log, rebuilds provider-neutral history, and projects it through the thread's selected provider. A legacy log without a context snapshot, a provider or workspace mismatch, a busy thread, or an invalid log fails closed. If the prior process stopped during a tool call, Koda reports the durable effect and process evidence it has and does not execute the call again automatically. It never sends a signal using only a PID recovered from an earlier process because operating systems can reuse PIDs.
 
 Oversized tool text keeps a bounded head/tail excerpt in the transcript and stores the complete captured bytes under `KODA_HOME/artifacts/sha256`. Artifact references are content-addressed and deduplicated. The model can call `read_artifact` with an ID, byte offset, and range size; missing or corrupt blobs are reported explicitly when a thread resumes. Koda removes stale temporary captures automatically and reclaims published blobs only through explicit reference-aware garbage collection.
 
 Before every model request, Koda budgets base instructions, scoped repository guidance, tool schemas, and the active transcript. The defaults are a 128,000-token context window, a 16,384-token output reserve, and an 8,192-token safety margin. Override the first two with `KODA_CONTEXT_WINDOW_TOKENS` and `KODA_MAX_OUTPUT_TOKENS`. When history no longer fits, Koda appends a structured compaction record to JSONL, preserves the newest coherent suffix, and rebuilds the same model-facing view after restart without deleting original events.
 
-The model defaults to `gpt-5.6-terra`. Override it with `--model <model>` or `KODA_MODEL`. Runtime event logs are written under `~/.koda/threads` by default; set `KODA_HOME` to move them.
+The provider defaults to `openai`; select it with `--provider <provider>` or `KODA_PROVIDER`. The model defaults to the selected provider's registry entry and can be overridden with `--model <model>` or `KODA_MODEL`. Runtime event logs are written under `~/.koda/threads` by default; set `KODA_HOME` to move them.
 
 Koda discovers `AGENTS.md` and `KODA.md` from the workspace root downward, excluding `.git`, `.koda`, `node_modules`, symlinked directories, and paths deeper than 20 levels. It loads broader scopes before deeper scopes and `AGENTS.md` before `KODA.md` within one directory. Each source applies only to its subtree, must be a regular UTF-8 file no larger than 64 KiB, and cannot override runtime policy or approvals. Discovery is capped at 32 files and 256 KiB total. If these files change between turns, resume records the exact added, removed, or changed paths and uses the current versions.
 
@@ -175,7 +197,7 @@ pnpm eval:scenarios
 
 - `@koda/protocol`: versioned runtime schemas and domain types.
 - `@koda/agent-core`: agent loop, provider and tool ports, event ports.
-- `@koda/providers`: OpenAI Responses and deterministic scripted providers.
+- `@koda/providers`: OpenAI Responses, Anthropic Messages, named OpenAI-compatible profiles, normalized provider errors, and deterministic scripted providers.
 - `@koda/runtime-node`: JSONL, artifact, and rebuildable SQLite metadata persistence plus constrained workspace, patch, and process tools.
 - `@koda/mcp-client-node`: strict local MCP configuration, official stdio client lifecycle, tool adaptation, policy metadata, and bounded result conversion.
 - `@koda/app`: transport-neutral turn orchestration and credential-free thread use cases.
@@ -201,5 +223,6 @@ pnpm eval:scenarios
 - [Phase 3 extensibility roadmap](docs/plans/2026-08-26-phase-3-roadmap.md)
 - [Phase 3A local stdio app-server design](docs/plans/2026-08-26-phase-3a-stdio-app-server-design.md)
 - [Phase 3B local MCP client design](docs/plans/2026-08-26-phase-3b-mcp-client-design.md)
+- [Phase 3C multi-provider runtime design](docs/plans/2026-08-26-phase-3c-multi-provider-design.md)
 
 The model can propose actions, but the Koda runtime owns validation, policy, approval, and execution. User interfaces consume typed events and do not own agent state.

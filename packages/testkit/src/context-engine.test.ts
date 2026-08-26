@@ -2,6 +2,7 @@ import { ContextEngine } from "@koda/agent-core";
 import {
   assistantMessageItemSchema,
   itemIdSchema,
+  providerStateItemSchema,
   toolCallIdSchema,
   toolCallItemSchema,
   toolResultItemSchema,
@@ -110,6 +111,92 @@ describe("ContextEngine", () => {
         itemIdSchema.parse("retained-result"),
       ]),
     );
+  });
+
+  it("retains provider state and all tool calls from its model step atomically", () => {
+    const firstCallId = toolCallIdSchema.parse("state-first-call");
+    const secondCallId = toolCallIdSchema.parse("state-second-call");
+    const transcript: ConversationItem[] = [
+      user("state-old-user", "z".repeat(8_000)),
+      user("state-latest-user", "Continue the stateful tool step."),
+      providerStateItemSchema.parse({
+        type: "provider_state",
+        id: itemIdSchema.parse("retained-provider-state"),
+        provider: "deepseek",
+        data: { reasoning_content: "inspect both files" },
+      }),
+      toolCallItemSchema.parse({
+        type: "tool_call",
+        id: itemIdSchema.parse("state-first-call-item"),
+        callId: firstCallId,
+        name: "read_file",
+        arguments: { path: "README.md" },
+      }),
+      toolResultItemSchema.parse({
+        type: "tool_result",
+        id: itemIdSchema.parse("state-first-result-item"),
+        callId: firstCallId,
+        name: "read_file",
+        status: "success",
+        output: { content: "first" },
+      }),
+      toolCallItemSchema.parse({
+        type: "tool_call",
+        id: itemIdSchema.parse("state-second-call-item"),
+        callId: secondCallId,
+        name: "read_file",
+        arguments: { path: "package.json" },
+      }),
+      toolResultItemSchema.parse({
+        type: "tool_result",
+        id: itemIdSchema.parse("state-second-result-item"),
+        callId: secondCallId,
+        name: "read_file",
+        status: "success",
+        output: { content: "second" },
+      }),
+    ];
+
+    const prepared = createEngine({ contextWindowTokens: 1_500 }).prepare(
+      transcript,
+      [],
+    );
+
+    expect(prepared.compaction?.retainedItemIds).toEqual(
+      expect.arrayContaining([
+        itemIdSchema.parse("retained-provider-state"),
+        itemIdSchema.parse("state-first-call-item"),
+        itemIdSchema.parse("state-first-result-item"),
+        itemIdSchema.parse("state-second-call-item"),
+        itemIdSchema.parse("state-second-result-item"),
+      ]),
+    );
+  });
+
+  it("rejects provider state that is not followed by a complete tool step", () => {
+    expect(() =>
+      createEngine({ contextWindowTokens: 1_000 }).prepare(
+        [
+          user("orphan-state-user", "x".repeat(8_000)),
+          providerStateItemSchema.parse({
+            type: "provider_state",
+            id: itemIdSchema.parse("orphan-provider-state"),
+            provider: "anthropic",
+            data: {
+              blocks: [
+                {
+                  type: "thinking",
+                  thinking: "unfinished",
+                  signature: "signature",
+                },
+              ],
+            },
+          }),
+          user("orphan-state-latest", "Continue."),
+        ],
+        [],
+      ),
+    ).toThrow("has no following tool call");
   });
 
   it("carries structured facts forward across repeated compactions", () => {

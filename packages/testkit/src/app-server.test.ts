@@ -14,6 +14,7 @@ import {
 } from "@koda/app-server";
 import type { ModelProvider } from "@koda/agent-core";
 import {
+  APP_SERVER_PROTOCOL_VERSION,
   threadIdSchema,
   toolCallIdSchema,
   turnIdSchema,
@@ -57,7 +58,7 @@ describe("KodaAppServer", () => {
     });
     await initialize(server, 3);
     await request(server, 4, "initialize", {
-      protocolVersion: 1,
+      protocolVersion: APP_SERVER_PROTOCOL_VERSION,
       client: { name: "duplicate" },
     });
     await request(server, 5, "missing/method", {});
@@ -67,8 +68,15 @@ describe("KodaAppServer", () => {
     expect(errorDataCode(writer, 1)).toBe("SERVER_NOT_INITIALIZED");
     expect(errorDataCode(writer, 2)).toBe("PROTOCOL_VERSION_MISMATCH");
     expect(responseResult(writer, 3)).toMatchObject({
-      protocolVersion: 1,
+      protocolVersion: APP_SERVER_PROTOCOL_VERSION,
       capabilities: { durableEventNotifications: true },
+      providers: [
+        { id: "openai", defaultModel: "gpt-5.6-terra" },
+        { id: "anthropic", defaultModel: "claude-sonnet-5" },
+        { id: "deepseek", defaultModel: "deepseek-v4-pro" },
+        { id: "kimi", defaultModel: "kimi-k2.6" },
+        { id: "glm", defaultModel: "glm-5.2" },
+      ],
     });
     expect(errorDataCode(writer, 4)).toBe("SERVER_ALREADY_INITIALIZED");
     expect(errorDataCode(writer, 5)).toBe("METHOD_NOT_FOUND");
@@ -292,7 +300,10 @@ describe("KodaAppServer", () => {
         jsonrpc: "2.0",
         id: 1,
         method: "initialize",
-        params: { protocolVersion: 1, client: { name: "eof-test" } },
+        params: {
+          protocolVersion: APP_SERVER_PROTOCOL_VERSION,
+          client: { name: "eof-test" },
+        },
       })}\n`,
     );
     input.write(
@@ -461,7 +472,7 @@ function dependencies(
 
 async function initialize(server: KodaAppServer, id: number): Promise<void> {
   await request(server, id, "initialize", {
-    protocolVersion: 1,
+    protocolVersion: APP_SERVER_PROTOCOL_VERSION,
     client: { name: "vitest", version: "1" },
   });
 }
