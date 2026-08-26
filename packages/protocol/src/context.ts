@@ -4,6 +4,7 @@ import { artifactSha256Schema } from "./artifacts.js";
 
 export const repositoryInstructionSnapshotSchema = z.object({
   path: z.string().min(1),
+  scope: z.string().min(1).default("."),
   bytes: z.number().int().nonnegative(),
   sha256: artifactSha256Schema,
 });

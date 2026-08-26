@@ -7,7 +7,7 @@
 
 ## Roadmap status: Phase 2 active
 
-Phase 0 and Phase 1A through 1D are complete. Phase 2A provides durable local transcript replay, safe interrupted-turn recovery, context snapshots, continuous event sequencing, `--resume`, and single-host writer leases. Phase 2B now adds content-addressed output artifacts, uniform model-facing byte budgets, bounded artifact retrieval, recovery diagnostics, and provider-output limits. Phase 2C context budgets and compaction are next. All work moved to later phases remains listed explicitly in the Phase 2 reliability roadmap and the revised phase sections below.
+Phase 0 and Phase 1A through 1D are complete. Phase 2A provides durable local transcript replay, safe interrupted-turn recovery, context snapshots, continuous event sequencing, `--resume`, and single-host writer leases. Phase 2B adds content-addressed output artifacts, uniform model-facing byte budgets, bounded artifact retrieval, recovery diagnostics, and provider-output limits. Phase 2C now adds provider-neutral context budgets, measured estimate calibration, append-only compaction, scoped nested repository instructions, and resume provenance. Phase 2D process reliability is next. All work moved to later phases remains listed explicitly in the Phase 2 reliability roadmap and the revised phase sections below.
 
 ## Roadmap revision: Phase 1 closeout
 

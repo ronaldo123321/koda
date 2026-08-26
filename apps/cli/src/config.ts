@@ -1,7 +1,10 @@
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 
-import type { ApprovalMode } from "@koda/agent-core";
+import {
+  DEFAULT_CONTEXT_SAFETY_MARGIN_TOKENS,
+  type ApprovalMode,
+} from "@koda/agent-core";
 import { threadIdSchema, type ThreadId } from "@koda/protocol";
 
 export interface RunConfigurationInput {
@@ -17,6 +20,8 @@ export interface RunConfiguration {
   cwd: string;
   kodaHome: string;
   model: string;
+  contextWindowTokens: number;
+  maxOutputTokens: number;
   resumeThreadId?: ThreadId;
 }
 
@@ -54,6 +59,24 @@ export function resolveRunConfiguration(
   const kodaHome = resolve(
     environment.KODA_HOME?.trim() || resolve(homedir(), ".koda"),
   );
+  const contextWindowTokens = parsePositiveInteger(
+    environment.KODA_CONTEXT_WINDOW_TOKENS,
+    "KODA_CONTEXT_WINDOW_TOKENS",
+    128_000,
+  );
+  const maxOutputTokens = parsePositiveInteger(
+    environment.KODA_MAX_OUTPUT_TOKENS,
+    "KODA_MAX_OUTPUT_TOKENS",
+    16_384,
+  );
+  if (
+    contextWindowTokens <=
+    maxOutputTokens + DEFAULT_CONTEXT_SAFETY_MARGIN_TOKENS
+  ) {
+    throw new ConfigurationError(
+      `KODA_CONTEXT_WINDOW_TOKENS must exceed KODA_MAX_OUTPUT_TOKENS plus the ${DEFAULT_CONTEXT_SAFETY_MARGIN_TOKENS}-token safety margin.`,
+    );
+  }
 
   let resumeThreadId: ThreadId | undefined;
   if (input.resume !== undefined) {
@@ -72,6 +95,27 @@ export function resolveRunConfiguration(
     cwd,
     kodaHome,
     model,
+    contextWindowTokens,
+    maxOutputTokens,
     ...(resumeThreadId === undefined ? {} : { resumeThreadId }),
   };
+}
+
+function parsePositiveInteger(
+  rawValue: string | undefined,
+  name: string,
+  defaultValue: number,
+): number {
+  const value = rawValue?.trim();
+  if (value === undefined || value.length === 0) {
+    return defaultValue;
+  }
+  if (!/^\d+$/u.test(value)) {
+    throw new ConfigurationError(`${name} must be a positive integer.`);
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+    throw new ConfigurationError(`${name} must be a positive integer.`);
+  }
+  return parsed;
 }

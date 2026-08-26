@@ -23,6 +23,7 @@ import {
   type Clock,
   type EventSink,
 } from "./events.js";
+import { ContextBudgetError, type ContextEngine } from "./context-engine.js";
 import type { ModelEvent, ModelProvider } from "./model.js";
 import {
   denySideEffectsPolicy,
@@ -50,6 +51,7 @@ export interface AgentLoopOptions {
   clock?: Clock;
   maxSteps?: number;
   maxModelOutputBytes?: number;
+  contextEngine?: ContextEngine;
 }
 
 export interface RunTurnInput {
@@ -99,6 +101,7 @@ export class AgentLoop {
   private readonly clock: Clock;
   private readonly maxSteps: number;
   private readonly maxModelOutputBytes: number;
+  private readonly contextEngine: ContextEngine | undefined;
 
   public constructor(options: AgentLoopOptions) {
     this.provider = options.provider;
@@ -111,6 +114,7 @@ export class AgentLoop {
     this.maxSteps = options.maxSteps ?? DEFAULT_MAX_STEPS;
     this.maxModelOutputBytes =
       options.maxModelOutputBytes ?? DEFAULT_MAX_MODEL_OUTPUT_BYTES;
+    this.contextEngine = options.contextEngine;
 
     if (!Number.isInteger(this.maxSteps) || this.maxSteps < 1) {
       throw new Error("maxSteps must be a positive integer.");
@@ -176,6 +180,34 @@ export class AgentLoop {
     }
 
     for (let step = 1; step <= this.maxSteps; step += 1) {
+      const toolDefinitions = this.tools.definitions();
+      let modelItems: readonly ConversationItem[] = items;
+      let rawEstimatedInputTokens: number | undefined;
+      if (this.contextEngine !== undefined) {
+        try {
+          const prepared = this.contextEngine.prepare(items, toolDefinitions);
+          modelItems = prepared.items;
+          rawEstimatedInputTokens = prepared.rawEstimatedInputTokens;
+          if (prepared.compaction !== undefined) {
+            items.push(prepared.compaction);
+            await recorder.record({
+              type: "item.recorded",
+              payload: { item: prepared.compaction },
+            });
+          }
+        } catch (error) {
+          return this.fail(
+            recorder,
+            items,
+            completedSteps,
+            error instanceof ContextBudgetError
+              ? error.code
+              : "CONTEXT_PREPARATION_ERROR",
+            error instanceof Error ? error.message : String(error),
+            usage,
+          );
+        }
+      }
       completedSteps = step;
       usage.modelRequests += 1;
       let assistantText = "";
@@ -193,8 +225,8 @@ export class AgentLoop {
             threadId: input.threadId,
             turnId: input.turnId,
             step,
-            items: [...items],
-            tools: this.tools.definitions(),
+            items: [...modelItems],
+            tools: toolDefinitions,
           },
           signal,
         )) {
@@ -281,6 +313,15 @@ export class AgentLoop {
 
       if (stepUsage !== undefined) {
         addTokenUsage(usage, stepUsage);
+        if (
+          this.contextEngine !== undefined &&
+          rawEstimatedInputTokens !== undefined
+        ) {
+          this.contextEngine.observe(
+            rawEstimatedInputTokens,
+            stepUsage.inputTokens,
+          );
+        }
         await recorder.record({
           type: "model.usage",
           payload: {

@@ -94,6 +94,7 @@ export function recoverThread(
       );
     }
   }
+  validateCompactionHistory(history);
 
   const uncertainToolCalls = findUncertainToolCalls(previous.events);
   const partialTrailingEventDiscarded = readResult.diagnostics.some(
@@ -252,6 +253,99 @@ function reconstructHistory(events: readonly AgentEvent[]): {
       (item) => item.type !== "tool_call" || !unmatchedIds.has(item.callId),
     );
   return { history, unmatchedCalls };
+}
+
+function validateCompactionHistory(history: readonly ConversationItem[]): void {
+  const itemIds = new Set<string>();
+  for (const item of history) {
+    if (itemIds.has(item.id)) {
+      throw invalidLog(`Conversation item '${item.id}' is duplicated.`);
+    }
+    itemIds.add(item.id);
+  }
+
+  for (const [index, item] of history.entries()) {
+    if (item.type !== "compaction" || item.reason === undefined) {
+      continue;
+    }
+    if (
+      item.retainedItemIds === undefined ||
+      item.estimatedTokensBefore === undefined ||
+      item.estimatedTokensAfter === undefined
+    ) {
+      throw invalidLog(`Compaction '${item.id}' has incomplete metadata.`);
+    }
+    if (item.estimatedTokensAfter > item.estimatedTokensBefore) {
+      throw invalidLog(
+        `Compaction '${item.id}' increases the estimated context size.`,
+      );
+    }
+
+    const retainedIds = new Set(item.retainedItemIds);
+    if (retainedIds.size !== item.retainedItemIds.length) {
+      throw invalidLog(`Compaction '${item.id}' repeats a retained item ID.`);
+    }
+    const precedingItems = history.slice(0, index);
+    const precedingById = new Map(
+      precedingItems.map((preceding) => [preceding.id, preceding]),
+    );
+    const retainedItems = item.retainedItemIds.map((retainedId) => {
+      const retained = precedingById.get(retainedId);
+      if (retained === undefined || retained.type === "compaction") {
+        throw invalidLog(
+          `Compaction '${item.id}' references unavailable item '${retainedId}'.`,
+        );
+      }
+      return retained;
+    });
+    const retainedPositions = item.retainedItemIds.map((retainedId) =>
+      precedingItems.findIndex((preceding) => preceding.id === retainedId),
+    );
+    if (
+      retainedPositions.some(
+        (position, retainedIndex) =>
+          retainedIndex > 0 &&
+          position <= (retainedPositions[retainedIndex - 1] ?? -1),
+      )
+    ) {
+      throw invalidLog(
+        `Compaction '${item.id}' does not preserve retained item order.`,
+      );
+    }
+
+    const newestUser = [...precedingItems]
+      .reverse()
+      .find((preceding) => preceding.type === "user_message");
+    if (newestUser === undefined || !retainedIds.has(newestUser.id)) {
+      throw invalidLog(
+        `Compaction '${item.id}' does not retain the newest user message.`,
+      );
+    }
+
+    const retainedCallIds = new Set(
+      retainedItems.flatMap((retained) =>
+        retained.type === "tool_call" ||
+        retained.type === "approval" ||
+        retained.type === "tool_result"
+          ? [retained.callId]
+          : [],
+      ),
+    );
+    for (const callId of retainedCallIds) {
+      const related = precedingItems.filter(
+        (preceding) =>
+          (preceding.type === "tool_call" ||
+            preceding.type === "approval" ||
+            preceding.type === "tool_result") &&
+          preceding.callId === callId,
+      );
+      if (related.some((relatedItem) => !retainedIds.has(relatedItem.id))) {
+        throw invalidLog(
+          `Compaction '${item.id}' retains only part of tool call '${callId}'.`,
+        );
+      }
+    }
+  }
 }
 
 function findUncertainToolCalls(

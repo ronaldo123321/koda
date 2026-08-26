@@ -1,4 +1,4 @@
-import { AgentLoop, ToolRegistry } from "@koda/agent-core";
+import { AgentLoop, ContextEngine, ToolRegistry } from "@koda/agent-core";
 import {
   artifactReferenceSchema,
   assistantMessageItemSchema,
@@ -204,6 +204,106 @@ describe("AgentLoop", () => {
       type: "turn.context",
       payload: { workspaceRoot: "/workspace", model: "test-model" },
     });
+  });
+
+  it("records a durable compaction before sending reduced context", async () => {
+    const events = new MemoryEventStore();
+    const ids = new DeterministicItemIdFactory("context-loop-item");
+    const provider = new ScriptedModelProvider([
+      {
+        assertRequest: (request) => {
+          expect(request.items[0]).toMatchObject({
+            type: "compaction",
+            reason: "context_budget",
+          });
+          expect(request.items.at(-1)).toMatchObject({
+            type: "user_message",
+            content: "Continue now.",
+          });
+          expect(
+            request.items.some((item) => item.id === "large-history"),
+          ).toBe(false);
+        },
+        events: [
+          { type: "assistant_delta", text: "Continued." },
+          { type: "completed", finishReason: "stop" },
+        ],
+      },
+    ]);
+    const result = await new AgentLoop({
+      provider,
+      tools: createTools(),
+      events,
+      ids,
+      clock: new FixedClock(),
+      contextEngine: new ContextEngine({
+        contextWindowTokens: 1_000,
+        maxOutputTokens: 100,
+        safetyMarginTokens: 100,
+        fixedInputTokens: 20,
+        ids,
+      }),
+    }).runTurn({
+      threadId,
+      turnId,
+      userInput: "Continue now.",
+      history: [
+        userMessageItemSchema.parse({
+          type: "user_message",
+          id: itemIdSchema.parse("large-history"),
+          content: "x".repeat(8_000),
+        }),
+      ],
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.items.some((item) => item.type === "compaction")).toBe(true);
+    expect(
+      events.events.some(
+        (event) =>
+          event.type === "item.recorded" &&
+          event.payload.item.type === "compaction",
+      ),
+    ).toBe(true);
+  });
+
+  it("fails before provider use when mandatory context cannot fit", async () => {
+    const provider = new ScriptedModelProvider([
+      {
+        events: [
+          { type: "assistant_delta", text: "Must not run." },
+          { type: "completed", finishReason: "stop" },
+        ],
+      },
+    ]);
+    const ids = new DeterministicItemIdFactory("context-failure-item");
+
+    const result = await new AgentLoop({
+      provider,
+      tools: createTools(),
+      events: new MemoryEventStore(),
+      ids,
+      clock: new FixedClock(),
+      contextEngine: new ContextEngine({
+        contextWindowTokens: 600,
+        maxOutputTokens: 100,
+        safetyMarginTokens: 100,
+        fixedInputTokens: 20,
+        ids,
+      }),
+    }).runTurn({
+      threadId,
+      turnId,
+      userInput: "x".repeat(5_000),
+    });
+
+    expect(result).toMatchObject({
+      status: "failed",
+      steps: 0,
+      error: { code: "CONTEXT_BUDGET_EXCEEDED" },
+      usage: { modelRequests: 0 },
+    });
+    expect(provider.remainingSteps()).toBe(1);
   });
 
   it("records artifact references emitted by a successful tool", async () => {

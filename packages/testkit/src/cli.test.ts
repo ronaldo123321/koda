@@ -62,6 +62,8 @@ describe("Phase 1A CLI", () => {
     );
     expect(fromEnvironment.model).toBe("environment-model");
     expect(fromEnvironment.approvalMode).toBe("on-request");
+    expect(fromEnvironment.contextWindowTokens).toBe(128_000);
+    expect(fromEnvironment.maxOutputTokens).toBe(16_384);
 
     const fromCli = resolveRunConfiguration(
       { model: "cli-model", cwd: "project" },
@@ -98,6 +100,41 @@ describe("Phase 1A CLI", () => {
         "/workspace",
       ),
     ).toThrow("Resume thread ID");
+    expect(
+      resolveRunConfiguration(
+        {},
+        {
+          OPENAI_API_KEY: "test-key",
+          KODA_CONTEXT_WINDOW_TOKENS: "200000",
+          KODA_MAX_OUTPUT_TOKENS: "20000",
+        },
+        "/workspace",
+      ),
+    ).toMatchObject({
+      contextWindowTokens: 200_000,
+      maxOutputTokens: 20_000,
+    });
+    expect(() =>
+      resolveRunConfiguration(
+        {},
+        {
+          OPENAI_API_KEY: "test-key",
+          KODA_CONTEXT_WINDOW_TOKENS: "not-a-number",
+        },
+        "/workspace",
+      ),
+    ).toThrow("KODA_CONTEXT_WINDOW_TOKENS must be a positive integer");
+    expect(() =>
+      resolveRunConfiguration(
+        {},
+        {
+          OPENAI_API_KEY: "test-key",
+          KODA_CONTEXT_WINDOW_TOKENS: "20000",
+          KODA_MAX_OUTPUT_TOKENS: "16384",
+        },
+        "/workspace",
+      ),
+    ).toThrow("must exceed KODA_MAX_OUTPUT_TOKENS");
   });
 
   it("streams answer deltas to stdout and tool status to stderr", async () => {
@@ -645,6 +682,7 @@ describe("Phase 1A CLI", () => {
     const kodaHome = join(root, "state");
     const resumedThreadId = threadIdSchema.parse("resume-cli-thread");
     await mkdir(workspaceRoot);
+    await writeFile(join(workspaceRoot, "AGENTS.md"), "Original guidance.\n");
 
     const providers = [
       new ScriptedModelProvider([
@@ -667,8 +705,16 @@ describe("Phase 1A CLI", () => {
             expect(request.items[2]).toMatchObject({
               type: "recovery",
               previousStatus: "completed",
+              instructionChanges: [
+                { path: "AGENTS.md", scope: ".", change: "changed" },
+              ],
               uncertainToolCalls: [],
             });
+            if (request.items[2]?.type === "recovery") {
+              expect(request.items[2].message).toContain(
+                "Repository instructions changed",
+              );
+            }
           },
           events: [
             { type: "assistant_delta", text: "Second turn." },
@@ -724,6 +770,7 @@ describe("Phase 1A CLI", () => {
         dependencies,
       ),
     ).resolves.toBe(0);
+    await writeFile(join(workspaceRoot, "AGENTS.md"), "Updated guidance.\n");
     await expect(
       runCommand(
         {
@@ -757,6 +804,9 @@ describe("Phase 1A CLI", () => {
       ),
     ).toHaveLength(1);
     expect(context.stdout.value).toBe("First turn.\nSecond turn.\n");
+    expect(context.stderr.value).toContain(
+      "repository instructions changed: changed AGENTS.md",
+    );
     await expect(access(`${eventLogPath}.lock`)).rejects.toMatchObject({
       code: "ENOENT",
     });

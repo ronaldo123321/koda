@@ -6,7 +6,7 @@ The project is building the control plane around a coding model: typed conversat
 
 ## Current status
 
-Phase 2 is in progress. Phase 2A and 2B now provide durable recovery plus bounded, artifact-backed output on top of the OpenAI-first Phase 1 runtime:
+Phase 2 is in progress. Phase 2A through 2C now provide durable recovery, bounded artifact-backed output, and reproducible context compaction on top of the OpenAI-first Phase 1 runtime:
 
 - Versioned Thread, Turn, Item, and Agent Event schemas.
 - A provider-neutral streaming model interface.
@@ -19,7 +19,7 @@ Phase 2 is in progress. Phase 2A and 2B now provide durable recovery plus bounde
 - SHA-256 snapshot checks and atomic same-directory writes.
 - A structured `exec_command` tool that always uses `shell: false`.
 - Workspace-confined command directories, filtered environments, bounded output, timeouts, and cancellation.
-- Bounded workspace-root `AGENTS.md` and `KODA.md` instruction loading with stable ordering and hashes.
+- Bounded nested `AGENTS.md` and `KODA.md` discovery with explicit directory scopes, stable broad-to-deep ordering, and hashes.
 - Provider-neutral per-response token usage events and turn-level aggregation.
 - A single-turn `koda run` command with JSONL event persistence.
 - Cross-process `koda run --resume <thread-id>` using normalized local history replay.
@@ -30,9 +30,13 @@ Phase 2 is in progress. Phase 2A and 2B now provide durable recovery plus bounde
 - Uniform 64 KiB model-facing excerpts with exact byte counts and retrievable full output.
 - A bounded `read_artifact` tool, missing/corrupt artifact recovery diagnostics, and stale temporary-file cleanup.
 - A 256 KiB per-model-step provider-output guard and 64 MiB per-stream artifact hard limit.
+- A provider-neutral `ContextEngine` with configured input budgets, conservative token estimates, and measured-usage calibration.
+- Append-only structured compaction with exact retained item IDs and atomic tool-call/result retention.
+- Recovery validation for compaction metadata plus visible added/removed/changed repository-instruction notices.
+- OpenAI response-chain reset after mid-turn compaction and a configured `max_output_tokens` reserve.
 - Offline provider, runtime, CLI, and deterministic agent-loop tests.
 
-Context budgets, compaction, and nested instruction scoping are next in Phase 2C; process recovery, SQLite metadata, and scenario evaluations remain Phase 2D through 2F. The Anthropic adapter, Ink UI, richer patch operations, and interactive process UX were explicitly moved from Phase 1 to Phase 3. Strong sandboxing, the Rust executor, and any high-risk shell-string support remain Phase 4 work. Workspace writes and process execution require explicit approval by default.
+Process recovery is next in Phase 2D; SQLite metadata and scenario evaluations remain Phase 2E and 2F. Provider-assisted semantic compaction, exact provider tokenizers, the Anthropic adapter, Ink UI, richer patch operations, and interactive process UX are explicitly deferred to Phase 3. Strong sandboxing, the Rust executor, and any high-risk shell-string support remain Phase 4 work. Workspace writes and process execution require explicit approval by default.
 
 ## Run the CLI
 
@@ -54,9 +58,11 @@ Resume reads and validates the local JSONL log, rebuilds provider-neutral histor
 
 Oversized tool text keeps a bounded head/tail excerpt in the transcript and stores the complete captured bytes under `KODA_HOME/artifacts/sha256`. Artifact references are content-addressed and deduplicated. The model can call `read_artifact` with an ID, byte offset, and range size; missing or corrupt blobs are reported explicitly when a thread resumes. Koda removes stale temporary captures automatically but retains published blobs until reference-aware garbage collection arrives in Phase 2E.
 
+Before every model request, Koda budgets base instructions, scoped repository guidance, tool schemas, and the active transcript. The defaults are a 128,000-token context window, a 16,384-token output reserve, and an 8,192-token safety margin. Override the first two with `KODA_CONTEXT_WINDOW_TOKENS` and `KODA_MAX_OUTPUT_TOKENS`. When history no longer fits, Koda appends a structured compaction record to JSONL, preserves the newest coherent suffix, and rebuilds the same model-facing view after restart without deleting original events.
+
 The model defaults to `gpt-5.6-terra`. Override it with `--model <model>` or `KODA_MODEL`. Runtime event logs are written under `~/.koda/threads` by default; set `KODA_HOME` to move them.
 
-If the workspace root contains `AGENTS.md` or `KODA.md`, Koda loads both in that order before the first model request. Each must be a regular UTF-8 file no larger than 64 KiB. Root instruction files provide project guidance but cannot override runtime policy or approvals.
+Koda discovers `AGENTS.md` and `KODA.md` from the workspace root downward, excluding `.git`, `.koda`, `node_modules`, symlinked directories, and paths deeper than 20 levels. It loads broader scopes before deeper scopes and `AGENTS.md` before `KODA.md` within one directory. Each source applies only to its subtree, must be a regular UTF-8 file no larger than 64 KiB, and cannot override runtime policy or approvals. Discovery is capped at 32 files and 256 KiB total. If these files change between turns, resume records the exact added, removed, or changed paths and uses the current versions.
 
 When Koda proposes a patch or command, it prints the exact action and asks `Approve this action? [y/N]`. A command is represented as a JSON `argv` array, never reconstructed as shell syntax. Use `--approval-mode never` or `KODA_APPROVAL_MODE=never` to deny all writes and process execution without prompting.
 

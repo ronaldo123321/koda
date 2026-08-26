@@ -1,6 +1,6 @@
 # Koda Phase 2 Reliability Roadmap
 
-- Status: In progress — Phase 2A and 2B complete; Phase 2C next
+- Status: In progress — Phase 2A through 2C complete; Phase 2D next
 - Date: 2026-08-26
 - Depends on: Phase 1D repository context and token accounting
 
@@ -44,7 +44,7 @@ Status: Complete (2026-08-26)
 
 ### Phase 2C: context budgets and compaction
 
-Status: In progress
+Status: Complete (2026-08-26)
 
 - Build a provider-neutral ContextEngine.
 - Use measured usage plus conservative estimates for preflight budgets.
@@ -53,7 +53,7 @@ Status: In progress
 
 ### Phase 2D: process reliability
 
-Status: Planned
+Status: Next
 
 - Harden cross-platform process-tree ownership and termination.
 - Record termination attempts and uncertain process outcomes.

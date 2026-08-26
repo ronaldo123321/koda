@@ -2,6 +2,7 @@ import type { ModelRequest } from "@koda/agent-core";
 import {
   approvalItemSchema,
   assistantMessageItemSchema,
+  compactionItemSchema,
   itemIdSchema,
   recoveryItemSchema,
   threadIdSchema,
@@ -107,6 +108,7 @@ describe("OpenAIResponsesProvider", () => {
       model: "gpt-5.6-terra",
       instructions: "Inspect the repository.",
       reasoningEffort: "medium",
+      maxOutputTokens: 16_384,
     });
     const firstRequest: ModelRequest = {
       threadId,
@@ -137,6 +139,7 @@ describe("OpenAIResponsesProvider", () => {
       instructions: "Inspect the repository.",
       input: [{ role: "user", content: "Read the README." }],
       reasoning: { effort: "medium" },
+      max_output_tokens: 16_384,
       store: true,
       stream: true,
     });
@@ -293,6 +296,92 @@ describe("OpenAIResponsesProvider", () => {
         content: `Koda recovery notice: ${recoveryMessage}`,
       },
       { role: "user", content: "Continue." },
+    ]);
+  });
+
+  it("resets the response chain when a later model step introduces compaction", async () => {
+    const client = new FakeOpenAIClient([
+      [
+        functionCallEvent(callId, "fc-before-compaction"),
+        completedEvent("resp-before"),
+      ],
+      [completedEvent("resp-after")],
+    ]);
+    const provider = new OpenAIResponsesProvider({
+      client,
+      model: "gpt-5.6-terra",
+      instructions: "Inspect.",
+    });
+    await collect(provider, {
+      threadId,
+      turnId,
+      step: 1,
+      items: [userItem],
+      tools: [toolDefinition],
+    });
+    const retainedCall = toolCallItemSchema.parse({
+      type: "tool_call",
+      id: itemIdSchema.parse("compacted-call-item"),
+      callId,
+      name: "read_file",
+      arguments: { path: "README.md" },
+    });
+    const retainedResult = toolResultItemSchema.parse({
+      type: "tool_result",
+      id: itemIdSchema.parse("compacted-result-item"),
+      callId,
+      name: "read_file",
+      status: "success",
+      output: { content: "# Koda" },
+    });
+    const compaction = compactionItemSchema.parse({
+      type: "compaction",
+      id: itemIdSchema.parse("openai-compaction-item"),
+      reason: "context_budget",
+      retainedItemIds: [userItem.id, retainedCall.id, retainedResult.id],
+      estimatedTokensBefore: 2_000,
+      estimatedTokensAfter: 500,
+      summary: {
+        objective: "Read the README.",
+        decisions: [],
+        modifiedFiles: [],
+        completedWork: [],
+        pendingWork: ["Read the README."],
+        failedAttempts: [],
+        criticalFacts: [],
+      },
+    });
+
+    await collect(provider, {
+      threadId,
+      turnId,
+      step: 2,
+      items: [compaction, userItem, retainedCall, retainedResult],
+      tools: [toolDefinition],
+    });
+
+    expect(client.requests[1]?.body.previous_response_id).toBeUndefined();
+    expect(client.requests[1]?.body.input).toEqual([
+      {
+        role: "developer",
+        content: `Koda compacted thread state: ${JSON.stringify(compaction.summary)}`,
+      },
+      { role: "user", content: "Read the README." },
+      {
+        type: "function_call",
+        call_id: callId,
+        name: "read_file",
+        arguments: '{"path":"README.md"}',
+      },
+      {
+        type: "function_call_output",
+        call_id: callId,
+        name: "read_file",
+        output: JSON.stringify({
+          status: "success",
+          output: { content: "# Koda" },
+        }),
+      },
     ]);
   });
 

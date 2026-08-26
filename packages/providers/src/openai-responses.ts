@@ -30,6 +30,7 @@ export interface OpenAIResponsesProviderOptions {
   model: string;
   instructions: string;
   reasoningEffort?: OpenAIReasoningEffort;
+  maxOutputTokens?: number;
 }
 
 export interface CreateOpenAIResponsesProviderOptions extends Omit<
@@ -73,7 +74,21 @@ export class OpenAIResponsesProvider implements ModelProvider {
     const sessionKey = `${request.threadId}:${request.turnId}`;
     const session = this.getSession(sessionKey, request.step);
     this.assertSessionCanStart(session, request.step);
-    const input = this.buildInput(request.items, session, request.step);
+    const resetsResponseChain =
+      request.step > 1 &&
+      request.items.some(
+        (item) =>
+          item.type === "compaction" && !session.submittedItemIds.has(item.id),
+      );
+    const input = resetsResponseChain
+      ? this.buildReplayInput(request.items)
+      : this.buildInput(request.items, session, request.step);
+    const previousResponseId = resetsResponseChain
+      ? undefined
+      : session.previousResponseId;
+    if (resetsResponseChain) {
+      session.submittedItemIds.clear();
+    }
     session.inFlight = true;
 
     let completed = false;
@@ -89,9 +104,12 @@ export class OpenAIResponsesProvider implements ModelProvider {
           reasoning: { effort: this.reasoningEffort },
           store: true,
           stream: true,
-          ...(session.previousResponseId === undefined
+          ...(this.options.maxOutputTokens === undefined
             ? {}
-            : { previous_response_id: session.previousResponseId }),
+            : { max_output_tokens: this.options.maxOutputTokens }),
+          ...(previousResponseId === undefined
+            ? {}
+            : { previous_response_id: previousResponseId }),
         },
         { signal },
       );
@@ -251,14 +269,7 @@ export class OpenAIResponsesProvider implements ModelProvider {
     step: number,
   ): OpenAI.Responses.ResponseInput {
     if (step === 1) {
-      const replay = toOpenAIReplayInput(items);
-      if (!items.some((item) => item.type === "user_message")) {
-        throw new OpenAIProviderError(
-          "OPENAI_INPUT_EMPTY",
-          "The first OpenAI request requires a user message.",
-        );
-      }
-      return replay;
+      return this.buildReplayInput(items);
     }
 
     const newItems = items.filter(
@@ -279,6 +290,19 @@ export class OpenAIResponsesProvider implements ModelProvider {
       );
     }
     return input;
+  }
+
+  private buildReplayInput(
+    items: readonly ConversationItem[],
+  ): OpenAI.Responses.ResponseInput {
+    const replay = toOpenAIReplayInput(items);
+    if (!items.some((item) => item.type === "user_message")) {
+      throw new OpenAIProviderError(
+        "OPENAI_INPUT_EMPTY",
+        "An OpenAI response chain requires a user message.",
+      );
+    }
+    return replay;
   }
 }
 
@@ -327,6 +351,9 @@ export function createOpenAIResponsesProvider(
     ...(options.reasoningEffort === undefined
       ? {}
       : { reasoningEffort: options.reasoningEffort }),
+    ...(options.maxOutputTokens === undefined
+      ? {}
+      : { maxOutputTokens: options.maxOutputTokens }),
   });
 }
 

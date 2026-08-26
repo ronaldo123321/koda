@@ -149,7 +149,151 @@ describe("recoverThread", () => {
       expect.objectContaining({ code: "THREAD_LOG_INVALID" }),
     );
   });
+
+  it("recovers an append-only context compaction with retained history", () => {
+    const latestUserId = itemIdSchema.parse("compaction-latest-user");
+    const events = [
+      event(0, "turn.started", {}),
+      contextEvent(1),
+      recorded(2, {
+        type: "user_message",
+        id: itemIdSchema.parse("compaction-old-user"),
+        content: "Old objective.",
+      }),
+      recorded(3, {
+        type: "assistant_message",
+        id: itemIdSchema.parse("compaction-old-assistant"),
+        content: "Old conclusion.",
+      }),
+      recorded(4, {
+        type: "user_message",
+        id: latestUserId,
+        content: "Current objective.",
+      }),
+      recorded(5, {
+        type: "compaction",
+        id: itemIdSchema.parse("compaction-state"),
+        reason: "context_budget",
+        retainedItemIds: [latestUserId],
+        estimatedTokensBefore: 1_000,
+        estimatedTokensAfter: 300,
+        summary: compactionSummary(),
+      }),
+      event(6, "turn.completed", { steps: 1 }),
+    ];
+
+    const recovered = recoverThread(readResult(events), threadId);
+
+    expect(recovered.history.map((item) => item.type)).toEqual([
+      "user_message",
+      "assistant_message",
+      "user_message",
+      "compaction",
+    ]);
+  });
+
+  it.each([
+    ["unknown", [itemIdSchema.parse("missing-item")]],
+    [
+      "duplicated",
+      [
+        itemIdSchema.parse("invalid-compaction-user"),
+        itemIdSchema.parse("invalid-compaction-user"),
+      ],
+    ],
+    ["drops latest user", [itemIdSchema.parse("invalid-old-user")]],
+  ])("rejects a compaction with %s retained IDs", (_case, retainedItemIds) => {
+    const events = [
+      event(0, "turn.started", {}),
+      contextEvent(1),
+      recorded(2, {
+        type: "user_message",
+        id: itemIdSchema.parse("invalid-old-user"),
+        content: "Old.",
+      }),
+      recorded(3, {
+        type: "user_message",
+        id: itemIdSchema.parse("invalid-compaction-user"),
+        content: "Newest.",
+      }),
+      recorded(4, {
+        type: "compaction",
+        id: itemIdSchema.parse("invalid-compaction-state"),
+        reason: "context_budget",
+        retainedItemIds,
+        estimatedTokensBefore: 1_000,
+        estimatedTokensAfter: 300,
+        summary: compactionSummary(),
+      }),
+      event(5, "turn.completed", { steps: 1 }),
+    ];
+
+    expect(() => recoverThread(readResult(events), threadId)).toThrowError(
+      expect.objectContaining({ code: "THREAD_LOG_INVALID" }),
+    );
+  });
+
+  it("rejects a compaction that retains only part of a tool group", () => {
+    const callId = toolCallIdSchema.parse("partial-compaction-call");
+    const callItemId = itemIdSchema.parse("partial-compaction-call-item");
+    const latestUserId = itemIdSchema.parse("partial-compaction-user");
+    const events = [
+      event(0, "turn.started", {}),
+      contextEvent(1),
+      recorded(2, {
+        type: "user_message",
+        id: itemIdSchema.parse("partial-compaction-old-user"),
+        content: "Inspect.",
+      }),
+      recorded(3, {
+        type: "tool_call",
+        id: callItemId,
+        callId,
+        name: "read_file",
+        arguments: { path: "README.md" },
+      }),
+      recorded(4, {
+        type: "tool_result",
+        id: itemIdSchema.parse("partial-compaction-result-item"),
+        callId,
+        name: "read_file",
+        status: "success",
+        output: { content: "# Koda" },
+      }),
+      recorded(5, {
+        type: "user_message",
+        id: latestUserId,
+        content: "Continue.",
+      }),
+      recorded(6, {
+        type: "compaction",
+        id: itemIdSchema.parse("partial-compaction-state"),
+        reason: "context_budget",
+        retainedItemIds: [callItemId, latestUserId],
+        estimatedTokensBefore: 1_000,
+        estimatedTokensAfter: 300,
+        summary: compactionSummary(),
+      }),
+      event(7, "turn.completed", { steps: 1 }),
+    ];
+
+    expect(() => recoverThread(readResult(events), threadId)).toThrowError(
+      expect.objectContaining({ code: "THREAD_LOG_INVALID" }),
+    );
+  });
 });
+
+function compactionSummary() {
+  return {
+    objective: "Current objective.",
+    decisions: [],
+    modifiedFiles: [],
+    completedWork: [],
+    pendingWork: ["Current objective."],
+    failedAttempts: [],
+    criticalFacts: [],
+  };
+}
 
 function contextEvent(sequence: number): AgentEvent {
   return event(sequence, "turn.context", {

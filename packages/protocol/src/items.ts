@@ -50,6 +50,10 @@ export const approvalItemSchema = z.object({
 export const compactionItemSchema = z.object({
   type: z.literal("compaction"),
   id: itemIdSchema,
+  reason: z.literal("context_budget").optional(),
+  retainedItemIds: z.array(itemIdSchema).optional(),
+  estimatedTokensBefore: z.number().int().nonnegative().optional(),
+  estimatedTokensAfter: z.number().int().nonnegative().optional(),
   summary: z.object({
     objective: z.string(),
     decisions: z.array(z.string()),
@@ -73,6 +77,15 @@ export const recoveryItemSchema = z.object({
       z.object({
         id: artifactIdSchema,
         reason: z.enum(["missing", "corrupt"]),
+      }),
+    )
+    .default([]),
+  instructionChanges: z
+    .array(
+      z.object({
+        path: z.string().min(1),
+        scope: z.string().min(1),
+        change: z.enum(["added", "removed", "changed"]),
       }),
     )
     .default([]),

@@ -41,11 +41,31 @@ export class ConsoleEventSink implements EventSink {
 
     if (
       event.type === "item.recorded" &&
-      event.payload.item.type === "recovery" &&
-      event.payload.item.unavailableArtifacts.length > 0
+      event.payload.item.type === "recovery"
     ) {
+      if (event.payload.item.unavailableArtifacts.length > 0) {
+        this.writeDiagnostic(
+          `unavailable artifacts: ${event.payload.item.unavailableArtifacts.map((artifact) => `${artifact.id} (${artifact.reason})`).join(", ")}`,
+        );
+      }
+      if (event.payload.item.instructionChanges.length > 0) {
+        this.writeDiagnostic(
+          `repository instructions changed: ${event.payload.item.instructionChanges.map((change) => `${change.change} ${change.path}`).join(", ")}`,
+        );
+      }
+      return;
+    }
+
+    if (
+      event.type === "item.recorded" &&
+      event.payload.item.type === "compaction"
+    ) {
+      const before = event.payload.item.estimatedTokensBefore;
+      const after = event.payload.item.estimatedTokensAfter;
       this.writeDiagnostic(
-        `unavailable artifacts: ${event.payload.item.unavailableArtifacts.map((artifact) => `${artifact.id} (${artifact.reason})`).join(", ")}`,
+        before === undefined || after === undefined
+          ? "context compacted"
+          : `context compacted: approximately ${before} -> ${after} input tokens`,
       );
       return;
     }

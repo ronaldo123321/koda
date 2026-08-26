@@ -1,6 +1,6 @@
 # Koda Phase 2C: Context Budgets, Compaction, and Scoped Instructions
 
-- Status: Accepted for implementation
+- Status: Implemented (2026-08-26)
 - Date: 2026-08-26
 - Depends on: Phase 2B artifacts and output budgets
 - Scope: provider-neutral context preparation, measured token calibration, durable structured compaction, nested repository instructions, and resume provenance
@@ -79,7 +79,7 @@ The full source list and hashes enter each `turn.context` snapshot. On resume, K
 - Invalid budget configuration returns a CLI configuration error.
 - A request that cannot fit after compaction returns `CONTEXT_BUDGET_EXCEEDED` without calling the provider.
 - Invalid compaction metadata in a durable log returns `THREAD_LOG_INVALID` through normal schema or recovery validation.
-- Too many, too deep, too large, binary, symlinked, or unreadable instruction sources fail before provider creation.
+- Too many, too large, binary, symlinked, or unreadable instruction sources fail before provider creation. Symlinked directories, ignored directories, and paths deeper than 20 levels are not discovered.
 - Instruction changes do not execute anything and do not bypass approval; they are recorded before the new user item.
 - Provider usage remains optional. Missing usage leaves the conservative estimator unchanged.
 
@@ -102,7 +102,7 @@ Phase 2C is complete when long threads remain inside a configured request budget
 
 ## 9. Deferred destinations
 
-- Provider-assisted semantic compaction: a later Phase 2C refinement if deterministic summaries prove insufficient.
+- Provider-assisted semantic compaction: Phase 3, and only if Phase 2F evaluations show deterministic summaries are insufficient.
 - Artifact reference indexing and compaction-aware garbage collection: Phase 2E.
 - Interactive context-budget and instruction-change views: Phase 3.
-- Provider-specific exact tokenizers: add only when measured estimation error justifies the dependency.
+- Provider-specific exact tokenizers: Phase 3, and only when measured estimation error justifies the dependency.
