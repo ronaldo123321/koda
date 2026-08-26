@@ -1,4 +1,5 @@
 export * from "./artifact-store.js";
+export * from "./artifact-garbage-collector.js";
 export * from "./artifact-tools.js";
 export * from "./exec-command-tool.js";
 export * from "./jsonl-event-store.js";

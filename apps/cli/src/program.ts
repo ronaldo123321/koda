@@ -1,5 +1,6 @@
 import { Command, Option } from "commander";
 
+import { runArtifactGarbageCollectionCommand } from "./artifact-command.js";
 import type { TextWriter } from "./console-event-sink.js";
 import { runCommand, type RunCommandInput } from "./run-command.js";
 import {
@@ -119,6 +120,28 @@ export function createProgram(runtime: ProgramRuntime): Command {
         await runThreadShowCommand(threadId, {
           environment: runtime.environment,
           processDirectory: runtime.processDirectory,
+          stdout: runtime.stdout,
+          stderr: runtime.stderr,
+        }),
+      );
+    });
+
+  const artifact = program
+    .command("artifact")
+    .description("Maintain local Koda artifacts");
+  artifact
+    .command("gc")
+    .description("Find or delete unreferenced artifact blobs")
+    .option("--delete", "delete eligible unreferenced artifacts")
+    .option(
+      "--min-age-hours <hours>",
+      "minimum age of an unreferenced artifact",
+      "24",
+    )
+    .action(async (options: { delete?: boolean; minAgeHours?: string }) => {
+      runtime.setExitCode(
+        await runArtifactGarbageCollectionCommand(options, {
+          environment: runtime.environment,
           stdout: runtime.stdout,
           stderr: runtime.stderr,
         }),

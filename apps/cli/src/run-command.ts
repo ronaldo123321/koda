@@ -24,6 +24,8 @@ import {
 } from "@koda/protocol";
 import { createOpenAIResponsesProvider } from "@koda/providers";
 import {
+  ArtifactGarbageCollectionError,
+  ArtifactMaintenanceLease,
   ArtifactStore,
   JsonlEventStore,
   ReadOnlyWorkspace,
@@ -165,6 +167,9 @@ export async function runCommand(
     );
     lease = await ThreadLease.acquire(eventLogPath);
     indexedThreadId = ids.threadId;
+    await ArtifactMaintenanceLease.assertInactive(
+      join(configuration.kodaHome, "artifacts"),
+    );
     const eventStore = new JsonlEventStore(eventLogPath);
     const artifactStore = await ArtifactStore.open(
       join(configuration.kodaHome, "artifacts"),
@@ -285,7 +290,11 @@ export async function runCommand(
       return 130;
     }
     const message = error instanceof Error ? error.message : String(error);
-    const code = error instanceof ThreadRecoveryError ? `${error.code}: ` : "";
+    const code =
+      error instanceof ThreadRecoveryError ||
+      error instanceof ArtifactGarbageCollectionError
+        ? `${error.code}: `
+        : "";
     context.stderr.write(`[koda] ${code}${message}\n`);
     return 1;
   } finally {

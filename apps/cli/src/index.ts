@@ -1,3 +1,4 @@
+export * from "./artifact-command.js";
 export * from "./config.js";
 export * from "./console-event-sink.js";
 export * from "./program.js";
