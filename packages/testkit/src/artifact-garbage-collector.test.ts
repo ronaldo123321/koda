@@ -69,6 +69,11 @@ describe("ArtifactGarbageCollector", () => {
     expect(dryRun.candidates.map((candidate) => candidate.id)).toEqual([
       orphan.id,
     ]);
+    const repeatedDryRun = await collector.collect({
+      minimumAgeMs: 10_000,
+      now: () => now,
+    });
+    expect(repeatedDryRun.candidates).toEqual(dryRun.candidates);
     await expect(
       access(artifactPath(kodaHome, orphan)),
     ).resolves.toBeUndefined();
@@ -176,6 +181,46 @@ describe("ArtifactGarbageCollector", () => {
     await expect(collector.collect({ minimumAgeMs: -1 })).rejects.toMatchObject(
       { code: "ARTIFACT_GC_INVALID_OPTIONS" },
     );
+  });
+
+  it("fails closed for corrupt, discontinuous, and non-regular logs", async () => {
+    const corruptState = await createState();
+    await mkdir(join(corruptState.kodaHome, "threads"), { recursive: true });
+    await writeFile(
+      join(corruptState.kodaHome, "threads", "corrupt.jsonl"),
+      "not-json\n",
+    );
+    await expect(
+      new ArtifactGarbageCollector(corruptState.kodaHome).collect(),
+    ).rejects.toMatchObject({ code: "ARTIFACT_GC_UNSAFE_SCAN" });
+
+    const discontinuousState = await createState();
+    const threadId = threadIdSchema.parse("discontinuous");
+    const turnId = turnIdSchema.parse("discontinuous-turn");
+    const metadata = {
+      schemaVersion: 1 as const,
+      timestamp: "2026-08-26T00:00:00.000Z",
+      threadId,
+      turnId,
+    };
+    await mkdir(join(discontinuousState.kodaHome, "threads"), {
+      recursive: true,
+    });
+    await writeFile(
+      join(discontinuousState.kodaHome, "threads", "discontinuous.jsonl"),
+      `${JSON.stringify({ ...metadata, sequence: 0, type: "turn.started", payload: {} })}\n${JSON.stringify({ ...metadata, sequence: 2, type: "turn.completed", payload: { steps: 1 } })}\n`,
+    );
+    await expect(
+      new ArtifactGarbageCollector(discontinuousState.kodaHome).collect(),
+    ).rejects.toMatchObject({ code: "ARTIFACT_GC_UNSAFE_SCAN" });
+
+    const nonRegularState = await createState();
+    await mkdir(join(nonRegularState.kodaHome, "threads", "directory.jsonl"), {
+      recursive: true,
+    });
+    await expect(
+      new ArtifactGarbageCollector(nonRegularState.kodaHome).collect(),
+    ).rejects.toMatchObject({ code: "ARTIFACT_GC_UNSAFE_SCAN" });
   });
 });
 
