@@ -262,12 +262,20 @@ export type JsonRpcResponse = z.infer<typeof jsonRpcResponseSchema>;
 export type InitializeParams = z.infer<typeof initializeParamsSchema>;
 export type InitializeResult = z.infer<typeof initializeResultSchema>;
 export type ThreadListParams = z.infer<typeof threadListParamsSchema>;
+export type ThreadListResult = z.infer<typeof threadListResultSchema>;
 export type ThreadGetParams = z.infer<typeof threadGetParamsSchema>;
+export type ThreadGetResult = z.infer<typeof threadGetResultSchema>;
 export type ThreadMetadataMessage = z.infer<typeof threadMetadataSchema>;
 export type TurnStartParams = z.infer<typeof turnStartParamsSchema>;
 export type TurnStartResult = z.infer<typeof turnStartResultSchema>;
 export type TurnCancelParams = z.infer<typeof turnCancelParamsSchema>;
+export type TurnCancelResult = z.infer<typeof turnCancelResultSchema>;
 export type ApprovalResolveParams = z.infer<typeof approvalResolveParamsSchema>;
+export type ApprovalResolveResult = z.infer<typeof approvalResolveResultSchema>;
+export type ShutdownResult = z.infer<typeof shutdownResultSchema>;
+export type TurnEventNotificationParams = z.infer<
+  typeof turnEventNotificationParamsSchema
+>;
 export type TurnFinishedNotificationParams = z.infer<
   typeof turnFinishedNotificationParamsSchema
 >;

@@ -24,12 +24,17 @@
   "devDependencies": {
     "@koda/app": "workspace:*",
     "@koda/app-server": "workspace:*",
+    "@koda/app-server-client-node": "workspace:*",
     "@koda/cli": "workspace:*",
     "@koda/mcp-client-node": "workspace:*",
     "@koda/providers": "workspace:*",
     "@koda/runtime-node": "workspace:*",
+    "@koda/tui": "workspace:*",
     "@modelcontextprotocol/server": "2.0.0",
     "@types/node": "^22.18.0",
+    "@types/react": "^19.2.0",
+    "ink": "7.1.1",
+    "react": "19.2.0",
     "vitest": "^3.2.4"
   }
 }

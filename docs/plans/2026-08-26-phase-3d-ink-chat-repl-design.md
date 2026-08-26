@@ -1,6 +1,6 @@
 # Koda Phase 3D: Ink Chat REPL
 
-- Status: Approved for implementation (2026-08-26)
+- Status: Implemented and verified (2026-08-26)
 - Date: 2026-08-26
 - Depends on: Phase 3A local stdio app-server and Phase 3C app-server protocol v2 provider metadata
 - Scope: a local interactive Ink chat client that exercises the app-server protocol, streams durable turn events, mediates one-shot approvals, and owns one app-server child process

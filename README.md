@@ -1,12 +1,12 @@
 # Koda
 
-Koda is a local-first coding-agent runtime and CLI under active development.
+Koda is a local-first coding-agent runtime, CLI, and interactive terminal client under active development.
 
 The project is building the control plane around a coding model: typed conversation state, deterministic model/tool loops, runtime-validated tools, append-only events, cancellation, recovery, and explicit security boundaries.
 
 ## Current status
 
-Phase 3C is implemented. It adds an explicit five-provider runtime on top of the Phase 3A transport-neutral application layer, the Phase 3B local MCP client, and the completed Phase 0 through Phase 2 runtime:
+Phase 3D is implemented. It adds an Ink chat REPL and reusable Node app-server client on top of the Phase 3C five-provider runtime, Phase 3B local MCP client, Phase 3A transport-neutral application layer, and the completed Phase 0 through Phase 2 runtime:
 
 - Versioned Thread, Turn, Item, and Agent Event schemas.
 - A provider-neutral streaming model interface.
@@ -52,13 +52,16 @@ Phase 3C is implemented. It adds an explicit five-provider runtime on top of the
 - A strict, versioned, newline-delimited JSON-RPC 2.0 app-server over local stdio.
 - Durable-before-notify event streaming, one-shot interactive approvals, active-turn cancellation, and graceful shutdown/EOF cleanup.
 - Credential-free app-server thread list/get operations and different-thread concurrency guarded by existing per-thread leases.
+- A reusable Node app-server client with strict NDJSON framing, typed JSON-RPC correlation, bounded stderr diagnostics, request timeouts, and owned child-process cleanup.
+- An Ink `koda-chat` REPL that uses app-server v2 exclusively for sequential multi-turn chat, streamed answers, tool state, one-shot approvals, cancellation, usage, errors, and thread resume.
+- Static completed transcript output plus one bounded live region, normal terminal scrollback, `/help`, `/status`, `/clear`, `/exit`, `Esc` cancellation, and context-sensitive `Ctrl+C`.
 - Official MCP v2 client integration for explicitly configured local stdio servers, with one isolated session per turn.
 - Frozen, validated MCP tool catalogs exposed as stable `mcp__<server>__<tool>` aliases without importing MCP into `agent-core`.
 - Fail-closed MCP effects: external tools require approval by default, and only explicitly reviewed `read` tools bypass approval.
 - MCP call timeouts, turn cancellation, reverse-order child cleanup, bounded binary/result normalization, artifact-backed large output, and conservative interrupted-call recovery.
 - Offline provider, runtime, CLI, and deterministic agent-loop tests.
 
-Provider-assisted semantic compaction, exact provider tokenizers and pricing, custom endpoints/profiles, automatic routing/fallback, cross-provider resume, additional providers, Ink UI, richer patch operations, artifact client APIs, interactive process UX, and the non-Tool MCP capability surface remain later Phase 3 slices. Remote MCP/HTTP/OAuth, shared or remote artifact stores, remote app-server transports, strong sandboxing, Windows Job Objects, crash-surviving supervision, the Rust executor, and any high-risk shell-string support remain Phase 4 work. Parent/child thread lineage and multi-agent scenario matrices remain Phase 5 work. Workspace writes, process execution, and MCP tools not explicitly classified as read require approval by default.
+Provider-assisted semantic compaction, exact provider tokenizers and pricing, custom endpoints/profiles, automatic routing/fallback, cross-provider resume, additional providers, thread/settings panels, rich Markdown/diff/artifact views, richer patch operations, interactive process UX, and the non-Tool MCP capability surface remain later Phase 3 slices. Remote MCP/HTTP/OAuth, shared or remote artifact stores, remote app-server transports, strong sandboxing, Windows Job Objects, crash-surviving supervision, the Rust executor, and any high-risk shell-string support remain Phase 4 work. Parent/child thread lineage and multi-agent scenario matrices remain Phase 5 work. Workspace writes, process execution, and MCP tools not explicitly classified as read require approval by default.
 
 ## Run the CLI
 
@@ -105,6 +108,25 @@ node apps/cli/dist/main.js thread show <thread-id>
 ```
 
 These commands refresh `KODA_HOME/state.db` from changed JSONL logs before querying. The database is a disposable projection: if it is deleted, Koda recreates it; if it is corrupt, Koda preserves a timestamped `.corrupt-*` copy and rebuilds current rows from JSONL.
+
+## Run interactive chat
+
+Build Koda, export the selected provider credential, and start the Ink client in an interactive terminal:
+
+```bash
+pnpm build
+export OPENAI_API_KEY=...
+pnpm chat --cwd . --provider openai
+```
+
+The installed binary is `koda-chat`; the built workspace entry can also be run directly:
+
+```bash
+node apps/tui/dist/main.js --cwd . --provider deepseek --model deepseek-v4-pro
+node apps/tui/dist/main.js --cwd . --provider openai --resume <thread-id>
+```
+
+Workspace, provider, model, resume thread, and approval mode are fixed at startup. Ordinary input starts a turn. `/help`, `/status`, `/clear`, and `/exit` are local commands; `/clear` resets the client transcript without deleting the durable thread. Press `y` or `n` for a pending approval, `d` to toggle details, and `Esc` to cancel the active turn. `Ctrl+C` cancels while a turn is active and exits while idle. The client requires a TTY; scripts should continue to use `koda run` or the stdio app-server.
 
 ## Run the local app-server
 
@@ -203,6 +225,8 @@ pnpm eval:scenarios
 - `@koda/app`: transport-neutral turn orchestration and credential-free thread use cases.
 - `@koda/cli`: line-oriented command parsing, terminal approval, and console projection over `@koda/app`.
 - `@koda/app-server`: local stdio JSON-RPC transport, active-turn coordination, and interactive approval routing.
+- `@koda/app-server-client-node`: typed local JSON-RPC client, NDJSON framing, request lifecycle, diagnostics, and owned app-server process cleanup.
+- `@koda/tui`: React/Ink controller, static transcript and live-region rendering, keyboard interaction, and `koda-chat` entry point.
 - `@koda/testkit`: deterministic clocks, IDs, tools, in-memory event storage, and offline reliability scenarios.
 
 ## Architecture
@@ -224,5 +248,6 @@ pnpm eval:scenarios
 - [Phase 3A local stdio app-server design](docs/plans/2026-08-26-phase-3a-stdio-app-server-design.md)
 - [Phase 3B local MCP client design](docs/plans/2026-08-26-phase-3b-mcp-client-design.md)
 - [Phase 3C multi-provider runtime design](docs/plans/2026-08-26-phase-3c-multi-provider-design.md)
+- [Phase 3D Ink chat REPL design](docs/plans/2026-08-26-phase-3d-ink-chat-repl-design.md)
 
 The model can propose actions, but the Koda runtime owns validation, policy, approval, and execution. User interfaces consume typed events and do not own agent state.

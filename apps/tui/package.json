@@ -1,17 +1,16 @@
 {
-  "name": "@koda/app-server",
+  "name": "@koda/tui",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "bin": {
-    "koda-app-server": "./dist/main.js"
+    "koda-chat": "./dist/main.js"
   },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
-    },
-    "./main": "./dist/main.js"
+    }
   },
   "files": [
     "dist"
@@ -22,12 +21,14 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@koda/agent-core": "workspace:*",
-    "@koda/app": "workspace:*",
+    "@koda/app-server-client-node": "workspace:*",
     "@koda/protocol": "workspace:*",
-    "zod": "^4.1.5"
+    "commander": "^15.0.0",
+    "ink": "7.1.1",
+    "react": "19.2.0"
   },
   "devDependencies": {
-    "@types/node": "^22.18.0"
+    "@types/node": "^22.18.0",
+    "@types/react": "^19.2.0"
   }
 }

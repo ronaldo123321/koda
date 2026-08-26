@@ -9,6 +9,7 @@
   },
   "scripts": {
     "build": "pnpm -r --if-present build",
+    "chat": "node apps/tui/dist/main.js",
     "eval:scenarios": "pnpm build && vitest run packages/testkit/scenarios/scenario-suite.test.ts",
     "format": "prettier --write .",
     "format:check": "prettier --check .",

@@ -1,6 +1,6 @@
 # Koda Phase 3 Extensibility Roadmap
 
-- Status: In progress — Phase 3A, Phase 3B, and Phase 3C implemented; Phase 3D approved (2026-08-26)
+- Status: In progress — Phase 3A through Phase 3D implemented (2026-08-26)
 - Date: 2026-08-26
 - Depends on: Phase 2 reliability closure
 - Scope: stable client/tool/provider extension boundaries without weakening the local runtime's durable state and approval guarantees
@@ -51,15 +51,15 @@ The complete contract, configuration table, recovery rules, verification matrix,
 
 ## Phase 3D: Ink chat REPL
 
-Status: **Approved for implementation.**
+Status: **Complete.**
 
-- Add a local interactive Ink client that starts and owns one stdio app-server child process.
-- Introduce a reusable Node app-server client for NDJSON framing, JSON-RPC request correlation, typed notifications, bounded diagnostics, timeouts, and graceful child cleanup.
-- Route all TUI turns, approvals, cancellation, thread operations, and shutdown through app-server protocol v2 instead of importing `@koda/app` directly.
-- Render completed transcript entries through Ink static output and keep the active response, tool state, approval card, status, and prompt in a bounded live region.
-- Support startup provider/model/workspace/resume configuration, sequential multi-turn chat, one-shot interactive approvals, token usage, visible errors, `/help`, `/status`, `/clear`, `/exit`, `Esc` cancellation, and context-sensitive `Ctrl+C`.
-- Keep approval fail-closed on cancellation, malformed protocol, child failure, or client loss.
-- Verify the protocol client, controller state machine, focused Ink rendering, real app-server initialization/shutdown, and all existing reliability gates without live provider credentials.
+- Add a local interactive Ink client that starts and owns one stdio app-server child process. **Completed with the `koda-chat` entry point and root `pnpm chat` script.**
+- Introduce a reusable Node app-server client for NDJSON framing, JSON-RPC request correlation, typed notifications, bounded diagnostics, timeouts, and graceful child cleanup. **Completed with `@koda/app-server-client-node`.**
+- Route all TUI turns, approvals, cancellation, thread operations, and shutdown through app-server protocol v2 instead of importing `@koda/app` directly. **Completed with no TUI dependency on `@koda/app`.**
+- Render completed transcript entries through Ink static output and keep the active response, tool state, approval card, status, and prompt in a bounded live region. **Completed in the normal terminal screen buffer.**
+- Support startup provider/model/workspace/resume configuration, sequential multi-turn chat, one-shot interactive approvals, token usage, visible errors, `/help`, `/status`, `/clear`, `/exit`, `Esc` cancellation, and context-sensitive `Ctrl+C`. **Completed with provider/model fixed for one TUI process.**
+- Keep approval fail-closed on cancellation, malformed protocol, child failure, or client loss. **Completed with strict protocol disconnect and approval-state cleanup.**
+- Verify the protocol client, controller state machine, focused Ink rendering, real app-server initialization/shutdown, and all existing reliability gates without live provider credentials. **Completed with 214/214 offline tests, 6/6 reliability scenarios, and a real TTY startup/status/shutdown smoke test.**
 
 The complete component boundary, interaction contract, failure semantics, verification matrix, and deferred destinations are in the [Phase 3D Ink chat REPL design](2026-08-26-phase-3d-ink-chat-repl-design.md).
 
@@ -75,7 +75,7 @@ The complete component boundary, interaction contract, failure semantics, verifi
 
 ### Interactive clients and client APIs
 
-- Complete the approved Phase 3D Ink chat REPL on the Phase 3A application protocol.
+- Maintain the completed Phase 3D Ink chat REPL on the Phase 3A application protocol.
 - In Phase 3E, add thread selection, history search, full-screen navigation, custom scrolling, runtime provider/model switching, and settings panels.
 - In Phase 3E or Phase 4, add Markdown/syntax rendering, diff and artifact viewers, range/download APIs, attachments, context-budget inspection, and instruction-change views.
 - Build IDE or desktop clients only after the local protocol client and TUI have validated the shared boundary.
