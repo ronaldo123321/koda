@@ -1,6 +1,6 @@
 # Koda Phase 1C: Approval-Gated Structured Commands
 
-- Status: Accepted for implementation
+- Status: Implemented
 - Date: 2026-08-26
 - Depends on: Phase 1B safe structured patch
 - Scope: one foreground process per tool call, structured arguments, explicit approval, bounded output, timeout, and cancellation
@@ -51,7 +51,7 @@ Preparation performs no process execution. The prepared object records the canon
 
 ## 4. Input and workspace rules
 
-`argv` must contain between 1 and 64 entries. The executable must be non-empty. Each entry is bounded to 4 KiB and may not contain a null byte. Total argument data is bounded to 32 KiB. No shell metacharacter filtering is needed because there is no shell parser; strings such as `&&` are passed as ordinary arguments.
+`argv` must contain between 1 and 64 entries. The executable must be non-empty. Each entry is bounded to 4 KiB and may not contain a null byte. Total argument data is bounded to 32 KiB. Direct invocations of common shell interpreters such as `sh`, `bash`, `zsh`, `cmd`, and PowerShell are rejected. No shell metacharacter filtering is otherwise needed because there is no shell parser; strings such as `&&` are passed as ordinary arguments.
 
 `cwd` must be a non-empty relative path without a null byte. It must resolve to an existing real directory inside the canonical workspace root. Lexical traversal outside the root and symlinked path components are rejected. Absolute paths are rejected. The default directory is represented as `.` in previews and results.
 
@@ -117,7 +117,7 @@ Phase 1C is complete when:
 - OpenAI receives the strict `exec_command` function schema.
 - Default policy asks once before every process execution.
 - `never` mode starts no process.
-- Commands never use a shell parser.
+- Koda always spawns with `shell: false` and rejects direct shell interpreters.
 - Working directories cannot escape the workspace through absolute paths, traversal, or symlinks.
 - Timeout and cancellation terminate the observed child before returning.
 - Captured output is bounded while byte counts remain available.

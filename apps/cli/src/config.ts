@@ -1,7 +1,7 @@
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 
-import type { WriteApprovalMode } from "@koda/agent-core";
+import type { ApprovalMode } from "@koda/agent-core";
 
 export interface RunConfigurationInput {
   approvalMode?: string;
@@ -10,7 +10,7 @@ export interface RunConfigurationInput {
 }
 
 export interface RunConfiguration {
-  approvalMode: WriteApprovalMode;
+  approvalMode: ApprovalMode;
   apiKey: string;
   cwd: string;
   kodaHome: string;

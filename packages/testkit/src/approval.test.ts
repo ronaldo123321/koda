@@ -125,6 +125,22 @@ describe("AgentLoop approvals", () => {
     expect(approvalCalls).toBe(0);
     expect(executed).toBe(false);
   });
+
+  it("asks for process execution in on-request mode and denies it in never mode", () => {
+    const input = {
+      callId: toolCallIdSchema.parse("approval-exec-call"),
+      name: "exec_command",
+      effect: "execute" as const,
+      arguments: { argv: ["pnpm", "test"] },
+    };
+
+    expect(new EffectToolPolicy("on-request").evaluate(input)).toMatchObject({
+      decision: "ask",
+    });
+    expect(new EffectToolPolicy("never").evaluate(input)).toMatchObject({
+      decision: "deny",
+    });
+  });
 });
 
 interface WriteTurnOptions {

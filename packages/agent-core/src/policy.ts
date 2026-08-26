@@ -41,22 +41,31 @@ export interface ApprovalBroker {
   ): Promise<ApprovalDecision>;
 }
 
-export type WriteApprovalMode = "on-request" | "never";
+export type ApprovalMode = "on-request" | "never";
+
+/** @deprecated Use ApprovalMode. */
+export type WriteApprovalMode = ApprovalMode;
 
 export class EffectToolPolicy implements ToolPolicy {
-  public constructor(private readonly writeMode: WriteApprovalMode) {}
+  public constructor(private readonly approvalMode: ApprovalMode) {}
 
   public evaluate(input: ToolPolicyInput): PolicyDecision {
     if (input.effect === "read") {
       return { decision: "allow" };
     }
     if (input.effect === "execute") {
-      return {
-        decision: "deny",
-        reason: "Process execution is not enabled in this Koda phase.",
-      };
+      return this.approvalMode === "on-request"
+        ? {
+            decision: "ask",
+            reason:
+              "This tool will execute a process with the current user's permissions.",
+          }
+        : {
+            decision: "deny",
+            reason: "Process execution is disabled by the approval mode.",
+          };
     }
-    return this.writeMode === "on-request"
+    return this.approvalMode === "on-request"
       ? {
           decision: "ask",
           reason: "This tool will modify a file in the workspace.",

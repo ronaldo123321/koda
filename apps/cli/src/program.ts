@@ -37,10 +37,10 @@ export function createProgram(runtime: ProgramRuntime): Command {
     .option("-C, --cwd <directory>", "workspace directory")
     .option("-m, --model <model>", "OpenAI model ID")
     .addOption(
-      new Option("--approval-mode <mode>", "write approval behavior").choices([
-        "on-request",
-        "never",
-      ]),
+      new Option(
+        "--approval-mode <mode>",
+        "write and command approval behavior",
+      ).choices(["on-request", "never"]),
     )
     .action(
       async (

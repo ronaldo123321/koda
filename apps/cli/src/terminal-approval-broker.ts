@@ -22,7 +22,7 @@ export class TerminalApprovalBroker implements ApprovalBroker {
   ): Promise<ApprovalDecision> {
     signal.throwIfAborted();
     this.options.output.write(
-      `\n[koda] approval required: ${request.title}\n${request.summary}\n${request.details}\nApply this patch? [y/N] `,
+      `\n[koda] approval required: ${request.title}\n${request.summary}\n${request.details}\nApprove this action? [y/N] `,
     );
     const lines = createInterface({
       input: this.options.input,
@@ -34,7 +34,7 @@ export class TerminalApprovalBroker implements ApprovalBroker {
         .toLowerCase();
       const approved = answer === "y" || answer === "yes";
       this.options.output.write(
-        approved ? "[koda] patch approved\n" : "[koda] patch rejected\n",
+        approved ? "[koda] action approved\n" : "[koda] action rejected\n",
       );
       return approved
         ? { decision: "approved", reason: "Approved by the user." }
@@ -43,7 +43,7 @@ export class TerminalApprovalBroker implements ApprovalBroker {
       if (signal.aborted) {
         throw error;
       }
-      this.options.output.write("[koda] patch rejected: input unavailable\n");
+      this.options.output.write("[koda] action rejected: input unavailable\n");
       return {
         decision: "rejected",
         reason: "Approval input was unavailable.",

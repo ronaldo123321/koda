@@ -15,7 +15,14 @@ import {
 } from "@koda/protocol";
 import { ScriptedModelProvider } from "@koda/providers";
 import { ReadOnlyWorkspace } from "@koda/runtime-node";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  access,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -333,6 +340,177 @@ describe("Phase 1A CLI", () => {
     expect(await readFile(join(workspaceRoot, "README.md"), "utf8")).toBe(
       "After\n",
     );
+  });
+
+  it("runs an approved structured command end to end", async () => {
+    const root = await mkdtemp(join(tmpdir(), "koda-exec-cli-"));
+    temporaryDirectories.push(root);
+    const workspaceRoot = join(root, "repo");
+    await mkdir(workspaceRoot);
+    let approvalCalls = 0;
+
+    const provider = new ScriptedModelProvider([
+      {
+        assertRequest: (request) => {
+          const definition = request.tools.find(
+            (tool) => tool.name === "exec_command",
+          );
+          expect(definition).toMatchObject({
+            inputJsonSchema: {
+              required: ["argv"],
+              additionalProperties: false,
+            },
+          });
+        },
+        events: [
+          {
+            type: "tool_call",
+            callId: toolCallIdSchema.parse("cli-exec-call"),
+            name: "exec_command",
+            arguments: {
+              argv: [
+                process.execPath,
+                "-e",
+                "process.stdout.write('validation passed')",
+              ],
+              timeout_ms: 2_000,
+            },
+          },
+          { type: "completed", finishReason: "tool_calls" },
+        ],
+      },
+      {
+        assertRequest: (request) => {
+          expect(request.items.map((item) => item.type)).toContain("approval");
+          expect(request.items.at(-1)).toMatchObject({
+            type: "tool_result",
+            status: "success",
+            output: {
+              exit_code: 0,
+              stdout: "validation passed",
+              timed_out: false,
+            },
+          });
+        },
+        events: [
+          { type: "assistant_delta", text: "Validation passed." },
+          { type: "completed", finishReason: "stop" },
+        ],
+      },
+    ]);
+    const dependencies: RunCommandDependencies = {
+      openWorkspace: (path) => ReadOnlyWorkspace.open(path),
+      createProvider: () => provider,
+      createApprovalBroker: () => ({
+        request: async (request) => {
+          approvalCalls += 1;
+          expect(request.name).toBe("exec_command");
+          expect(request.details).toContain(JSON.stringify(process.execPath));
+          return { decision: "approved" };
+        },
+      }),
+      createIds: () => ({
+        threadId: threadIdSchema.parse("exec-cli-thread"),
+        turnId: turnIdSchema.parse("exec-cli-turn"),
+        itemIds: new DeterministicItemIdFactory(),
+      }),
+    };
+    const stdout = new MemoryWriter();
+
+    const exitCode = await runCommand(
+      {
+        prompt: "Run validation.",
+        cwd: workspaceRoot,
+        signal: new AbortController().signal,
+      },
+      {
+        environment: {
+          OPENAI_API_KEY: "offline-test-key",
+          KODA_HOME: join(root, "state"),
+        },
+        processDirectory: root,
+        stdout,
+        stderr: new MemoryWriter(),
+      },
+      dependencies,
+    );
+
+    expect(exitCode).toBe(0);
+    expect(approvalCalls).toBe(1);
+    expect(stdout.value).toBe("Validation passed.\n");
+  });
+
+  it("does not start a rejected structured command", async () => {
+    const root = await mkdtemp(join(tmpdir(), "koda-reject-exec-cli-"));
+    temporaryDirectories.push(root);
+    const workspaceRoot = join(root, "repo");
+    await mkdir(workspaceRoot);
+    const marker = join(workspaceRoot, "must-not-exist.txt");
+    const provider = new ScriptedModelProvider([
+      {
+        events: [
+          {
+            type: "tool_call",
+            callId: toolCallIdSchema.parse("cli-rejected-exec-call"),
+            name: "exec_command",
+            arguments: {
+              argv: [
+                process.execPath,
+                "-e",
+                "require('node:fs').writeFileSync('must-not-exist.txt', 'started')",
+              ],
+            },
+          },
+          { type: "completed", finishReason: "tool_calls" },
+        ],
+      },
+      {
+        assertRequest: (request) => {
+          expect(request.items.at(-1)).toMatchObject({
+            type: "tool_result",
+            status: "error",
+            error: { code: "APPROVAL_REJECTED" },
+          });
+        },
+        events: [
+          { type: "assistant_delta", text: "Command was rejected." },
+          { type: "completed", finishReason: "stop" },
+        ],
+      },
+    ]);
+    const dependencies: RunCommandDependencies = {
+      openWorkspace: (path) => ReadOnlyWorkspace.open(path),
+      createProvider: () => provider,
+      createApprovalBroker: () => ({
+        request: async () => ({ decision: "rejected" }),
+      }),
+      createIds: () => ({
+        threadId: threadIdSchema.parse("rejected-exec-cli-thread"),
+        turnId: turnIdSchema.parse("rejected-exec-cli-turn"),
+        itemIds: new DeterministicItemIdFactory(),
+      }),
+    };
+
+    const exitCode = await runCommand(
+      {
+        prompt: "Try validation.",
+        cwd: workspaceRoot,
+        signal: new AbortController().signal,
+      },
+      {
+        environment: {
+          OPENAI_API_KEY: "offline-test-key",
+          KODA_HOME: join(root, "state"),
+        },
+        processDirectory: root,
+        stdout: new MemoryWriter(),
+        stderr: new MemoryWriter(),
+      },
+      dependencies,
+    );
+
+    expect(exitCode).toBe(0);
+    await expect(access(marker)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("renders run help without requiring credentials", async () => {

@@ -33,7 +33,8 @@ describe("TerminalApprovalBroker", () => {
       broker.request(request, new AbortController().signal),
     ).resolves.toMatchObject({ decision: "approved" });
     expect(output.value).toContain("*** Update File: README.md");
-    expect(output.value).toContain("patch approved");
+    expect(output.value).toContain("Approve this action? [y/N]");
+    expect(output.value).toContain("action approved");
   });
 
   it.each(["\n", "n\n", "anything\n"])(
