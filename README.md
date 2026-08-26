@@ -6,7 +6,7 @@ The project is building the control plane around a coding model: typed conversat
 
 ## Current status
 
-Phase 2 is in progress. Phase 2A through 2E now provide durable recovery, bounded artifact-backed output, reproducible context compaction, owned process termination, and rebuildable thread metadata on top of the OpenAI-first Phase 1 runtime:
+Phase 2 is complete. Phase 2A through 2F provide durable recovery, bounded artifact-backed output, reproducible context compaction, owned process termination, rebuildable thread metadata, reference-aware artifact collection, and deterministic reliability scenarios on top of the OpenAI-first Phase 1 runtime:
 
 - Versioned Thread, Turn, Item, and Agent Event schemas.
 - A provider-neutral streaming model interface.
@@ -43,9 +43,12 @@ Phase 2 is in progress. Phase 2A through 2E now provide durable recovery, bounde
 - Credential-free `koda thread list` and `koda thread show` commands with canonical workspace filtering.
 - WAL-backed concurrent metadata writers, source fingerprint refresh, invalid-log visibility, and corrupt-database quarantine.
 - Best-effort post-run indexing that never makes the derived database authoritative over JSONL.
+- Reference-aware artifact garbage collection derived only from valid JSONL logs, with a global maintenance lease and fail-closed concurrency checks.
+- Credential-free `koda artifact gc` dry runs and explicit `--delete` collection with a configurable minimum age.
+- Six deterministic binary scenarios for resume, compaction, prompt injection, process-tree cancellation, artifact retrieval, and uncertain side-effect recovery.
 - Offline provider, runtime, CLI, and deterministic agent-loop tests.
 
-Scenario evaluations are next in Phase 2F. Provider-assisted semantic compaction, exact provider tokenizers, the Anthropic adapter, Ink UI, richer patch operations, and interactive process UX are explicitly deferred to Phase 3. Strong sandboxing, Windows Job Objects, crash-surviving supervision, the Rust executor, and any high-risk shell-string support remain Phase 4 work. Parent/child thread lineage remains Phase 5 work. Workspace writes and process execution require explicit approval by default.
+Phase 3 extensibility is next. Provider-assisted semantic compaction, exact provider tokenizers, the Anthropic adapter, Ink UI, richer patch operations, MCP/app-server boundaries, and interactive process UX are explicitly deferred there. Shared or remote artifact stores, strong sandboxing, Windows Job Objects, crash-surviving supervision, the Rust executor, and any high-risk shell-string support remain Phase 4 work. Parent/child thread lineage and multi-agent scenario matrices remain Phase 5 work. Workspace writes and process execution require explicit approval by default.
 
 ## Run the CLI
 
@@ -73,9 +76,18 @@ node apps/cli/dist/main.js thread show <thread-id>
 
 These commands refresh `KODA_HOME/state.db` from changed JSONL logs before querying. The database is a disposable projection: if it is deleted, Koda recreates it; if it is corrupt, Koda preserves a timestamped `.corrupt-*` copy and rebuilds current rows from JSONL.
 
+Preview old unreferenced artifacts without provider credentials, then delete them only after reviewing the report:
+
+```bash
+node apps/cli/dist/main.js artifact gc
+node apps/cli/dist/main.js artifact gc --delete --min-age-hours 24
+```
+
+GC derives reachability from every valid JSONL event rather than SQLite. It refuses to delete anything while a thread is active or when a log is partial, corrupt, unsafe, or unreadable. The default minimum age is 24 hours; dry-run is always the default.
+
 Resume reads and validates the local JSONL log, rebuilds provider-neutral history, and starts a fresh OpenAI response chain. A legacy log without a context snapshot, a different workspace, a busy thread, or an invalid log fails closed. If the prior process stopped during a tool call, Koda reports the durable effect and process evidence it has and does not execute the call again automatically. It never sends a signal using only a PID recovered from an earlier process because operating systems can reuse PIDs.
 
-Oversized tool text keeps a bounded head/tail excerpt in the transcript and stores the complete captured bytes under `KODA_HOME/artifacts/sha256`. Artifact references are content-addressed and deduplicated. The model can call `read_artifact` with an ID, byte offset, and range size; missing or corrupt blobs are reported explicitly when a thread resumes. Koda removes stale temporary captures automatically but retains published blobs until reference-aware garbage collection arrives in Phase 2F.
+Oversized tool text keeps a bounded head/tail excerpt in the transcript and stores the complete captured bytes under `KODA_HOME/artifacts/sha256`. Artifact references are content-addressed and deduplicated. The model can call `read_artifact` with an ID, byte offset, and range size; missing or corrupt blobs are reported explicitly when a thread resumes. Koda removes stale temporary captures automatically and reclaims published blobs only through explicit reference-aware garbage collection.
 
 Before every model request, Koda budgets base instructions, scoped repository guidance, tool schemas, and the active transcript. The defaults are a 128,000-token context window, a 16,384-token output reserve, and an 8,192-token safety margin. Override the first two with `KODA_CONTEXT_WINDOW_TOKENS` and `KODA_MAX_OUTPUT_TOKENS`. When history no longer fits, Koda appends a structured compaction record to JSONL, preserves the newest coherent suffix, and rebuilds the same model-facing view after restart without deleting original events.
 
@@ -103,6 +115,7 @@ pnpm install
 pnpm format:check
 pnpm typecheck
 pnpm test
+pnpm eval:scenarios
 ```
 
 ## Packages
@@ -112,7 +125,7 @@ pnpm test
 - `@koda/providers`: OpenAI Responses and deterministic scripted providers.
 - `@koda/runtime-node`: JSONL, artifact, and rebuildable SQLite metadata persistence plus constrained workspace, patch, and process tools.
 - `@koda/cli`: single-turn CLI composition root, approval input, and console projection.
-- `@koda/testkit`: deterministic clocks, IDs, tools, and in-memory event storage.
+- `@koda/testkit`: deterministic clocks, IDs, tools, in-memory event storage, and offline reliability scenarios.
 
 ## Architecture
 
@@ -128,5 +141,6 @@ pnpm test
 - [Phase 2C context and compaction design](docs/plans/2026-08-26-phase-2c-context-compaction-design.md)
 - [Phase 2D process reliability design](docs/plans/2026-08-26-phase-2d-process-reliability-design.md)
 - [Phase 2E SQLite metadata design](docs/plans/2026-08-26-phase-2e-sqlite-metadata-design.md)
+- [Phase 2F scenarios and artifact GC design](docs/plans/2026-08-26-phase-2f-scenarios-artifact-gc-design.md)
 
 The model can propose actions, but the Koda runtime owns validation, policy, approval, and execution. User interfaces consume typed events and do not own agent state.

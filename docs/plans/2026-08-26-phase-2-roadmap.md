@@ -1,6 +1,6 @@
 # Koda Phase 2 Reliability Roadmap
 
-- Status: In progress — Phase 2A through 2E complete; Phase 2F next
+- Status: Complete — Phase 2A through 2F implemented (2026-08-26)
 - Date: 2026-08-26
 - Depends on: Phase 1D repository context and token accounting
 
@@ -73,12 +73,23 @@ Status: Complete (2026-08-26)
 
 ### Phase 2F: scenario evaluations
 
-Status: Next
+Status: Complete (2026-08-26)
 
 - Add binary end-to-end assertions for recovery, compaction, prompt injection, cancellation, output artifacts, and uncertain side effects.
 - Publish deterministic fixtures and regression commands.
 - Add reference-aware artifact garbage collection with deterministic reachability and recovery coverage. **Moved from the earlier Phase 2E expectation.**
+- Add a global artifact-maintenance lease, fail-closed log validation, default dry-run behavior, and explicit deletion.
+- Block new runs after their thread lease but before artifact publication whenever GC owns the maintenance lease.
 
 ## Phase 2 exit criterion
 
 A multi-turn thread can survive process restart, preserve context within budget, avoid repeating uncertain side effects, expose bounded artifact-backed output, terminate owned processes, rebuild query metadata, and pass the scenario suite without live credentials.
+
+Status: **Met (2026-08-26).** `pnpm eval:scenarios` executes all six reliability scenarios offline, while `pnpm test` includes the same suite in the normal regression gate.
+
+## Work explicitly moved beyond Phase 2
+
+- Provider-assisted semantic compaction, exact provider tokenizers, Anthropic support, Ink/chat UI, MCP/app-server boundaries, richer patch operations, PTYs, managed background processes, and approval caching: Phase 3.
+- Shared or remote artifact storage and distributed collection leases, hardened sandboxing, Windows Job Objects, crash-surviving supervision, Rust execution, and any retained shell-string mode: Phase 4.
+- Parent/child thread lineage, child-agent orchestration, worktree isolation, and multi-agent scenario matrices: Phase 5.
+- Artifact retention quotas, scheduled collection, and trash/quarantine recovery: later operations work after usage data justifies policy.

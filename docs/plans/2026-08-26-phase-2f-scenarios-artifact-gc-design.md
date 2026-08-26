@@ -1,6 +1,6 @@
 # Koda Phase 2F: Deterministic Scenarios and Reference-Aware Artifact GC
 
-- Status: Accepted for implementation (2026-08-26)
+- Status: Implemented (2026-08-26)
 - Date: 2026-08-26
 - Depends on: Phase 2E rebuildable thread metadata
 - Scope: deterministic offline reliability scenarios, reference-aware local artifact garbage collection, and credential-free maintenance commands

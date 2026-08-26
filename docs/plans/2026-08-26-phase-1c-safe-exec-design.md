@@ -131,5 +131,5 @@ Phase 1C is complete when:
 - Artifact storage for large output: Phase 2.
 - Strong filesystem and network sandboxing: Phase 4.
 - Rust execution sidecar: Phase 4.
-- Git rollback and mutation-recovery records: Phase 2.
+- Automatic Git rollback and multi-file mutation recovery: Phase 3. **Moved after Phase 2 adopted conservative uncertain-side-effect records without automatic replay.**
 - Automatic commits: Phase 3 product workflow.

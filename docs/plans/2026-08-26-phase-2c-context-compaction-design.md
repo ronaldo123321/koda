@@ -103,6 +103,6 @@ Phase 2C is complete when long threads remain inside a configured request budget
 ## 9. Deferred destinations
 
 - Provider-assisted semantic compaction: Phase 3, and only if Phase 2F evaluations show deterministic summaries are insufficient.
-- Artifact reference indexing and compaction-aware garbage collection: Phase 2E.
+- Compaction-aware artifact garbage collection: Phase 2F. **Moved from the earlier Phase 2E expectation and implemented from JSONL reachability.**
 - Interactive context-budget and instruction-change views: Phase 3.
 - Provider-specific exact tokenizers: Phase 3, and only when measured estimation error justifies the dependency.

@@ -1,13 +1,13 @@
 # Koda Agent Architecture Design
 
-- Status: Accepted for Phase 0 implementation
+- Status: Implemented through Phase 2; Phase 3 next
 - Date: 2026-08-26
 - Owners: Koda maintainers
 - Scope: Local-first coding agent CLI and its reusable agent runtime
 
-## Roadmap status: Phase 2 active
+## Roadmap status: Phase 2 complete
 
-Phase 0 and Phase 1A through 1D are complete. Phase 2A provides durable local transcript replay, safe interrupted-turn recovery, context snapshots, continuous event sequencing, `--resume`, and single-host writer leases. Phase 2B adds content-addressed output artifacts, uniform model-facing byte budgets, bounded artifact retrieval, recovery diagnostics, and provider-output limits. Phase 2C adds provider-neutral context budgets, measured estimate calibration, append-only compaction, scoped nested repository instructions, and resume provenance. Phase 2D adds a durable side-effect boundary, owned process trees, bounded termination escalation, lifecycle events, and structured interrupted-operation evidence. Phase 2E adds rebuildable SQLite thread metadata, corrupt-database quarantine, source-fingerprint refresh, and credential-free list/show commands. Phase 2F scenario evaluations are next. All work moved to later phases remains listed explicitly in the Phase 2 reliability roadmap and the revised phase sections below.
+Phase 0 and Phase 1A through 1D are complete. Phase 2A provides durable local transcript replay, safe interrupted-turn recovery, context snapshots, continuous event sequencing, `--resume`, and single-host writer leases. Phase 2B adds content-addressed output artifacts, uniform model-facing byte budgets, bounded artifact retrieval, recovery diagnostics, and provider-output limits. Phase 2C adds provider-neutral context budgets, measured estimate calibration, append-only compaction, scoped nested repository instructions, and resume provenance. Phase 2D adds a durable side-effect boundary, owned process trees, bounded termination escalation, lifecycle events, and structured interrupted-operation evidence. Phase 2E adds rebuildable SQLite thread metadata, corrupt-database quarantine, source-fingerprint refresh, and credential-free list/show commands. Phase 2F closes the phase with six deterministic reliability scenarios and JSONL-derived, reference-aware artifact collection guarded by a global maintenance lease. Phase 3 extensibility is next. All work moved to later phases remains listed explicitly in the Phase 2 reliability roadmap and the revised phase sections below.
 
 ## Roadmap revision: Phase 1 closeout
 
@@ -344,6 +344,8 @@ Required scenarios:
 
 Scenario evaluations use binary assertions over file diffs, commands, policy decisions, events, and final status rather than subjective output scoring.
 
+The Phase 2F dedicated suite composes the six cross-cutting recovery and safety scenarios offline. The remaining read/write confinement, deterministic parallel ordering, and malformed-tool cases stay in the ordinary deterministic integration suite, which runs under the same `pnpm test` gate.
+
 ## 18. Technology decisions
 
 - TypeScript with strict compiler settings for the control plane.
@@ -390,7 +392,7 @@ Moved from Phase 1 to Phase 3: the Anthropic adapter, Ink terminal UI, and long-
 
 ### Phase 2: reliability
 
-Status: **In progress; Phase 2A through 2E are complete and Phase 2F scenario evaluations are next.**
+Status: **Complete; Phase 2A through 2F are implemented and pass offline regression gates.**
 
 - Resume and recovery.
 - Context compaction.

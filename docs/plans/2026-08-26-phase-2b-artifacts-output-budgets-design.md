@@ -100,7 +100,7 @@ Phase 2B is complete when full captured oversized tool output is durable and ret
 
 ## 9. Deferred destinations
 
-- Artifact reference indexing and safe unreferenced-blob garbage collection: Phase 2E.
+- Artifact reference-aware garbage collection: Phase 2F. **Moved from the earlier Phase 2E expectation and implemented.**
 - Artifact-backed assistant-message compaction: Phase 2C.
 - Rich artifact previews and downloads in an interactive UI: Phase 3.
 - OS-level storage quotas and sandbox enforcement: Phase 4.
