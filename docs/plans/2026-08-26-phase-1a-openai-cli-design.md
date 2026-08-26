@@ -1,6 +1,6 @@
 # Koda Phase 1A: OpenAI CLI Vertical Slice
 
-- Status: Accepted for implementation
+- Status: Implemented
 - Date: 2026-08-26
 - Depends on: Phase 0 deterministic agent foundation
 - Scope: OpenAI Responses Provider, non-interactive CLI, streaming output, and read-only repository tools
@@ -143,7 +143,7 @@ previous OpenAI response ID
 Provider stream mapping:
 
 - `response.output_text.delta` -> `assistant_delta`
-- `response.function_call_arguments.done` -> parsed `tool_call`
+- completed `function_call` items from `response.output_item.done` -> parsed `tool_call`
 - `response.completed` -> `completed`
 - response failure, incomplete response, SDK error, invalid arguments, or missing completion -> typed provider error
 
@@ -188,7 +188,7 @@ Tool behavior:
 
 ### `list_files`
 
-- Optional relative directory.
+- Workspace-relative directory (`.` means the root).
 - Recursive with bounded depth and result count.
 - Skips `.git`, `node_modules`, and `.koda` by default.
 - Returns workspace-relative POSIX-style paths and truncation metadata.
@@ -196,13 +196,13 @@ Tool behavior:
 ### `read_file`
 
 - Requires a relative file path.
-- Optional one-based line offset and line limit.
+- Requires a bounded one-based line offset and line limit.
 - Rejects directories and oversized files.
 - Returns numbered text lines, total line count, and truncation metadata.
 
 ### `search_text`
 
-- Requires a non-empty text pattern and optional relative path.
+- Requires a non-empty text pattern and relative path.
 - Uses ripgrep fixed-string search by default to avoid treating model input as a regular expression.
 - Executes with structured arguments, a bounded timeout, result cap, output cap, and caller cancellation.
 - Returns matches and truncation metadata.

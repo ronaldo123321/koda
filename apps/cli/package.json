@@ -1,8 +1,11 @@
 {
-  "name": "@koda/testkit",
-  "version": "0.0.0",
+  "name": "@koda/cli",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
+  "bin": {
+    "koda": "./dist/main.js"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -14,18 +17,17 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "start": "node dist/main.js",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
     "@koda/agent-core": "workspace:*",
     "@koda/protocol": "workspace:*",
-    "zod": "^4.1.5"
-  },
-  "devDependencies": {
-    "@koda/cli": "workspace:*",
     "@koda/providers": "workspace:*",
     "@koda/runtime-node": "workspace:*",
-    "@types/node": "^22.18.0",
-    "vitest": "^3.2.4"
+    "commander": "^15.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.0"
   }
 }

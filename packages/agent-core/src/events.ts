@@ -9,6 +9,20 @@ export interface EventSink {
   append(event: AgentEvent): Promise<void>;
 }
 
+export class FanoutEventSink implements EventSink {
+  public constructor(private readonly sinks: readonly EventSink[]) {
+    if (sinks.length === 0) {
+      throw new Error("FanoutEventSink requires at least one destination.");
+    }
+  }
+
+  public async append(event: AgentEvent): Promise<void> {
+    for (const sink of this.sinks) {
+      await sink.append(event);
+    }
+  }
+}
+
 export interface EventReadDiagnostic {
   code: "PARTIAL_TRAILING_LINE";
   message: string;

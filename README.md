@@ -6,16 +6,32 @@ The project is building the control plane around a coding model: typed conversat
 
 ## Current status
 
-Phase 0 implements a deterministic vertical slice:
+Phase 1A adds the first useful, read-only CLI vertical slice:
 
 - Versioned Thread, Turn, Item, and Agent Event schemas.
 - A provider-neutral streaming model interface.
 - A runtime-validated tool registry.
 - A model -> tool -> model agent loop.
-- In-memory and JSONL event stores.
-- A scripted provider and deterministic testkit.
+- An OpenAI Responses API adapter with streamed text and function calls.
+- Workspace-confined `list_files`, `read_file`, and literal `search_text` tools.
+- A non-interactive `koda run` command with JSONL event persistence.
+- Offline provider, runtime, CLI, and deterministic agent-loop tests.
 
-Real provider APIs, repository tools, the terminal UI, approvals, and sandboxing are intentionally deferred to the next phases.
+File edits, shell execution, the terminal UI, approvals, and sandboxing remain deferred. Phase 1A is intentionally read-only.
+
+## Run the CLI
+
+Build Koda, provide an OpenAI API key, and run one task against a workspace:
+
+```bash
+pnpm build
+export OPENAI_API_KEY=...
+node apps/cli/dist/main.js run "explain this repository" --cwd .
+```
+
+The model defaults to `gpt-5.6-terra`. Override it with `--model <model>` or `KODA_MODEL`. Runtime event logs are written under `~/.koda/threads` by default; set `KODA_HOME` to move them.
+
+`ripgrep` (`rg`) must be available for the `search_text` tool. `list_files` and `read_file` continue to work without it.
 
 ## Development
 
@@ -35,13 +51,15 @@ pnpm test
 
 - `@koda/protocol`: versioned runtime schemas and domain types.
 - `@koda/agent-core`: agent loop, provider and tool ports, event ports.
-- `@koda/providers`: model-provider adapters; currently includes a deterministic scripted provider.
-- `@koda/runtime-node`: Node.js runtime adapters; currently includes JSONL event persistence.
+- `@koda/providers`: OpenAI Responses and deterministic scripted providers.
+- `@koda/runtime-node`: JSONL persistence and constrained read-only workspace tools.
+- `@koda/cli`: non-interactive CLI composition root and console projection.
 - `@koda/testkit`: deterministic clocks, IDs, tools, and in-memory event storage.
 
 ## Architecture
 
 - [Architecture design](docs/plans/2026-08-26-koda-agent-architecture-design.md)
 - [Phase 0 implementation plan](docs/plans/2026-08-26-phase-0-implementation-plan.md)
+- [Phase 1A OpenAI CLI design](docs/plans/2026-08-26-phase-1a-openai-cli-design.md)
 
 The model can propose actions, but the Koda runtime owns validation, policy, approval, and execution. User interfaces consume typed events and do not own agent state.

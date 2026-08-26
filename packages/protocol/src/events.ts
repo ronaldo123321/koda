@@ -24,6 +24,11 @@ export const agentEventSchema = z.discriminatedUnion("type", [
   }),
   z.object({
     ...metadataShape,
+    type: z.literal("assistant.delta"),
+    payload: z.object({ text: z.string().min(1) }),
+  }),
+  z.object({
+    ...metadataShape,
     type: z.literal("item.recorded"),
     payload: z.object({ item: conversationItemSchema }),
   }),

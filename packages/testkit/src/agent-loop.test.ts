@@ -92,16 +92,18 @@ describe("AgentLoop", () => {
     expect(events.events.map((event) => event.type)).toEqual([
       "turn.started",
       "item.recorded",
+      "assistant.delta",
       "item.recorded",
       "item.recorded",
       "tool.started",
       "item.recorded",
       "tool.completed",
+      "assistant.delta",
       "item.recorded",
       "turn.completed",
     ]);
     expect(events.events.map((event) => event.sequence)).toEqual([
-      0, 1, 2, 3, 4, 5, 6, 7, 8,
+      0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
     ]);
   });
 

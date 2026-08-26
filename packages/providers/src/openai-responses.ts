@@ -1,0 +1,353 @@
+import type {
+  ModelEvent,
+  ModelProvider,
+  ModelRequest,
+  ModelToolDefinition,
+} from "@koda/agent-core";
+import {
+  jsonObjectSchema,
+  toolCallIdSchema,
+  type ConversationItem,
+  type ToolResultItem,
+} from "@koda/protocol";
+import OpenAI from "openai";
+
+export type OpenAIReasoningEffort =
+  "none" | "low" | "medium" | "high" | "xhigh" | "max";
+
+export interface OpenAIResponsesClient {
+  responses: {
+    create(
+      body: OpenAI.Responses.ResponseCreateParamsStreaming,
+      options?: { signal?: AbortSignal },
+    ): Promise<AsyncIterable<OpenAI.Responses.ResponseStreamEvent>>;
+  };
+}
+
+export interface OpenAIResponsesProviderOptions {
+  client: OpenAIResponsesClient;
+  model: string;
+  instructions: string;
+  reasoningEffort?: OpenAIReasoningEffort;
+}
+
+export interface CreateOpenAIResponsesProviderOptions extends Omit<
+  OpenAIResponsesProviderOptions,
+  "client"
+> {
+  apiKey: string;
+}
+
+interface TurnSession {
+  previousResponseId?: string;
+  submittedItemIds: Set<string>;
+  lastCompletedStep: number;
+  inFlight: boolean;
+  failed: boolean;
+}
+
+export class OpenAIProviderError extends Error {
+  public constructor(
+    public readonly code: string,
+    message: string,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = "OpenAIProviderError";
+  }
+}
+
+export class OpenAIResponsesProvider implements ModelProvider {
+  private readonly sessions = new Map<string, TurnSession>();
+  private readonly reasoningEffort: OpenAIReasoningEffort;
+
+  public constructor(private readonly options: OpenAIResponsesProviderOptions) {
+    this.reasoningEffort = options.reasoningEffort ?? "medium";
+  }
+
+  public async *stream(
+    request: ModelRequest,
+    signal: AbortSignal,
+  ): AsyncIterable<ModelEvent> {
+    const sessionKey = `${request.threadId}:${request.turnId}`;
+    const session = this.getSession(sessionKey, request.step);
+    this.assertSessionCanStart(session, request.step);
+    const input = this.buildInput(request.items, session, request.step);
+    session.inFlight = true;
+
+    let completed = false;
+    let functionCallCount = 0;
+    try {
+      const stream = await this.options.client.responses.create(
+        {
+          model: this.options.model,
+          instructions: this.options.instructions,
+          input,
+          tools: request.tools.map(toOpenAIFunctionTool),
+          parallel_tool_calls: true,
+          reasoning: { effort: this.reasoningEffort },
+          store: true,
+          stream: true,
+          ...(session.previousResponseId === undefined
+            ? {}
+            : { previous_response_id: session.previousResponseId }),
+        },
+        { signal },
+      );
+
+      for await (const event of stream) {
+        signal.throwIfAborted();
+
+        if (event.type === "response.output_text.delta") {
+          if (event.delta.length > 0) {
+            yield { type: "assistant_delta", text: event.delta };
+          }
+          continue;
+        }
+
+        if (
+          event.type === "response.output_item.done" &&
+          event.item.type === "function_call"
+        ) {
+          const parsedArguments = parseFunctionArguments(
+            event.item.arguments,
+            event.item.name,
+          );
+          functionCallCount += 1;
+          yield {
+            type: "tool_call",
+            callId: toolCallIdSchema.parse(event.item.call_id),
+            name: event.item.name,
+            arguments: parsedArguments,
+          };
+          continue;
+        }
+
+        if (event.type === "error") {
+          throw new OpenAIProviderError(
+            event.code ?? "OPENAI_STREAM_ERROR",
+            event.message,
+          );
+        }
+
+        if (event.type === "response.failed") {
+          throw new OpenAIProviderError(
+            event.response.error?.code ?? "OPENAI_RESPONSE_FAILED",
+            event.response.error?.message ?? "The OpenAI response failed.",
+          );
+        }
+
+        if (event.type === "response.incomplete") {
+          throw new OpenAIProviderError(
+            "OPENAI_RESPONSE_INCOMPLETE",
+            "The OpenAI response ended before it completed.",
+          );
+        }
+
+        if (event.type === "response.completed") {
+          if (completed) {
+            throw new OpenAIProviderError(
+              "OPENAI_PROTOCOL_ERROR",
+              "OpenAI emitted more than one response.completed event.",
+            );
+          }
+          completed = true;
+          session.previousResponseId = event.response.id;
+          session.lastCompletedStep = request.step;
+          for (const item of request.items) {
+            session.submittedItemIds.add(item.id);
+          }
+          yield {
+            type: "completed",
+            finishReason: functionCallCount > 0 ? "tool_calls" : "stop",
+            responseId: event.response.id,
+          };
+        }
+      }
+
+      if (!completed) {
+        throw new OpenAIProviderError(
+          "OPENAI_PROTOCOL_ERROR",
+          "The OpenAI stream ended without response.completed.",
+        );
+      }
+
+      if (functionCallCount === 0) {
+        this.sessions.delete(sessionKey);
+      }
+    } catch (error) {
+      session.failed = true;
+      if (error instanceof OpenAIProviderError) {
+        throw error;
+      }
+      throw new OpenAIProviderError(
+        signal.aborted ? "OPENAI_REQUEST_CANCELLED" : "OPENAI_REQUEST_FAILED",
+        signal.aborted
+          ? "The OpenAI request was cancelled."
+          : error instanceof Error
+            ? error.message
+            : String(error),
+        { cause: error },
+      );
+    } finally {
+      session.inFlight = false;
+    }
+  }
+
+  private getSession(sessionKey: string, step: number): TurnSession {
+    const existing = this.sessions.get(sessionKey);
+    if (existing !== undefined) {
+      return existing;
+    }
+    if (step !== 1) {
+      throw new OpenAIProviderError(
+        "OPENAI_SESSION_MISSING",
+        `Model step ${step} has no previous OpenAI response session.`,
+      );
+    }
+    const created: TurnSession = {
+      submittedItemIds: new Set(),
+      lastCompletedStep: 0,
+      inFlight: false,
+      failed: false,
+    };
+    this.sessions.set(sessionKey, created);
+    return created;
+  }
+
+  private assertSessionCanStart(session: TurnSession, step: number): void {
+    if (session.failed) {
+      throw new OpenAIProviderError(
+        "OPENAI_SESSION_FAILED",
+        "This OpenAI turn session previously failed and cannot be continued.",
+      );
+    }
+    if (session.inFlight) {
+      throw new OpenAIProviderError(
+        "OPENAI_SESSION_BUSY",
+        "A model request is already running for this turn.",
+      );
+    }
+    if (step !== session.lastCompletedStep + 1) {
+      throw new OpenAIProviderError(
+        "OPENAI_STEP_OUT_OF_ORDER",
+        `Expected model step ${session.lastCompletedStep + 1}, received ${step}.`,
+      );
+    }
+    if (step > 1 && session.previousResponseId === undefined) {
+      throw new OpenAIProviderError(
+        "OPENAI_RESPONSE_ID_MISSING",
+        "A follow-up model step requires a previous OpenAI response ID.",
+      );
+    }
+  }
+
+  private buildInput(
+    items: readonly ConversationItem[],
+    session: TurnSession,
+    step: number,
+  ): OpenAI.Responses.ResponseInput {
+    if (step === 1) {
+      const unsupported = items.find((item) => item.type !== "user_message");
+      if (unsupported !== undefined) {
+        throw new OpenAIProviderError(
+          "OPENAI_UNSUPPORTED_INITIAL_CONTEXT",
+          `Initial OpenAI context cannot contain '${unsupported.type}' in Phase 1A.`,
+        );
+      }
+      const messages: OpenAI.Responses.ResponseInput = items.flatMap((item) =>
+        item.type === "user_message"
+          ? [{ role: "user" as const, content: item.content }]
+          : [],
+      );
+      if (messages.length === 0) {
+        throw new OpenAIProviderError(
+          "OPENAI_INPUT_EMPTY",
+          "The first OpenAI request requires a user message.",
+        );
+      }
+      return messages;
+    }
+
+    const newItems = items.filter(
+      (item) => !session.submittedItemIds.has(item.id),
+    );
+    const input: OpenAI.Responses.ResponseInput = [];
+    for (const item of newItems) {
+      if (item.type === "tool_result") {
+        input.push(toFunctionCallOutput(item));
+      } else if (item.type === "user_message") {
+        input.push({ role: "user", content: item.content });
+      }
+    }
+    if (input.length === 0) {
+      throw new OpenAIProviderError(
+        "OPENAI_FOLLOW_UP_EMPTY",
+        "A follow-up OpenAI request has no new tool results or user input.",
+      );
+    }
+    return input;
+  }
+}
+
+export function createOpenAIResponsesProvider(
+  options: CreateOpenAIResponsesProviderOptions,
+): OpenAIResponsesProvider {
+  const client = new OpenAI({ apiKey: options.apiKey });
+  return new OpenAIResponsesProvider({
+    client,
+    model: options.model,
+    instructions: options.instructions,
+    ...(options.reasoningEffort === undefined
+      ? {}
+      : { reasoningEffort: options.reasoningEffort }),
+  });
+}
+
+function toOpenAIFunctionTool(
+  tool: ModelToolDefinition,
+): OpenAI.Responses.FunctionTool {
+  return {
+    type: "function",
+    name: tool.name,
+    description: tool.description,
+    parameters: tool.inputJsonSchema,
+    strict: true,
+  };
+}
+
+function toFunctionCallOutput(
+  item: ToolResultItem,
+): OpenAI.Responses.ResponseInputItem.FunctionCallOutput {
+  return {
+    type: "function_call_output",
+    call_id: item.callId,
+    name: item.name,
+    output: JSON.stringify(
+      item.status === "success"
+        ? { status: "success", output: item.output ?? null }
+        : { status: "error", error: item.error },
+    ),
+  };
+}
+
+function parseFunctionArguments(argumentsText: string, toolName: string) {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(argumentsText);
+  } catch (error) {
+    throw new OpenAIProviderError(
+      "OPENAI_INVALID_FUNCTION_ARGUMENTS",
+      `OpenAI returned invalid JSON arguments for '${toolName}'.`,
+      { cause: error },
+    );
+  }
+  const result = jsonObjectSchema.safeParse(parsed);
+  if (!result.success) {
+    throw new OpenAIProviderError(
+      "OPENAI_INVALID_FUNCTION_ARGUMENTS",
+      `OpenAI returned non-object arguments for '${toolName}'.`,
+    );
+  }
+  return result.data;
+}

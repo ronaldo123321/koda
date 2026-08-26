@@ -17,6 +17,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@koda/agent-core": "workspace:*"
+    "@koda/agent-core": "workspace:*",
+    "@koda/protocol": "workspace:*",
+    "openai": "^7.5.0"
   }
 }

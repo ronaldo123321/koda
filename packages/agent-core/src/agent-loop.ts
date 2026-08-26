@@ -142,6 +142,12 @@ export class AgentLoop {
           }
           if (event.type === "assistant_delta") {
             assistantText += event.text;
+            if (event.text.length > 0) {
+              await recorder.record({
+                type: "assistant.delta",
+                payload: { text: event.text },
+              });
+            }
           } else if (event.type === "tool_call") {
             toolCalls.push(event);
           } else if (event.type === "completed") {
