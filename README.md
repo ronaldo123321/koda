@@ -6,7 +6,7 @@ The project is building the control plane around a coding model: typed conversat
 
 ## Current status
 
-Phase 2 is in progress. Phase 2A through 2C now provide durable recovery, bounded artifact-backed output, and reproducible context compaction on top of the OpenAI-first Phase 1 runtime:
+Phase 2 is in progress. Phase 2A through 2D now provide durable recovery, bounded artifact-backed output, reproducible context compaction, and owned process termination on top of the OpenAI-first Phase 1 runtime:
 
 - Versioned Thread, Turn, Item, and Agent Event schemas.
 - A provider-neutral streaming model interface.
@@ -34,9 +34,14 @@ Phase 2 is in progress. Phase 2A through 2C now provide durable recovery, bounde
 - Append-only structured compaction with exact retained item IDs and atomic tool-call/result retention.
 - Recovery validation for compaction metadata plus visible added/removed/changed repository-instruction notices.
 - OpenAI response-chain reset after mid-turn compaction and a configured `max_output_tokens` reserve.
+- A durable `tool.execution_started` boundary after policy and approval, immediately before handler execution.
+- Typed process start, exit, termination-attempt, and termination-outcome events tied to the originating tool call.
+- POSIX process-group ownership with graceful-to-force escalation, descendant cleanup, and bounded confirmation.
+- Windows tree-aware `taskkill` handling with explicit direct-child fallback and honest uncertain outcomes.
+- Structured interrupted-operation recovery that reports effect and process evidence without replaying a side effect or killing a historical PID.
 - Offline provider, runtime, CLI, and deterministic agent-loop tests.
 
-Process recovery is next in Phase 2D; SQLite metadata and scenario evaluations remain Phase 2E and 2F. Provider-assisted semantic compaction, exact provider tokenizers, the Anthropic adapter, Ink UI, richer patch operations, and interactive process UX are explicitly deferred to Phase 3. Strong sandboxing, the Rust executor, and any high-risk shell-string support remain Phase 4 work. Workspace writes and process execution require explicit approval by default.
+SQLite metadata and scenario evaluations are next in Phase 2E and 2F. Provider-assisted semantic compaction, exact provider tokenizers, the Anthropic adapter, Ink UI, richer patch operations, and interactive process UX are explicitly deferred to Phase 3. Strong sandboxing, Windows Job Objects, crash-surviving supervision, the Rust executor, and any high-risk shell-string support remain Phase 4 work. Workspace writes and process execution require explicit approval by default.
 
 ## Run the CLI
 
@@ -54,7 +59,7 @@ Koda prints the generated thread ID at turn start. Continue it from a later CLI 
 node apps/cli/dist/main.js run "continue with the next task" --cwd . --resume <thread-id>
 ```
 
-Resume reads and validates the local JSONL log, rebuilds provider-neutral history, and starts a fresh OpenAI response chain. A legacy log without a context snapshot, a different workspace, a busy thread, or an invalid log fails closed. If the prior process stopped during a tool call, Koda reports that call as uncertain and does not execute it again automatically.
+Resume reads and validates the local JSONL log, rebuilds provider-neutral history, and starts a fresh OpenAI response chain. A legacy log without a context snapshot, a different workspace, a busy thread, or an invalid log fails closed. If the prior process stopped during a tool call, Koda reports the durable effect and process evidence it has and does not execute the call again automatically. It never sends a signal using only a PID recovered from an earlier process because operating systems can reuse PIDs.
 
 Oversized tool text keeps a bounded head/tail excerpt in the transcript and stores the complete captured bytes under `KODA_HOME/artifacts/sha256`. Artifact references are content-addressed and deduplicated. The model can call `read_artifact` with an ID, byte offset, and range size; missing or corrupt blobs are reported explicitly when a thread resumes. Koda removes stale temporary captures automatically but retains published blobs until reference-aware garbage collection arrives in Phase 2E.
 
@@ -66,7 +71,7 @@ Koda discovers `AGENTS.md` and `KODA.md` from the workspace root downward, exclu
 
 When Koda proposes a patch or command, it prints the exact action and asks `Approve this action? [y/N]`. A command is represented as a JSON `argv` array, never reconstructed as shell syntax. Use `--approval-mode never` or `KODA_APPROVAL_MODE=never` to deny all writes and process execution without prompting.
 
-Commands run without stdin, have a 30-second default timeout, and retain at most 64 KiB from each output stream. This TypeScript runtime provides guardrails, not a security sandbox: an approved executable or repository script still runs with the current user's operating-system permissions.
+Commands run without stdin, have a 30-second default timeout, and retain at most 64 KiB from each output stream. On POSIX, each command owns a process group; timeout, cancellation, output failure, or unsupported surviving descendants trigger `SIGTERM`, a grace period, and then `SIGKILL` when needed. Windows uses tree-aware `taskkill` with explicit uncertainty when termination cannot be confirmed. This TypeScript runtime provides guardrails, not a security sandbox: an approved executable or repository script still runs with the current user's operating-system permissions.
 
 When the provider reports usage, Koda persists normalized input, cached, cache-write, output, reasoning, and total token counts and prints a turn summary. Missing provider usage is reported as unmeasured rather than treated as zero billable usage.
 
@@ -107,5 +112,6 @@ pnpm test
 - [Phase 2A durable resume and recovery design](docs/plans/2026-08-26-phase-2a-resume-recovery-design.md)
 - [Phase 2B artifacts and output budgets design](docs/plans/2026-08-26-phase-2b-artifacts-output-budgets-design.md)
 - [Phase 2C context and compaction design](docs/plans/2026-08-26-phase-2c-context-compaction-design.md)
+- [Phase 2D process reliability design](docs/plans/2026-08-26-phase-2d-process-reliability-design.md)
 
 The model can propose actions, but the Koda runtime owns validation, policy, approval, and execution. User interfaces consume typed events and do not own agent state.

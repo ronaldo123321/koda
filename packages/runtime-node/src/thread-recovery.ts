@@ -2,6 +2,8 @@ import type { EventReadResult } from "@koda/agent-core";
 import type {
   AgentEvent,
   ConversationItem,
+  ProcessOwnership,
+  ProcessTerminationReason,
   ThreadId,
   ToolCallId,
   TurnContextSnapshot,
@@ -37,14 +39,37 @@ export interface RecoveredThread {
   nextSequence: number;
   history: ConversationItem[];
   context: TurnContextSnapshot;
-  uncertainToolCalls: Array<{ callId: ToolCallId; name: string }>;
+  uncertainToolCalls: UncertainToolCall[];
   partialTrailingEventDiscarded: boolean;
   message: string;
+}
+
+export interface UncertainToolCall {
+  callId: ToolCallId;
+  name: string;
+  effect?: "read" | "write" | "execute";
+  process?: {
+    pid: number;
+    ownership: ProcessOwnership;
+    status: "exited" | "terminated" | "already_exited" | "uncertain";
+    exitCode?: number | null;
+    signal?: string | null;
+  };
 }
 
 interface TurnGroup {
   turnId: TurnId;
   events: AgentEvent[];
+}
+
+interface RecoveryProcessState {
+  name: string;
+  pid: number;
+  ownership: ProcessOwnership;
+  exit?: { exitCode: number | null; signal: string | null };
+  termination?: "terminated" | "already_exited" | "uncertain";
+  terminationReason?: ProcessTerminationReason;
+  terminationRequests: Set<string>;
 }
 
 export function recoverThread(
@@ -350,8 +375,13 @@ function validateCompactionHistory(history: readonly ConversationItem[]): void {
 
 function findUncertainToolCalls(
   events: readonly AgentEvent[],
-): Array<{ callId: ToolCallId; name: string }> {
+): UncertainToolCall[] {
   const started = new Map<ToolCallId, string>();
+  const executionStarted = new Map<
+    ToolCallId,
+    { name: string; effect: "read" | "write" | "execute" }
+  >();
+  const processes = new Map<ToolCallId, RecoveryProcessState>();
   const completed = new Set<ToolCallId>();
   for (const event of events) {
     if (event.type === "tool.started") {
@@ -361,6 +391,96 @@ function findUncertainToolCalls(
         );
       }
       started.set(event.payload.callId, event.payload.name);
+    } else if (event.type === "tool.execution_started") {
+      const name = started.get(event.payload.callId);
+      if (name === undefined || name !== event.payload.name) {
+        throw invalidLog(
+          `Tool execution '${event.payload.callId}' has no matching tool start.`,
+        );
+      }
+      if (executionStarted.has(event.payload.callId)) {
+        throw invalidLog(
+          `Tool execution '${event.payload.callId}' started more than once.`,
+        );
+      }
+      executionStarted.set(event.payload.callId, {
+        name,
+        effect: event.payload.effect,
+      });
+    } else if (event.type === "process.started") {
+      const execution = executionStarted.get(event.payload.callId);
+      if (
+        execution === undefined ||
+        execution.name !== event.payload.name ||
+        execution.effect !== "execute"
+      ) {
+        throw invalidLog(
+          `Process '${event.payload.callId}' has no matching execute boundary.`,
+        );
+      }
+      if (processes.has(event.payload.callId)) {
+        throw invalidLog(
+          `Process '${event.payload.callId}' started more than once.`,
+        );
+      }
+      processes.set(event.payload.callId, {
+        name: event.payload.name,
+        pid: event.payload.pid,
+        ownership: event.payload.ownership,
+        terminationRequests: new Set(),
+      });
+    } else if (event.type === "process.exited") {
+      const processState = matchingProcess(processes, event);
+      if (processState.exit !== undefined) {
+        throw invalidLog(
+          `Process '${event.payload.callId}' exited more than once.`,
+        );
+      }
+      processState.exit = {
+        exitCode: event.payload.exitCode,
+        signal: event.payload.signal,
+      };
+    } else if (event.type === "process.termination_requested") {
+      const processState = matchingProcess(processes, event);
+      if (processState.termination !== undefined) {
+        throw invalidLog(
+          `Process '${event.payload.callId}' requested termination after completion.`,
+        );
+      }
+      if (
+        processState.terminationReason !== undefined &&
+        processState.terminationReason !== event.payload.reason
+      ) {
+        throw invalidLog(
+          `Process '${event.payload.callId}' changed its termination reason.`,
+        );
+      }
+      const requestKey = `${event.payload.attempt}:${event.payload.mechanism}`;
+      if (processState.terminationRequests.has(requestKey)) {
+        throw invalidLog(
+          `Process '${event.payload.callId}' repeated a termination attempt.`,
+        );
+      }
+      processState.terminationReason = event.payload.reason;
+      processState.terminationRequests.add(requestKey);
+    } else if (event.type === "process.termination_completed") {
+      const processState = matchingProcess(processes, event);
+      if (processState.terminationRequests.size === 0) {
+        throw invalidLog(
+          `Process '${event.payload.callId}' completed termination without a request.`,
+        );
+      }
+      if (processState.terminationReason !== event.payload.reason) {
+        throw invalidLog(
+          `Process '${event.payload.callId}' completed a different termination reason.`,
+        );
+      }
+      if (processState.termination !== undefined) {
+        throw invalidLog(
+          `Process '${event.payload.callId}' completed termination more than once.`,
+        );
+      }
+      processState.termination = event.payload.outcome;
     } else if (event.type === "tool.completed") {
       const name = started.get(event.payload.callId);
       if (name === undefined || name !== event.payload.name) {
@@ -376,9 +496,79 @@ function findUncertainToolCalls(
       completed.add(event.payload.item.callId);
     }
   }
+  for (const [callId, processState] of processes) {
+    if (
+      completed.has(callId) &&
+      processState.exit === undefined &&
+      processState.termination === undefined
+    ) {
+      throw invalidLog(
+        `Completed tool '${callId}' has an unfinished process lifecycle.`,
+      );
+    }
+  }
+  const usesExecutionBoundaries = events.some(
+    (event) =>
+      event.type === "tool.started" && event.payload.executionBoundary === true,
+  );
   return [...started.entries()]
     .filter(([callId]) => !completed.has(callId))
-    .map(([callId, name]) => ({ callId, name }));
+    .flatMap(([callId, name]) => {
+      const execution = executionStarted.get(callId);
+      if (execution === undefined) {
+        return usesExecutionBoundaries ? [] : [{ callId, name }];
+      }
+      const processState = processes.get(callId);
+      if (processState === undefined) {
+        return [{ callId, name, effect: execution.effect }];
+      }
+      const status =
+        processState.termination ??
+        (processState.exit === undefined ? "uncertain" : "exited");
+      return [
+        {
+          callId,
+          name,
+          effect: execution.effect,
+          process: {
+            pid: processState.pid,
+            ownership: processState.ownership,
+            status,
+            ...(processState.exit === undefined
+              ? {}
+              : {
+                  exitCode: processState.exit.exitCode,
+                  signal: processState.exit.signal,
+                }),
+          },
+        },
+      ];
+    });
+}
+
+function matchingProcess(
+  processes: Map<ToolCallId, RecoveryProcessState>,
+  event: Extract<
+    AgentEvent,
+    {
+      type:
+        | "process.exited"
+        | "process.termination_requested"
+        | "process.termination_completed";
+    }
+  >,
+) {
+  const processState = processes.get(event.payload.callId);
+  if (
+    processState === undefined ||
+    processState.name !== event.payload.name ||
+    processState.pid !== event.payload.pid
+  ) {
+    throw invalidLog(
+      `Process event '${event.type}' has no matching process start.`,
+    );
+  }
+  return processState;
 }
 
 function isTerminalEvent(
@@ -396,7 +586,7 @@ function isTerminalEvent(
 
 function buildRecoveryMessage(options: {
   previousStatus: PreviousTurnStatus;
-  uncertainToolCalls: readonly { callId: ToolCallId; name: string }[];
+  uncertainToolCalls: readonly UncertainToolCall[];
   partialTrailingEventDiscarded: boolean;
 }): string {
   const parts = [
@@ -404,13 +594,22 @@ function buildRecoveryMessage(options: {
   ];
   if (options.uncertainToolCalls.length > 0) {
     parts.push(
-      `The following tool calls started without a durable completion and must not be assumed successful or automatically repeated: ${options.uncertainToolCalls.map((call) => `${call.name} (${call.callId})`).join(", ")}. Inspect current state before proposing any new action.`,
+      `The following tool calls started without a durable completion and must not be assumed successful or automatically repeated: ${options.uncertainToolCalls.map(describeUncertainToolCall).join(", ")}. Inspect current repository and process state before proposing any new action.`,
     );
   }
   if (options.partialTrailingEventDiscarded) {
     parts.push("One partial trailing event was discarded during recovery.");
   }
   return parts.join(" ");
+}
+
+function describeUncertainToolCall(call: UncertainToolCall): string {
+  const effect = call.effect === undefined ? "" : `, effect ${call.effect}`;
+  const processState =
+    call.process === undefined
+      ? ""
+      : `, process ${call.process.pid} ${call.process.status}`;
+  return `${call.name} (${call.callId}${effect}${processState})`;
 }
 
 function invalidLog(message: string): ThreadRecoveryError {

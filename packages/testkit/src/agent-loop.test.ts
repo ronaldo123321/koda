@@ -101,6 +101,7 @@ describe("AgentLoop", () => {
       "item.recorded",
       "item.recorded",
       "tool.started",
+      "tool.execution_started",
       "item.recorded",
       "tool.completed",
       "assistant.delta",
@@ -108,7 +109,7 @@ describe("AgentLoop", () => {
       "turn.completed",
     ]);
     expect(events.events.map((event) => event.sequence)).toEqual([
-      0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+      0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
     ]);
     expect(result.usage).toEqual({
       modelRequests: 2,

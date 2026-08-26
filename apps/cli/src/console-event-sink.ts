@@ -53,6 +53,11 @@ export class ConsoleEventSink implements EventSink {
           `repository instructions changed: ${event.payload.item.instructionChanges.map((change) => `${change.change} ${change.path}`).join(", ")}`,
         );
       }
+      if (event.payload.item.uncertainToolCalls.length > 0) {
+        this.writeDiagnostic(
+          `uncertain operations: ${event.payload.item.uncertainToolCalls.map((call) => `${call.name} (${call.callId}${call.effect === undefined ? "" : `, ${call.effect}`}${call.process === undefined ? "" : `, process ${call.process.pid} ${call.process.status}`})`).join(", ")}`,
+        );
+      }
       return;
     }
 
@@ -73,6 +78,20 @@ export class ConsoleEventSink implements EventSink {
     if (event.type === "tool.completed") {
       this.writeDiagnostic(
         `${event.payload.name} ${event.payload.status === "success" ? "completed" : "failed"}`,
+      );
+      return;
+    }
+
+    if (event.type === "process.termination_requested") {
+      this.writeDiagnostic(
+        `terminating process ${event.payload.pid}: ${event.payload.reason} (${event.payload.attempt})`,
+      );
+      return;
+    }
+
+    if (event.type === "process.termination_completed") {
+      this.writeDiagnostic(
+        `process ${event.payload.pid} termination ${event.payload.outcome}`,
       );
       return;
     }

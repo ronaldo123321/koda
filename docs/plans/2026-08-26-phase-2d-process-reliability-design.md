@@ -1,6 +1,6 @@
 # Koda Phase 2D: Process Ownership, Termination, and Side-effect Recovery
 
-- Status: Accepted for implementation
+- Status: Implemented (2026-08-26)
 - Date: 2026-08-26
 - Depends on: Phase 2C context budgets and compaction
 - Scope: durable side-effect boundaries, owned foreground process trees, termination escalation, and structured interrupted-operation recovery
@@ -27,7 +27,7 @@ Phase 2D adds these version-1 event variants:
 
 - `tool.execution_started`: emitted after policy and approval, immediately before invoking a prepared handler; contains tool effect.
 - `process.started`: emitted after a successful OS spawn; contains PID and ownership mechanism.
-- `process.exited`: emitted when the root child closes; contains exit code and signal.
+- `process.exited`: emitted when the root child exits; contains exit code and signal.
 - `process.termination_requested`: one event for each graceful or force attempt, including reason and mechanism.
 - `process.termination_completed`: contains `terminated`, `already_exited`, or `uncertain`.
 
@@ -69,7 +69,7 @@ Legacy logs without `tool.execution_started` keep the Phase 2A conservative beha
 ## 7. Failure behavior
 
 - Spawn failure before `process.started` returns the existing stable command error.
-- Failure to append a lifecycle event is a persistence failure and prevents the runtime from claiming durable progress.
+- Failure to append a lifecycle event is a persistence failure and prevents the runtime from claiming durable progress; an already-started owned process is still terminated before that failure propagates.
 - Timeout normally remains a tool observation with `timed_out: true` after confirmed termination.
 - Cancellation confirms or attempts termination before `turn.cancelled` is written.
 - An unconfirmed active target returns `PROCESS_TERMINATION_UNCERTAIN` and records the uncertainty.

@@ -33,6 +33,7 @@ import {
 } from "./policy.js";
 import {
   ToolRegistry,
+  ToolOperationalEventError,
   type PreparedToolInvocation,
   type ToolExecutionResult,
 } from "./tools.js";
@@ -385,15 +386,70 @@ export class AgentLoop {
         });
         await recorder.record({
           type: "tool.started",
-          payload: { callId: call.callId, name: call.name },
+          payload: {
+            callId: call.callId,
+            name: call.name,
+            executionBoundary: true,
+          },
         });
 
         let result: ToolExecutionResult;
+        let operationalEventQueue = Promise.resolve();
         try {
           const preparation = await this.tools.prepare(call, {
             threadId: input.threadId,
             turnId: input.turnId,
             signal,
+            report: async (event) => {
+              const recording = operationalEventQueue.then(async () => {
+                try {
+                  if (event.type === "process.started") {
+                    await recorder.record({
+                      type: event.type,
+                      payload: {
+                        callId: call.callId,
+                        name: call.name,
+                        ...event.payload,
+                      },
+                    });
+                  } else if (event.type === "process.exited") {
+                    await recorder.record({
+                      type: event.type,
+                      payload: {
+                        callId: call.callId,
+                        name: call.name,
+                        ...event.payload,
+                      },
+                    });
+                  } else if (event.type === "process.termination_requested") {
+                    await recorder.record({
+                      type: event.type,
+                      payload: {
+                        callId: call.callId,
+                        name: call.name,
+                        ...event.payload,
+                      },
+                    });
+                  } else {
+                    await recorder.record({
+                      type: event.type,
+                      payload: {
+                        callId: call.callId,
+                        name: call.name,
+                        ...event.payload,
+                      },
+                    });
+                  }
+                } catch (error) {
+                  throw new ToolOperationalEventError(
+                    `Could not persist ${event.type} for '${call.name}'.`,
+                    { cause: error },
+                  );
+                }
+              });
+              operationalEventQueue = recording.catch(() => {});
+              await recording;
+            },
           });
           result =
             preparation.status === "error"
@@ -412,6 +468,16 @@ export class AgentLoop {
               items,
               completedSteps,
               signal.reason,
+              usage,
+            );
+          }
+          if (error instanceof ToolOperationalEventError) {
+            return this.fail(
+              recorder,
+              items,
+              completedSteps,
+              "EVENT_PERSISTENCE_FAILED",
+              error.message,
               usage,
             );
           }
@@ -522,7 +588,7 @@ export class AgentLoop {
       };
     }
     if (policyDecision.decision === "allow") {
-      return prepared.execute();
+      return this.executePrepared(recorder, call, prepared);
     }
     if (prepared.approval === undefined) {
       return {
@@ -584,7 +650,7 @@ export class AgentLoop {
     });
 
     return decision.decision === "approved"
-      ? prepared.execute()
+      ? this.executePrepared(recorder, call, prepared)
       : {
           status: "error",
           error: {
@@ -592,6 +658,29 @@ export class AgentLoop {
             message: decision.reason ?? "The user rejected this tool call.",
           },
         };
+  }
+
+  private async executePrepared(
+    recorder: TurnEventRecorder,
+    call: Extract<ModelEvent, { type: "tool_call" }>,
+    prepared: PreparedToolInvocation,
+  ): Promise<ToolExecutionResult> {
+    try {
+      await recorder.record({
+        type: "tool.execution_started",
+        payload: {
+          callId: call.callId,
+          name: call.name,
+          effect: prepared.effect,
+        },
+      });
+    } catch (error) {
+      throw new ToolOperationalEventError(
+        `Could not persist tool.execution_started for '${call.name}'.`,
+        { cause: error },
+      );
+    }
+    return prepared.execute();
   }
 
   private createToolResult(

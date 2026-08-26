@@ -90,6 +90,266 @@ describe("recoverThread", () => {
     expect(recovered.message).toContain("partial trailing event");
   });
 
+  it("does not claim a new-format tool crossed the side-effect boundary before execution", () => {
+    const callId = toolCallIdSchema.parse("pre-execution-call");
+    const events = [
+      event(0, "turn.started", {}),
+      contextEvent(1),
+      recorded(2, {
+        type: "user_message",
+        id: itemIdSchema.parse("pre-execution-user"),
+        content: "Update the file.",
+      }),
+      recorded(3, {
+        type: "tool_call",
+        id: itemIdSchema.parse("pre-execution-call-item"),
+        callId,
+        name: "apply_patch",
+        arguments: {},
+      }),
+      event(4, "tool.started", {
+        callId,
+        name: "apply_patch",
+        executionBoundary: true,
+      }),
+    ];
+
+    const recovered = recoverThread(readResult(events), threadId);
+
+    expect(recovered.uncertainToolCalls).toEqual([]);
+  });
+
+  it("reports an interrupted write after its durable execution boundary", () => {
+    const callId = toolCallIdSchema.parse("uncertain-write-call");
+    const events = [
+      event(0, "turn.started", {}),
+      contextEvent(1),
+      recorded(2, {
+        type: "tool_call",
+        id: itemIdSchema.parse("uncertain-write-item"),
+        callId,
+        name: "apply_patch",
+        arguments: {},
+      }),
+      event(3, "tool.started", {
+        callId,
+        name: "apply_patch",
+        executionBoundary: true,
+      }),
+      event(4, "tool.execution_started", {
+        callId,
+        name: "apply_patch",
+        effect: "write",
+      }),
+    ];
+
+    const recovered = recoverThread(readResult(events), threadId);
+
+    expect(recovered.uncertainToolCalls).toEqual([
+      { callId, name: "apply_patch", effect: "write" },
+    ]);
+    expect(recovered.message).toContain("effect write");
+  });
+
+  it.each([
+    [
+      "exited" as const,
+      [
+        event(6, "process.exited", {
+          callId: toolCallIdSchema.parse("uncertain-process-call"),
+          name: "exec_command",
+          pid: 4321,
+          exitCode: 0,
+          signal: null,
+        }),
+      ],
+    ],
+    [
+      "terminated" as const,
+      [
+        event(6, "process.termination_requested", {
+          callId: toolCallIdSchema.parse("uncertain-process-call"),
+          name: "exec_command",
+          pid: 4321,
+          reason: "cancellation",
+          attempt: "graceful",
+          mechanism: "posix_process_group_signal",
+        }),
+        event(7, "process.termination_completed", {
+          callId: toolCallIdSchema.parse("uncertain-process-call"),
+          name: "exec_command",
+          pid: 4321,
+          reason: "cancellation",
+          outcome: "terminated",
+        }),
+      ],
+    ],
+    [
+      "uncertain" as const,
+      [
+        event(6, "process.termination_requested", {
+          callId: toolCallIdSchema.parse("uncertain-process-call"),
+          name: "exec_command",
+          pid: 4321,
+          reason: "timeout",
+          attempt: "force",
+          mechanism: "posix_process_group_signal",
+        }),
+        event(7, "process.termination_completed", {
+          callId: toolCallIdSchema.parse("uncertain-process-call"),
+          name: "exec_command",
+          pid: 4321,
+          reason: "timeout",
+          outcome: "uncertain",
+        }),
+      ],
+    ],
+  ])(
+    "recovers an incomplete command with process status %s",
+    (status, tail) => {
+      const callId = toolCallIdSchema.parse("uncertain-process-call");
+      const events = [
+        event(0, "turn.started", {}),
+        contextEvent(1),
+        recorded(2, {
+          type: "tool_call",
+          id: itemIdSchema.parse("uncertain-process-item"),
+          callId,
+          name: "exec_command",
+          arguments: { argv: ["node", "--version"] },
+        }),
+        event(3, "tool.started", {
+          callId,
+          name: "exec_command",
+          executionBoundary: true,
+        }),
+        event(4, "tool.execution_started", {
+          callId,
+          name: "exec_command",
+          effect: "execute",
+        }),
+        event(5, "process.started", {
+          callId,
+          name: "exec_command",
+          pid: 4321,
+          ownership: "posix_process_group",
+        }),
+        ...tail,
+      ];
+
+      const recovered = recoverThread(readResult(events), threadId);
+
+      expect(recovered.uncertainToolCalls).toEqual([
+        expect.objectContaining({
+          callId,
+          name: "exec_command",
+          effect: "execute",
+          process: expect.objectContaining({ pid: 4321, status }),
+        }),
+      ]);
+      expect(recovered.message).toContain(`process 4321 ${status}`);
+    },
+  );
+
+  it("rejects process lifecycle events without an execute boundary", () => {
+    const callId = toolCallIdSchema.parse("invalid-process-order-call");
+    const events = [
+      event(0, "turn.started", {}),
+      contextEvent(1),
+      event(2, "tool.started", {
+        callId,
+        name: "exec_command",
+        executionBoundary: true,
+      }),
+      event(3, "process.started", {
+        callId,
+        name: "exec_command",
+        pid: 6789,
+        ownership: "posix_process_group",
+      }),
+    ];
+
+    expect(() => recoverThread(readResult(events), threadId)).toThrowError(
+      expect.objectContaining({ code: "THREAD_LOG_INVALID" }),
+    );
+  });
+
+  it("rejects a completed tool with an unfinished process lifecycle", () => {
+    const callId = toolCallIdSchema.parse("invalid-finished-process-call");
+    const events = [
+      event(0, "turn.started", {}),
+      contextEvent(1),
+      event(2, "tool.started", {
+        callId,
+        name: "exec_command",
+        executionBoundary: true,
+      }),
+      event(3, "tool.execution_started", {
+        callId,
+        name: "exec_command",
+        effect: "execute",
+      }),
+      event(4, "process.started", {
+        callId,
+        name: "exec_command",
+        pid: 9876,
+        ownership: "posix_process_group",
+      }),
+      event(5, "tool.completed", {
+        callId,
+        name: "exec_command",
+        status: "success",
+      }),
+    ];
+
+    expect(() => recoverThread(readResult(events), threadId)).toThrowError(
+      expect.objectContaining({ code: "THREAD_LOG_INVALID" }),
+    );
+  });
+
+  it("rejects mismatched process termination reasons", () => {
+    const callId = toolCallIdSchema.parse("invalid-termination-reason-call");
+    const events = [
+      event(0, "turn.started", {}),
+      contextEvent(1),
+      event(2, "tool.started", {
+        callId,
+        name: "exec_command",
+        executionBoundary: true,
+      }),
+      event(3, "tool.execution_started", {
+        callId,
+        name: "exec_command",
+        effect: "execute",
+      }),
+      event(4, "process.started", {
+        callId,
+        name: "exec_command",
+        pid: 2468,
+        ownership: "posix_process_group",
+      }),
+      event(5, "process.termination_requested", {
+        callId,
+        name: "exec_command",
+        pid: 2468,
+        reason: "timeout",
+        attempt: "graceful",
+        mechanism: "posix_process_group_signal",
+      }),
+      event(6, "process.termination_completed", {
+        callId,
+        name: "exec_command",
+        pid: 2468,
+        reason: "cancellation",
+        outcome: "terminated",
+      }),
+    ];
+
+    expect(() => recoverThread(readResult(events), threadId)).toThrowError(
+      expect.objectContaining({ code: "THREAD_LOG_INVALID" }),
+    );
+  });
+
   it.each([
     [
       "turn.failed" as const,

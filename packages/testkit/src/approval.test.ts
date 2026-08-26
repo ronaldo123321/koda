@@ -56,6 +56,7 @@ describe("AgentLoop approvals", () => {
       "approval.requested",
       "item.recorded",
       "approval.resolved",
+      "tool.execution_started",
       "item.recorded",
       "tool.completed",
       "assistant.delta",
@@ -74,8 +75,9 @@ describe("AgentLoop approvals", () => {
 
   it("returns a rejected approval to the model without executing", async () => {
     let executed = false;
+    const events = new MemoryEventStore();
     const result = await runWriteTurn({
-      events: new MemoryEventStore(),
+      events,
       approvals: {
         request: async () => ({
           decision: "rejected",
@@ -96,13 +98,17 @@ describe("AgentLoop approvals", () => {
 
     expect(result.status).toBe("completed");
     expect(executed).toBe(false);
+    expect(
+      events.events.some((event) => event.type === "tool.execution_started"),
+    ).toBe(false);
   });
 
   it("never mode denies writes without invoking the approval broker", async () => {
     let approvalCalls = 0;
     let executed = false;
+    const events = new MemoryEventStore();
     const result = await runWriteTurn({
-      events: new MemoryEventStore(),
+      events,
       approvals: {
         request: async () => {
           approvalCalls += 1;
@@ -124,6 +130,9 @@ describe("AgentLoop approvals", () => {
     expect(result.status).toBe("completed");
     expect(approvalCalls).toBe(0);
     expect(executed).toBe(false);
+    expect(
+      events.events.some((event) => event.type === "tool.execution_started"),
+    ).toBe(false);
   });
 
   it("asks for process execution in on-request mode and denies it in never mode", () => {

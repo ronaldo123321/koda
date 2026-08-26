@@ -93,6 +93,25 @@ export const recoveryItemSchema = z.object({
     z.object({
       callId: toolCallIdSchema,
       name: z.string().min(1),
+      effect: z.enum(["read", "write", "execute"]).optional(),
+      process: z
+        .object({
+          pid: z.number().int().positive(),
+          ownership: z.enum([
+            "posix_process_group",
+            "windows_taskkill_tree",
+            "direct_child",
+          ]),
+          status: z.enum([
+            "exited",
+            "terminated",
+            "already_exited",
+            "uncertain",
+          ]),
+          exitCode: z.number().int().nullable().optional(),
+          signal: z.string().min(1).nullable().optional(),
+        })
+        .optional(),
     }),
   ),
 });

@@ -7,7 +7,7 @@
 
 ## Roadmap status: Phase 2 active
 
-Phase 0 and Phase 1A through 1D are complete. Phase 2A provides durable local transcript replay, safe interrupted-turn recovery, context snapshots, continuous event sequencing, `--resume`, and single-host writer leases. Phase 2B adds content-addressed output artifacts, uniform model-facing byte budgets, bounded artifact retrieval, recovery diagnostics, and provider-output limits. Phase 2C now adds provider-neutral context budgets, measured estimate calibration, append-only compaction, scoped nested repository instructions, and resume provenance. Phase 2D process reliability is next. All work moved to later phases remains listed explicitly in the Phase 2 reliability roadmap and the revised phase sections below.
+Phase 0 and Phase 1A through 1D are complete. Phase 2A provides durable local transcript replay, safe interrupted-turn recovery, context snapshots, continuous event sequencing, `--resume`, and single-host writer leases. Phase 2B adds content-addressed output artifacts, uniform model-facing byte budgets, bounded artifact retrieval, recovery diagnostics, and provider-output limits. Phase 2C adds provider-neutral context budgets, measured estimate calibration, append-only compaction, scoped nested repository instructions, and resume provenance. Phase 2D adds a durable side-effect boundary, owned process trees, bounded termination escalation, lifecycle events, and structured interrupted-operation evidence. Phase 2E SQLite metadata is next. All work moved to later phases remains listed explicitly in the Phase 2 reliability roadmap and the revised phase sections below.
 
 ## Roadmap revision: Phase 1 closeout
 
@@ -390,16 +390,16 @@ Moved from Phase 1 to Phase 3: the Anthropic adapter, Ink terminal UI, and long-
 
 ### Phase 2: reliability
 
-Status: **In progress; Phase 2A resume and recovery is the active slice.**
+Status: **In progress; Phase 2A through 2D are complete and Phase 2E SQLite metadata is next.**
 
 - Resume and recovery.
 - Context compaction.
 - Output artifacts and truncation.
-- Process-tree cancellation.
+- Durable side-effect boundaries and process-tree cancellation with explicit termination evidence.
 - SQLite metadata index, including materialized thread usage and optional cost metadata.
 - Scenario evaluation suite.
 - Nested instruction scoping and instruction-snapshot validation during resume.
-- Git rollback or recovery records for uncertain mutations.
+- Recovery records for uncertain mutations. Automatic rollback and multi-file transactions remain Phase 3 work.
 
 ### Phase 3: extensibility
 

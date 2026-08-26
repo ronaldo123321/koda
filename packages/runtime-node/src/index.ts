@@ -2,6 +2,7 @@ export * from "./artifact-store.js";
 export * from "./artifact-tools.js";
 export * from "./exec-command-tool.js";
 export * from "./jsonl-event-store.js";
+export * from "./process-tree-controller.js";
 export * from "./read-only-tools.js";
 export * from "./read-only-workspace.js";
 export * from "./repository-instructions.js";

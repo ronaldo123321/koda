@@ -1,4 +1,5 @@
 import { ArtifactStore, WorkspaceCommandRunner } from "@koda/runtime-node";
+import type { ToolOperationalEvent } from "@koda/agent-core";
 import { access, mkdir, mkdtemp, rename, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
@@ -38,7 +39,13 @@ describe("WorkspaceCommandRunner", () => {
     expect(command.preview).toContain("timeout: 2000 ms");
     expect(command.preview).toContain(JSON.stringify(process.execPath));
 
-    const result = await command.execute(new AbortController().signal);
+    const lifecycle: ToolOperationalEvent[] = [];
+    const result = await command.execute(
+      new AbortController().signal,
+      async (event) => {
+        lifecycle.push(event);
+      },
+    );
 
     expect(result).toMatchObject({
       argv: [process.execPath, "-e", expect.any(String)],
@@ -54,6 +61,10 @@ describe("WorkspaceCommandRunner", () => {
       timed_out: false,
     });
     expect(result.duration_ms).toBeGreaterThanOrEqual(0);
+    expect(lifecycle.map((event) => event.type)).toEqual([
+      "process.started",
+      "process.exited",
+    ]);
   });
 
   it("passes only allowlisted environment variables", async () => {
@@ -213,16 +224,41 @@ describe("WorkspaceCommandRunner", () => {
       terminationGraceMs: 10,
     });
     const command = await runner.prepare({
-      argv: [process.execPath, "-e", "setInterval(() => {}, 1000)"],
+      argv: [
+        process.execPath,
+        "-e",
+        "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)",
+      ],
       timeoutMs: 100,
     });
+    const lifecycle: ToolOperationalEvent[] = [];
 
-    const result = await command.execute(new AbortController().signal);
+    const result = await command.execute(
+      new AbortController().signal,
+      async (event) => {
+        lifecycle.push(event);
+      },
+    );
 
     expect(result.timed_out).toBe(true);
     expect(result.exit_code).toBeNull();
     expect(result.signal).not.toBeNull();
     expect(result.duration_ms).toBeLessThan(5_000);
+    expect(result.termination).toEqual({
+      reason: "timeout",
+      outcome: "terminated",
+    });
+    expect(
+      lifecycle.flatMap((event) =>
+        event.type === "process.termination_requested"
+          ? [event.payload.attempt]
+          : [],
+      ),
+    ).toEqual(["graceful", "force"]);
+    expect(lifecycle.at(-1)).toMatchObject({
+      type: "process.termination_completed",
+      payload: { reason: "timeout", outcome: "terminated" },
+    });
   });
 
   it("terminates on cancellation and propagates the abort", async () => {
@@ -234,14 +270,120 @@ describe("WorkspaceCommandRunner", () => {
       argv: [process.execPath, "-e", "setInterval(() => {}, 1000)"],
     });
     const controller = new AbortController();
-    const execution = command.execute(controller.signal);
+    const lifecycle: ToolOperationalEvent[] = [];
+    const execution = command.execute(controller.signal, async (event) => {
+      lifecycle.push(event);
+    });
     setTimeout(() => controller.abort("Cancelled by test."), 50);
 
     await expect(execution).rejects.toMatchObject({
       name: "AbortError",
       message: "Cancelled by test.",
     });
+    expect(lifecycle).toContainEqual(
+      expect.objectContaining({
+        type: "process.termination_completed",
+        payload: expect.objectContaining({
+          reason: "cancellation",
+          outcome: "terminated",
+        }),
+      }),
+    );
   });
+
+  it("terminates a started process when lifecycle persistence fails", async () => {
+    const root = await createWorkspace();
+    const runner = await WorkspaceCommandRunner.open(root, {
+      terminationGraceMs: 10,
+    });
+    const command = await runner.prepare({
+      argv: [process.execPath, "-e", "setInterval(() => {}, 1000)"],
+    });
+    let startedPid: number | undefined;
+
+    await expect(
+      command.execute(new AbortController().signal, async (event) => {
+        if (event.type === "process.started") {
+          startedPid = event.payload.pid;
+        }
+        throw new Error("event store unavailable");
+      }),
+    ).rejects.toThrow("event store unavailable");
+
+    expect(startedPid).toBeGreaterThan(0);
+    await expectProcessGone(startedPid ?? 0);
+  });
+
+  it.runIf(process.platform !== "win32")(
+    "cleans descendants when persisting the root exit fails",
+    async () => {
+      const root = await createWorkspace();
+      const runner = await WorkspaceCommandRunner.open(root, {
+        terminationGraceMs: 10,
+      });
+      const command = await runner.prepare({
+        argv: [
+          process.execPath,
+          "-e",
+          "const { spawn } = require('node:child_process'); const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }); child.unref();",
+        ],
+      });
+      let processGroupId: number | undefined;
+
+      await expect(
+        command.execute(new AbortController().signal, async (event) => {
+          if (event.type === "process.started") {
+            processGroupId = event.payload.pid;
+          }
+          if (event.type === "process.exited") {
+            throw new Error("could not persist root exit");
+          }
+        }),
+      ).rejects.toThrow("could not persist root exit");
+
+      expect(processGroupId).toBeGreaterThan(0);
+      await expectProcessGroupGone(processGroupId ?? 0);
+    },
+  );
+
+  it.runIf(process.platform !== "win32")(
+    "cleans up an unsupported background descendant after the root exits",
+    async () => {
+      const root = await createWorkspace();
+      const runner = await WorkspaceCommandRunner.open(root, {
+        terminationGraceMs: 25,
+      });
+      const command = await runner.prepare({
+        argv: [
+          process.execPath,
+          "-e",
+          "const { spawn } = require('node:child_process'); const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }); child.unref(); process.stdout.write(String(child.pid));",
+        ],
+      });
+      const lifecycle: ToolOperationalEvent[] = [];
+
+      const result = await command.execute(
+        new AbortController().signal,
+        async (event) => {
+          lifecycle.push(event);
+        },
+      );
+      const descendantPid = Number(result.stdout);
+
+      expect(descendantPid).toBeGreaterThan(0);
+      expect(result.termination).toEqual({
+        reason: "orphan_cleanup",
+        outcome: "terminated",
+      });
+      expect(lifecycle).toContainEqual(
+        expect.objectContaining({
+          type: "process.termination_requested",
+          payload: expect.objectContaining({ reason: "orphan_cleanup" }),
+        }),
+      );
+      await expectProcessGone(descendantPid);
+    },
+  );
 
   it("returns a stable error when the executable does not exist", async () => {
     const root = await createWorkspace();
@@ -260,4 +402,52 @@ async function createWorkspace(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "koda-command-"));
   temporaryDirectories.push(root);
   return root;
+}
+
+async function expectProcessGone(pid: number): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        "code" in error &&
+        (error as NodeJS.ErrnoException).code === "ESRCH"
+      ) {
+        return;
+      }
+      throw error;
+    }
+    await new Promise<void>((resolvePromise) => setTimeout(resolvePromise, 20));
+  }
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch {
+    // The process may have exited on the final polling boundary.
+  }
+  throw new Error(`Expected process ${pid} to be gone.`);
+}
+
+async function expectProcessGroupGone(processGroupId: number): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try {
+      process.kill(-processGroupId, 0);
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        "code" in error &&
+        (error as NodeJS.ErrnoException).code === "ESRCH"
+      ) {
+        return;
+      }
+      throw error;
+    }
+    await new Promise<void>((resolvePromise) => setTimeout(resolvePromise, 20));
+  }
+  try {
+    process.kill(-processGroupId, "SIGKILL");
+  } catch {
+    // The process group may have exited on the final polling boundary.
+  }
+  throw new Error(`Expected process group ${processGroupId} to be gone.`);
 }

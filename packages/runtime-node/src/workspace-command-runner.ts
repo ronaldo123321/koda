@@ -4,6 +4,7 @@ import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { Writable } from "node:stream";
 import { finished } from "node:stream/promises";
 
+import type { ToolOperationalEvent } from "@koda/agent-core";
 import type { ArtifactReference } from "@koda/protocol";
 
 import {
@@ -11,13 +12,18 @@ import {
   type MaterializedTextOutput,
   type TextArtifactCapture,
 } from "./artifact-store.js";
+import {
+  OwnedProcessTree,
+  type ProcessTerminationReport,
+} from "./process-tree-controller.js";
 
 export type CommandErrorCode =
   | "INVALID_COMMAND"
   | "INVALID_COMMAND_CWD"
   | "COMMAND_CWD_CHANGED"
   | "COMMAND_NOT_FOUND"
-  | "COMMAND_START_FAILED";
+  | "COMMAND_START_FAILED"
+  | "PROCESS_TERMINATION_UNCERTAIN";
 
 export class CommandError extends Error {
   public constructor(
@@ -51,6 +57,7 @@ export interface ExecCommandResult {
   stderr_artifact?: ArtifactReference;
   timed_out: boolean;
   duration_ms: number;
+  termination?: ProcessTerminationReport;
 }
 
 export interface PreparedWorkspaceCommand {
@@ -60,7 +67,10 @@ export interface PreparedWorkspaceCommand {
   title: string;
   summary: string;
   preview: string;
-  execute(signal: AbortSignal): Promise<ExecCommandResult>;
+  execute(
+    signal: AbortSignal,
+    report?: (event: ToolOperationalEvent) => Promise<void>,
+  ): Promise<ExecCommandResult>;
 }
 
 export interface WorkspaceCommandRunnerOptions {
@@ -68,6 +78,7 @@ export interface WorkspaceCommandRunnerOptions {
   maxOutputBytes?: number;
   artifactStore?: ArtifactStore;
   terminationGraceMs?: number;
+  terminationConfirmationMs?: number;
 }
 
 interface WorkingDirectorySnapshot {
@@ -82,6 +93,7 @@ const MIN_TIMEOUT_MS = 100;
 const MAX_TIMEOUT_MS = 120_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 65_536;
 const DEFAULT_TERMINATION_GRACE_MS = 500;
+const DEFAULT_TERMINATION_CONFIRMATION_MS = 2_000;
 const MAX_ARGUMENTS = 64;
 const MAX_ARGUMENT_BYTES = 4_096;
 const MAX_TOTAL_ARGUMENT_BYTES = 32_768;
@@ -130,6 +142,7 @@ export class WorkspaceCommandRunner {
     private readonly environment: NodeJS.ProcessEnv,
     private readonly maxOutputBytes: number,
     private readonly terminationGraceMs: number,
+    private readonly terminationConfirmationMs: number,
     private readonly artifactStore?: ArtifactStore,
   ) {}
 
@@ -148,13 +161,22 @@ export class WorkspaceCommandRunner {
     const maxOutputBytes = options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
     const terminationGraceMs =
       options.terminationGraceMs ?? DEFAULT_TERMINATION_GRACE_MS;
+    const terminationConfirmationMs =
+      options.terminationConfirmationMs ?? DEFAULT_TERMINATION_CONFIRMATION_MS;
     assertIntegerInRange(maxOutputBytes, 1, 1_000_000, "maxOutputBytes");
     assertIntegerInRange(terminationGraceMs, 0, 10_000, "terminationGraceMs");
+    assertIntegerInRange(
+      terminationConfirmationMs,
+      100,
+      30_000,
+      "terminationConfirmationMs",
+    );
     return new WorkspaceCommandRunner(
       canonicalRoot,
       filterEnvironment(options.environment ?? process.env),
       maxOutputBytes,
       terminationGraceMs,
+      terminationConfirmationMs,
       options.artifactStore,
     );
   }
@@ -186,7 +208,7 @@ export class WorkspaceCommandRunner {
         `timeout: ${timeoutMs} ms`,
         `argv: ${JSON.stringify(argv)}`,
       ].join("\n"),
-      execute: async (signal) => {
+      execute: async (signal, report) => {
         if (executed) {
           throw new CommandError(
             "INVALID_COMMAND",
@@ -206,8 +228,10 @@ export class WorkspaceCommandRunner {
             ? {}
             : { artifactStore: this.artifactStore }),
           terminationGraceMs: this.terminationGraceMs,
+          terminationConfirmationMs: this.terminationConfirmationMs,
           timeoutMs,
           signal,
+          ...(report === undefined ? {} : { report }),
         });
       },
     };
@@ -330,8 +354,10 @@ interface RunForegroundCommandOptions {
   maxOutputBytes: number;
   artifactStore?: ArtifactStore;
   terminationGraceMs: number;
+  terminationConfirmationMs: number;
   timeoutMs: number;
   signal: AbortSignal;
+  report?: (event: ToolOperationalEvent) => Promise<void>;
 }
 
 async function runForegroundCommand(
@@ -381,141 +407,234 @@ async function runForegroundCommand(
       "Command output streams were not created.",
     );
   }
-  const stdoutFinished = pipeToCapture(stdoutStream, stdout);
-  const stderrFinished = pipeToCapture(stderrStream, stderr);
-
-  return new Promise<ExecCommandResult>((resolvePromise, rejectPromise) => {
-    let aborted = false;
-    let settled = false;
-    let timedOut = false;
-    let timeoutTimer: NodeJS.Timeout | undefined;
-    let killTimer: NodeJS.Timeout | undefined;
-
-    const signalChild = (signal: NodeJS.Signals): void => {
-      try {
-        if (useProcessGroup && child.pid !== undefined) {
-          process.kill(-child.pid, signal);
-        } else {
-          child.kill(signal);
-        }
-      } catch (error) {
-        if (!isNodeError(error, "ESRCH")) {
-          try {
-            child.kill(signal);
-          } catch {
-            // The child may have exited between the close check and signal.
-          }
-        }
-      }
-    };
-
-    const requestTermination = (): void => {
-      signalChild("SIGTERM");
-      killTimer ??= setTimeout(() => {
-        signalChild("SIGKILL");
-      }, options.terminationGraceMs);
-      killTimer.unref();
-    };
-
-    void stdoutFinished.catch(() => requestTermination());
-    void stderrFinished.catch(() => requestTermination());
-
-    const onAbort = (): void => {
-      aborted = true;
-      requestTermination();
-    };
-
-    const cleanup = (): void => {
-      if (timeoutTimer !== undefined) {
-        clearTimeout(timeoutTimer);
-      }
-      if (killTimer !== undefined) {
-        clearTimeout(killTimer);
-      }
-      options.signal.removeEventListener("abort", onAbort);
-    };
-
-    child.once("error", (error) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      cleanup();
-      void Promise.allSettled([stdoutFinished, stderrFinished]).then(
-        async () => {
-          await Promise.all([stdout.abort(), stderr.abort()]);
-          if (aborted || options.signal.aborted) {
-            rejectPromise(abortError(options.signal.reason));
-            return;
-          }
-          rejectPromise(
-            new CommandError(
-              isNodeError(error, "ENOENT")
-                ? "COMMAND_NOT_FOUND"
-                : "COMMAND_START_FAILED",
-              isNodeError(error, "ENOENT")
-                ? `Command executable was not found: ${executable}`
-                : `Command could not start: ${error.message}`,
-              { cause: error },
-            ),
-          );
-        },
-      );
-    });
-    child.once("close", (exitCode, exitSignal) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      cleanup();
-      if (aborted || options.signal.aborted) {
-        void Promise.all([stdout.abort(), stderr.abort()]).finally(() => {
-          rejectPromise(abortError(options.signal.reason));
-        });
-        return;
-      }
-      void (async () => {
-        await Promise.all([stdoutFinished, stderrFinished]);
-        const [stdoutResult, stderrResult] = await Promise.all([
-          stdout.finish(),
-          stderr.finish(),
-        ]);
-        resolvePromise({
-          argv: [...options.argv],
-          cwd: options.workspacePath,
-          exit_code: exitCode,
-          signal: exitSignal,
-          stdout: stdoutResult.text,
-          stderr: stderrResult.text,
-          stdout_bytes: stdoutResult.totalBytes,
-          stderr_bytes: stderrResult.totalBytes,
-          stdout_truncated: stdoutResult.truncated,
-          stderr_truncated: stderrResult.truncated,
-          ...(stdoutResult.artifact === undefined
-            ? {}
-            : { stdout_artifact: stdoutResult.artifact }),
-          ...(stderrResult.artifact === undefined
-            ? {}
-            : { stderr_artifact: stderrResult.artifact }),
-          timed_out: timedOut,
-          duration_ms: Math.max(0, Date.now() - startedAt),
-        });
-      })().catch(async (error: unknown) => {
-        await Promise.all([stdout.abort(), stderr.abort()]);
-        rejectPromise(error);
-      });
-    });
-
-    timeoutTimer = setTimeout(() => {
-      timedOut = true;
-      requestTermination();
-    }, options.timeoutMs);
-    timeoutTimer.unref();
-    options.signal.addEventListener("abort", onAbort, { once: true });
-    if (options.signal.aborted) {
-      onAbort();
-    }
+  const rawExit = new Promise<{
+    exitCode: number | null;
+    signal: NodeJS.Signals | null;
+  }>((resolvePromise) => {
+    child.once("exit", (exitCode, signal) =>
+      resolvePromise({ exitCode, signal }),
+    );
   });
+  const closed = new Promise<void>((resolvePromise) => {
+    child.once("close", () => resolvePromise());
+  });
+  let spawnError: Error | undefined;
+  const spawned = new Promise<void>((resolvePromise, rejectPromise) => {
+    child.once("spawn", resolvePromise);
+    child.once("error", (error) => {
+      spawnError = error;
+      rejectPromise(error);
+    });
+  });
+  try {
+    await spawned;
+  } catch (error) {
+    await Promise.all([stdout.abort(), stderr.abort()]);
+    throw new CommandError(
+      isNodeError(error, "ENOENT")
+        ? "COMMAND_NOT_FOUND"
+        : "COMMAND_START_FAILED",
+      isNodeError(error, "ENOENT")
+        ? `Command executable was not found: ${executable}`
+        : `Command could not start: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
+  }
+
+  const pid = child.pid;
+  if (pid === undefined || pid < 1) {
+    child.kill();
+    await Promise.all([stdout.abort(), stderr.abort()]);
+    throw new CommandError(
+      "COMMAND_START_FAILED",
+      "Command started without a valid process ID.",
+    );
+  }
+  const ownedProcess = new OwnedProcessTree({
+    child,
+    pid,
+    terminationGraceMs: options.terminationGraceMs,
+    terminationConfirmationMs: options.terminationConfirmationMs,
+    ...(options.report === undefined ? {} : { report: options.report }),
+  });
+  try {
+    await options.report?.({
+      type: "process.started",
+      payload: { pid, ownership: ownedProcess.ownership },
+    });
+  } catch (error) {
+    await ownedProcess.terminate("output_failure").catch(() => undefined);
+    stdoutStream.destroy();
+    stderrStream.destroy();
+    await Promise.all([stdout.abort(), stderr.abort()]);
+    throw error;
+  }
+
+  const exited = rawExit.then(async (outcome) => {
+    await options.report?.({
+      type: "process.exited",
+      payload: {
+        pid,
+        exitCode: outcome.exitCode,
+        signal: outcome.signal,
+      },
+    });
+    return outcome;
+  });
+  const stdoutPipe = pipeToCapture(stdoutStream, stdout);
+  const stderrPipe = pipeToCapture(stderrStream, stderr);
+  const stdoutFinished = stdoutPipe.finished;
+  const stderrFinished = stderrPipe.finished;
+  let triggerTermination:
+    ((interruption: CommandInterruption) => void) | undefined;
+  const interrupted = new Promise<CommandInterruption>((resolvePromise) => {
+    triggerTermination = resolvePromise;
+  });
+  void stdoutFinished.catch((error: unknown) =>
+    triggerTermination?.({ reason: "output_failure", error }),
+  );
+  void stderrFinished.catch((error: unknown) =>
+    triggerTermination?.({ reason: "output_failure", error }),
+  );
+  const timeoutTimer = setTimeout(
+    () => triggerTermination?.({ reason: "timeout" }),
+    options.timeoutMs,
+  );
+  timeoutTimer.unref();
+  const onAbort = () =>
+    triggerTermination?.({
+      reason: "cancellation",
+      error: options.signal.reason,
+    });
+  options.signal.addEventListener("abort", onAbort, { once: true });
+  if (options.signal.aborted) {
+    onAbort();
+  }
+
+  let termination: ProcessTerminationReport | undefined;
+  let timedOut = false;
+  try {
+    const first = await Promise.race([
+      exited.then((outcome) => ({ type: "exit" as const, outcome })),
+      interrupted.then((interruption) => ({
+        type: "interruption" as const,
+        interruption,
+      })),
+    ]);
+    let outcome: Awaited<typeof exited>;
+    if (first.type === "exit") {
+      outcome = first.outcome;
+      if (spawnError !== undefined) {
+        throw new CommandError(
+          "COMMAND_START_FAILED",
+          `Command failed after spawn: ${spawnError.message}`,
+          { cause: spawnError },
+        );
+      }
+      if (ownedProcess.isAlive()) {
+        termination = await ownedProcess.terminate("orphan_cleanup");
+        assertTerminationConfirmed(termination, pid);
+      }
+    } else {
+      timedOut = first.interruption.reason === "timeout";
+      termination = await ownedProcess.terminate(first.interruption.reason);
+      assertTerminationConfirmed(termination, pid);
+      outcome = await exited;
+
+      if (first.interruption.reason === "cancellation") {
+        await Promise.allSettled([stdoutFinished, stderrFinished]);
+        await Promise.all([stdout.abort(), stderr.abort()]);
+        throw abortError(first.interruption.error);
+      }
+      if (first.interruption.reason === "output_failure") {
+        await Promise.allSettled([stdoutFinished, stderrFinished]);
+        await Promise.all([stdout.abort(), stderr.abort()]);
+        throw first.interruption.error instanceof Error
+          ? first.interruption.error
+          : new Error(String(first.interruption.error));
+      }
+    }
+
+    await closed;
+    await Promise.all([stdoutFinished, stderrFinished]);
+    const [stdoutResult, stderrResult] = await Promise.all([
+      stdout.finish(),
+      stderr.finish(),
+    ]);
+    return {
+      argv: [...options.argv],
+      cwd: options.workspacePath,
+      exit_code: outcome.exitCode,
+      signal: outcome.signal,
+      stdout: stdoutResult.text,
+      stderr: stderrResult.text,
+      stdout_bytes: stdoutResult.totalBytes,
+      stderr_bytes: stderrResult.totalBytes,
+      stdout_truncated: stdoutResult.truncated,
+      stderr_truncated: stderrResult.truncated,
+      ...(stdoutResult.artifact === undefined
+        ? {}
+        : { stdout_artifact: stdoutResult.artifact }),
+      ...(stderrResult.artifact === undefined
+        ? {}
+        : { stderr_artifact: stderrResult.artifact }),
+      timed_out: timedOut,
+      duration_ms: Math.max(0, Date.now() - startedAt),
+      ...(termination === undefined ? {} : { termination }),
+    };
+  } catch (error) {
+    let failure = error;
+    if (ownedProcess.isAlive()) {
+      try {
+        const cleanup = await ownedProcess.terminate("output_failure");
+        assertTerminationConfirmed(cleanup, pid);
+      } catch (cleanupError) {
+        if (ownedProcess.isAlive()) {
+          failure =
+            cleanupError instanceof CommandError &&
+            cleanupError.code === "PROCESS_TERMINATION_UNCERTAIN"
+              ? cleanupError
+              : new CommandError(
+                  "PROCESS_TERMINATION_UNCERTAIN",
+                  `Koda could not confirm that process tree ${pid} terminated after a command failure.`,
+                  { cause: cleanupError },
+                );
+        }
+      }
+    }
+    if (
+      failure instanceof CommandError &&
+      failure.code === "PROCESS_TERMINATION_UNCERTAIN"
+    ) {
+      stdoutPipe.stop();
+      stderrPipe.stop();
+      stdoutStream.destroy();
+      stderrStream.destroy();
+    }
+    await Promise.allSettled([stdoutFinished, stderrFinished]);
+    await Promise.all([stdout.abort(), stderr.abort()]);
+    throw failure;
+  } finally {
+    clearTimeout(timeoutTimer);
+    options.signal.removeEventListener("abort", onAbort);
+  }
+}
+
+interface CommandInterruption {
+  reason: "timeout" | "cancellation" | "output_failure";
+  error?: unknown;
+}
+
+function assertTerminationConfirmed(
+  report: ProcessTerminationReport,
+  pid: number,
+): void {
+  if (report.outcome === "uncertain") {
+    throw new CommandError(
+      "PROCESS_TERMINATION_UNCERTAIN",
+      `Koda could not confirm that process tree ${pid} terminated.`,
+    );
+  }
 }
 
 interface OutputCapture {
@@ -563,10 +682,15 @@ async function createOutputCapture(
     : artifactStore.createTextCapture({ inlineBytes: maxOutputBytes });
 }
 
+interface OutputPipe {
+  finished: Promise<void>;
+  stop(): void;
+}
+
 function pipeToCapture(
   stream: NodeJS.ReadableStream,
   capture: OutputCapture | TextArtifactCapture,
-): Promise<void> {
+): OutputPipe {
   const sink = new Writable({
     write(chunk: Buffer, _encoding, callback) {
       void capture.append(chunk).then(
@@ -576,7 +700,15 @@ function pipeToCapture(
     },
   });
   stream.pipe(sink);
-  return finished(sink);
+  return {
+    finished: finished(sink),
+    stop: () => {
+      stream.unpipe(sink);
+      if (!sink.destroyed && !sink.writableEnded) {
+        sink.end();
+      }
+    },
+  };
 }
 
 function validateArguments(input: readonly string[]): string[] {

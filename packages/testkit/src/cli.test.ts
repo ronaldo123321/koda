@@ -315,6 +315,7 @@ describe("Phase 1A CLI", () => {
     const root = await mkdtemp(join(tmpdir(), "koda-cancel-"));
     temporaryDirectories.push(root);
     const workspaceRoot = join(root, "repo");
+    const kodaHome = join(root, "state");
     await mkdir(workspaceRoot);
 
     let markStarted: (() => void) | undefined;
@@ -355,7 +356,7 @@ describe("Phase 1A CLI", () => {
       {
         environment: {
           OPENAI_API_KEY: "offline-test-key",
-          KODA_HOME: join(root, "state"),
+          KODA_HOME: kodaHome,
         },
         processDirectory: root,
         stdout: new MemoryWriter(),
@@ -375,6 +376,7 @@ describe("Phase 1A CLI", () => {
     const root = await mkdtemp(join(tmpdir(), "koda-write-cli-"));
     temporaryDirectories.push(root);
     const workspaceRoot = join(root, "repo");
+    const kodaHome = join(root, "state");
     await mkdir(workspaceRoot);
     await writeFile(join(workspaceRoot, "README.md"), "Before\n");
 
@@ -439,7 +441,7 @@ describe("Phase 1A CLI", () => {
       {
         environment: {
           OPENAI_API_KEY: "offline-test-key",
-          KODA_HOME: join(root, "state"),
+          KODA_HOME: kodaHome,
         },
         processDirectory: root,
         stdout: new MemoryWriter(),
@@ -458,6 +460,7 @@ describe("Phase 1A CLI", () => {
     const root = await mkdtemp(join(tmpdir(), "koda-exec-cli-"));
     temporaryDirectories.push(root);
     const workspaceRoot = join(root, "repo");
+    const kodaHome = join(root, "state");
     await mkdir(workspaceRoot);
     let approvalCalls = 0;
 
@@ -538,7 +541,7 @@ describe("Phase 1A CLI", () => {
       {
         environment: {
           OPENAI_API_KEY: "offline-test-key",
-          KODA_HOME: join(root, "state"),
+          KODA_HOME: kodaHome,
         },
         processDirectory: root,
         stdout,
@@ -550,6 +553,22 @@ describe("Phase 1A CLI", () => {
     expect(exitCode).toBe(0);
     expect(approvalCalls).toBe(1);
     expect(stdout.value).toBe("Validation passed.\n");
+    const events = await new JsonlEventStore(
+      join(kodaHome, "threads", "exec-cli-thread.jsonl"),
+    ).readAll();
+    const lifecycle = events.events.map((event) => event.type);
+    expect(lifecycle.indexOf("approval.resolved")).toBeLessThan(
+      lifecycle.indexOf("tool.execution_started"),
+    );
+    expect(lifecycle.indexOf("tool.execution_started")).toBeLessThan(
+      lifecycle.indexOf("process.started"),
+    );
+    expect(lifecycle.indexOf("process.started")).toBeLessThan(
+      lifecycle.indexOf("process.exited"),
+    );
+    expect(lifecycle.indexOf("process.exited")).toBeLessThan(
+      lifecycle.indexOf("tool.completed"),
+    );
   });
 
   it("does not start a rejected structured command", async () => {

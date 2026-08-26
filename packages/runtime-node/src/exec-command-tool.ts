@@ -111,7 +111,7 @@ export function registerExecCommandTool(
           details: command.preview,
         },
         execute: async (): Promise<JsonValue> => ({
-          ...(await command.execute(context.signal)),
+          ...(await command.execute(context.signal, context.report)),
         }),
       };
     },

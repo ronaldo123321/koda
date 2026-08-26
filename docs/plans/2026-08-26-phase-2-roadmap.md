@@ -1,6 +1,6 @@
 # Koda Phase 2 Reliability Roadmap
 
-- Status: In progress — Phase 2A through 2C complete; Phase 2D next
+- Status: In progress — Phase 2A through 2D complete; Phase 2E next
 - Date: 2026-08-26
 - Depends on: Phase 1D repository context and token accounting
 
@@ -53,15 +53,17 @@ Status: Complete (2026-08-26)
 
 ### Phase 2D: process reliability
 
-Status: Next
+Status: Complete (2026-08-26)
 
-- Harden cross-platform process-tree ownership and termination.
-- Record termination attempts and uncertain process outcomes.
-- Add recovery records for incomplete writes and commands.
+- Record a durable side-effect boundary after policy and approval.
+- Own POSIX process groups and terminate descendants with bounded TERM-to-KILL escalation.
+- Use tree-aware Windows termination with explicit best-effort fallback and uncertainty.
+- Record process starts, exits, termination attempts, and confirmed or uncertain outcomes.
+- Recover incomplete writes and commands with structured effect and process evidence, without automatic replay or historical-PID signaling.
 
 ### Phase 2E: SQLite metadata index
 
-Status: Planned
+Status: Next
 
 - Materialize thread status, timestamps, model, workspace, usage, and log offsets.
 - Rebuild the index entirely from JSONL.

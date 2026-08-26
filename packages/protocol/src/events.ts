@@ -19,6 +19,30 @@ const metadataShape = {
   turnId: turnIdSchema,
 };
 
+export const toolEffectSchema = z.enum(["read", "write", "execute"]);
+export const processOwnershipSchema = z.enum([
+  "posix_process_group",
+  "windows_taskkill_tree",
+  "direct_child",
+]);
+export const processTerminationReasonSchema = z.enum([
+  "timeout",
+  "cancellation",
+  "orphan_cleanup",
+  "output_failure",
+]);
+export const processTerminationAttemptSchema = z.enum(["graceful", "force"]);
+export const processTerminationMechanismSchema = z.enum([
+  "posix_process_group_signal",
+  "windows_taskkill",
+  "direct_child_signal",
+]);
+export const processTerminationOutcomeSchema = z.enum([
+  "terminated",
+  "already_exited",
+  "uncertain",
+]);
+
 export const agentEventSchema = z.discriminatedUnion("type", [
   z.object({
     ...metadataShape,
@@ -64,6 +88,60 @@ export const agentEventSchema = z.discriminatedUnion("type", [
     payload: z.object({
       callId: toolCallIdSchema,
       name: z.string().min(1),
+      executionBoundary: z.literal(true).optional(),
+    }),
+  }),
+  z.object({
+    ...metadataShape,
+    type: z.literal("tool.execution_started"),
+    payload: z.object({
+      callId: toolCallIdSchema,
+      name: z.string().min(1),
+      effect: toolEffectSchema,
+    }),
+  }),
+  z.object({
+    ...metadataShape,
+    type: z.literal("process.started"),
+    payload: z.object({
+      callId: toolCallIdSchema,
+      name: z.string().min(1),
+      pid: z.number().int().positive(),
+      ownership: processOwnershipSchema,
+    }),
+  }),
+  z.object({
+    ...metadataShape,
+    type: z.literal("process.exited"),
+    payload: z.object({
+      callId: toolCallIdSchema,
+      name: z.string().min(1),
+      pid: z.number().int().positive(),
+      exitCode: z.number().int().nullable(),
+      signal: z.string().min(1).nullable(),
+    }),
+  }),
+  z.object({
+    ...metadataShape,
+    type: z.literal("process.termination_requested"),
+    payload: z.object({
+      callId: toolCallIdSchema,
+      name: z.string().min(1),
+      pid: z.number().int().positive(),
+      reason: processTerminationReasonSchema,
+      attempt: processTerminationAttemptSchema,
+      mechanism: processTerminationMechanismSchema,
+    }),
+  }),
+  z.object({
+    ...metadataShape,
+    type: z.literal("process.termination_completed"),
+    payload: z.object({
+      callId: toolCallIdSchema,
+      name: z.string().min(1),
+      pid: z.number().int().positive(),
+      reason: processTerminationReasonSchema,
+      outcome: processTerminationOutcomeSchema,
     }),
   }),
   z.object({
@@ -126,3 +204,16 @@ export const agentEventSchema = z.discriminatedUnion("type", [
 
 export type AgentEvent = z.infer<typeof agentEventSchema>;
 export type AgentEventType = AgentEvent["type"];
+export type ProcessOwnership = z.infer<typeof processOwnershipSchema>;
+export type ProcessTerminationReason = z.infer<
+  typeof processTerminationReasonSchema
+>;
+export type ProcessTerminationAttempt = z.infer<
+  typeof processTerminationAttemptSchema
+>;
+export type ProcessTerminationMechanism = z.infer<
+  typeof processTerminationMechanismSchema
+>;
+export type ProcessTerminationOutcome = z.infer<
+  typeof processTerminationOutcomeSchema
+>;

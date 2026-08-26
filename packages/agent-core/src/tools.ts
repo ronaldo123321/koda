@@ -1,6 +1,11 @@
 import type {
   JsonObject,
   JsonValue,
+  ProcessOwnership,
+  ProcessTerminationAttempt,
+  ProcessTerminationMechanism,
+  ProcessTerminationOutcome,
+  ProcessTerminationReason,
   ThreadId,
   ToolCallId,
   TurnId,
@@ -16,6 +21,45 @@ export interface ToolContext {
   turnId: TurnId;
   callId: ToolCallId;
   signal: AbortSignal;
+  report?: (event: ToolOperationalEvent) => Promise<void>;
+}
+
+export type ToolOperationalEvent =
+  | {
+      type: "process.started";
+      payload: { pid: number; ownership: ProcessOwnership };
+    }
+  | {
+      type: "process.exited";
+      payload: {
+        pid: number;
+        exitCode: number | null;
+        signal: string | null;
+      };
+    }
+  | {
+      type: "process.termination_requested";
+      payload: {
+        pid: number;
+        reason: ProcessTerminationReason;
+        attempt: ProcessTerminationAttempt;
+        mechanism: ProcessTerminationMechanism;
+      };
+    }
+  | {
+      type: "process.termination_completed";
+      payload: {
+        pid: number;
+        reason: ProcessTerminationReason;
+        outcome: ProcessTerminationOutcome;
+      };
+    };
+
+export class ToolOperationalEventError extends Error {
+  public constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "ToolOperationalEventError";
+  }
 }
 
 export type ToolExecutionResult =
@@ -205,6 +249,9 @@ export class ToolRegistry {
                     },
                   };
             } catch (error) {
+              if (error instanceof ToolOperationalEventError) {
+                throw error;
+              }
               if (context.signal.aborted) {
                 throw error;
               }
