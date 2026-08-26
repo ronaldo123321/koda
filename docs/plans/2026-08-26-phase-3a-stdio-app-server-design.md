@@ -1,6 +1,6 @@
 # Koda Phase 3A: Local stdio JSON-RPC App Server
 
-- Status: Accepted for implementation (2026-08-26)
+- Status: Implemented and verified (2026-08-26)
 - Date: 2026-08-26
 - Depends on: Phase 2F deterministic reliability closure
 - Scope: transport-neutral application orchestration, versioned stdio JSON-RPC, durable event streaming, interactive approval, cancellation, and credential-free thread queries

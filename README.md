@@ -6,7 +6,7 @@ The project is building the control plane around a coding model: typed conversat
 
 ## Current status
 
-Phase 2 is complete. Phase 2A through 2F provide durable recovery, bounded artifact-backed output, reproducible context compaction, owned process termination, rebuildable thread metadata, reference-aware artifact collection, and deterministic reliability scenarios on top of the OpenAI-first Phase 1 runtime:
+Phase 3A is complete. It adds a transport-neutral application layer and a local stdio JSON-RPC app-server on top of the completed Phase 0 through Phase 2 runtime:
 
 - Versioned Thread, Turn, Item, and Agent Event schemas.
 - A provider-neutral streaming model interface.
@@ -46,9 +46,13 @@ Phase 2 is complete. Phase 2A through 2F provide durable recovery, bounded artif
 - Reference-aware artifact garbage collection derived only from valid JSONL logs, with a global maintenance lease and fail-closed concurrency checks.
 - Credential-free `koda artifact gc` dry runs and explicit `--delete` collection with a configurable minimum age.
 - Six deterministic binary scenarios for resume, compaction, prompt injection, process-tree cancellation, artifact retrieval, and uncertain side-effect recovery.
+- A shared `KodaApplication` workflow used by both CLI and protocol clients.
+- A strict, versioned, newline-delimited JSON-RPC 2.0 app-server over local stdio.
+- Durable-before-notify event streaming, one-shot interactive approvals, active-turn cancellation, and graceful shutdown/EOF cleanup.
+- Credential-free app-server thread list/get operations and different-thread concurrency guarded by existing per-thread leases.
 - Offline provider, runtime, CLI, and deterministic agent-loop tests.
 
-Phase 3 extensibility is next. Provider-assisted semantic compaction, exact provider tokenizers, the Anthropic adapter, Ink UI, richer patch operations, MCP/app-server boundaries, and interactive process UX are explicitly deferred there. Shared or remote artifact stores, strong sandboxing, Windows Job Objects, crash-surviving supervision, the Rust executor, and any high-risk shell-string support remain Phase 4 work. Parent/child thread lineage and multi-agent scenario matrices remain Phase 5 work. Workspace writes and process execution require explicit approval by default.
+Phase 3B MCP client and external-tool lifecycle design is next. Provider-assisted semantic compaction, exact provider tokenizers, the Anthropic adapter, Ink UI, richer patch operations, artifact client APIs, and interactive process UX remain later Phase 3 slices. Shared or remote artifact stores, remote app-server transports, strong sandboxing, Windows Job Objects, crash-surviving supervision, the Rust executor, and any high-risk shell-string support remain Phase 4 work. Parent/child thread lineage and multi-agent scenario matrices remain Phase 5 work. Workspace writes and process execution require explicit approval by default.
 
 ## Run the CLI
 
@@ -75,6 +79,24 @@ node apps/cli/dist/main.js thread show <thread-id>
 ```
 
 These commands refresh `KODA_HOME/state.db` from changed JSONL logs before querying. The database is a disposable projection: if it is deleted, Koda recreates it; if it is corrupt, Koda preserves a timestamped `.corrupt-*` copy and rebuilds current rows from JSONL.
+
+## Run the local app-server
+
+Build Koda, place provider credentials in the server environment, and launch the stdio transport:
+
+```bash
+pnpm build
+OPENAI_API_KEY=... node apps/app-server/dist/main.js
+```
+
+The process accepts one JSON-RPC 2.0 object per UTF-8 line. `initialize` must be the first request:
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"client":{"name":"my-koda-client","version":"0.1.0"}}}
+{"jsonrpc":"2.0","id":2,"method":"turn/start","params":{"prompt":"explain this repository","cwd":"."}}
+```
+
+Responses and `turn/event` / `turn/finished` notifications use stdout exclusively; diagnostics use stderr. Clients answer an `approval.requested` event with `approval/resolve`, may stop a live turn with `turn/cancel`, and should finish with `shutdown`. Provider credentials are server configuration and are never protocol fields.
 
 Preview old unreferenced artifacts without provider credentials, then delete them only after reviewing the report:
 
@@ -124,7 +146,9 @@ pnpm eval:scenarios
 - `@koda/agent-core`: agent loop, provider and tool ports, event ports.
 - `@koda/providers`: OpenAI Responses and deterministic scripted providers.
 - `@koda/runtime-node`: JSONL, artifact, and rebuildable SQLite metadata persistence plus constrained workspace, patch, and process tools.
-- `@koda/cli`: single-turn CLI composition root, approval input, and console projection.
+- `@koda/app`: transport-neutral turn orchestration and credential-free thread use cases.
+- `@koda/cli`: line-oriented command parsing, terminal approval, and console projection over `@koda/app`.
+- `@koda/app-server`: local stdio JSON-RPC transport, active-turn coordination, and interactive approval routing.
 - `@koda/testkit`: deterministic clocks, IDs, tools, in-memory event storage, and offline reliability scenarios.
 
 ## Architecture
@@ -142,5 +166,7 @@ pnpm eval:scenarios
 - [Phase 2D process reliability design](docs/plans/2026-08-26-phase-2d-process-reliability-design.md)
 - [Phase 2E SQLite metadata design](docs/plans/2026-08-26-phase-2e-sqlite-metadata-design.md)
 - [Phase 2F scenarios and artifact GC design](docs/plans/2026-08-26-phase-2f-scenarios-artifact-gc-design.md)
+- [Phase 3 extensibility roadmap](docs/plans/2026-08-26-phase-3-roadmap.md)
+- [Phase 3A local stdio app-server design](docs/plans/2026-08-26-phase-3a-stdio-app-server-design.md)
 
 The model can propose actions, but the Koda runtime owns validation, policy, approval, and execution. User interfaces consume typed events and do not own agent state.
