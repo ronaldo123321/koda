@@ -204,10 +204,7 @@ User steering is queued in a mailbox. Input received during a step is consumed b
 
 ```ts
 interface ModelProvider {
-  stream(
-    request: ModelRequest,
-    signal: AbortSignal,
-  ): AsyncIterable<ModelEvent>;
+  stream(request: ModelRequest, signal: AbortSignal): AsyncIterable<ModelEvent>;
 }
 ```
 
@@ -404,4 +401,3 @@ Exit criterion: the scripted model requests a tool, receives its result, produce
 - Cancellation and maximum-step exhaustion have explicit terminal results.
 - JSONL events can be appended and read back in sequence.
 - Public packages expose documented entry points and avoid deep imports.
-
