@@ -5,6 +5,19 @@
 - Owners: Koda maintainers
 - Scope: Local-first coding agent CLI and its reusable agent runtime
 
+## Roadmap revision: Phase 1 closeout
+
+The original roadmap placed both Anthropic support and an Ink terminal UI in Phase 1. Phase 1A through Phase 1C showed that neither is a dependency for the first reliable OpenAI coding loop. On 2026-08-26 the roadmap was revised as follows:
+
+| Capability                    | Original phase | Revised phase | Reason                                                                                    |
+| ----------------------------- | -------------- | ------------- | ----------------------------------------------------------------------------------------- |
+| Anthropic provider            | Phase 1        | Phase 3       | Add the second provider after recovery and context behavior are stable.                   |
+| Ink terminal UI and chat REPL | Phase 1        | Phase 3       | Keep the line-oriented approval CLI until long-lived UI state has a durable app boundary. |
+| Root repository instructions  | Phase 1        | Phase 1D      | Required before resume and compaction.                                                    |
+| Provider token accounting     | Phase 1        | Phase 1D      | Required to measure future context budgets.                                               |
+
+Moved work is retained explicitly in its destination phase below. Phase 1 closes with an OpenAI-first, single-turn local agent; it does not claim multi-provider or interactive-TUI completion.
+
 ## 1. Problem statement
 
 Koda aims to be a local coding agent similar in product shape to Codex: it can inspect a repository, reason over a user request, invoke constrained tools, modify files, run commands, stream progress, and resume interrupted work.
@@ -331,8 +344,8 @@ Scenario evaluations use binary assertions over file diffs, commands, policy dec
 - pnpm workspaces for dependency and package management.
 - ESM packages.
 - Zod for runtime protocol and tool validation.
-- Ink for the first terminal UI.
-- Official model provider SDKs behind Koda adapters.
+- A line-oriented terminal and approval UI through Phase 2; Ink is scheduled for Phase 3.
+- The official OpenAI SDK behind the first adapter; the Anthropic adapter is scheduled for Phase 3.
 - Official MCP TypeScript SDK behind the internal tool contract.
 - JSONL plus SQLite for local state.
 - `node-pty` behind a replaceable process interface when interactive terminal support is added.
@@ -357,11 +370,12 @@ Exit criterion: the scripted model requests a tool, receives its result, produce
 
 ### Phase 1: usable local agent
 
-- OpenAI and Anthropic adapters.
-- Ink terminal UI.
+- OpenAI adapter and a line-oriented terminal CLI.
 - Repository read/search/edit/exec tools.
 - Policy and approval UI.
-- Repository instructions and token accounting.
+- Root repository instructions and provider token accounting.
+
+Moved from Phase 1 to Phase 3: the Anthropic adapter, Ink terminal UI, and long-lived chat REPL.
 
 ### Phase 2: reliability
 
@@ -371,6 +385,8 @@ Exit criterion: the scripted model requests a tool, receives its result, produce
 - Process-tree cancellation.
 - SQLite metadata index.
 - Scenario evaluation suite.
+- Nested instruction scoping and instruction-snapshot validation during resume.
+- Git rollback or recovery records for uncertain mutations.
 
 ### Phase 3: extensibility
 
@@ -378,12 +394,18 @@ Exit criterion: the scripted model requests a tool, receives its result, produce
 - App-server protocol.
 - IDE and desktop integration boundary.
 - Hooks and provider extensions.
+- Anthropic adapter. **Moved from Phase 1.**
+- Ink terminal UI and long-lived chat REPL. **Moved from Phase 1.**
+- Native or richer patch capabilities, multi-file operations, moves, and deletion.
+- Interactive PTY and managed background-process UX.
+- Approval caching and trusted command-prefix UX.
 
 ### Phase 4: hardening
 
 - Rust execution sidecar.
 - OS-specific sandboxing and network policy.
 - Secret handling and signed cross-platform releases.
+- High-risk shell-string execution, if retained after sandbox evaluation.
 
 ### Phase 5: multi-agent and curated memory
 

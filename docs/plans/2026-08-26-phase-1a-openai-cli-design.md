@@ -279,15 +279,21 @@ CLI tests verify configuration precedence, streamed stdout, diagnostic stderr, s
 - A missing API key fails before the model loop and does not create a misleading completed thread.
 - The implementation includes a documented manual smoke-test command, but no live API call is required in CI.
 
-## 13. Deferred work
+## 13. Deferred-work disposition
 
-- Anthropic Provider.
-- Interactive Ink TUI and chat REPL.
-- File writes and apply-patch.
-- Shell execution and PTY.
-- Policy/approval UI.
-- Resume and persisted provider response IDs.
-- Repository instruction discovery and context compaction.
-- Token usage display and cost estimation.
+These items remained out of Phase 1A so the first real integration kept a small, auditable side-effect surface. Their destinations are now explicit:
 
-These remain out of Phase 1A so the first real integration keeps a small, auditable side-effect surface.
+| Item                                                  | Disposition                                        |
+| ----------------------------------------------------- | -------------------------------------------------- |
+| Anthropic provider                                    | Phase 3; moved from the original Phase 1 roadmap.  |
+| Interactive Ink TUI and chat REPL                     | Phase 3; moved from the original Phase 1 roadmap.  |
+| File writes and apply-patch                           | Completed in Phase 1B.                             |
+| Structured foreground execution                       | Completed in Phase 1C.                             |
+| Shell strings and strong process isolation            | Phase 4.                                           |
+| Interactive PTY                                       | Phase 3.                                           |
+| Policy and approval UI                                | Completed in Phase 1B and generalized in Phase 1C. |
+| Resume and persisted provider response IDs            | Phase 2.                                           |
+| Root repository instruction discovery                 | Phase 1D.                                          |
+| Nested instruction scoping and context compaction     | Phase 2.                                           |
+| Provider token usage display                          | Phase 1D.                                          |
+| Materialized thread totals and optional cost metadata | Phase 2.                                           |

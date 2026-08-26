@@ -121,11 +121,13 @@ All automated tests remain offline and cover:
 - Writes cannot escape the workspace through `..` or symlinks.
 - API keys and full file contents are not stored outside the existing event log and user-visible preview.
 
-## 10. Deferred work
+## 10. Deferred-work disposition
 
-- Native OpenAI V4A Apply Patch calls.
-- Multi-file atomic patches, moves, and deletion.
-- Shell execution and process sandboxing.
-- Approval caching or "approve all" modes.
-- Ink approval UI.
-- Git rollback and automatic commits.
+- Native OpenAI V4A and richer patch capabilities: Phase 3.
+- Multi-file patches, moves, and deletion: Phase 3.
+- Structured foreground execution: completed in Phase 1C.
+- Strong process sandboxing and high-risk shell strings: Phase 4.
+- Approval caching or trusted-prefix modes: Phase 3.
+- Ink approval UI: Phase 3; moved from the original Phase 1 roadmap.
+- Git rollback and mutation-recovery records: Phase 2.
+- Automatic commits: Phase 3 product workflow.

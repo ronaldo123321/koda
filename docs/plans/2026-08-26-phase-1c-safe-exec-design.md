@@ -122,13 +122,14 @@ Phase 1C is complete when:
 - Timeout and cancellation terminate the observed child before returning.
 - Captured output is bounded while byte counts remain available.
 
-## 9. Deferred work
+## 9. Deferred-work disposition
 
-- Shell strings, pipelines, redirection, and command substitution.
-- PTY and interactive terminal sessions.
-- Background services and long-running process sessions.
-- Command approval caching or trusted-prefix rules.
-- Artifact storage for large output.
-- Strong filesystem and network sandboxing.
-- Rust execution sidecar.
-- Automatic Git commits or rollback.
+- Shell strings, pipelines, redirection, and command substitution: Phase 4, subject to sandbox review.
+- PTY and interactive terminal sessions: Phase 3.
+- Background services and long-running process sessions: Phase 3.
+- Command approval caching or trusted-prefix rules: Phase 3.
+- Artifact storage for large output: Phase 2.
+- Strong filesystem and network sandboxing: Phase 4.
+- Rust execution sidecar: Phase 4.
+- Git rollback and mutation-recovery records: Phase 2.
+- Automatic commits: Phase 3 product workflow.
