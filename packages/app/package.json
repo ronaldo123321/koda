@@ -18,6 +18,7 @@
   },
   "dependencies": {
     "@koda/agent-core": "workspace:*",
+    "@koda/mcp-client-node": "workspace:*",
     "@koda/protocol": "workspace:*",
     "@koda/providers": "workspace:*",
     "@koda/runtime-node": "workspace:*"

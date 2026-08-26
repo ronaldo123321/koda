@@ -14,6 +14,7 @@ import {
   type ItemIdFactory,
   type ModelProvider,
 } from "@koda/agent-core";
+import { McpClientError, McpTurnSession } from "@koda/mcp-client-node";
 import {
   collectArtifactReferences,
   itemIdSchema,
@@ -241,6 +242,7 @@ export class KodaApplication {
     client: TurnClient,
   ): Promise<TurnCompletion> {
     let lease: ThreadLease | undefined;
+    let mcpSession: McpTurnSession | undefined;
     let refreshMetadata = false;
     try {
       controller.signal.throwIfAborted();
@@ -341,6 +343,14 @@ export class KodaApplication {
         artifactStore,
       });
       registerExecCommandTool(tools, commandRunner);
+      mcpSession = await McpTurnSession.open({
+        environment: this.environment,
+        kodaHome: configuration.kodaHome,
+        processDirectory: this.processDirectory,
+        artifactStore,
+        signal: controller.signal,
+      });
+      mcpSession.registerTools(tools);
       const contextEngine = new ContextEngine({
         contextWindowTokens: configuration.contextWindowTokens,
         maxOutputTokens: configuration.maxOutputTokens,
@@ -399,6 +409,17 @@ export class KodaApplication {
       }
       return completion(ids, "failed", 1, applicationError(error));
     } finally {
+      if (mcpSession !== undefined) {
+        try {
+          await mcpSession.close();
+        } catch (error) {
+          await emitDiagnostic(client, {
+            level: "warning",
+            code: "MCP_SESSION_CLEANUP_FAILED",
+            message: errorMessage(error),
+          });
+        }
+      }
       if (lease !== undefined) {
         try {
           await lease.release();
@@ -519,7 +540,8 @@ function applicationError(error: unknown): { code: string; message: string } {
   const code =
     error instanceof ThreadRecoveryError ||
     error instanceof ArtifactGarbageCollectionError ||
-    error instanceof ConfigurationError
+    error instanceof ConfigurationError ||
+    error instanceof McpClientError
       ? error.code
       : "APPLICATION_ERROR";
   return { code, message: errorMessage(error) };

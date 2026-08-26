@@ -151,6 +151,42 @@ describe("recoverThread", () => {
     expect(recovered.message).toContain("effect write");
   });
 
+  it("recovers an interrupted external MCP call without replaying it", () => {
+    const callId = toolCallIdSchema.parse("uncertain-mcp-call");
+    const name = "mcp__github__create_issue";
+    const events = [
+      event(0, "turn.started", {}),
+      contextEvent(1),
+      recorded(2, {
+        type: "tool_call",
+        id: itemIdSchema.parse("uncertain-mcp-item"),
+        callId,
+        name,
+        arguments: { title: "Investigate" },
+      }),
+      event(3, "tool.started", {
+        callId,
+        name,
+        executionBoundary: true,
+      }),
+      event(4, "tool.execution_started", {
+        callId,
+        name,
+        effect: "execute",
+      }),
+    ];
+
+    const recovered = recoverThread(readResult(events), threadId);
+
+    expect(recovered.history).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ callId })]),
+    );
+    expect(recovered.uncertainToolCalls).toEqual([
+      { callId, name, effect: "execute" },
+    ]);
+    expect(recovered.message).toContain("must not be assumed successful");
+  });
+
   it.each([
     [
       "exited" as const,
