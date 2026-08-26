@@ -1,6 +1,6 @@
 # Koda Phase 1B: Safe Structured Patch
 
-- Status: Accepted for implementation
+- Status: Implemented
 - Date: 2026-08-26
 - Depends on: Phase 1A OpenAI read-only CLI slice
 - Scope: one-file structured patching, runtime policy, per-patch approval, and safe workspace writes

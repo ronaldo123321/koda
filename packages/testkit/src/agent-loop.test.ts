@@ -190,6 +190,7 @@ describe("AgentLoop", () => {
       },
       inputSchema: z.object({}),
       concurrency: "parallel",
+      effect: "read",
       execute: async () => undefined as unknown as JsonValue,
     });
     const provider = new ScriptedModelProvider([

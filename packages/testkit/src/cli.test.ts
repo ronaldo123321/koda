@@ -15,7 +15,7 @@ import {
 } from "@koda/protocol";
 import { ScriptedModelProvider } from "@koda/providers";
 import { ReadOnlyWorkspace } from "@koda/runtime-node";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -52,6 +52,7 @@ describe("Phase 1A CLI", () => {
       "/workspace",
     );
     expect(fromEnvironment.model).toBe("environment-model");
+    expect(fromEnvironment.approvalMode).toBe("on-request");
 
     const fromCli = resolveRunConfiguration(
       { model: "cli-model", cwd: "project" },
@@ -60,6 +61,20 @@ describe("Phase 1A CLI", () => {
     );
     expect(fromCli.model).toBe("cli-model");
     expect(fromCli.cwd).toBe("/workspace/project");
+
+    const approvalFromCli = resolveRunConfiguration(
+      { approvalMode: "never" },
+      { OPENAI_API_KEY: "test-key", KODA_APPROVAL_MODE: "on-request" },
+      "/workspace",
+    );
+    expect(approvalFromCli.approvalMode).toBe("never");
+    expect(() =>
+      resolveRunConfiguration(
+        { approvalMode: "always" },
+        { OPENAI_API_KEY: "test-key" },
+        "/workspace",
+      ),
+    ).toThrow("Approval mode must be either");
   });
 
   it("streams answer deltas to stdout and tool status to stderr", async () => {
@@ -141,6 +156,9 @@ describe("Phase 1A CLI", () => {
     const dependencies: RunCommandDependencies = {
       openWorkspace: (path) => ReadOnlyWorkspace.open(path),
       createProvider: () => provider,
+      createApprovalBroker: () => ({
+        request: async () => ({ decision: "rejected" }),
+      }),
       createIds: () => ({
         threadId: threadIdSchema.parse("cli-thread"),
         turnId: turnIdSchema.parse("cli-turn"),
@@ -198,6 +216,9 @@ describe("Phase 1A CLI", () => {
     const dependencies: RunCommandDependencies = {
       openWorkspace: (path) => ReadOnlyWorkspace.open(path),
       createProvider: () => provider,
+      createApprovalBroker: () => ({
+        request: async () => ({ decision: "rejected" }),
+      }),
       createIds: () => ({
         threadId: threadIdSchema.parse("cancel-thread"),
         turnId: turnIdSchema.parse("cancel-turn"),
@@ -231,6 +252,89 @@ describe("Phase 1A CLI", () => {
     expect(stderr.value).toContain("Test cancellation.");
   });
 
+  it("applies an approved structured patch end to end", async () => {
+    const root = await mkdtemp(join(tmpdir(), "koda-write-cli-"));
+    temporaryDirectories.push(root);
+    const workspaceRoot = join(root, "repo");
+    await mkdir(workspaceRoot);
+    await writeFile(join(workspaceRoot, "README.md"), "Before\n");
+
+    const provider = new ScriptedModelProvider([
+      {
+        assertRequest: (request) => {
+          expect(request.tools.map((tool) => tool.name)).toContain(
+            "apply_patch",
+          );
+        },
+        events: [
+          {
+            type: "tool_call",
+            callId: toolCallIdSchema.parse("cli-patch-call"),
+            name: "apply_patch",
+            arguments: {
+              path: "README.md",
+              operation: "update",
+              old_text: "Before",
+              new_text: "After",
+            },
+          },
+          { type: "completed", finishReason: "tool_calls" },
+        ],
+      },
+      {
+        assertRequest: (request) => {
+          expect(request.items.map((item) => item.type)).toContain("approval");
+          expect(request.items.at(-1)).toMatchObject({
+            type: "tool_result",
+            status: "success",
+          });
+        },
+        events: [
+          { type: "assistant_delta", text: "Updated README.md." },
+          { type: "completed", finishReason: "stop" },
+        ],
+      },
+    ]);
+    const dependencies: RunCommandDependencies = {
+      openWorkspace: (path) => ReadOnlyWorkspace.open(path),
+      createProvider: () => provider,
+      createApprovalBroker: () => ({
+        request: async () => ({
+          decision: "approved",
+          reason: "Offline test approval.",
+        }),
+      }),
+      createIds: () => ({
+        threadId: threadIdSchema.parse("write-cli-thread"),
+        turnId: turnIdSchema.parse("write-cli-turn"),
+        itemIds: new DeterministicItemIdFactory(),
+      }),
+    };
+
+    const exitCode = await runCommand(
+      {
+        prompt: "Update the README.",
+        cwd: workspaceRoot,
+        signal: new AbortController().signal,
+      },
+      {
+        environment: {
+          OPENAI_API_KEY: "offline-test-key",
+          KODA_HOME: join(root, "state"),
+        },
+        processDirectory: root,
+        stdout: new MemoryWriter(),
+        stderr: new MemoryWriter(),
+      },
+      dependencies,
+    );
+
+    expect(exitCode).toBe(0);
+    expect(await readFile(join(workspaceRoot, "README.md"), "utf8")).toBe(
+      "After\n",
+    );
+  });
+
   it("renders run help without requiring credentials", async () => {
     const stdout = new MemoryWriter();
     const stderr = new MemoryWriter();
@@ -246,7 +350,8 @@ describe("Phase 1A CLI", () => {
     await expect(
       program.parseAsync(["node", "koda", "run", "--help"]),
     ).rejects.toMatchObject({ code: "commander.helpDisplayed" });
-    expect(stdout.value).toContain("Run one read-only coding-agent turn");
+    expect(stdout.value).toContain("Run one coding-agent turn");
     expect(stdout.value).toContain("--model <model>");
+    expect(stdout.value).toContain("--approval-mode <mode>");
   });
 });

@@ -50,6 +50,7 @@ export function registerReadOnlyWorkspaceTools(
     },
     inputSchema: listFilesInput,
     concurrency: "parallel",
+    effect: "read",
     execute: async (_context, input): Promise<JsonValue> => ({
       ...(await workspace.listFiles({
         path: input.path,
@@ -77,6 +78,7 @@ export function registerReadOnlyWorkspaceTools(
     },
     inputSchema: readFileInput,
     concurrency: "parallel",
+    effect: "read",
     execute: async (_context, input): Promise<JsonValue> => ({
       ...(await workspace.readFile({
         path: input.path,
@@ -104,6 +106,7 @@ export function registerReadOnlyWorkspaceTools(
     },
     inputSchema: searchTextInput,
     concurrency: "parallel",
+    effect: "read",
     execute: async (context, input): Promise<JsonValue> => ({
       ...(await workspace.searchText({
         query: input.query,

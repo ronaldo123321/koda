@@ -42,6 +42,27 @@ export const agentEventSchema = z.discriminatedUnion("type", [
   }),
   z.object({
     ...metadataShape,
+    type: z.literal("approval.requested"),
+    payload: z.object({
+      callId: toolCallIdSchema,
+      name: z.string().min(1),
+      title: z.string().min(1),
+      summary: z.string().min(1),
+      details: z.string().min(1),
+      reason: z.string().min(1),
+    }),
+  }),
+  z.object({
+    ...metadataShape,
+    type: z.literal("approval.resolved"),
+    payload: z.object({
+      callId: toolCallIdSchema,
+      decision: z.enum(["approved", "rejected"]),
+      reason: z.string().optional(),
+    }),
+  }),
+  z.object({
+    ...metadataShape,
     type: z.literal("tool.completed"),
     payload: z.object({
       callId: toolCallIdSchema,

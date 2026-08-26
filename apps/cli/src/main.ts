@@ -7,6 +7,7 @@ import { createProgram } from "./program.js";
 const program = createProgram({
   environment: process.env,
   processDirectory: process.cwd(),
+  stdin: process.stdin,
   stdout: process.stdout,
   stderr: process.stderr,
   setExitCode: (code) => {

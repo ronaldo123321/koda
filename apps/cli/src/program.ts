@@ -1,4 +1,4 @@
-import { Command } from "commander";
+import { Command, Option } from "commander";
 
 import type { TextWriter } from "./console-event-sink.js";
 import { runCommand, type RunCommandInput } from "./run-command.js";
@@ -6,6 +6,7 @@ import { runCommand, type RunCommandInput } from "./run-command.js";
 export interface ProgramRuntime {
   environment: NodeJS.ProcessEnv;
   processDirectory: string;
+  stdin?: NodeJS.ReadableStream;
   stdout: TextWriter;
   stderr: TextWriter;
   setExitCode(code: number): void;
@@ -31,14 +32,20 @@ export function createProgram(runtime: ProgramRuntime): Command {
 
   program
     .command("run")
-    .description("Run one read-only coding-agent turn")
+    .description("Run one coding-agent turn")
     .argument("<prompt...>", "task for Koda")
     .option("-C, --cwd <directory>", "workspace directory")
     .option("-m, --model <model>", "OpenAI model ID")
+    .addOption(
+      new Option("--approval-mode <mode>", "write approval behavior").choices([
+        "on-request",
+        "never",
+      ]),
+    )
     .action(
       async (
         promptParts: string[],
-        options: { cwd?: string; model?: string },
+        options: { approvalMode?: string; cwd?: string; model?: string },
       ) => {
         const controller = new AbortController();
         let interrupted = false;
@@ -54,6 +61,9 @@ export function createProgram(runtime: ProgramRuntime): Command {
           const input: RunCommandInput = {
             prompt: promptParts.join(" "),
             signal: controller.signal,
+            ...(options.approvalMode === undefined
+              ? {}
+              : { approvalMode: options.approvalMode }),
             ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
             ...(options.model === undefined ? {} : { model: options.model }),
           };
@@ -62,6 +72,7 @@ export function createProgram(runtime: ProgramRuntime): Command {
             processDirectory: runtime.processDirectory,
             stdout: runtime.stdout,
             stderr: runtime.stderr,
+            stdin: runtime.stdin ?? process.stdin,
           });
           runtime.setExitCode(exitCode);
         } finally {

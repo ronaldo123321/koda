@@ -1,4 +1,5 @@
 import {
+  approvalItemSchema,
   assistantMessageItemSchema,
   itemIdSchema,
   toolCallItemSchema,
@@ -18,7 +19,17 @@ import {
   type EventSink,
 } from "./events.js";
 import type { ModelEvent, ModelProvider } from "./model.js";
-import { ToolRegistry, type ToolExecutionResult } from "./tools.js";
+import {
+  denySideEffectsPolicy,
+  rejectApprovalsBroker,
+  type ApprovalBroker,
+  type ToolPolicy,
+} from "./policy.js";
+import {
+  ToolRegistry,
+  type PreparedToolInvocation,
+  type ToolExecutionResult,
+} from "./tools.js";
 
 export interface ItemIdFactory {
   next(): ItemId;
@@ -29,6 +40,8 @@ export interface AgentLoopOptions {
   tools: ToolRegistry;
   events: EventSink;
   ids: ItemIdFactory;
+  policy?: ToolPolicy;
+  approvals?: ApprovalBroker;
   clock?: Clock;
   maxSteps?: number;
 }
@@ -67,6 +80,8 @@ export class AgentLoop {
   private readonly tools: ToolRegistry;
   private readonly events: EventSink;
   private readonly ids: ItemIdFactory;
+  private readonly policy: ToolPolicy;
+  private readonly approvals: ApprovalBroker;
   private readonly clock: Clock;
   private readonly maxSteps: number;
 
@@ -75,6 +90,8 @@ export class AgentLoop {
     this.tools = options.tools;
     this.events = options.events;
     this.ids = options.ids;
+    this.policy = options.policy ?? denySideEffectsPolicy;
+    this.approvals = options.approvals ?? rejectApprovalsBroker;
     this.clock = options.clock ?? systemClock;
     this.maxSteps = options.maxSteps ?? DEFAULT_MAX_STEPS;
 
@@ -229,11 +246,21 @@ export class AgentLoop {
 
         let result: ToolExecutionResult;
         try {
-          result = await this.tools.execute(call, {
+          const preparation = await this.tools.prepare(call, {
             threadId: input.threadId,
             turnId: input.turnId,
             signal,
           });
+          result =
+            preparation.status === "error"
+              ? preparation.result
+              : await this.authorizeAndExecute(
+                  recorder,
+                  items,
+                  call,
+                  preparation.invocation,
+                  signal,
+                );
         } catch (error) {
           if (signal.aborted) {
             return this.cancel(recorder, items, completedSteps, signal.reason);
@@ -289,6 +316,110 @@ export class AgentLoop {
       "MAX_STEPS_EXCEEDED",
       `The turn exceeded the configured limit of ${this.maxSteps} model steps.`,
     );
+  }
+
+  private async authorizeAndExecute(
+    recorder: TurnEventRecorder,
+    items: ConversationItem[],
+    call: Extract<ModelEvent, { type: "tool_call" }>,
+    prepared: PreparedToolInvocation,
+    signal: AbortSignal,
+  ): Promise<ToolExecutionResult> {
+    let policyDecision;
+    try {
+      policyDecision = await this.policy.evaluate({
+        callId: call.callId,
+        name: call.name,
+        effect: prepared.effect,
+        arguments: call.arguments,
+      });
+    } catch (error) {
+      return {
+        status: "error",
+        error: {
+          code: "POLICY_ERROR",
+          message: error instanceof Error ? error.message : String(error),
+        },
+      };
+    }
+
+    if (policyDecision.decision === "deny") {
+      return {
+        status: "error",
+        error: { code: "POLICY_DENIED", message: policyDecision.reason },
+      };
+    }
+    if (policyDecision.decision === "allow") {
+      return prepared.execute();
+    }
+    if (prepared.approval === undefined) {
+      return {
+        status: "error",
+        error: {
+          code: "APPROVAL_CONTEXT_MISSING",
+          message: `Tool '${call.name}' requires approval but did not provide a preview.`,
+        },
+      };
+    }
+
+    const request = {
+      callId: call.callId,
+      name: call.name,
+      reason: policyDecision.reason,
+      ...prepared.approval,
+    };
+    await recorder.record({
+      type: "approval.requested",
+      payload: request,
+    });
+    signal.throwIfAborted();
+
+    let decision;
+    try {
+      decision = await this.approvals.request(request, signal);
+    } catch (error) {
+      if (signal.aborted) {
+        throw error;
+      }
+      decision = {
+        decision: "rejected" as const,
+        reason:
+          error instanceof Error
+            ? `Approval failed: ${error.message}`
+            : `Approval failed: ${String(error)}`,
+      };
+    }
+
+    const approvalItem = approvalItemSchema.parse({
+      type: "approval",
+      id: this.ids.next(),
+      callId: call.callId,
+      decision: decision.decision,
+      ...(decision.reason === undefined ? {} : { reason: decision.reason }),
+    });
+    items.push(approvalItem);
+    await recorder.record({
+      type: "item.recorded",
+      payload: { item: approvalItem },
+    });
+    await recorder.record({
+      type: "approval.resolved",
+      payload: {
+        callId: call.callId,
+        decision: decision.decision,
+        ...(decision.reason === undefined ? {} : { reason: decision.reason }),
+      },
+    });
+
+    return decision.decision === "approved"
+      ? prepared.execute()
+      : {
+          status: "error",
+          error: {
+            code: "APPROVAL_REJECTED",
+            message: decision.reason ?? "The user rejected this tool call.",
+          },
+        };
   }
 
   private createToolResult(

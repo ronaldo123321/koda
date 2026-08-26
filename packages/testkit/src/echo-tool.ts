@@ -18,6 +18,7 @@ export function registerEchoTool(registry: ToolRegistry): void {
     },
     inputSchema: echoInputSchema,
     concurrency: "parallel",
+    effect: "read",
     execute: async (_context, input): Promise<JsonValue> => ({
       echoed: input.text,
     }),
