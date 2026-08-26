@@ -383,7 +383,7 @@ Moved from Phase 1 to Phase 3: the Anthropic adapter, Ink terminal UI, and long-
 
 ### Phase 2: reliability
 
-Status: **Next.**
+Status: **In progress; Phase 2A resume and recovery is the active slice.**
 
 - Resume and recovery.
 - Context compaction.
