@@ -2,6 +2,7 @@ import { type ToolRegistry } from "@koda/agent-core";
 import { type JsonValue } from "@koda/protocol";
 import { z } from "zod";
 
+import { ArtifactStore } from "./artifact-store.js";
 import { ReadOnlyWorkspace } from "./read-only-workspace.js";
 
 const listFilesInput = z
@@ -28,9 +29,15 @@ const searchTextInput = z
   })
   .strict();
 
+export interface ReadOnlyWorkspaceToolOptions {
+  artifactStore?: ArtifactStore;
+  inlineOutputBytes?: number;
+}
+
 export function registerReadOnlyWorkspaceTools(
   registry: ToolRegistry,
   workspace: ReadOnlyWorkspace,
+  options: ReadOnlyWorkspaceToolOptions = {},
 ): void {
   registry.register({
     spec: {
@@ -64,7 +71,7 @@ export function registerReadOnlyWorkspaceTools(
     spec: {
       name: "read_file",
       description:
-        "Read numbered lines from a UTF-8 text file using a workspace-relative path.",
+        "Read numbered lines from a UTF-8 text file using a workspace-relative path. Oversized results include a retrievable content artifact.",
       inputJsonSchema: {
         type: "object",
         properties: {
@@ -79,20 +86,36 @@ export function registerReadOnlyWorkspaceTools(
     inputSchema: readFileInput,
     concurrency: "parallel",
     effect: "read",
-    execute: async (_context, input): Promise<JsonValue> => ({
-      ...(await workspace.readFile({
+    execute: async (_context, input): Promise<JsonValue> => {
+      const result = await workspace.readFile({
         path: input.path,
         startLine: input.start_line,
         lineCount: input.line_count,
-      })),
-    }),
+      });
+      if (options.artifactStore === undefined) {
+        return { ...result };
+      }
+      const materialized = await options.artifactStore.materializeText(
+        result.content,
+        inlineOptions(options.inlineOutputBytes),
+      );
+      return {
+        ...result,
+        content: materialized.text,
+        content_bytes: materialized.totalBytes,
+        content_truncated: materialized.truncated,
+        ...(materialized.artifact === undefined
+          ? {}
+          : { content_artifact: materialized.artifact }),
+      };
+    },
   });
 
   registry.register({
     spec: {
       name: "search_text",
       description:
-        "Search for a literal text string with ripgrep inside a workspace-relative path.",
+        "Search for a literal text string with ripgrep inside a workspace-relative path. Oversized match output includes a retrievable artifact.",
       inputJsonSchema: {
         type: "object",
         properties: {
@@ -107,13 +130,38 @@ export function registerReadOnlyWorkspaceTools(
     inputSchema: searchTextInput,
     concurrency: "parallel",
     effect: "read",
-    execute: async (context, input): Promise<JsonValue> => ({
-      ...(await workspace.searchText({
+    execute: async (context, input): Promise<JsonValue> => {
+      const result = await workspace.searchText({
         query: input.query,
         path: input.path,
         maxResults: input.max_results,
         signal: context.signal,
-      })),
-    }),
+      });
+      if (options.artifactStore === undefined) {
+        return { ...result };
+      }
+      const materialized = await options.artifactStore.materializeText(
+        result.matches.join("\n"),
+        inlineOptions(options.inlineOutputBytes),
+      );
+      return {
+        ...result,
+        matches:
+          materialized.text.length === 0 ? [] : materialized.text.split("\n"),
+        matches_bytes: materialized.totalBytes,
+        matches_truncated: materialized.truncated,
+        ...(materialized.artifact === undefined
+          ? {}
+          : { matches_artifact: materialized.artifact }),
+      };
+    },
   });
+}
+
+function inlineOptions(inlineOutputBytes: number | undefined): {
+  inlineBytes?: number;
+} {
+  return inlineOutputBytes === undefined
+    ? {}
+    : { inlineBytes: inlineOutputBytes };
 }

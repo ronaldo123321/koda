@@ -1,6 +1,16 @@
 import { spawn } from "node:child_process";
 import { lstat, realpath, stat } from "node:fs/promises";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { Writable } from "node:stream";
+import { finished } from "node:stream/promises";
+
+import type { ArtifactReference } from "@koda/protocol";
+
+import {
+  ArtifactStore,
+  type MaterializedTextOutput,
+  type TextArtifactCapture,
+} from "./artifact-store.js";
 
 export type CommandErrorCode =
   | "INVALID_COMMAND"
@@ -37,6 +47,8 @@ export interface ExecCommandResult {
   stderr_bytes: number;
   stdout_truncated: boolean;
   stderr_truncated: boolean;
+  stdout_artifact?: ArtifactReference;
+  stderr_artifact?: ArtifactReference;
   timed_out: boolean;
   duration_ms: number;
 }
@@ -54,6 +66,7 @@ export interface PreparedWorkspaceCommand {
 export interface WorkspaceCommandRunnerOptions {
   environment?: NodeJS.ProcessEnv;
   maxOutputBytes?: number;
+  artifactStore?: ArtifactStore;
   terminationGraceMs?: number;
 }
 
@@ -117,6 +130,7 @@ export class WorkspaceCommandRunner {
     private readonly environment: NodeJS.ProcessEnv,
     private readonly maxOutputBytes: number,
     private readonly terminationGraceMs: number,
+    private readonly artifactStore?: ArtifactStore,
   ) {}
 
   public static async open(
@@ -141,6 +155,7 @@ export class WorkspaceCommandRunner {
       filterEnvironment(options.environment ?? process.env),
       maxOutputBytes,
       terminationGraceMs,
+      options.artifactStore,
     );
   }
 
@@ -187,6 +202,9 @@ export class WorkspaceCommandRunner {
           workspacePath: cwd.workspacePath,
           environment: this.environment,
           maxOutputBytes: this.maxOutputBytes,
+          ...(this.artifactStore === undefined
+            ? {}
+            : { artifactStore: this.artifactStore }),
           terminationGraceMs: this.terminationGraceMs,
           timeoutMs,
           signal,
@@ -310,6 +328,7 @@ interface RunForegroundCommandOptions {
   workspacePath: string;
   environment: NodeJS.ProcessEnv;
   maxOutputBytes: number;
+  artifactStore?: ArtifactStore;
   terminationGraceMs: number;
   timeoutMs: number;
   signal: AbortSignal;
@@ -324,20 +343,50 @@ async function runForegroundCommand(
     throw new CommandError("INVALID_COMMAND", "Command argv is empty.");
   }
   const startedAt = Date.now();
-  const stdout = new BoundedOutput(options.maxOutputBytes);
-  const stderr = new BoundedOutput(options.maxOutputBytes);
+  const stdout = await createOutputCapture(
+    options.artifactStore,
+    options.maxOutputBytes,
+  );
+  const stderr = await createOutputCapture(
+    options.artifactStore,
+    options.maxOutputBytes,
+  );
   const useProcessGroup = process.platform !== "win32";
-  const child = spawn(executable, options.argv.slice(1), {
-    cwd: options.cwd,
-    detached: useProcessGroup,
-    env: options.environment,
-    shell: false,
-    stdio: ["ignore", "pipe", "pipe"],
-    windowsHide: true,
-  });
+  let child: ReturnType<typeof spawn>;
+  try {
+    child = spawn(executable, options.argv.slice(1), {
+      cwd: options.cwd,
+      detached: useProcessGroup,
+      env: options.environment,
+      shell: false,
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    });
+  } catch (error) {
+    await Promise.all([stdout.abort(), stderr.abort()]);
+    throw new CommandError(
+      "COMMAND_START_FAILED",
+      `Command could not start: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
+  }
+
+  const stdoutStream = child.stdout;
+  const stderrStream = child.stderr;
+  if (stdoutStream === null || stderrStream === null) {
+    child.kill();
+    await Promise.all([stdout.abort(), stderr.abort()]);
+    throw new CommandError(
+      "COMMAND_START_FAILED",
+      "Command output streams were not created.",
+    );
+  }
+  const stdoutFinished = pipeToCapture(stdoutStream, stdout);
+  const stderrFinished = pipeToCapture(stderrStream, stderr);
 
   return new Promise<ExecCommandResult>((resolvePromise, rejectPromise) => {
     let aborted = false;
+    let settled = false;
     let timedOut = false;
     let timeoutTimer: NodeJS.Timeout | undefined;
     let killTimer: NodeJS.Timeout | undefined;
@@ -368,6 +417,9 @@ async function runForegroundCommand(
       killTimer.unref();
     };
 
+    void stdoutFinished.catch(() => requestTermination());
+    void stderrFinished.catch(() => requestTermination());
+
     const onAbort = (): void => {
       aborted = true;
       requestTermination();
@@ -383,51 +435,74 @@ async function runForegroundCommand(
       options.signal.removeEventListener("abort", onAbort);
     };
 
-    child.stdout.on("data", (chunk: Buffer | string) => {
-      stdout.append(chunk);
-    });
-    child.stderr.on("data", (chunk: Buffer | string) => {
-      stderr.append(chunk);
-    });
     child.once("error", (error) => {
-      cleanup();
-      if (aborted || options.signal.aborted) {
-        rejectPromise(abortError(options.signal.reason));
+      if (settled) {
         return;
       }
-      rejectPromise(
-        new CommandError(
-          isNodeError(error, "ENOENT")
-            ? "COMMAND_NOT_FOUND"
-            : "COMMAND_START_FAILED",
-          isNodeError(error, "ENOENT")
-            ? `Command executable was not found: ${executable}`
-            : `Command could not start: ${error.message}`,
-          { cause: error },
-        ),
+      settled = true;
+      cleanup();
+      void Promise.allSettled([stdoutFinished, stderrFinished]).then(
+        async () => {
+          await Promise.all([stdout.abort(), stderr.abort()]);
+          if (aborted || options.signal.aborted) {
+            rejectPromise(abortError(options.signal.reason));
+            return;
+          }
+          rejectPromise(
+            new CommandError(
+              isNodeError(error, "ENOENT")
+                ? "COMMAND_NOT_FOUND"
+                : "COMMAND_START_FAILED",
+              isNodeError(error, "ENOENT")
+                ? `Command executable was not found: ${executable}`
+                : `Command could not start: ${error.message}`,
+              { cause: error },
+            ),
+          );
+        },
       );
     });
     child.once("close", (exitCode, exitSignal) => {
-      cleanup();
-      if (aborted || options.signal.aborted) {
-        rejectPromise(abortError(options.signal.reason));
+      if (settled) {
         return;
       }
-      const stdoutResult = stdout.result();
-      const stderrResult = stderr.result();
-      resolvePromise({
-        argv: [...options.argv],
-        cwd: options.workspacePath,
-        exit_code: exitCode,
-        signal: exitSignal,
-        stdout: stdoutResult.text,
-        stderr: stderrResult.text,
-        stdout_bytes: stdoutResult.totalBytes,
-        stderr_bytes: stderrResult.totalBytes,
-        stdout_truncated: stdoutResult.truncated,
-        stderr_truncated: stderrResult.truncated,
-        timed_out: timedOut,
-        duration_ms: Math.max(0, Date.now() - startedAt),
+      settled = true;
+      cleanup();
+      if (aborted || options.signal.aborted) {
+        void Promise.all([stdout.abort(), stderr.abort()]).finally(() => {
+          rejectPromise(abortError(options.signal.reason));
+        });
+        return;
+      }
+      void (async () => {
+        await Promise.all([stdoutFinished, stderrFinished]);
+        const [stdoutResult, stderrResult] = await Promise.all([
+          stdout.finish(),
+          stderr.finish(),
+        ]);
+        resolvePromise({
+          argv: [...options.argv],
+          cwd: options.workspacePath,
+          exit_code: exitCode,
+          signal: exitSignal,
+          stdout: stdoutResult.text,
+          stderr: stderrResult.text,
+          stdout_bytes: stdoutResult.totalBytes,
+          stderr_bytes: stderrResult.totalBytes,
+          stdout_truncated: stdoutResult.truncated,
+          stderr_truncated: stderrResult.truncated,
+          ...(stdoutResult.artifact === undefined
+            ? {}
+            : { stdout_artifact: stdoutResult.artifact }),
+          ...(stderrResult.artifact === undefined
+            ? {}
+            : { stderr_artifact: stderrResult.artifact }),
+          timed_out: timedOut,
+          duration_ms: Math.max(0, Date.now() - startedAt),
+        });
+      })().catch(async (error: unknown) => {
+        await Promise.all([stdout.abort(), stderr.abort()]);
+        rejectPromise(error);
       });
     });
 
@@ -443,14 +518,20 @@ async function runForegroundCommand(
   });
 }
 
-class BoundedOutput {
+interface OutputCapture {
+  append(chunk: Buffer | string): Promise<void>;
+  finish(): Promise<MaterializedTextOutput>;
+  abort(): Promise<void>;
+}
+
+class BoundedOutput implements OutputCapture {
   private readonly chunks: Buffer[] = [];
   private retainedBytes = 0;
   private totalBytes = 0;
 
   public constructor(private readonly maxBytes: number) {}
 
-  public append(chunk: Buffer | string): void {
+  public async append(chunk: Buffer | string): Promise<void> {
     const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     this.totalBytes += bytes.byteLength;
     const available = this.maxBytes - this.retainedBytes;
@@ -462,17 +543,40 @@ class BoundedOutput {
     this.retainedBytes += retained.byteLength;
   }
 
-  public result(): {
-    text: string;
-    totalBytes: number;
-    truncated: boolean;
-  } {
+  public async finish(): Promise<MaterializedTextOutput> {
     return {
       text: Buffer.concat(this.chunks, this.retainedBytes).toString("utf8"),
       totalBytes: this.totalBytes,
       truncated: this.totalBytes > this.retainedBytes,
     };
   }
+
+  public async abort(): Promise<void> {}
+}
+
+async function createOutputCapture(
+  artifactStore: ArtifactStore | undefined,
+  maxOutputBytes: number,
+): Promise<OutputCapture> {
+  return artifactStore === undefined
+    ? new BoundedOutput(maxOutputBytes)
+    : artifactStore.createTextCapture({ inlineBytes: maxOutputBytes });
+}
+
+function pipeToCapture(
+  stream: NodeJS.ReadableStream,
+  capture: OutputCapture | TextArtifactCapture,
+): Promise<void> {
+  const sink = new Writable({
+    write(chunk: Buffer, _encoding, callback) {
+      void capture.append(chunk).then(
+        () => callback(),
+        (error: unknown) => callback(error as Error),
+      );
+    },
+  });
+  stream.pipe(sink);
+  return finished(sink);
 }
 
 function validateArguments(input: readonly string[]): string[] {

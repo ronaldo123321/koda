@@ -7,7 +7,7 @@
 
 ## Roadmap status: Phase 2 active
 
-Phase 0 and Phase 1A through 1D are complete. Phase 2A now provides durable local transcript replay, safe interrupted-turn recovery, context snapshots, continuous event sequencing, `--resume`, and single-host writer leases. Phase 2B artifacts and output budgets are next. All work moved to later phases remains listed explicitly in the Phase 2 reliability roadmap and the revised phase sections below.
+Phase 0 and Phase 1A through 1D are complete. Phase 2A provides durable local transcript replay, safe interrupted-turn recovery, context snapshots, continuous event sequencing, `--resume`, and single-host writer leases. Phase 2B now adds content-addressed output artifacts, uniform model-facing byte budgets, bounded artifact retrieval, recovery diagnostics, and provider-output limits. Phase 2C context budgets and compaction are next. All work moved to later phases remains listed explicitly in the Phase 2 reliability roadmap and the revised phase sections below.
 
 ## Roadmap revision: Phase 1 closeout
 
@@ -193,6 +193,8 @@ type ConversationItem =
   | RecoveryItem
   | CompactionItem;
 ```
+
+Oversized tool output remains a normal `ToolResultItem`, but its bounded excerpt may include a standard `ArtifactReference`. The referenced bytes are stored outside JSONL by SHA-256 and can be retrieved only through a bounded read-only runtime tool. Artifact events are projections; tool results remain the durable transcript source.
 
 `StepContext` is captured at the beginning of a model request. It includes model configuration, working directory, permissions, instruction version, advertised tool definitions, and token budget. A tool call must execute against the same snapshot that advertised it.
 

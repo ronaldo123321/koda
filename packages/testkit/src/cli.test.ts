@@ -8,10 +8,12 @@ import {
 } from "@koda/cli";
 import type { ModelProvider } from "@koda/agent-core";
 import {
+  artifactReferenceSchema,
   itemIdSchema,
   threadIdSchema,
   toolCallIdSchema,
   turnIdSchema,
+  type ArtifactId,
 } from "@koda/protocol";
 import { ScriptedModelProvider } from "@koda/providers";
 import { JsonlEventStore, ReadOnlyWorkspace } from "@koda/runtime-node";
@@ -125,6 +127,21 @@ describe("Phase 1A CLI", () => {
     });
     await sink.append({
       ...metadata,
+      type: "artifact.recorded",
+      payload: {
+        callId: toolCallIdSchema.parse("console-call"),
+        name: "read_file",
+        artifact: artifactReferenceSchema.parse({
+          type: "artifact",
+          id: `sha256:${"a".repeat(64)}`,
+          sha256: "a".repeat(64),
+          bytes: 70_000,
+          mediaType: "text/plain; charset=utf-8",
+        }),
+      },
+    });
+    await sink.append({
+      ...metadata,
       type: "turn.completed",
       payload: {
         steps: 1,
@@ -146,6 +163,7 @@ describe("Phase 1A CLI", () => {
 
     expect(stdout.value).toBe("Hello\n");
     expect(stderr.value).toContain("[koda] using read_file");
+    expect(stderr.value).toContain("[koda] artifact sha256:");
     expect(stderr.value).toContain("120 input (80 cached, 10 cache write)");
     expect(stderr.value).toContain("1/1 requests reported");
   });
@@ -819,6 +837,147 @@ describe("Phase 1A CLI", () => {
 
     expect(providerCreations).toBe(1);
     expect(stderr.value).toContain("THREAD_WORKSPACE_MISMATCH");
+  });
+
+  it("reports a missing output artifact when resuming", async () => {
+    const root = await mkdtemp(join(tmpdir(), "koda-missing-artifact-"));
+    temporaryDirectories.push(root);
+    const workspaceRoot = join(root, "repo");
+    const kodaHome = join(root, "state");
+    const resumedThreadId = threadIdSchema.parse("artifact-resume-thread");
+    await mkdir(workspaceRoot);
+    await writeFile(
+      join(workspaceRoot, "large.txt"),
+      `${"x".repeat(70_000)}\n`,
+    );
+
+    let artifactId: ArtifactId | undefined;
+    const firstProvider = new ScriptedModelProvider([
+      {
+        events: [
+          {
+            type: "tool_call",
+            callId: toolCallIdSchema.parse("artifact-resume-call"),
+            name: "read_file",
+            arguments: {
+              path: "large.txt",
+              start_line: 1,
+              line_count: 1,
+            },
+          },
+          { type: "completed", finishReason: "tool_calls" },
+        ],
+      },
+      {
+        assertRequest: (request) => {
+          const result = request.items.at(-1);
+          if (
+            result?.type !== "tool_result" ||
+            result.status !== "success" ||
+            result.output === undefined ||
+            result.output === null ||
+            typeof result.output !== "object" ||
+            Array.isArray(result.output)
+          ) {
+            throw new Error("Expected an artifact-backed tool result.");
+          }
+          artifactId = artifactReferenceSchema.parse(
+            result.output.content_artifact,
+          ).id;
+        },
+        events: [
+          { type: "assistant_delta", text: "Large output inspected." },
+          { type: "completed", finishReason: "stop" },
+        ],
+      },
+    ]);
+    const secondProvider = new ScriptedModelProvider([
+      {
+        assertRequest: (request) => {
+          const recovery = request.items.find(
+            (item) => item.type === "recovery",
+          );
+          expect(recovery).toMatchObject({
+            type: "recovery",
+            unavailableArtifacts: [{ id: artifactId, reason: "missing" }],
+          });
+          if (recovery?.type === "recovery") {
+            expect(recovery.message).toContain("artifacts are unavailable");
+          }
+        },
+        events: [
+          { type: "assistant_delta", text: "Missing artifact acknowledged." },
+          { type: "completed", finishReason: "stop" },
+        ],
+      },
+    ]);
+    const providers = [firstProvider, secondProvider];
+    let providerCursor = 0;
+    let idCursor = 0;
+    const dependencies: RunCommandDependencies = {
+      openWorkspace: (path) => ReadOnlyWorkspace.open(path),
+      createProvider: () => {
+        const provider = providers[providerCursor];
+        if (provider === undefined) {
+          throw new Error("Unexpected provider creation.");
+        }
+        providerCursor += 1;
+        return provider;
+      },
+      createApprovalBroker: () => ({
+        request: async () => ({ decision: "rejected" }),
+      }),
+      createIds: (resumeThreadId) => {
+        idCursor += 1;
+        return {
+          threadId: resumeThreadId ?? resumedThreadId,
+          turnId: turnIdSchema.parse(`artifact-resume-turn-${idCursor}`),
+          itemIds: new DeterministicItemIdFactory(
+            `artifact-resume-item-${idCursor}`,
+          ),
+        };
+      },
+    };
+    const context = {
+      environment: {
+        OPENAI_API_KEY: "offline-test-key",
+        KODA_HOME: kodaHome,
+      },
+      processDirectory: root,
+      stdout: new MemoryWriter(),
+      stderr: new MemoryWriter(),
+    };
+
+    await expect(
+      runCommand(
+        {
+          prompt: "Inspect the large file.",
+          cwd: workspaceRoot,
+          signal: new AbortController().signal,
+        },
+        context,
+        dependencies,
+      ),
+    ).resolves.toBe(0);
+    if (artifactId === undefined) {
+      throw new Error("Expected the first turn to create an artifact.");
+    }
+    const hash = artifactId.slice("sha256:".length);
+    await rm(join(kodaHome, "artifacts", "sha256", hash.slice(0, 2), hash));
+
+    await expect(
+      runCommand(
+        {
+          prompt: "Continue without the artifact.",
+          cwd: workspaceRoot,
+          resume: resumedThreadId,
+          signal: new AbortController().signal,
+        },
+        context,
+        dependencies,
+      ),
+    ).resolves.toBe(0);
+    expect(context.stderr.value).toContain("unavailable artifacts");
   });
 
   it("renders run help without requiring credentials", async () => {

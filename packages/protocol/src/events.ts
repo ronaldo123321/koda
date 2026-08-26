@@ -7,6 +7,7 @@ import {
   turnIdSchema,
 } from "./ids.js";
 import { conversationItemSchema } from "./items.js";
+import { artifactReferenceSchema } from "./artifacts.js";
 import { tokenUsageSchema, turnUsageSchema } from "./usage.js";
 import { turnContextSnapshotSchema } from "./context.js";
 
@@ -47,6 +48,15 @@ export const agentEventSchema = z.discriminatedUnion("type", [
     ...metadataShape,
     type: z.literal("item.recorded"),
     payload: z.object({ item: conversationItemSchema }),
+  }),
+  z.object({
+    ...metadataShape,
+    type: z.literal("artifact.recorded"),
+    payload: z.object({
+      callId: toolCallIdSchema,
+      name: z.string().min(1),
+      artifact: artifactReferenceSchema,
+    }),
   }),
   z.object({
     ...metadataShape,

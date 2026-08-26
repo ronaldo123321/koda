@@ -1,11 +1,11 @@
 import { z } from "zod";
 
-const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/u);
+import { artifactSha256Schema } from "./artifacts.js";
 
 export const repositoryInstructionSnapshotSchema = z.object({
   path: z.string().min(1),
   bytes: z.number().int().nonnegative(),
-  sha256: sha256Schema,
+  sha256: artifactSha256Schema,
 });
 
 export const turnContextSnapshotSchema = z.object({
@@ -13,7 +13,7 @@ export const turnContextSnapshotSchema = z.object({
   model: z.string().min(1),
   workspaceRoot: z.string().min(1),
   approvalMode: z.enum(["on-request", "never"]),
-  instructionsSha256: sha256Schema,
+  instructionsSha256: artifactSha256Schema,
   repositoryInstructions: z.array(repositoryInstructionSnapshotSchema),
 });
 

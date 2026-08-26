@@ -1,6 +1,6 @@
 # Koda Phase 2 Reliability Roadmap
 
-- Status: In progress — Phase 2A complete; Phase 2B next
+- Status: In progress — Phase 2A and 2B complete; Phase 2C next
 - Date: 2026-08-26
 - Depends on: Phase 1D repository context and token accounting
 
@@ -35,7 +35,7 @@ Status: Complete (2026-08-26)
 
 ### Phase 2B: artifacts and output budgets
 
-Status: In progress
+Status: Complete (2026-08-26)
 
 - Store oversized tool output as content-addressed artifacts.
 - Keep bounded prompt-facing excerpts with byte counts and hashes.
@@ -44,7 +44,7 @@ Status: In progress
 
 ### Phase 2C: context budgets and compaction
 
-Status: Planned
+Status: Next
 
 - Build a provider-neutral ContextEngine.
 - Use measured usage plus conservative estimates for preflight budgets.

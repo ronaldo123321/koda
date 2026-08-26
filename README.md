@@ -6,7 +6,7 @@ The project is building the control plane around a coding model: typed conversat
 
 ## Current status
 
-Phase 2 is in progress. Phase 2A completes durable thread resume and safe local recovery on top of the OpenAI-first Phase 1 runtime:
+Phase 2 is in progress. Phase 2A and 2B now provide durable recovery plus bounded, artifact-backed output on top of the OpenAI-first Phase 1 runtime:
 
 - Versioned Thread, Turn, Item, and Agent Event schemas.
 - A provider-neutral streaming model interface.
@@ -26,9 +26,13 @@ Phase 2 is in progress. Phase 2A completes durable thread resume and safe local 
 - Per-turn context snapshots, globally contiguous event sequences, and typed recovery notices.
 - Conservative recovery for unfinished tool calls: uncertain side effects are reported and never automatically retried.
 - A local thread lease that prevents two live CLI processes from appending to the same log.
+- Content-addressed SHA-256 artifacts for oversized read, search, and command output.
+- Uniform 64 KiB model-facing excerpts with exact byte counts and retrievable full output.
+- A bounded `read_artifact` tool, missing/corrupt artifact recovery diagnostics, and stale temporary-file cleanup.
+- A 256 KiB per-model-step provider-output guard and 64 MiB per-stream artifact hard limit.
 - Offline provider, runtime, CLI, and deterministic agent-loop tests.
 
-Artifacts and output budgets are next in Phase 2B. Nested instruction scoping and compaction remain Phase 2C; process recovery, SQLite metadata, and scenario evaluations remain Phase 2D through 2F. The Anthropic adapter, Ink UI, richer patch operations, and interactive process UX were explicitly moved from Phase 1 to Phase 3. Strong sandboxing, the Rust executor, and any high-risk shell-string support remain Phase 4 work. Workspace writes and process execution require explicit approval by default.
+Context budgets, compaction, and nested instruction scoping are next in Phase 2C; process recovery, SQLite metadata, and scenario evaluations remain Phase 2D through 2F. The Anthropic adapter, Ink UI, richer patch operations, and interactive process UX were explicitly moved from Phase 1 to Phase 3. Strong sandboxing, the Rust executor, and any high-risk shell-string support remain Phase 4 work. Workspace writes and process execution require explicit approval by default.
 
 ## Run the CLI
 
@@ -47,6 +51,8 @@ node apps/cli/dist/main.js run "continue with the next task" --cwd . --resume <t
 ```
 
 Resume reads and validates the local JSONL log, rebuilds provider-neutral history, and starts a fresh OpenAI response chain. A legacy log without a context snapshot, a different workspace, a busy thread, or an invalid log fails closed. If the prior process stopped during a tool call, Koda reports that call as uncertain and does not execute it again automatically.
+
+Oversized tool text keeps a bounded head/tail excerpt in the transcript and stores the complete captured bytes under `KODA_HOME/artifacts/sha256`. Artifact references are content-addressed and deduplicated. The model can call `read_artifact` with an ID, byte offset, and range size; missing or corrupt blobs are reported explicitly when a thread resumes. Koda removes stale temporary captures automatically but retains published blobs until reference-aware garbage collection arrives in Phase 2E.
 
 The model defaults to `gpt-5.6-terra`. Override it with `--model <model>` or `KODA_MODEL`. Runtime event logs are written under `~/.koda/threads` by default; set `KODA_HOME` to move them.
 
@@ -79,7 +85,7 @@ pnpm test
 - `@koda/protocol`: versioned runtime schemas and domain types.
 - `@koda/agent-core`: agent loop, provider and tool ports, event ports.
 - `@koda/providers`: OpenAI Responses and deterministic scripted providers.
-- `@koda/runtime-node`: JSONL persistence plus constrained workspace, patch, and process tools.
+- `@koda/runtime-node`: JSONL and artifact persistence plus constrained workspace, patch, and process tools.
 - `@koda/cli`: single-turn CLI composition root, approval input, and console projection.
 - `@koda/testkit`: deterministic clocks, IDs, tools, and in-memory event storage.
 

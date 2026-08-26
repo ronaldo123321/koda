@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { artifactIdSchema } from "./artifacts.js";
 import { itemIdSchema, toolCallIdSchema, turnIdSchema } from "./ids.js";
 import { jsonObjectSchema, jsonValueSchema } from "./json.js";
 
@@ -67,6 +68,14 @@ export const recoveryItemSchema = z.object({
   previousStatus: z.enum(["completed", "failed", "cancelled", "interrupted"]),
   message: z.string().min(1),
   partialTrailingEventDiscarded: z.boolean(),
+  unavailableArtifacts: z
+    .array(
+      z.object({
+        id: artifactIdSchema,
+        reason: z.enum(["missing", "corrupt"]),
+      }),
+    )
+    .default([]),
   uncertainToolCalls: z.array(
     z.object({
       callId: toolCallIdSchema,

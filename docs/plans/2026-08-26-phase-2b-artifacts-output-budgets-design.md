@@ -1,6 +1,6 @@
 # Koda Phase 2B: Artifacts and Output Budgets
 
-- Status: Accepted for implementation
+- Status: Implemented
 - Date: 2026-08-26
 - Depends on: Phase 2A durable resume and safe recovery
 - Scope: content-addressed tool-output artifacts, bounded model-facing excerpts, artifact retrieval and diagnostics, and provider-output limits
@@ -55,13 +55,13 @@ Tool result compatibility is preserved:
 - `search_text` keeps `matches` and its source-level `truncated` flag, then adds `matches_bytes`, `matches_truncated`, and optional `matches_artifact`.
 - `exec_command` keeps stdout/stderr fields and byte counts. Its existing truncation flags now describe the model-facing excerpt; optional stdout/stderr artifact references hold the complete captured streams.
 
-Search still has a separate raw-result safety ceiling and `max_results`; an artifact cannot claim completeness beyond those source limits. Command capture streams to disk and uses backpressure, so artifact size does not become process memory usage.
+Search still has a separate raw-result safety ceiling and `max_results`; an artifact cannot claim completeness beyond those source limits. Command capture streams to disk and uses backpressure, so artifact size does not become process memory usage. A single captured stream also has a 64 MiB hard ceiling; exceeding it stops capture with `ARTIFACT_OUTPUT_LIMIT_EXCEEDED` instead of allowing unbounded disk growth.
 
 ## 5. Retrieval and lifecycle
 
 `read_artifact` accepts a validated artifact ID, a non-negative byte offset, and at most 64 KiB. It returns a UTF-8-decoded byte range, offsets, total size, and whether more bytes remain. It is read-only, does not require approval, and cannot access arbitrary `KODA_HOME` paths.
 
-On resume, Koda recursively finds standard artifact references in durable tool results and checks that their blob paths exist with the recorded size. Missing references do not prevent recovery because the bounded excerpt remains useful. Instead, the typed recovery item lists missing IDs and its developer notice tells the model that those blobs are unavailable. A direct read returns `ARTIFACT_NOT_FOUND`; a size mismatch returns `ARTIFACT_CORRUPT`.
+On resume, Koda recursively finds standard artifact references in durable tool results and checks that their blob paths exist with the recorded size and digest. Missing or corrupt references do not prevent recovery because the bounded excerpt remains useful. Instead, the typed recovery item lists unavailable IDs and reasons, and its developer notice tells the model that those blobs are unavailable. A direct read returns `ARTIFACT_NOT_FOUND`; a size or digest mismatch returns `ARTIFACT_CORRUPT`.
 
 Every artifact reference recorded in a tool result also produces an `artifact.recorded` event associated with its tool call. The event is observational; the tool result remains the transcript source of truth.
 

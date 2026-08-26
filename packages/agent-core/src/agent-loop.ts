@@ -1,6 +1,7 @@
 import {
   approvalItemSchema,
   assistantMessageItemSchema,
+  collectArtifactReferences,
   conversationItemSchema,
   itemIdSchema,
   toolCallItemSchema,
@@ -48,6 +49,7 @@ export interface AgentLoopOptions {
   approvals?: ApprovalBroker;
   clock?: Clock;
   maxSteps?: number;
+  maxModelOutputBytes?: number;
 }
 
 export interface RunTurnInput {
@@ -85,6 +87,7 @@ export type RunTurnResult =
     };
 
 const DEFAULT_MAX_STEPS = 8;
+const DEFAULT_MAX_MODEL_OUTPUT_BYTES = 262_144;
 
 export class AgentLoop {
   private readonly provider: ModelProvider;
@@ -95,6 +98,7 @@ export class AgentLoop {
   private readonly approvals: ApprovalBroker;
   private readonly clock: Clock;
   private readonly maxSteps: number;
+  private readonly maxModelOutputBytes: number;
 
   public constructor(options: AgentLoopOptions) {
     this.provider = options.provider;
@@ -105,9 +109,17 @@ export class AgentLoop {
     this.approvals = options.approvals ?? rejectApprovalsBroker;
     this.clock = options.clock ?? systemClock;
     this.maxSteps = options.maxSteps ?? DEFAULT_MAX_STEPS;
+    this.maxModelOutputBytes =
+      options.maxModelOutputBytes ?? DEFAULT_MAX_MODEL_OUTPUT_BYTES;
 
     if (!Number.isInteger(this.maxSteps) || this.maxSteps < 1) {
       throw new Error("maxSteps must be a positive integer.");
+    }
+    if (
+      !Number.isInteger(this.maxModelOutputBytes) ||
+      this.maxModelOutputBytes < 1
+    ) {
+      throw new Error("maxModelOutputBytes must be a positive integer.");
     }
   }
 
@@ -173,6 +185,7 @@ export class AgentLoop {
         Extract<ModelEvent, { type: "completed" }>["finishReason"] | undefined;
       let responseId: string | undefined;
       let stepUsage: TokenUsage | undefined;
+      let modelOutputBytes = 0;
 
       try {
         for await (const event of this.provider.stream(
@@ -197,6 +210,17 @@ export class AgentLoop {
             );
           }
           if (event.type === "assistant_delta") {
+            modelOutputBytes += utf8Bytes(event.text);
+            if (modelOutputBytes > this.maxModelOutputBytes) {
+              return this.fail(
+                recorder,
+                items,
+                completedSteps,
+                "MODEL_OUTPUT_LIMIT_EXCEEDED",
+                `The provider output exceeded the ${this.maxModelOutputBytes}-byte limit for one model step.`,
+                usage,
+              );
+            }
             assistantText += event.text;
             if (event.text.length > 0) {
               await recorder.record({
@@ -205,6 +229,17 @@ export class AgentLoop {
               });
             }
           } else if (event.type === "tool_call") {
+            modelOutputBytes += utf8Bytes(JSON.stringify(event.arguments));
+            if (modelOutputBytes > this.maxModelOutputBytes) {
+              return this.fail(
+                recorder,
+                items,
+                completedSteps,
+                "MODEL_OUTPUT_LIMIT_EXCEEDED",
+                `The provider output exceeded the ${this.maxModelOutputBytes}-byte limit for one model step.`,
+                usage,
+              );
+            }
             toolCalls.push(event);
           } else if (event.type === "completed") {
             completedEventSeen = true;
@@ -354,6 +389,21 @@ export class AgentLoop {
           type: "item.recorded",
           payload: { item: resultItem },
         });
+        if (
+          resultItem.type === "tool_result" &&
+          resultItem.output !== undefined
+        ) {
+          for (const artifact of collectArtifactReferences(resultItem.output)) {
+            await recorder.record({
+              type: "artifact.recorded",
+              payload: {
+                callId: call.callId,
+                name: call.name,
+                artifact,
+              },
+            });
+          }
+        }
         await recorder.record({
           type: "tool.completed",
           payload: {
@@ -596,4 +646,8 @@ function copyTurnUsage(usage: TurnUsage): TurnUsage {
     reportedRequests: usage.reportedRequests,
     tokens: { ...usage.tokens },
   };
+}
+
+function utf8Bytes(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
 }

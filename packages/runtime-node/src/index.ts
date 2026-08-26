@@ -1,3 +1,5 @@
+export * from "./artifact-store.js";
+export * from "./artifact-tools.js";
 export * from "./exec-command-tool.js";
 export * from "./jsonl-event-store.js";
 export * from "./read-only-tools.js";

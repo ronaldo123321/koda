@@ -1,4 +1,4 @@
-import { WorkspaceCommandRunner } from "@koda/runtime-node";
+import { ArtifactStore, WorkspaceCommandRunner } from "@koda/runtime-node";
 import { access, mkdir, mkdtemp, rename, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
@@ -168,6 +168,43 @@ describe("WorkspaceCommandRunner", () => {
       stdout_truncated: true,
       stderr_truncated: true,
     });
+  });
+
+  it("stores complete oversized command streams as artifacts", async () => {
+    const root = await createWorkspace();
+    const artifactStore = await ArtifactStore.open(join(root, ".artifacts"));
+    const runner = await WorkspaceCommandRunner.open(root, {
+      maxOutputBytes: 8,
+      artifactStore,
+    });
+    const stdout = "123456789abcdef";
+    const stderr = "ABCDEFGHIJKLMNO";
+    const command = await runner.prepare({
+      argv: [
+        process.execPath,
+        "-e",
+        `process.stdout.write(${JSON.stringify(stdout)}); process.stderr.write(${JSON.stringify(stderr)})`,
+      ],
+    });
+
+    const result = await command.execute(new AbortController().signal);
+
+    expect(result).toMatchObject({
+      stdout_bytes: Buffer.byteLength(stdout),
+      stderr_bytes: Buffer.byteLength(stderr),
+      stdout_truncated: true,
+      stderr_truncated: true,
+      stdout_artifact: { type: "artifact" },
+      stderr_artifact: { type: "artifact" },
+    });
+    expect(Buffer.byteLength(result.stdout)).toBeLessThanOrEqual(8);
+    expect(Buffer.byteLength(result.stderr)).toBeLessThanOrEqual(8);
+    await expect(
+      artifactStore.readRange(result.stdout_artifact?.id ?? "", 0, 65_536),
+    ).resolves.toMatchObject({ content: stdout, truncated: false });
+    await expect(
+      artifactStore.readRange(result.stderr_artifact?.id ?? "", 0, 65_536),
+    ).resolves.toMatchObject({ content: stderr, truncated: false });
   });
 
   it("terminates a command after its timeout and returns an observation", async () => {

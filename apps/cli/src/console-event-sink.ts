@@ -32,6 +32,24 @@ export class ConsoleEventSink implements EventSink {
       return;
     }
 
+    if (event.type === "artifact.recorded") {
+      this.writeDiagnostic(
+        `artifact ${event.payload.artifact.id} (${event.payload.artifact.bytes} bytes)`,
+      );
+      return;
+    }
+
+    if (
+      event.type === "item.recorded" &&
+      event.payload.item.type === "recovery" &&
+      event.payload.item.unavailableArtifacts.length > 0
+    ) {
+      this.writeDiagnostic(
+        `unavailable artifacts: ${event.payload.item.unavailableArtifacts.map((artifact) => `${artifact.id} (${artifact.reason})`).join(", ")}`,
+      );
+      return;
+    }
+
     if (event.type === "tool.completed") {
       this.writeDiagnostic(
         `${event.payload.name} ${event.payload.status === "success" ? "completed" : "failed"}`,

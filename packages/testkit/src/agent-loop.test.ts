@@ -1,5 +1,6 @@
 import { AgentLoop, ToolRegistry } from "@koda/agent-core";
 import {
+  artifactReferenceSchema,
   assistantMessageItemSchema,
   itemIdSchema,
   recoveryItemSchema,
@@ -203,6 +204,136 @@ describe("AgentLoop", () => {
       type: "turn.context",
       payload: { workspaceRoot: "/workspace", model: "test-model" },
     });
+  });
+
+  it("records artifact references emitted by a successful tool", async () => {
+    const artifact = artifactReferenceSchema.parse({
+      type: "artifact",
+      id: `sha256:${"a".repeat(64)}`,
+      sha256: "a".repeat(64),
+      bytes: 100_000,
+      mediaType: "text/plain; charset=utf-8",
+    });
+    const tools = new ToolRegistry();
+    tools.register({
+      spec: {
+        name: "large_output",
+        description: "Return an artifact reference.",
+        inputJsonSchema: {
+          type: "object",
+          properties: {},
+          additionalProperties: false,
+        },
+      },
+      inputSchema: z.object({}).strict(),
+      concurrency: "parallel",
+      effect: "read",
+      execute: async () => ({ excerpt: "bounded", artifact }),
+    });
+    const events = new MemoryEventStore();
+    const callId = toolCallIdSchema.parse("artifact-call");
+    const provider = new ScriptedModelProvider([
+      {
+        events: [
+          {
+            type: "tool_call",
+            callId,
+            name: "large_output",
+            arguments: {},
+          },
+          { type: "completed", finishReason: "tool_calls" },
+        ],
+      },
+      {
+        events: [
+          { type: "assistant_delta", text: "Artifact recorded." },
+          { type: "completed", finishReason: "stop" },
+        ],
+      },
+    ]);
+
+    const result = await new AgentLoop({
+      provider,
+      tools,
+      events,
+      ids: new DeterministicItemIdFactory("artifact-item"),
+      clock: new FixedClock(),
+    }).runTurn({ threadId, turnId, userInput: "Produce output." });
+
+    expect(result.status).toBe("completed");
+    expect(
+      events.events.filter((event) => event.type === "artifact.recorded"),
+    ).toEqual([
+      expect.objectContaining({
+        payload: { callId, name: "large_output", artifact },
+      }),
+    ]);
+  });
+
+  it("fails before recording provider output beyond the byte limit", async () => {
+    const events = new MemoryEventStore();
+    const provider = new ScriptedModelProvider([
+      {
+        events: [
+          { type: "assistant_delta", text: "12345" },
+          { type: "assistant_delta", text: "67890" },
+          { type: "completed", finishReason: "stop" },
+        ],
+      },
+    ]);
+
+    const result = await new AgentLoop({
+      provider,
+      tools: createTools(),
+      events,
+      ids: new DeterministicItemIdFactory("limited-item"),
+      clock: new FixedClock(),
+      maxModelOutputBytes: 8,
+    }).runTurn({ threadId, turnId, userInput: "Stay bounded." });
+
+    expect(result).toMatchObject({
+      status: "failed",
+      error: { code: "MODEL_OUTPUT_LIMIT_EXCEEDED" },
+    });
+    expect(
+      events.events
+        .filter((event) => event.type === "assistant.delta")
+        .map((event) => event.payload),
+    ).toEqual([{ text: "12345" }]);
+  });
+
+  it("does not execute an over-budget provider tool call", async () => {
+    const events = new MemoryEventStore();
+    const provider = new ScriptedModelProvider([
+      {
+        events: [
+          {
+            type: "tool_call",
+            callId: toolCallIdSchema.parse("oversized-call"),
+            name: "echo",
+            arguments: { text: "x".repeat(100) },
+          },
+          { type: "completed", finishReason: "tool_calls" },
+        ],
+      },
+    ]);
+
+    const result = await new AgentLoop({
+      provider,
+      tools: createTools(),
+      events,
+      ids: new DeterministicItemIdFactory("oversized-item"),
+      clock: new FixedClock(),
+      maxModelOutputBytes: 32,
+    }).runTurn({ threadId, turnId, userInput: "Stay bounded." });
+
+    expect(result).toMatchObject({
+      status: "failed",
+      error: { code: "MODEL_OUTPUT_LIMIT_EXCEEDED" },
+    });
+    expect(events.events.some((event) => event.type === "tool.started")).toBe(
+      false,
+    );
   });
 
   it("records per-step usage and aggregates a multi-step turn", async () => {
