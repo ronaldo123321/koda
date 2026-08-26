@@ -1,13 +1,13 @@
 # Koda Agent Architecture Design
 
-- Status: Implemented through Phase 3A; Phase 3B next
+- Status: Implemented through Phase 3B
 - Date: 2026-08-26
 - Owners: Koda maintainers
 - Scope: Local-first coding agent CLI and its reusable agent runtime
 
-## Roadmap status: Phase 3A complete
+## Roadmap status: Phase 3B complete
 
-Phase 0 and Phase 1A through 1D are complete. Phase 2A provides durable local transcript replay, safe interrupted-turn recovery, context snapshots, continuous event sequencing, `--resume`, and single-host writer leases. Phase 2B adds content-addressed output artifacts, uniform model-facing byte budgets, bounded artifact retrieval, recovery diagnostics, and provider-output limits. Phase 2C adds provider-neutral context budgets, measured estimate calibration, append-only compaction, scoped nested repository instructions, and resume provenance. Phase 2D adds a durable side-effect boundary, owned process trees, bounded termination escalation, lifecycle events, and structured interrupted-operation evidence. Phase 2E adds rebuildable SQLite thread metadata, corrupt-database quarantine, source-fingerprint refresh, and credential-free list/show commands. Phase 2F closes the phase with six deterministic reliability scenarios and JSONL-derived, reference-aware artifact collection guarded by a global maintenance lease. Phase 3A adds the shared `@koda/app` application boundary and a strict local stdio JSON-RPC app-server with durable event notifications, interactive approval, cancellation, thread queries, and cleanup semantics. Phase 3B MCP lifecycle design is next. All moved work remains listed explicitly in the Phase 3 roadmap and the revised phase sections below.
+Phase 0 and Phase 1A through 1D are complete. Phase 2A provides durable local transcript replay, safe interrupted-turn recovery, context snapshots, continuous event sequencing, `--resume`, and single-host writer leases. Phase 2B adds content-addressed output artifacts, uniform model-facing byte budgets, bounded artifact retrieval, recovery diagnostics, and provider-output limits. Phase 2C adds provider-neutral context budgets, measured estimate calibration, append-only compaction, scoped nested repository instructions, and resume provenance. Phase 2D adds a durable side-effect boundary, owned process trees, bounded termination escalation, lifecycle events, and structured interrupted-operation evidence. Phase 2E adds rebuildable SQLite thread metadata, corrupt-database quarantine, source-fingerprint refresh, and credential-free list/show commands. Phase 2F closes the phase with six deterministic reliability scenarios and JSONL-derived, reference-aware artifact collection guarded by a global maintenance lease. Phase 3A adds the shared `@koda/app` application boundary and a strict local stdio JSON-RPC app-server with durable event notifications, interactive approval, cancellation, thread queries, and cleanup semantics. Phase 3B adds the official MCP v2 stdio client behind `@koda/mcp-client-node`, strict environment-isolated configuration, frozen tool catalogs, fail-closed external-tool policy, bounded result artifacts, per-turn child lifecycle, and conservative interrupted-call recovery. All moved work remains listed explicitly in the Phase 3 roadmap and the revised phase sections below.
 
 ## Roadmap revision: Phase 1 closeout
 
@@ -406,11 +406,11 @@ Status: **Complete; Phase 2A through 2F are implemented and pass offline regress
 
 ### Phase 3: extensibility
 
-Status: **In progress; Phase 3A app-server boundary is implemented and verified.**
+Status: **In progress; Phase 3A app-server and Phase 3B local MCP boundaries are implemented and verified.**
 
 - Shared transport-neutral application workflow. **Completed in Phase 3A.**
 - Local stdio JSON-RPC app-server protocol. **Completed in Phase 3A.**
-- MCP client and external tool lifecycle. **Phase 3B next.**
+- MCP client and external tool lifecycle. **Completed in Phase 3B for local stdio Tools. HTTP/OAuth and the non-Tool capability surface remain deferred as documented.**
 - IDE and desktop integration boundary.
 - Hooks and provider extensions.
 - Anthropic adapter. **Moved from Phase 1.**

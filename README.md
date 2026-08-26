@@ -6,7 +6,7 @@ The project is building the control plane around a coding model: typed conversat
 
 ## Current status
 
-Phase 3A is complete. It adds a transport-neutral application layer and a local stdio JSON-RPC app-server on top of the completed Phase 0 through Phase 2 runtime:
+Phase 3B is complete. It adds local MCP stdio tool integration on top of the Phase 3A transport-neutral application layer and the completed Phase 0 through Phase 2 runtime:
 
 - Versioned Thread, Turn, Item, and Agent Event schemas.
 - A provider-neutral streaming model interface.
@@ -50,9 +50,13 @@ Phase 3A is complete. It adds a transport-neutral application layer and a local 
 - A strict, versioned, newline-delimited JSON-RPC 2.0 app-server over local stdio.
 - Durable-before-notify event streaming, one-shot interactive approvals, active-turn cancellation, and graceful shutdown/EOF cleanup.
 - Credential-free app-server thread list/get operations and different-thread concurrency guarded by existing per-thread leases.
+- Official MCP v2 client integration for explicitly configured local stdio servers, with one isolated session per turn.
+- Frozen, validated MCP tool catalogs exposed as stable `mcp__<server>__<tool>` aliases without importing MCP into `agent-core`.
+- Fail-closed MCP effects: external tools require approval by default, and only explicitly reviewed `read` tools bypass approval.
+- MCP call timeouts, turn cancellation, reverse-order child cleanup, bounded binary/result normalization, artifact-backed large output, and conservative interrupted-call recovery.
 - Offline provider, runtime, CLI, and deterministic agent-loop tests.
 
-Phase 3B MCP client and external-tool lifecycle design is next. Provider-assisted semantic compaction, exact provider tokenizers, the Anthropic adapter, Ink UI, richer patch operations, artifact client APIs, and interactive process UX remain later Phase 3 slices. Shared or remote artifact stores, remote app-server transports, strong sandboxing, Windows Job Objects, crash-surviving supervision, the Rust executor, and any high-risk shell-string support remain Phase 4 work. Parent/child thread lineage and multi-agent scenario matrices remain Phase 5 work. Workspace writes and process execution require explicit approval by default.
+Provider-assisted semantic compaction, exact provider tokenizers, the Anthropic adapter, Ink UI, richer patch operations, artifact client APIs, interactive process UX, and the non-Tool MCP capability surface remain later Phase 3 slices. Remote MCP/HTTP/OAuth, shared or remote artifact stores, remote app-server transports, strong sandboxing, Windows Job Objects, crash-surviving supervision, the Rust executor, and any high-risk shell-string support remain Phase 4 work. Parent/child thread lineage and multi-agent scenario matrices remain Phase 5 work. Workspace writes, process execution, and MCP tools not explicitly classified as read require approval by default.
 
 ## Run the CLI
 
@@ -97,6 +101,33 @@ The process accepts one JSON-RPC 2.0 object per UTF-8 line. `initialize` must be
 ```
 
 Responses and `turn/event` / `turn/finished` notifications use stdout exclusively; diagnostics use stderr. Clients answer an `approval.requested` event with `approval/resolve`, may stop a live turn with `turn/cancel`, and should finish with `shutdown`. Provider credentials are server configuration and are never protocol fields.
+
+## Configure local MCP tools
+
+Create `${KODA_HOME:-$HOME/.koda}/mcp.json` to start local stdio MCP servers for each turn. An absent default file disables MCP. `KODA_MCP_CONFIG` may select another file relative to the process directory or by absolute path.
+
+```json
+{
+  "version": 1,
+  "servers": {
+    "github": {
+      "command": "node",
+      "args": ["/absolute/path/to/github-mcp-server.js"],
+      "cwd": "/absolute/path/to/optional/server-directory",
+      "env": ["GITHUB_TOKEN"],
+      "startup_timeout_ms": 15000,
+      "call_timeout_ms": 60000,
+      "tools": {
+        "list_repositories": { "effect": "read" }
+      }
+    }
+  }
+}
+```
+
+`command` and `args` are passed directly without a shell. `env` contains parent environment variable names, never secret values; each child receives only a small runtime baseline plus those allowlisted names. Missing variables, relative or nonexistent `cwd` values, malformed schemas, oversized catalogs, and stale read classifications fail the turn before the model sees a partial catalog.
+
+Every discovered tool defaults to effect `execute`. Under the default `on-request` mode it needs one approval per call; under `never` it is denied. Add `{ "effect": "read" }` only after reviewing that exact server tool. MCP annotations are treated as untrusted hints and cannot weaken this policy. Phase 3B supports MCP Tools over local stdio only; HTTP/OAuth, resources, prompts, sampling, elicitation, dynamic catalog refresh, and cross-turn shared sessions are intentionally deferred.
 
 Preview old unreferenced artifacts without provider credentials, then delete them only after reviewing the report:
 
@@ -146,6 +177,7 @@ pnpm eval:scenarios
 - `@koda/agent-core`: agent loop, provider and tool ports, event ports.
 - `@koda/providers`: OpenAI Responses and deterministic scripted providers.
 - `@koda/runtime-node`: JSONL, artifact, and rebuildable SQLite metadata persistence plus constrained workspace, patch, and process tools.
+- `@koda/mcp-client-node`: strict local MCP configuration, official stdio client lifecycle, tool adaptation, policy metadata, and bounded result conversion.
 - `@koda/app`: transport-neutral turn orchestration and credential-free thread use cases.
 - `@koda/cli`: line-oriented command parsing, terminal approval, and console projection over `@koda/app`.
 - `@koda/app-server`: local stdio JSON-RPC transport, active-turn coordination, and interactive approval routing.
@@ -168,5 +200,6 @@ pnpm eval:scenarios
 - [Phase 2F scenarios and artifact GC design](docs/plans/2026-08-26-phase-2f-scenarios-artifact-gc-design.md)
 - [Phase 3 extensibility roadmap](docs/plans/2026-08-26-phase-3-roadmap.md)
 - [Phase 3A local stdio app-server design](docs/plans/2026-08-26-phase-3a-stdio-app-server-design.md)
+- [Phase 3B local MCP client design](docs/plans/2026-08-26-phase-3b-mcp-client-design.md)
 
 The model can propose actions, but the Koda runtime owns validation, policy, approval, and execution. User interfaces consume typed events and do not own agent state.

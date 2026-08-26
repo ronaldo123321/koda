@@ -1,6 +1,6 @@
 # Koda Phase 3B: Local MCP Client and External Tool Lifecycle
 
-- Status: Accepted for implementation (2026-08-26)
+- Status: Implemented and verified (2026-08-26)
 - Date: 2026-08-26
 - Depends on: Phase 3A transport-neutral application boundary
 - Scope: official MCP v2 client, explicitly configured local stdio servers, tool discovery and invocation, fail-closed effect policy, bounded outputs, cancellation, cleanup, and conservative recovery
@@ -78,7 +78,7 @@ Approval previews identify the MCP server, original tool, stable alias, and boun
 
 ## 6. Invocation, outputs, and errors
 
-When the model calls an MCP alias, the adapter invokes the owning client's `callTool` with the original name and unchanged JSON arguments. Each call is bound to the turn abort signal and a configured Phase 3B timeout. Calls for one server are treated as exclusive initially because arbitrary external tools may share server session state; different servers and Koda-native read tools may still run independently according to the existing scheduler.
+When the model calls an MCP alias, the adapter invokes the owning client's `callTool` with the original name and unchanged JSON arguments. Each call is bound to the turn abort signal and a configured Phase 3B timeout. MCP tools are registered as exclusive because arbitrary external tools may share server session state. The current agent loop executes tool calls serially; the exclusive declaration preserves that safety constraint if a later scheduler introduces parallel execution.
 
 The complete MCP result is normalized into JSON containing `content`, optional `structured_content`, optional resource links or embedded resources, and the `is_error` flag. Binary content is represented by bounded metadata in Phase 3B rather than being copied unbounded into JSONL. The normalized JSON is serialized deterministically and passed through `ArtifactStore.materializeText`. Small results return parsed JSON inline; oversized results return a bounded textual excerpt plus byte counts and an artifact reference that can be read with the existing `read_artifact` tool.
 

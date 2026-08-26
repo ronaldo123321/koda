@@ -1,6 +1,6 @@
 # Koda Phase 3 Extensibility Roadmap
 
-- Status: In progress — Phase 3A implemented (2026-08-26)
+- Status: In progress — Phase 3A and Phase 3B implemented (2026-08-26)
 - Date: 2026-08-26
 - Depends on: Phase 2 reliability closure
 - Scope: stable client/tool/provider extension boundaries without weakening the local runtime's durable state and approval guarantees
@@ -26,15 +26,15 @@ The detailed contract and deferred boundaries are in the [Phase 3A app-server de
 
 ## Phase 3B: MCP client and external tool lifecycle
 
-Status: **Next planned design slice.**
+Status: **Complete.**
 
-- Discover and configure local MCP servers without importing MCP concepts into `agent-core`.
-- Translate MCP tools into the existing validated tool registry and preserve effect classification, approval, cancellation, and output budgets.
-- Define server start, capability negotiation, health, timeout, disconnect, and shutdown behavior.
-- Persist enough tool identity and lifecycle evidence for safe resume without automatically replaying uncertain external effects.
-- Keep credentials in server-side configuration; do not pass secrets through model-visible arguments or the app-server protocol.
+- Discover and configure local stdio MCP servers without importing MCP concepts into `agent-core`. **Completed with `@koda/mcp-client-node`.**
+- Translate MCP tools into the existing validated tool registry and preserve effect classification, approval, cancellation, and output budgets. **Completed with fail-closed execute defaults and explicit reviewed read overrides.**
+- Define server start, initialization, frozen discovery, timeout, disconnect, cancellation, and reverse-order shutdown behavior. **Completed with one isolated session per turn.**
+- Persist enough tool identity and lifecycle evidence for safe resume without automatically replaying uncertain external effects. **Completed through stable aliases and the existing durable execution boundary.**
+- Keep credentials in server-side configuration; do not pass secrets through model-visible arguments or the app-server protocol. **Completed with environment-name allowlists and no raw wire persistence.**
 
-Remote MCP hosting, shared tenants, and network sandbox policy remain Phase 4 concerns.
+The detailed contract, security model, verification matrix, and deferred boundaries are in the [Phase 3B MCP client design](2026-08-26-phase-3b-mcp-client-design.md). MCP HTTP/OAuth, remote hosting, shared sessions or tenants, and network sandbox policy remain Phase 4 concerns. Resources, prompts, subscriptions, sampling, elicitation, and dynamic tool refresh remain later measured Phase 3 capability slices.
 
 ## Later Phase 3 slices
 
