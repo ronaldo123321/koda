@@ -21,11 +21,33 @@ importers:
         specifier: ^3.2.4
         version: 3.2.7(@types/node@22.20.1)
 
+  apps/app-server:
+    dependencies:
+      '@koda/agent-core':
+        specifier: workspace:*
+        version: link:../../packages/agent-core
+      '@koda/app':
+        specifier: workspace:*
+        version: link:../../packages/app
+      '@koda/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
+      zod:
+        specifier: ^4.1.5
+        version: 4.4.3
+    devDependencies:
+      '@types/node':
+        specifier: ^22.18.0
+        version: 22.20.1
+
   apps/cli:
     dependencies:
       '@koda/agent-core':
         specifier: workspace:*
         version: link:../../packages/agent-core
+      '@koda/app':
+        specifier: workspace:*
+        version: link:../../packages/app
       '@koda/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
@@ -51,6 +73,25 @@ importers:
       zod:
         specifier: ^4.1.5
         version: 4.4.3
+
+  packages/app:
+    dependencies:
+      '@koda/agent-core':
+        specifier: workspace:*
+        version: link:../agent-core
+      '@koda/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      '@koda/providers':
+        specifier: workspace:*
+        version: link:../providers
+      '@koda/runtime-node':
+        specifier: workspace:*
+        version: link:../runtime-node
+    devDependencies:
+      '@types/node':
+        specifier: ^22.18.0
+        version: 22.20.1
 
   packages/protocol:
     dependencies:
@@ -104,6 +145,12 @@ importers:
         specifier: ^4.1.5
         version: 4.4.3
     devDependencies:
+      '@koda/app':
+        specifier: workspace:*
+        version: link:../app
+      '@koda/app-server':
+        specifier: workspace:*
+        version: link:../../apps/app-server
       '@koda/cli':
         specifier: workspace:*
         version: link:../../apps/cli

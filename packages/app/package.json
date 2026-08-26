@@ -1,5 +1,5 @@
 {
-  "name": "@koda/testkit",
+  "name": "@koda/app",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -19,15 +19,10 @@
   "dependencies": {
     "@koda/agent-core": "workspace:*",
     "@koda/protocol": "workspace:*",
-    "zod": "^4.1.5"
+    "@koda/providers": "workspace:*",
+    "@koda/runtime-node": "workspace:*"
   },
   "devDependencies": {
-    "@koda/app": "workspace:*",
-    "@koda/app-server": "workspace:*",
-    "@koda/cli": "workspace:*",
-    "@koda/providers": "workspace:*",
-    "@koda/runtime-node": "workspace:*",
-    "@types/node": "^22.18.0",
-    "vitest": "^3.2.4"
+    "@types/node": "^22.18.0"
   }
 }

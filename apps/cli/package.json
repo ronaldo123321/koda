@@ -21,6 +21,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@koda/app": "workspace:*",
     "@koda/agent-core": "workspace:*",
     "@koda/protocol": "workspace:*",
     "@koda/providers": "workspace:*",
