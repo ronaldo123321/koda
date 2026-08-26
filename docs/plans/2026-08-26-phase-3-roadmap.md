@@ -1,6 +1,6 @@
 # Koda Phase 3 Extensibility Roadmap
 
-- Status: In progress — Phase 3A, Phase 3B, and Phase 3C implemented (2026-08-26)
+- Status: In progress — Phase 3A, Phase 3B, and Phase 3C implemented; Phase 3D approved (2026-08-26)
 - Date: 2026-08-26
 - Depends on: Phase 2 reliability closure
 - Scope: stable client/tool/provider extension boundaries without weakening the local runtime's durable state and approval guarantees
@@ -49,6 +49,20 @@ Status: **Complete.**
 
 The complete contract, configuration table, recovery rules, verification matrix, and deferred boundaries are in the [Phase 3C multi-provider design](2026-08-26-phase-3c-multi-provider-design.md).
 
+## Phase 3D: Ink chat REPL
+
+Status: **Approved for implementation.**
+
+- Add a local interactive Ink client that starts and owns one stdio app-server child process.
+- Introduce a reusable Node app-server client for NDJSON framing, JSON-RPC request correlation, typed notifications, bounded diagnostics, timeouts, and graceful child cleanup.
+- Route all TUI turns, approvals, cancellation, thread operations, and shutdown through app-server protocol v2 instead of importing `@koda/app` directly.
+- Render completed transcript entries through Ink static output and keep the active response, tool state, approval card, status, and prompt in a bounded live region.
+- Support startup provider/model/workspace/resume configuration, sequential multi-turn chat, one-shot interactive approvals, token usage, visible errors, `/help`, `/status`, `/clear`, `/exit`, `Esc` cancellation, and context-sensitive `Ctrl+C`.
+- Keep approval fail-closed on cancellation, malformed protocol, child failure, or client loss.
+- Verify the protocol client, controller state machine, focused Ink rendering, real app-server initialization/shutdown, and all existing reliability gates without live provider credentials.
+
+The complete component boundary, interaction contract, failure semantics, verification matrix, and deferred destinations are in the [Phase 3D Ink chat REPL design](2026-08-26-phase-3d-ink-chat-repl-design.md).
+
 ## Later Phase 3 slices
 
 ### Provider and context extensions after Phase 3C
@@ -61,8 +75,10 @@ The complete contract, configuration table, recovery rules, verification matrix,
 
 ### Interactive clients and client APIs
 
-- Build an Ink chat REPL, then IDE or desktop clients on the Phase 3A application protocol.
-- Add artifact range/download, rich preview, attachments, context-budget inspection, and instruction-change views as versioned client APIs.
+- Complete the approved Phase 3D Ink chat REPL on the Phase 3A application protocol.
+- In Phase 3E, add thread selection, history search, full-screen navigation, custom scrolling, runtime provider/model switching, and settings panels.
+- In Phase 3E or Phase 4, add Markdown/syntax rendering, diff and artifact viewers, range/download APIs, attachments, context-budget inspection, and instruction-change views.
+- Build IDE or desktop clients only after the local protocol client and TUI have validated the shared boundary.
 - Keep presentation state outside the agent runtime and keep approvals fail-closed on client loss.
 
 ### Richer local workflows
@@ -74,7 +90,8 @@ The complete contract, configuration table, recovery rules, verification matrix,
 
 ## Explicitly outside Phase 3
 
-- HTTP/WebSocket remote access, authentication, multi-client broadcasting, shared artifact stores, strong OS sandboxing, Windows Job Objects, crash-surviving process supervision, signed releases, a Rust executor, and any retained shell-string execution: **Phase 4 hardening and distribution**.
+- HTTP/WebSocket remote access, authentication, reconnect/resubscribe, multi-client broadcasting, shared app-server processes, shared artifact stores, strong OS sandboxing, Windows Job Objects, crash-surviving process supervision, signed releases, a Rust executor, and any retained shell-string execution: **Phase 4 hardening and distribution**.
+- PTY-backed foreground/background workflow panes and managed process UX: **Phase 4 process UX and hardening**.
 - Child agents, parent/child thread lineage, mailboxes, wait/interrupt, worktree isolation, curated project memory, and multi-agent scenario matrices: **Phase 5 multi-agent and memory**.
 
 ## Phase 3 exit criterion
