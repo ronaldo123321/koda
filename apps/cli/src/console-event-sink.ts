@@ -16,6 +16,11 @@ export class ConsoleEventSink implements EventSink {
   public constructor(private readonly options: ConsoleEventSinkOptions) {}
 
   public async append(event: AgentEvent): Promise<void> {
+    if (event.type === "turn.started") {
+      this.writeDiagnostic(`thread ${event.threadId}`);
+      return;
+    }
+
     if (event.type === "assistant.delta") {
       this.options.stdout.write(event.payload.text);
       this.answerEndsWithNewline = event.payload.text.endsWith("\n");

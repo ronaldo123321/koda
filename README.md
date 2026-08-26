@@ -6,7 +6,7 @@ The project is building the control plane around a coding model: typed conversat
 
 ## Current status
 
-Phase 1D closes the OpenAI-first usable local-agent milestone and prepares the event model for Phase 2 reliability:
+Phase 2 is in progress. Phase 2A completes durable thread resume and safe local recovery on top of the OpenAI-first Phase 1 runtime:
 
 - Versioned Thread, Turn, Item, and Agent Event schemas.
 - A provider-neutral streaming model interface.
@@ -22,9 +22,13 @@ Phase 1D closes the OpenAI-first usable local-agent milestone and prepares the e
 - Bounded workspace-root `AGENTS.md` and `KODA.md` instruction loading with stable ordering and hashes.
 - Provider-neutral per-response token usage events and turn-level aggregation.
 - A single-turn `koda run` command with JSONL event persistence.
+- Cross-process `koda run --resume <thread-id>` using normalized local history replay.
+- Per-turn context snapshots, globally contiguous event sequences, and typed recovery notices.
+- Conservative recovery for unfinished tool calls: uncertain side effects are reported and never automatically retried.
+- A local thread lease that prevents two live CLI processes from appending to the same log.
 - Offline provider, runtime, CLI, and deterministic agent-loop tests.
 
-Nested instruction scoping, resume, compaction, artifacts, SQLite metadata, and scenario evaluations are scheduled for Phase 2. The Anthropic adapter, Ink UI, richer patch operations, and interactive process UX were explicitly moved from Phase 1 to Phase 3. Strong sandboxing, the Rust executor, and any high-risk shell-string support remain Phase 4 work. Workspace writes and process execution require explicit approval by default.
+Artifacts and output budgets are next in Phase 2B. Nested instruction scoping and compaction remain Phase 2C; process recovery, SQLite metadata, and scenario evaluations remain Phase 2D through 2F. The Anthropic adapter, Ink UI, richer patch operations, and interactive process UX were explicitly moved from Phase 1 to Phase 3. Strong sandboxing, the Rust executor, and any high-risk shell-string support remain Phase 4 work. Workspace writes and process execution require explicit approval by default.
 
 ## Run the CLI
 
@@ -35,6 +39,14 @@ pnpm build
 export OPENAI_API_KEY=...
 node apps/cli/dist/main.js run "explain this repository" --cwd .
 ```
+
+Koda prints the generated thread ID at turn start. Continue it from a later CLI process with the same canonical workspace:
+
+```bash
+node apps/cli/dist/main.js run "continue with the next task" --cwd . --resume <thread-id>
+```
+
+Resume reads and validates the local JSONL log, rebuilds provider-neutral history, and starts a fresh OpenAI response chain. A legacy log without a context snapshot, a different workspace, a busy thread, or an invalid log fails closed. If the prior process stopped during a tool call, Koda reports that call as uncertain and does not execute it again automatically.
 
 The model defaults to `gpt-5.6-terra`. Override it with `--model <model>` or `KODA_MODEL`. Runtime event logs are written under `~/.koda/threads` by default; set `KODA_HOME` to move them.
 
@@ -79,5 +91,7 @@ pnpm test
 - [Phase 1B safe patch design](docs/plans/2026-08-26-phase-1b-safe-patch-design.md)
 - [Phase 1C safe exec design](docs/plans/2026-08-26-phase-1c-safe-exec-design.md)
 - [Phase 1D context and accounting design](docs/plans/2026-08-26-phase-1d-context-accounting-design.md)
+- [Phase 2 reliability roadmap](docs/plans/2026-08-26-phase-2-roadmap.md)
+- [Phase 2A durable resume and recovery design](docs/plans/2026-08-26-phase-2a-resume-recovery-design.md)
 
 The model can propose actions, but the Koda runtime owns validation, policy, approval, and execution. User interfaces consume typed events and do not own agent state.

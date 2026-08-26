@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
 
 import {
@@ -12,16 +12,23 @@ import {
 } from "@koda/agent-core";
 import {
   itemIdSchema,
+  recoveryItemSchema,
   threadIdSchema,
+  turnContextSnapshotSchema,
   turnIdSchema,
+  type ConversationItem,
   type ItemId,
 } from "@koda/protocol";
 import { createOpenAIResponsesProvider } from "@koda/providers";
 import {
   JsonlEventStore,
   ReadOnlyWorkspace,
+  ThreadLease,
+  ThreadRecoveryError,
   WorkspaceCommandRunner,
+  assertResumeWorkspace,
   loadRepositoryInstructions,
+  recoverThread,
   registerExecCommandTool,
   registerReadOnlyWorkspaceTools,
   registerStructuredPatchTool,
@@ -41,6 +48,7 @@ export interface RunCommandInput {
   prompt: string;
   cwd?: string;
   model?: string;
+  resume?: string;
   signal: AbortSignal;
 }
 
@@ -59,7 +67,7 @@ export interface RunCommandDependencies {
     instructions: string,
   ): ModelProvider;
   createApprovalBroker(context: RunCommandContext): ApprovalBroker;
-  createIds(): {
+  createIds(resumeThreadId?: ReturnType<typeof threadIdSchema.parse>): {
     threadId: ReturnType<typeof threadIdSchema.parse>;
     turnId: ReturnType<typeof turnIdSchema.parse>;
     itemIds: ItemIdFactory;
@@ -80,8 +88,8 @@ const productionDependencies: RunCommandDependencies = {
       input: context.stdin ?? process.stdin,
       output: context.stderr,
     }),
-  createIds: () => ({
-    threadId: threadIdSchema.parse(randomUUID()),
+  createIds: (resumeThreadId) => ({
+    threadId: resumeThreadId ?? threadIdSchema.parse(randomUUID()),
     turnId: turnIdSchema.parse(randomUUID()),
     itemIds: new RandomItemIdFactory(),
   }),
@@ -101,6 +109,7 @@ export async function runCommand(
           : { approvalMode: input.approvalMode }),
         ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
         ...(input.model === undefined ? {} : { model: input.model }),
+        ...(input.resume === undefined ? {} : { resume: input.resume }),
       },
       context.environment,
       context.processDirectory,
@@ -121,12 +130,51 @@ export async function runCommand(
     return 2;
   }
 
+  let lease: ThreadLease | undefined;
   try {
     const workspace = await dependencies.openWorkspace(configuration.cwd);
     const repositoryInstructions = await loadRepositoryInstructions(
       workspace.root,
     );
-    const ids = dependencies.createIds();
+    const instructions = buildInstructions(
+      workspace.root,
+      repositoryInstructions,
+    );
+    const ids = dependencies.createIds(configuration.resumeThreadId);
+    const eventLogPath = join(
+      configuration.kodaHome,
+      "threads",
+      `${ids.threadId}.jsonl`,
+    );
+    lease = await ThreadLease.acquire(eventLogPath);
+    const eventStore = new JsonlEventStore(eventLogPath);
+    let history: ConversationItem[] = [];
+    let prefaceItems: ConversationItem[] = [];
+    let initialSequence = 0;
+
+    if (configuration.resumeThreadId !== undefined) {
+      const readResult = await eventStore.readAll();
+      const recovered = recoverThread(readResult, ids.threadId);
+      assertResumeWorkspace(recovered, workspace.root);
+      history = recovered.history;
+      prefaceItems = [
+        recoveryItemSchema.parse({
+          type: "recovery",
+          id: ids.itemIds.next(),
+          previousTurnId: recovered.previousTurnId,
+          previousStatus: recovered.previousStatus,
+          message: recovered.message,
+          partialTrailingEventDiscarded:
+            recovered.partialTrailingEventDiscarded,
+          uncertainToolCalls: recovered.uncertainToolCalls,
+        }),
+      ];
+      initialSequence = recovered.nextSequence;
+      await eventStore.prepareForAppend({
+        discardPartialTrailingLine: recovered.partialTrailingEventDiscarded,
+      });
+    }
+
     const tools = new ToolRegistry();
     registerReadOnlyWorkspaceTools(tools, workspace);
     registerStructuredPatchTool(tools, workspace);
@@ -134,17 +182,11 @@ export async function runCommand(
       environment: context.environment,
     });
     registerExecCommandTool(tools, commandRunner);
-    const eventStore = new JsonlEventStore(
-      join(configuration.kodaHome, "threads", `${ids.threadId}.jsonl`),
-    );
     const consoleEvents = new ConsoleEventSink({
       stdout: context.stdout,
       stderr: context.stderr,
     });
-    const provider = dependencies.createProvider(
-      configuration,
-      buildInstructions(workspace.root, repositoryInstructions),
-    );
+    const provider = dependencies.createProvider(configuration, instructions);
     const loop = new AgentLoop({
       provider,
       tools,
@@ -159,6 +201,25 @@ export async function runCommand(
       turnId: ids.turnId,
       userInput: input.prompt.trim(),
       signal: input.signal,
+      history,
+      prefaceItems,
+      initialSequence,
+      context: turnContextSnapshotSchema.parse({
+        provider: "openai",
+        model: configuration.model,
+        workspaceRoot: workspace.root,
+        approvalMode: configuration.approvalMode,
+        instructionsSha256: createHash("sha256")
+          .update(instructions)
+          .digest("hex"),
+        repositoryInstructions: repositoryInstructions.sources.map(
+          (source) => ({
+            path: source.path,
+            bytes: source.bytes,
+            sha256: source.sha256,
+          }),
+        ),
+      }),
     });
     if (result.status === "completed") {
       return 0;
@@ -173,8 +234,20 @@ export async function runCommand(
       return 130;
     }
     const message = error instanceof Error ? error.message : String(error);
-    context.stderr.write(`[koda] ${message}\n`);
+    const code = error instanceof ThreadRecoveryError ? `${error.code}: ` : "";
+    context.stderr.write(`[koda] ${code}${message}\n`);
     return 1;
+  } finally {
+    if (lease !== undefined) {
+      try {
+        await lease.release();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        context.stderr.write(
+          `[koda] warning: thread lease cleanup failed: ${message}\n`,
+        );
+      }
+    }
   }
 }
 

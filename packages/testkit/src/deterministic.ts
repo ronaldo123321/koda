@@ -4,9 +4,11 @@ import { itemIdSchema, type ItemId } from "@koda/protocol";
 export class DeterministicItemIdFactory implements ItemIdFactory {
   private cursor = 0;
 
+  public constructor(private readonly prefix = "item") {}
+
   public next(): ItemId {
     this.cursor += 1;
-    return itemIdSchema.parse(`item-${this.cursor}`);
+    return itemIdSchema.parse(`${this.prefix}-${this.cursor}`);
   }
 }
 

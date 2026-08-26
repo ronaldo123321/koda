@@ -14,7 +14,7 @@ import {
   turnIdSchema,
 } from "@koda/protocol";
 import { ScriptedModelProvider } from "@koda/providers";
-import { ReadOnlyWorkspace } from "@koda/runtime-node";
+import { JsonlEventStore, ReadOnlyWorkspace } from "@koda/runtime-node";
 import {
   access,
   mkdir,
@@ -75,6 +75,13 @@ describe("Phase 1A CLI", () => {
       "/workspace",
     );
     expect(approvalFromCli.approvalMode).toBe("never");
+    expect(
+      resolveRunConfiguration(
+        { resume: "thread_123" },
+        { OPENAI_API_KEY: "test-key" },
+        "/workspace",
+      ).resumeThreadId,
+    ).toBe("thread_123");
     expect(() =>
       resolveRunConfiguration(
         { approvalMode: "always" },
@@ -82,6 +89,13 @@ describe("Phase 1A CLI", () => {
         "/workspace",
       ),
     ).toThrow("Approval mode must be either");
+    expect(() =>
+      resolveRunConfiguration(
+        { resume: "../thread" },
+        { OPENAI_API_KEY: "test-key" },
+        "/workspace",
+      ),
+    ).toThrow("Resume thread ID");
   });
 
   it("streams answer deltas to stdout and tool status to stderr", async () => {
@@ -606,6 +620,207 @@ describe("Phase 1A CLI", () => {
     expect(stderr.value).toContain("not valid UTF-8");
   });
 
+  it("resumes a completed thread from durable JSONL history", async () => {
+    const root = await mkdtemp(join(tmpdir(), "koda-resume-cli-"));
+    temporaryDirectories.push(root);
+    const workspaceRoot = join(root, "repo");
+    const kodaHome = join(root, "state");
+    const resumedThreadId = threadIdSchema.parse("resume-cli-thread");
+    await mkdir(workspaceRoot);
+
+    const providers = [
+      new ScriptedModelProvider([
+        {
+          events: [
+            { type: "assistant_delta", text: "First turn." },
+            { type: "completed", finishReason: "stop" },
+          ],
+        },
+      ]),
+      new ScriptedModelProvider([
+        {
+          assertRequest: (request) => {
+            expect(request.items.map((item) => item.type)).toEqual([
+              "user_message",
+              "assistant_message",
+              "recovery",
+              "user_message",
+            ]);
+            expect(request.items[2]).toMatchObject({
+              type: "recovery",
+              previousStatus: "completed",
+              uncertainToolCalls: [],
+            });
+          },
+          events: [
+            { type: "assistant_delta", text: "Second turn." },
+            { type: "completed", finishReason: "stop" },
+          ],
+        },
+      ]),
+    ];
+    let providerCursor = 0;
+    let idCursor = 0;
+    const dependencies: RunCommandDependencies = {
+      openWorkspace: (path) => ReadOnlyWorkspace.open(path),
+      createProvider: () => {
+        const provider = providers[providerCursor];
+        if (provider === undefined) {
+          throw new Error("Unexpected provider creation.");
+        }
+        providerCursor += 1;
+        return provider;
+      },
+      createApprovalBroker: () => ({
+        request: async () => ({ decision: "rejected" }),
+      }),
+      createIds: (resumeThreadId) => {
+        idCursor += 1;
+        return {
+          threadId: resumeThreadId ?? resumedThreadId,
+          turnId: turnIdSchema.parse(`resume-cli-turn-${idCursor}`),
+          itemIds: new DeterministicItemIdFactory(
+            `resume-cli-item-${idCursor}`,
+          ),
+        };
+      },
+    };
+    const context = {
+      environment: {
+        OPENAI_API_KEY: "offline-test-key",
+        KODA_HOME: kodaHome,
+      },
+      processDirectory: root,
+      stdout: new MemoryWriter(),
+      stderr: new MemoryWriter(),
+    };
+
+    await expect(
+      runCommand(
+        {
+          prompt: "Start.",
+          cwd: workspaceRoot,
+          signal: new AbortController().signal,
+        },
+        context,
+        dependencies,
+      ),
+    ).resolves.toBe(0);
+    await expect(
+      runCommand(
+        {
+          prompt: "Continue.",
+          cwd: workspaceRoot,
+          resume: resumedThreadId,
+          signal: new AbortController().signal,
+        },
+        context,
+        dependencies,
+      ),
+    ).resolves.toBe(0);
+
+    const eventLogPath = join(kodaHome, "threads", `${resumedThreadId}.jsonl`);
+    const eventLog = await new JsonlEventStore(eventLogPath).readAll();
+    expect(eventLog.diagnostics).toEqual([]);
+    expect(eventLog.events.map((event) => event.sequence)).toEqual(
+      eventLog.events.map((_, index) => index),
+    );
+    expect(
+      eventLog.events.filter((event) => event.type === "turn.started"),
+    ).toHaveLength(2);
+    expect(
+      eventLog.events.filter((event) => event.type === "turn.context"),
+    ).toHaveLength(2);
+    expect(
+      eventLog.events.filter(
+        (event) =>
+          event.type === "item.recorded" &&
+          event.payload.item.type === "recovery",
+      ),
+    ).toHaveLength(1);
+    expect(context.stdout.value).toBe("First turn.\nSecond turn.\n");
+    await expect(access(`${eventLogPath}.lock`)).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
+  it("rejects a resume from another workspace before provider creation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "koda-resume-workspace-"));
+    temporaryDirectories.push(root);
+    const firstWorkspace = join(root, "first-repo");
+    const otherWorkspace = join(root, "other-repo");
+    const resumedThreadId = threadIdSchema.parse("workspace-bound-thread");
+    await mkdir(firstWorkspace);
+    await mkdir(otherWorkspace);
+
+    let providerCreations = 0;
+    let idCursor = 0;
+    const dependencies: RunCommandDependencies = {
+      openWorkspace: (path) => ReadOnlyWorkspace.open(path),
+      createProvider: () => {
+        providerCreations += 1;
+        return new ScriptedModelProvider([
+          {
+            events: [
+              { type: "assistant_delta", text: "Bound." },
+              { type: "completed", finishReason: "stop" },
+            ],
+          },
+        ]);
+      },
+      createApprovalBroker: () => ({
+        request: async () => ({ decision: "rejected" }),
+      }),
+      createIds: (resumeThreadId) => {
+        idCursor += 1;
+        return {
+          threadId: resumeThreadId ?? resumedThreadId,
+          turnId: turnIdSchema.parse(`workspace-bound-turn-${idCursor}`),
+          itemIds: new DeterministicItemIdFactory(
+            `workspace-bound-item-${idCursor}`,
+          ),
+        };
+      },
+    };
+    const stderr = new MemoryWriter();
+    const context = {
+      environment: {
+        OPENAI_API_KEY: "offline-test-key",
+        KODA_HOME: join(root, "state"),
+      },
+      processDirectory: root,
+      stdout: new MemoryWriter(),
+      stderr,
+    };
+
+    await expect(
+      runCommand(
+        {
+          prompt: "Start here.",
+          cwd: firstWorkspace,
+          signal: new AbortController().signal,
+        },
+        context,
+        dependencies,
+      ),
+    ).resolves.toBe(0);
+    await expect(
+      runCommand(
+        {
+          prompt: "Resume elsewhere.",
+          cwd: otherWorkspace,
+          resume: resumedThreadId,
+          signal: new AbortController().signal,
+        },
+        context,
+        dependencies,
+      ),
+    ).resolves.toBe(1);
+
+    expect(providerCreations).toBe(1);
+    expect(stderr.value).toContain("THREAD_WORKSPACE_MISMATCH");
+  });
+
   it("renders run help without requiring credentials", async () => {
     const stdout = new MemoryWriter();
     const stderr = new MemoryWriter();
@@ -624,5 +839,6 @@ describe("Phase 1A CLI", () => {
     expect(stdout.value).toContain("Run one coding-agent turn");
     expect(stdout.value).toContain("--model <model>");
     expect(stdout.value).toContain("--approval-mode <mode>");
+    expect(stdout.value).toContain("--resume <thread-id>");
   });
 });

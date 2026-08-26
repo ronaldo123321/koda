@@ -2,11 +2,13 @@ import { homedir } from "node:os";
 import { resolve } from "node:path";
 
 import type { ApprovalMode } from "@koda/agent-core";
+import { threadIdSchema, type ThreadId } from "@koda/protocol";
 
 export interface RunConfigurationInput {
   approvalMode?: string;
   cwd?: string;
   model?: string;
+  resume?: string;
 }
 
 export interface RunConfiguration {
@@ -15,6 +17,7 @@ export interface RunConfiguration {
   cwd: string;
   kodaHome: string;
   model: string;
+  resumeThreadId?: ThreadId;
 }
 
 export class ConfigurationError extends Error {
@@ -52,5 +55,23 @@ export function resolveRunConfiguration(
     environment.KODA_HOME?.trim() || resolve(homedir(), ".koda"),
   );
 
-  return { approvalMode, apiKey, cwd, kodaHome, model };
+  let resumeThreadId: ThreadId | undefined;
+  if (input.resume !== undefined) {
+    const candidate = input.resume.trim();
+    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u.test(candidate)) {
+      throw new ConfigurationError(
+        "Resume thread ID must use 1-128 letters, digits, underscores, or hyphens and cannot contain path syntax.",
+      );
+    }
+    resumeThreadId = threadIdSchema.parse(candidate);
+  }
+
+  return {
+    approvalMode,
+    apiKey,
+    cwd,
+    kodaHome,
+    model,
+    ...(resumeThreadId === undefined ? {} : { resumeThreadId }),
+  };
 }

@@ -36,6 +36,7 @@ export function createProgram(runtime: ProgramRuntime): Command {
     .argument("<prompt...>", "task for Koda")
     .option("-C, --cwd <directory>", "workspace directory")
     .option("-m, --model <model>", "OpenAI model ID")
+    .option("--resume <thread-id>", "resume an existing Koda thread")
     .addOption(
       new Option(
         "--approval-mode <mode>",
@@ -45,7 +46,12 @@ export function createProgram(runtime: ProgramRuntime): Command {
     .action(
       async (
         promptParts: string[],
-        options: { approvalMode?: string; cwd?: string; model?: string },
+        options: {
+          approvalMode?: string;
+          cwd?: string;
+          model?: string;
+          resume?: string;
+        },
       ) => {
         const controller = new AbortController();
         let interrupted = false;
@@ -66,6 +72,7 @@ export function createProgram(runtime: ProgramRuntime): Command {
               : { approvalMode: options.approvalMode }),
             ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
             ...(options.model === undefined ? {} : { model: options.model }),
+            ...(options.resume === undefined ? {} : { resume: options.resume }),
           };
           const exitCode = await runCommand(input, {
             environment: runtime.environment,

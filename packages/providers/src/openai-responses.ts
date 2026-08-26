@@ -251,25 +251,14 @@ export class OpenAIResponsesProvider implements ModelProvider {
     step: number,
   ): OpenAI.Responses.ResponseInput {
     if (step === 1) {
-      const unsupported = items.find((item) => item.type !== "user_message");
-      if (unsupported !== undefined) {
-        throw new OpenAIProviderError(
-          "OPENAI_UNSUPPORTED_INITIAL_CONTEXT",
-          `Initial OpenAI context cannot contain '${unsupported.type}' in Phase 1A.`,
-        );
-      }
-      const messages: OpenAI.Responses.ResponseInput = items.flatMap((item) =>
-        item.type === "user_message"
-          ? [{ role: "user" as const, content: item.content }]
-          : [],
-      );
-      if (messages.length === 0) {
+      const replay = toOpenAIReplayInput(items);
+      if (!items.some((item) => item.type === "user_message")) {
         throw new OpenAIProviderError(
           "OPENAI_INPUT_EMPTY",
           "The first OpenAI request requires a user message.",
         );
       }
-      return messages;
+      return replay;
     }
 
     const newItems = items.filter(
@@ -291,6 +280,40 @@ export class OpenAIResponsesProvider implements ModelProvider {
     }
     return input;
   }
+}
+
+function toOpenAIReplayInput(
+  items: readonly ConversationItem[],
+): OpenAI.Responses.ResponseInput {
+  const input: OpenAI.Responses.ResponseInput = [];
+  for (const item of items) {
+    if (item.type === "user_message" || item.type === "assistant_message") {
+      input.push({
+        role: item.type === "user_message" ? "user" : "assistant",
+        content: item.content,
+      });
+    } else if (item.type === "tool_call") {
+      input.push({
+        type: "function_call",
+        call_id: item.callId,
+        name: item.name,
+        arguments: JSON.stringify(item.arguments),
+      });
+    } else if (item.type === "tool_result") {
+      input.push(toFunctionCallOutput(item));
+    } else if (item.type === "recovery") {
+      input.push({
+        role: "developer",
+        content: `Koda recovery notice: ${item.message}`,
+      });
+    } else if (item.type === "compaction") {
+      input.push({
+        role: "developer",
+        content: `Koda compacted thread state: ${JSON.stringify(item.summary)}`,
+      });
+    }
+  }
+  return input;
 }
 
 export function createOpenAIResponsesProvider(

@@ -5,6 +5,10 @@
 - Owners: Koda maintainers
 - Scope: Local-first coding agent CLI and its reusable agent runtime
 
+## Roadmap status: Phase 2 active
+
+Phase 0 and Phase 1A through 1D are complete. Phase 2A now provides durable local transcript replay, safe interrupted-turn recovery, context snapshots, continuous event sequencing, `--resume`, and single-host writer leases. Phase 2B artifacts and output budgets are next. All work moved to later phases remains listed explicitly in the Phase 2 reliability roadmap and the revised phase sections below.
+
 ## Roadmap revision: Phase 1 closeout
 
 The original roadmap placed both Anthropic support and an Ink terminal UI in Phase 1. Phase 1A through Phase 1C showed that neither is a dependency for the first reliable OpenAI coding loop. On 2026-08-26 the roadmap was revised as follows:
@@ -186,6 +190,7 @@ type ConversationItem =
   | ToolCallItem
   | ToolResultItem
   | ApprovalItem
+  | RecoveryItem
   | CompactionItem;
 ```
 

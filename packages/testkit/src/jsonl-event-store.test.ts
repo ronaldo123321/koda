@@ -1,4 +1,4 @@
-import { appendFile, mkdtemp, rm } from "node:fs/promises";
+import { appendFile, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -38,6 +38,18 @@ function turnStartedEvent() {
   });
 }
 
+function turnCompletedEvent() {
+  return agentEventSchema.parse({
+    schemaVersion: 1,
+    sequence: 1,
+    timestamp: "2026-08-26T00:00:01.000Z",
+    threadId: threadIdSchema.parse("thread-store"),
+    turnId: turnIdSchema.parse("turn-store"),
+    type: "turn.completed",
+    payload: { steps: 1 },
+  });
+}
+
 describe("JsonlEventStore", () => {
   it("appends and reads validated events", async () => {
     const { store } = await createStore();
@@ -66,5 +78,42 @@ describe("JsonlEventStore", () => {
         line: 2,
       },
     ]);
+  });
+
+  it("discards a partial trailing line before resuming appends", async () => {
+    const { store, filePath } = await createStore();
+    const started = turnStartedEvent();
+    const completed = turnCompletedEvent();
+    await store.append(started);
+    await appendFile(filePath, '{"schemaVersion":1', "utf8");
+
+    const interrupted = await store.readAll();
+    await store.prepareForAppend({ discardPartialTrailingLine: true });
+    await store.append(completed);
+
+    expect(interrupted.diagnostics).toHaveLength(1);
+    await expect(store.readAll()).resolves.toEqual({
+      events: [started, completed],
+      diagnostics: [],
+    });
+  });
+
+  it("adds a newline before appending to a valid final JSON line", async () => {
+    const { store, filePath } = await createStore();
+    const started = turnStartedEvent();
+    const completed = turnCompletedEvent();
+    await writeFile(filePath, JSON.stringify(started), "utf8");
+
+    await expect(store.readAll()).resolves.toEqual({
+      events: [started],
+      diagnostics: [],
+    });
+    await store.prepareForAppend({ discardPartialTrailingLine: false });
+    await store.append(completed);
+
+    await expect(store.readAll()).resolves.toEqual({
+      events: [started, completed],
+      diagnostics: [],
+    });
   });
 });

@@ -1,6 +1,6 @@
 # Koda Phase 2A: Durable Resume and Safe Recovery
 
-- Status: Accepted for implementation
+- Status: Implemented
 - Date: 2026-08-26
 - Depends on: Phase 1D repository context and token accounting
 - Scope: multi-turn JSONL continuity, transcript replay, recovery notices, thread leases, and `--resume`

@@ -1,8 +1,12 @@
 import { AgentLoop, ToolRegistry } from "@koda/agent-core";
 import {
+  assistantMessageItemSchema,
+  itemIdSchema,
+  recoveryItemSchema,
   threadIdSchema,
   toolCallIdSchema,
   turnIdSchema,
+  userMessageItemSchema,
   type JsonValue,
   type ToolResultItem,
 } from "@koda/protocol";
@@ -116,6 +120,88 @@ describe("AgentLoop", () => {
         reasoningOutputTokens: 0,
         totalTokens: 0,
       },
+    });
+  });
+
+  it("continues sequence numbers and records context when resuming history", async () => {
+    const events = new MemoryEventStore();
+    const history = [
+      userMessageItemSchema.parse({
+        type: "user_message",
+        id: itemIdSchema.parse("history-user"),
+        content: "Inspect the project.",
+      }),
+      assistantMessageItemSchema.parse({
+        type: "assistant_message",
+        id: itemIdSchema.parse("history-assistant"),
+        content: "The project is ready.",
+      }),
+    ];
+    const recovery = recoveryItemSchema.parse({
+      type: "recovery",
+      id: itemIdSchema.parse("history-recovery"),
+      previousTurnId: turnIdSchema.parse("previous-turn"),
+      previousStatus: "completed",
+      message: "Resume the completed thread.",
+      partialTrailingEventDiscarded: false,
+      uncertainToolCalls: [],
+    });
+    const provider = new ScriptedModelProvider([
+      {
+        assertRequest: (request) => {
+          expect(request.items.map((item) => item.type)).toEqual([
+            "user_message",
+            "assistant_message",
+            "recovery",
+            "user_message",
+          ]);
+        },
+        events: [
+          { type: "assistant_delta", text: "Continuing." },
+          { type: "completed", finishReason: "stop" },
+        ],
+      },
+    ]);
+
+    const result = await new AgentLoop({
+      provider,
+      tools: createTools(),
+      events,
+      ids: new DeterministicItemIdFactory("resume-item"),
+      clock: new FixedClock(),
+    }).runTurn({
+      threadId,
+      turnId: turnIdSchema.parse("resumed-turn"),
+      userInput: "Continue.",
+      history,
+      prefaceItems: [recovery],
+      initialSequence: 10,
+      context: {
+        provider: "openai",
+        model: "test-model",
+        workspaceRoot: "/workspace",
+        approvalMode: "on-request",
+        instructionsSha256: "a".repeat(64),
+        repositoryInstructions: [],
+      },
+    });
+
+    expect(result.status).toBe("completed");
+    expect(events.events.map((event) => event.sequence)).toEqual([
+      10, 11, 12, 13, 14, 15, 16,
+    ]);
+    expect(events.events.map((event) => event.type)).toEqual([
+      "turn.started",
+      "turn.context",
+      "item.recorded",
+      "item.recorded",
+      "assistant.delta",
+      "item.recorded",
+      "turn.completed",
+    ]);
+    expect(events.events[1]).toMatchObject({
+      type: "turn.context",
+      payload: { workspaceRoot: "/workspace", model: "test-model" },
     });
   });
 

@@ -1,6 +1,7 @@
 import {
   approvalItemSchema,
   assistantMessageItemSchema,
+  conversationItemSchema,
   itemIdSchema,
   toolCallItemSchema,
   toolResultItemSchema,
@@ -10,6 +11,7 @@ import {
   type ItemId,
   type TokenUsage,
   type ThreadId,
+  type TurnContextSnapshot,
   type TurnUsage,
   type TurnId,
 } from "@koda/protocol";
@@ -53,6 +55,10 @@ export interface RunTurnInput {
   turnId: TurnId;
   userInput: string;
   signal?: AbortSignal;
+  history?: readonly ConversationItem[];
+  prefaceItems?: readonly ConversationItem[];
+  context?: TurnContextSnapshot;
+  initialSequence?: number;
 }
 
 export type RunTurnResult =
@@ -107,17 +113,40 @@ export class AgentLoop {
 
   public async runTurn(input: RunTurnInput): Promise<RunTurnResult> {
     const signal = input.signal ?? new AbortController().signal;
+    const initialSequence = input.initialSequence ?? 0;
+    if (!Number.isInteger(initialSequence) || initialSequence < 0) {
+      throw new Error("initialSequence must be a non-negative integer.");
+    }
     const recorder = new TurnEventRecorder(
       this.events,
       this.clock,
       input.threadId,
       input.turnId,
+      initialSequence,
     );
-    const items: ConversationItem[] = [];
+    const items: ConversationItem[] = (input.history ?? []).map((item) =>
+      conversationItemSchema.parse(item),
+    );
     const usage = emptyTurnUsage();
     let completedSteps = 0;
 
     await recorder.record({ type: "turn.started", payload: {} });
+
+    if (input.context !== undefined) {
+      await recorder.record({
+        type: "turn.context",
+        payload: input.context,
+      });
+    }
+
+    for (const item of input.prefaceItems ?? []) {
+      const parsedItem = conversationItemSchema.parse(item);
+      items.push(parsedItem);
+      await recorder.record({
+        type: "item.recorded",
+        payload: { item: parsedItem },
+      });
+    }
 
     const userItem = userMessageItemSchema.parse({
       type: "user_message",

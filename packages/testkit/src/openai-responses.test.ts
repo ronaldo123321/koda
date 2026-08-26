@@ -1,7 +1,9 @@
 import type { ModelRequest } from "@koda/agent-core";
 import {
+  approvalItemSchema,
   assistantMessageItemSchema,
   itemIdSchema,
+  recoveryItemSchema,
   threadIdSchema,
   toolCallIdSchema,
   toolCallItemSchema,
@@ -203,6 +205,95 @@ describe("OpenAIResponsesProvider", () => {
     expect(client.requests[1]?.body.instructions).toBe(
       "Inspect the repository.",
     );
+  });
+
+  it("replays durable history and recovery context on a resumed turn", async () => {
+    const client = new FakeOpenAIClient([[completedEvent("resp-resumed")]]);
+    const provider = new OpenAIResponsesProvider({
+      client,
+      model: "gpt-5.6-terra",
+      instructions: "Inspect.",
+    });
+    const historicalCall = toolCallItemSchema.parse({
+      type: "tool_call",
+      id: itemIdSchema.parse("resume-call-item"),
+      callId,
+      name: "read_file",
+      arguments: { path: "README.md" },
+    });
+    const historicalResult = toolResultItemSchema.parse({
+      type: "tool_result",
+      id: itemIdSchema.parse("resume-result-item"),
+      callId,
+      name: "read_file",
+      status: "success",
+      output: { content: "# Koda" },
+    });
+    const recoveryMessage =
+      "This thread resumed after the previous turn completed.";
+
+    await collect(provider, {
+      threadId,
+      turnId: turnIdSchema.parse("openai-resumed-turn"),
+      step: 1,
+      items: [
+        userItem,
+        assistantMessageItemSchema.parse({
+          type: "assistant_message",
+          id: itemIdSchema.parse("resume-assistant-item"),
+          content: "I read the README.",
+        }),
+        historicalCall,
+        historicalResult,
+        approvalItemSchema.parse({
+          type: "approval",
+          id: itemIdSchema.parse("resume-approval-item"),
+          callId,
+          decision: "approved",
+        }),
+        recoveryItemSchema.parse({
+          type: "recovery",
+          id: itemIdSchema.parse("resume-recovery-item"),
+          previousTurnId: turnId,
+          previousStatus: "completed",
+          message: recoveryMessage,
+          partialTrailingEventDiscarded: false,
+          uncertainToolCalls: [],
+        }),
+        userMessageItemSchema.parse({
+          type: "user_message",
+          id: itemIdSchema.parse("resume-current-user-item"),
+          content: "Continue.",
+        }),
+      ],
+      tools: [toolDefinition],
+    });
+
+    expect(client.requests[0]?.body.previous_response_id).toBeUndefined();
+    expect(client.requests[0]?.body.input).toEqual([
+      { role: "user", content: "Read the README." },
+      { role: "assistant", content: "I read the README." },
+      {
+        type: "function_call",
+        call_id: callId,
+        name: "read_file",
+        arguments: '{"path":"README.md"}',
+      },
+      {
+        type: "function_call_output",
+        call_id: callId,
+        name: "read_file",
+        output: JSON.stringify({
+          status: "success",
+          output: { content: "# Koda" },
+        }),
+      },
+      {
+        role: "developer",
+        content: `Koda recovery notice: ${recoveryMessage}`,
+      },
+      { role: "user", content: "Continue." },
+    ]);
   });
 
   it("rejects malformed function arguments", async () => {

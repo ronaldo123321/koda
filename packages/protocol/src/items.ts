@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { itemIdSchema, toolCallIdSchema } from "./ids.js";
+import { itemIdSchema, toolCallIdSchema, turnIdSchema } from "./ids.js";
 import { jsonObjectSchema, jsonValueSchema } from "./json.js";
 
 export const userMessageItemSchema = z.object({
@@ -60,6 +60,21 @@ export const compactionItemSchema = z.object({
   }),
 });
 
+export const recoveryItemSchema = z.object({
+  type: z.literal("recovery"),
+  id: itemIdSchema,
+  previousTurnId: turnIdSchema,
+  previousStatus: z.enum(["completed", "failed", "cancelled", "interrupted"]),
+  message: z.string().min(1),
+  partialTrailingEventDiscarded: z.boolean(),
+  uncertainToolCalls: z.array(
+    z.object({
+      callId: toolCallIdSchema,
+      name: z.string().min(1),
+    }),
+  ),
+});
+
 export const conversationItemSchema = z.discriminatedUnion("type", [
   userMessageItemSchema,
   assistantMessageItemSchema,
@@ -67,6 +82,7 @@ export const conversationItemSchema = z.discriminatedUnion("type", [
   toolResultItemSchema,
   approvalItemSchema,
   compactionItemSchema,
+  recoveryItemSchema,
 ]);
 
 export type UserMessageItem = z.infer<typeof userMessageItemSchema>;
@@ -75,4 +91,5 @@ export type ToolCallItem = z.infer<typeof toolCallItemSchema>;
 export type ToolResultItem = z.infer<typeof toolResultItemSchema>;
 export type ApprovalItem = z.infer<typeof approvalItemSchema>;
 export type CompactionItem = z.infer<typeof compactionItemSchema>;
+export type RecoveryItem = z.infer<typeof recoveryItemSchema>;
 export type ConversationItem = z.infer<typeof conversationItemSchema>;

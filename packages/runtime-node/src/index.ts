@@ -4,4 +4,6 @@ export * from "./read-only-tools.js";
 export * from "./read-only-workspace.js";
 export * from "./repository-instructions.js";
 export * from "./structured-patch-tool.js";
+export * from "./thread-lease.js";
+export * from "./thread-recovery.js";
 export * from "./workspace-command-runner.js";
