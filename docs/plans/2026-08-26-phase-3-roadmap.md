@@ -1,6 +1,6 @@
 # Koda Phase 3 Extensibility Roadmap
 
-- Status: In progress — Phase 3A and Phase 3B implemented (2026-08-26)
+- Status: In progress — Phase 3A and Phase 3B implemented; Phase 3C approved (2026-08-26)
 - Date: 2026-08-26
 - Depends on: Phase 2 reliability closure
 - Scope: stable client/tool/provider extension boundaries without weakening the local runtime's durable state and approval guarantees
@@ -36,13 +36,28 @@ Status: **Complete.**
 
 The detailed contract, security model, verification matrix, and deferred boundaries are in the [Phase 3B MCP client design](2026-08-26-phase-3b-mcp-client-design.md). MCP HTTP/OAuth, remote hosting, shared sessions or tenants, and network sandbox policy remain Phase 4 concerns. Resources, prompts, subscriptions, sampling, elicitation, and dynamic tool refresh remain later measured Phase 3 capability slices.
 
+## Phase 3C: explicit multi-provider runtime
+
+Status: **Approved for implementation.**
+
+- Add explicit selection across OpenAI, Anthropic, DeepSeek, Kimi, and GLM through a named provider registry.
+- Keep OpenAI on Responses, add an Anthropic Messages adapter, and share reviewed Chat Completions mechanics across separate DeepSeek, Kimi, and GLM profiles.
+- Preserve required thinking and reasoning continuity in bounded, provider-tagged durable state without storing raw vendor responses.
+- Normalize tool calls, usage, stop reasons, cancellation, and errors behind the existing model-provider boundary.
+- Move the strict local app-server contract to protocol v2 with provider selection and discovery metadata.
+- Add offline provider conformance scenarios covering tools, usage, cancellation, compaction, recovery, and state corruption.
+
+The complete contract, configuration table, recovery rules, verification matrix, and deferred boundaries are in the [Phase 3C multi-provider design](2026-08-26-phase-3c-multi-provider-design.md).
+
 ## Later Phase 3 slices
 
-### Provider and context extensions
+### Provider and context extensions after Phase 3C
 
-- Add an Anthropic adapter and explicit provider selection while keeping provider-neutral conversation items and usage accounting.
+- Add arbitrary base URLs and user-defined profiles only with an explicit network and credential trust design.
+- Extend the registry to Qwen, Doubao, MiniMax, and other documented providers through the Phase 3C conformance suite.
+- Design model discovery, capability negotiation, automatic routing, fallback, retries, and cross-provider migration as separate slices.
 - Evaluate provider-assisted semantic compaction and exact tokenizers against the deterministic Phase 2 baseline before adopting either dependency.
-- Add provider conformance scenarios covering tool calls, usage, cancellation, compaction, and resume.
+- Add exact pricing and budget forecasting only after token accounting is verified per provider.
 
 ### Interactive clients and client APIs
 
