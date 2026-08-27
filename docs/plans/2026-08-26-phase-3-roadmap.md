@@ -1,6 +1,6 @@
 # Koda Phase 3 Extensibility Roadmap
 
-- Status: In progress — Phase 3A through Phase 3E2 implemented and verified (2026-08-27)
+- Status: In progress — Phase 3A through Phase 3E2 implemented and verified; Phase 3E3 design approved (2026-08-27)
 - Date: 2026-08-26
 - Depends on: Phase 2 reliability closure
 - Scope: stable client/tool/provider extension boundaries without weakening the local runtime's durable state and approval guarantees
@@ -91,6 +91,19 @@ Status: **Complete.**
 
 The accepted API contract, index rules, navigation model, verification matrix, and deferred boundaries are in the [Phase 3E2 history search and windowed navigation design](2026-08-27-phase-3e2-history-search-navigation-design.md).
 
+## Phase 3E3: workspace runtime settings
+
+Status: **Design approved; implementation pending.**
+
+- Upgrade the local app-server contract to protocol v5 with shared, workspace-scoped `settings/get` and revision-checked `settings/update` operations.
+- Expose only credential availability through runtime provider metadata; never transport or persist API-key values.
+- Persist provider/model preferences in bounded, versioned, atomically replaced per-workspace files outside disposable SQLite metadata.
+- Add explicit Ink provider and model modes through `/settings`, preserving the normal terminal buffer and rejecting unavailable providers.
+- Separate current-thread configuration from next-new-thread preference; existing and resumed threads keep their durable provider/model, while `/new` intentionally adopts the saved choice.
+- Verify storage concurrency/recovery, startup precedence, typed app-server/client paths, controller interaction, TTY behavior, and every existing reliability gate.
+
+The accepted persistence, protocol, interaction, consistency, and verification contract is in the [Phase 3E3 workspace runtime settings design](2026-08-27-phase-3e3-runtime-settings-design.md).
+
 ## Later Phase 3 slices
 
 ### Provider and context extensions after Phase 3C
@@ -106,7 +119,7 @@ The accepted API contract, index rules, navigation model, verification matrix, a
 - Maintain the completed Phase 3D Ink chat REPL on the Phase 3A application protocol.
 - Maintain the completed Phase 3E1 semantics for recent-thread selection, bounded history preview, and safe resume; protocol v4 supersedes its pre-release v3 transport.
 - Maintain the completed Phase 3E2 boundary as bounded bidirectional history navigation and workspace-scoped substring search over app-server protocol v4; retain the normal terminal buffer and a disposable SQLite projection.
-- In Phase 3E3, add an explicit provider/model settings panel and intentional runtime selection changes.
+- Implement and then maintain the accepted Phase 3E3 boundary for explicit provider/model preferences that affect only new threads.
 - Defer FTS5, fuzzy/relevance ranking, live search, cross-workspace search, alternate-screen navigation, and real-time subscriptions beyond Phase 3E2.
 - In Phase 3E or Phase 4, add Markdown/syntax rendering, diff and artifact viewers, range/download APIs, attachments, context-budget inspection, and instruction-change views.
 - Build IDE or desktop clients only after the local protocol client and TUI have validated the shared boundary.
