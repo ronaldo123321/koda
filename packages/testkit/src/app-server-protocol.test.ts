@@ -9,6 +9,8 @@ import {
   threadEventsParamsSchema,
   threadEventsResultSchema,
   threadGetParamsSchema,
+  threadSearchParamsSchema,
+  threadSearchResultSchema,
   turnStartParamsSchema,
 } from "@koda/protocol";
 import { describe, expect, it } from "vitest";
@@ -119,6 +121,13 @@ describe("app-server protocol", () => {
         beforeSequence: -1,
       }),
     ).toThrow();
+    expect(() =>
+      threadEventsParamsSchema.parse({
+        threadId: "history-thread",
+        beforeSequence: 4,
+        afterSequence: 2,
+      }),
+    ).toThrow();
 
     const first = historyEvent(3);
     const second = historyEvent(4);
@@ -126,13 +135,21 @@ describe("app-server protocol", () => {
       threadEventsResultSchema.parse({
         events: [first, second],
         hasEarlier: true,
+        hasLater: true,
         nextBeforeSequence: 3,
+        nextAfterSequence: 4,
       }),
-    ).toMatchObject({ hasEarlier: true, nextBeforeSequence: 3 });
+    ).toMatchObject({
+      hasEarlier: true,
+      hasLater: true,
+      nextBeforeSequence: 3,
+      nextAfterSequence: 4,
+    });
     expect(() =>
       threadEventsResultSchema.parse({
         events: [second, first],
         hasEarlier: true,
+        hasLater: false,
         nextBeforeSequence: 4,
       }),
     ).toThrow();
@@ -140,7 +157,77 @@ describe("app-server protocol", () => {
       threadEventsResultSchema.parse({
         events: [first],
         hasEarlier: false,
+        hasLater: false,
         nextBeforeSequence: 3,
+      }),
+    ).toThrow();
+  });
+
+  it("validates bounded revision-paginated thread search", () => {
+    expect(
+      threadSearchParamsSchema.parse({
+        workspace: "/workspace",
+        query: "修复 parser",
+        limit: 25,
+      }),
+    ).toMatchObject({ query: "修复 parser", limit: 25 });
+    expect(() =>
+      threadSearchParamsSchema.parse({
+        workspace: "/workspace",
+        query: "one two three four five six seven eight nine",
+      }),
+    ).toThrow();
+    expect(() =>
+      threadSearchParamsSchema.parse({
+        workspace: "/workspace",
+        query: "x".repeat(257),
+      }),
+    ).toThrow();
+    expect(() =>
+      threadSearchParamsSchema.parse({
+        workspace: "/workspace",
+        query: "   ",
+      }),
+    ).toThrow();
+
+    const match = {
+      threadId: "history-thread",
+      sequence: 4,
+      kind: "assistant_message",
+      timestamp: "2026-08-27T00:00:00.000Z",
+      snippet: "parser repaired",
+      threadUpdatedAt: "2026-08-27T00:00:01.000Z",
+      status: "completed",
+      provider: "openai",
+      model: "gpt-test",
+      turnCount: 1,
+    } as const;
+    expect(
+      threadSearchResultSchema.parse({
+        matches: [match],
+        revision: 2,
+        hasMore: true,
+        nextCursor: {
+          revision: 2,
+          updatedAt: match.threadUpdatedAt,
+          threadId: match.threadId,
+          sequence: match.sequence,
+        },
+        diagnostics: [],
+      }),
+    ).toMatchObject({ revision: 2, hasMore: true });
+    expect(() =>
+      threadSearchResultSchema.parse({
+        matches: [match],
+        revision: 2,
+        hasMore: true,
+        nextCursor: {
+          revision: 1,
+          updatedAt: match.threadUpdatedAt,
+          threadId: match.threadId,
+          sequence: match.sequence,
+        },
+        diagnostics: [],
       }),
     ).toThrow();
   });

@@ -53,7 +53,7 @@ describe("KodaAppServer", () => {
     await server.handleLine("not-json");
     await request(server, 1, "thread/list", {});
     await request(server, 2, "initialize", {
-      protocolVersion: 2,
+      protocolVersion: 3,
       client: { name: "wrong-version" },
     });
     await initialize(server, 3);
@@ -72,6 +72,8 @@ describe("KodaAppServer", () => {
       capabilities: {
         durableEventNotifications: true,
         threadEvents: true,
+        threadSearch: true,
+        bidirectionalThreadEvents: true,
       },
       providers: [
         { id: "openai", defaultModel: "gpt-5.6-terra" },
@@ -205,10 +207,45 @@ describe("KodaAppServer", () => {
         { sequence: expect.any(Number), type: "turn.completed" },
       ],
       hasEarlier: true,
+      hasLater: false,
       nextBeforeSequence: expect.any(Number),
     });
-    await request(server, 7, "shutdown", {});
-    expect(responseResult(writer, 7)).toEqual({});
+    const latestPage = responseResult(writer, 6) as {
+      nextBeforeSequence?: number;
+    };
+    if (latestPage.nextBeforeSequence === undefined) {
+      throw new Error(
+        "Latest app-server history page did not provide a cursor.",
+      );
+    }
+    await request(server, 7, "thread/events", {
+      threadId: "server-patch-thread",
+      afterSequence: latestPage.nextBeforeSequence,
+      limit: 2,
+    });
+    expect(responseResult(writer, 7)).toMatchObject({
+      events: expect.arrayContaining([
+        expect.objectContaining({ sequence: expect.any(Number) }),
+      ]),
+      hasEarlier: true,
+    });
+    await request(server, 8, "thread/search", {
+      workspace: fixture.workspaceRoot,
+      query: "Patched app-server",
+    });
+    expect(responseResult(writer, 8)).toMatchObject({
+      matches: [
+        {
+          threadId: "server-patch-thread",
+          kind: "assistant_message",
+          snippet: expect.stringContaining("Patched through app-server"),
+        },
+      ],
+      hasMore: false,
+      diagnostics: [],
+    });
+    await request(server, 9, "shutdown", {});
+    expect(responseResult(writer, 9)).toEqual({});
     expect(server.shouldClose).toBe(true);
   });
 

@@ -1,6 +1,6 @@
 # Koda Phase 3 Extensibility Roadmap
 
-- Status: In progress — Phase 3A through Phase 3E1 implemented; Phase 3E2 approved for implementation (2026-08-27)
+- Status: In progress — Phase 3A through Phase 3E2 implemented and verified (2026-08-27)
 - Date: 2026-08-26
 - Depends on: Phase 2 reliability closure
 - Scope: stable client/tool/provider extension boundaries without weakening the local runtime's durable state and approval guarantees
@@ -79,15 +79,15 @@ The complete API contract, interaction model, consistency rules, verification ma
 
 ## Phase 3E2: history search and windowed navigation
 
-Status: **Approved for implementation.**
+Status: **Complete.**
 
-- Upgrade the local app-server contract to protocol v4 with bidirectional `thread/events` cursors and workspace-scoped `thread/search`.
-- Add a rebuildable SQLite schema v2 search projection for bounded substring matching across display-worthy durable history; JSONL remains authoritative.
-- Add explicit search input and result modes, match-centered preview, highlighted hits, and layered Escape navigation to the Ink client.
-- Add bounded older/newer history loading with arrows, PageUp/PageDown, Home, and End while retaining the normal terminal screen buffer.
-- Bound raw events, projected rows, search results, query size, snippets, response sizes, and async request concurrency.
-- Revalidate authoritative metadata and JSONL before preview or resume; never replay historical approvals, tools, or processes.
-- Verify protocol v4, index rebuild/search semantics, client paging, TUI navigation, subprocess integration, TTY behavior, and all existing reliability gates.
+- Upgrade the local app-server contract to protocol v4 with bidirectional `thread/events` cursors and workspace-scoped `thread/search`. **Completed without a parallel pre-release v3 handler.**
+- Add a rebuildable SQLite schema v2 search projection for bounded substring matching across display-worthy durable history; JSONL remains authoritative. **Completed with revision-bound pagination, Chinese/English/short-term consistency, AND terms, and stale-row removal.**
+- Add explicit search input and result modes, match-centered preview, highlighted hits, and layered Escape navigation to the Ink client. **Completed with `/search <query>` and `/` from the thread list.**
+- Add bounded older/newer history loading with arrows, PageUp/PageDown, Home, and End while retaining the normal terminal screen buffer. **Completed with a resize-aware 5–30 row viewport.**
+- Bound raw events, projected rows, search results, query size, snippets, response sizes, and async request concurrency. **Completed with 400 events, 200 rows, 500 matches, generation-based stale-response rejection, and protocol byte budgets.**
+- Revalidate authoritative metadata and JSONL before preview or resume; never replay historical approvals, tools, or processes. **Completed with `thread/get` plus before/after JSONL reads for every search hit.**
+- Verify protocol v4, index rebuild/search semantics, client paging, TUI navigation, subprocess integration, TTY behavior, and all existing reliability gates. **Completed with 232/232 offline tests, 6/6 scenarios, and a real TTY list/search/preview/navigation/shutdown smoke test.**
 
 The accepted API contract, index rules, navigation model, verification matrix, and deferred boundaries are in the [Phase 3E2 history search and windowed navigation design](2026-08-27-phase-3e2-history-search-navigation-design.md).
 
@@ -104,8 +104,8 @@ The accepted API contract, index rules, navigation model, verification matrix, a
 ### Interactive clients and client APIs
 
 - Maintain the completed Phase 3D Ink chat REPL on the Phase 3A application protocol.
-- Maintain the completed Phase 3E1 boundary for recent-thread selection, bounded history preview, and safe resume over app-server protocol v3.
-- Implement the approved Phase 3E2 boundary as bounded bidirectional history navigation and workspace-scoped substring search over app-server protocol v4; retain the normal terminal buffer and a disposable SQLite projection.
+- Maintain the completed Phase 3E1 semantics for recent-thread selection, bounded history preview, and safe resume; protocol v4 supersedes its pre-release v3 transport.
+- Maintain the completed Phase 3E2 boundary as bounded bidirectional history navigation and workspace-scoped substring search over app-server protocol v4; retain the normal terminal buffer and a disposable SQLite projection.
 - In Phase 3E3, add an explicit provider/model settings panel and intentional runtime selection changes.
 - Defer FTS5, fuzzy/relevance ranking, live search, cross-workspace search, alternate-screen navigation, and real-time subscriptions beyond Phase 3E2.
 - In Phase 3E or Phase 4, add Markdown/syntax rendering, diff and artifact viewers, range/download APIs, attachments, context-budget inspection, and instruction-change views.

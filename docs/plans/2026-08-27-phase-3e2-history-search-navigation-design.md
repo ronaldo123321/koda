@@ -1,6 +1,6 @@
 # Koda Phase 3E2: History Search and Windowed Navigation
 
-- Status: Approved for implementation (2026-08-27)
+- Status: Implemented and verified (2026-08-27)
 - Date: 2026-08-27
 - Depends on: Phase 3E1 thread browser, authoritative JSONL history, and rebuildable SQLite metadata
 - Scope: workspace-scoped durable-history search and bounded bidirectional navigation without turning presentation state into runtime state
@@ -46,7 +46,7 @@ type ThreadEventsResult = {
 };
 ```
 
-With neither cursor, the method returns the latest page. `beforeSequence` returns up to the newest `limit` events below the exclusive cursor. `afterSequence` returns up to the oldest `limit` events above the exclusive cursor. Every result is chronological. A caller reaches the earliest window by requesting `beforeSequence: limit`, relying on the durable invariant that sequences are contiguous and start at zero. `limit` remains 1 through 200, defaults to 200, and every result remains under the 768 KiB budget established in Phase 3E1.
+With neither cursor, the method returns the latest page. `beforeSequence` returns up to the newest `limit` events below the exclusive cursor. `afterSequence` returns up to the oldest `limit` events above the exclusive cursor. Every result is chronological. Home follows stable `beforeSequence` cursors until `hasEarlier` is false; End requests the latest page directly. `limit` remains 1 through 200, defaults to 200, and every result remains under the 768 KiB budget established in Phase 3E1.
 
 The new `thread/search` method has this logical contract:
 
@@ -91,7 +91,7 @@ Index refresh validates the same thread ID and contiguous event sequence invaria
 
 Search normalization is deterministic and shared by indexed text and query terms. Parameterized SQLite `instr(normalized_text, ?)` predicates implement substring matching with AND semantics. The snippet is centered around the earliest match where practical, bounded to 512 UTF-8 bytes, and sanitized for terminal display.
 
-Every successful index refresh advances a monotonic revision. Search cursors bind that revision to their stable sort tuple. A cursor from an older revision fails with `THREAD_SEARCH_INDEX_CHANGED`; the client retains the query and prompts the user to rerun it instead of silently mixing result snapshots.
+Every refresh that changes a metadata or search projection advances a monotonic revision; a no-op fingerprint refresh preserves it so continuation pages remain usable. Search cursors bind that revision to their stable sort tuple. A cursor from an older revision fails with `THREAD_SEARCH_INDEX_CHANGED`; the client retains the query and prompts the user to rerun it instead of silently mixing result snapshots.
 
 ## 5. TUI states and interaction
 
@@ -142,6 +142,8 @@ SQLite tests cover schema v2 rebuild, Chinese, English, and short-term substring
 Node client tests cover `searchThreads()`, both history directions, schema validation, RPC errors, timeouts, and oversized responses. Controller and Ink tests cover all five states, search editing, layered Escape, resize clamping, selection and page movement, Home and End, automatic edge loading, bounded eviction and refetch, match positioning and highlighting, idle-only guards, resume revalidation, preserved failure state, and ignored stale async responses.
 
 A credential-free real app-server subprocess test exercises v4 search and bidirectional history. A real TTY smoke test exercises `/threads`, `/search`, search preview, navigation, Escape, and shutdown. Acceptance requires formatting, full typechecking, every offline unit and integration test, and all six existing deterministic reliability scenarios to pass.
+
+Implementation verification completed with 232/232 offline tests, 6/6 deterministic reliability scenarios, and a real TTY smoke covering thread listing, search input/results, authoritative match preview, highlighted context, layered Escape navigation, and graceful shutdown. The shipped boundary remains within the deferred destinations below.
 
 ## 9. Deferred destinations
 

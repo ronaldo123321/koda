@@ -163,6 +163,8 @@ describe("Koda Ink view", () => {
     state.threadBrowser = {
       threads: [thread],
       selectedIndex: 0,
+      listScrollOffset: 0,
+      viewportHeight: 10,
       loading: false,
     };
     let frame = renderToString(createElement(KodaView, { state }));
@@ -179,9 +181,15 @@ describe("Koda Ink view", () => {
     state.threadBrowser = {
       ...state.threadBrowser,
       preview: {
+        source: "list",
         thread,
+        events: [],
         entries: [{ id: "history", kind: "assistant", text: "Remembered" }],
+        scrollOffset: 0,
         hasEarlier: true,
+        hasLater: false,
+        hasProjectedEarlier: false,
+        hasProjectedLater: false,
       },
     };
     frame = renderToString(createElement(KodaView, { state }));
@@ -189,6 +197,70 @@ describe("Koda Ink view", () => {
     expect(frame).toContain("Earlier durable events are available");
     routeTuiInput(controller, state, "r", key(), vi.fn());
     expect(controller.resumePreviewedThread).toHaveBeenCalledOnce();
+    routeTuiInput(controller, state, "", key({ pageUp: true }), vi.fn());
+    routeTuiInput(controller, state, "", key({ home: true }), vi.fn());
+    expect(controller.scrollPreview).toHaveBeenCalledWith("page_up");
+    expect(controller.scrollPreview).toHaveBeenCalledWith("home");
+
+    state.mode = "thread_search_input";
+    const { preview: _preview, ...browserWithoutPreview } = state.threadBrowser;
+    state.threadBrowser = {
+      ...browserWithoutPreview,
+      search: {
+        origin: "thread_list",
+        input: "parser",
+        query: "",
+        matches: [],
+        selectedIndex: 0,
+        scrollOffset: 0,
+        loading: false,
+        hasMore: false,
+      },
+    };
+    frame = renderToString(createElement(KodaView, { state }));
+    expect(frame).toContain("Search durable history");
+    expect(frame).toContain("parser");
+    routeTuiInput(controller, state, "x", key(), vi.fn());
+    routeTuiInput(controller, state, "", key({ return: true }), vi.fn());
+    expect(controller.setThreadSearchInput).toHaveBeenCalledWith("parserx");
+    expect(controller.submitThreadSearch).toHaveBeenCalledOnce();
+
+    state.mode = "thread_search_results";
+    state.threadBrowser = {
+      ...state.threadBrowser,
+      search: {
+        origin: "thread_list",
+        input: "parser",
+        query: "parser",
+        matches: [
+          {
+            threadId: thread.threadId,
+            sequence: 3,
+            kind: "assistant_message",
+            timestamp: thread.updatedAt,
+            snippet: "parser repaired",
+            threadUpdatedAt: thread.updatedAt,
+            status: "completed",
+            provider: "openai",
+            model: "gpt-5.6-terra",
+            turnCount: 2,
+          },
+        ],
+        selectedIndex: 0,
+        scrollOffset: 0,
+        loading: false,
+        hasMore: false,
+      },
+    };
+    frame = renderToString(createElement(KodaView, { state }));
+    expect(frame).toContain("History search");
+    expect(frame).toContain("parser repaired");
+    routeTuiInput(controller, state, "", key({ downArrow: true }), vi.fn());
+    routeTuiInput(controller, state, "", key({ pageDown: true }), vi.fn());
+    routeTuiInput(controller, state, "", key({ return: true }), vi.fn());
+    expect(controller.selectSearchResult).toHaveBeenCalledWith(1);
+    expect(controller.pageSearchResults).toHaveBeenCalledWith(1);
+    expect(controller.previewSelectedSearchResult).toHaveBeenCalledOnce();
   });
 });
 
@@ -231,6 +303,8 @@ function baseState(): TuiState {
       interactiveApproval: true,
       durableEventNotifications: true,
       threadEvents: true,
+      threadSearch: true,
+      bidirectionalThreadEvents: true,
     },
     providers: [
       {
@@ -270,9 +344,18 @@ function fakeInputController() {
     toggleApprovalDetails: vi.fn(),
     openThreadBrowser: vi.fn(() => Promise.resolve()),
     selectThread: vi.fn(),
+    pageThreadList: vi.fn(),
     previewSelectedThread: vi.fn(() => Promise.resolve()),
+    enterThreadSearch: vi.fn(),
+    setThreadSearchInput: vi.fn(),
+    submitThreadSearch: vi.fn(() => Promise.resolve()),
+    selectSearchResult: vi.fn(),
+    pageSearchResults: vi.fn(() => Promise.resolve()),
+    previewSelectedSearchResult: vi.fn(() => Promise.resolve()),
+    scrollPreview: vi.fn(() => Promise.resolve()),
     closeThreadBrowserLevel: vi.fn(),
     resumePreviewedThread: vi.fn(() => Promise.resolve()),
+    setViewportHeight: vi.fn(),
   } satisfies TuiInputController;
 }
 

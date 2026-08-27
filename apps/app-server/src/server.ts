@@ -6,6 +6,7 @@ import {
 import {
   APP_SERVER_PROTOCOL_VERSION,
   APP_SERVER_RPC_ERROR_CODE,
+  THREAD_SEARCH_RESULT_BUDGET_BYTES,
   approvalResolveParamsSchema,
   approvalResolveResultSchema,
   initializeParamsSchema,
@@ -20,6 +21,8 @@ import {
   threadGetResultSchema,
   threadListParamsSchema,
   threadListResultSchema,
+  threadSearchParamsSchema,
+  threadSearchResultSchema,
   turnCancelParamsSchema,
   turnCancelResultSchema,
   turnEventNotificationParamsSchema,
@@ -170,6 +173,8 @@ export class KodaAppServer {
         return this.getThread(request.params);
       case "thread/events":
         return this.readThreadEvents(request.params);
+      case "thread/search":
+        return this.searchThreads(request.params);
       case "turn/start":
         return this.startTurn(request.params);
       case "turn/cancel":
@@ -221,6 +226,8 @@ export class KodaAppServer {
           interactiveApproval: true,
           durableEventNotifications: true,
           threadEvents: true,
+          threadSearch: true,
+          bidirectionalThreadEvents: true,
         },
         providers: this.application.listProviders(),
       }),
@@ -271,9 +278,51 @@ export class KodaAppServer {
         ...(input.beforeSequence === undefined
           ? {}
           : { beforeSequence: input.beforeSequence }),
+        ...(input.afterSequence === undefined
+          ? {}
+          : { afterSequence: input.afterSequence }),
         ...(input.limit === undefined ? {} : { limit: input.limit }),
       });
       return jsonValueSchema.parse(threadEventsResultSchema.parse(result));
+    } catch (error) {
+      throw rpcError(
+        APP_SERVER_RPC_ERROR_CODE.APPLICATION,
+        errorMessage(error),
+        applicationErrorCode(error),
+      );
+    }
+  }
+
+  private async searchThreads(
+    params: JsonValue | undefined,
+  ): Promise<JsonValue> {
+    const input = parseParams(threadSearchParamsSchema, params);
+    try {
+      const result = await this.application.searchThreads({
+        workspace: input.workspace,
+        query: input.query,
+        ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+        ...(input.limit === undefined ? {} : { limit: input.limit }),
+      });
+      const response = jsonValueSchema.parse(
+        threadSearchResultSchema.parse({
+          ...result.value,
+          diagnostics: result.diagnostics,
+          ...(result.recovery === undefined
+            ? {}
+            : { recovery: result.recovery }),
+        }),
+      );
+      if (
+        Buffer.byteLength(JSON.stringify(response), "utf8") >
+        THREAD_SEARCH_RESULT_BUDGET_BYTES
+      ) {
+        throw new AppServerResultError(
+          "THREAD_SEARCH_RESULT_TOO_LARGE",
+          `Thread search result exceeds the ${THREAD_SEARCH_RESULT_BUDGET_BYTES}-byte response budget.`,
+        );
+      }
+      return response;
     } catch (error) {
       throw rpcError(
         APP_SERVER_RPC_ERROR_CODE.APPLICATION,
@@ -493,6 +542,16 @@ class RpcRequestError extends Error {
   ) {
     super(message);
     this.name = "RpcRequestError";
+  }
+}
+
+class AppServerResultError extends Error {
+  public constructor(
+    public readonly code: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = "AppServerResultError";
   }
 }
 

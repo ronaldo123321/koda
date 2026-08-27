@@ -14,6 +14,8 @@ import {
   threadGetResultSchema,
   threadListParamsSchema,
   threadListResultSchema,
+  threadSearchParamsSchema,
+  threadSearchResultSchema,
   turnCancelParamsSchema,
   turnCancelResultSchema,
   turnStartParamsSchema,
@@ -27,6 +29,8 @@ import {
   type ThreadEventsResult,
   type ThreadListParams,
   type ThreadListResult,
+  type ThreadSearchParams,
+  type ThreadSearchResult,
   type TurnCancelParams,
   type TurnCancelResult,
   type TurnStartParams,
@@ -60,6 +64,7 @@ export interface AppServerClientApi {
   listThreads(params?: ThreadListParams): Promise<ThreadListResult>;
   getThread(params: ThreadGetParams): Promise<ThreadGetResult>;
   readThreadEvents(params: ThreadEventsParams): Promise<ThreadEventsResult>;
+  searchThreads(params: ThreadSearchParams): Promise<ThreadSearchResult>;
   startTurn(params: TurnStartParams): Promise<TurnStartResult>;
   cancelTurn(params: TurnCancelParams): Promise<TurnCancelResult>;
   resolveApproval(
@@ -199,6 +204,16 @@ export class NodeAppServerClient implements AppServerClientApi {
       "thread/events",
       jsonValueSchema.parse(threadEventsParamsSchema.parse(params)),
       threadEventsResultSchema,
+    );
+  }
+
+  public searchThreads(
+    params: ThreadSearchParams,
+  ): Promise<ThreadSearchResult> {
+    return this.connection.request(
+      "thread/search",
+      jsonValueSchema.parse(threadSearchParamsSchema.parse(params)),
+      threadSearchResultSchema,
     );
   }
 

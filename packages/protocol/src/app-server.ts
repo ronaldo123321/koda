@@ -6,11 +6,17 @@ import { jsonValueSchema } from "./json.js";
 import { tokenUsageSchema } from "./usage.js";
 import { modelProviderIdSchema, providerMetadataSchema } from "./providers.js";
 
-export const APP_SERVER_PROTOCOL_VERSION = 3 as const;
+export const APP_SERVER_PROTOCOL_VERSION = 4 as const;
 
 export const THREAD_EVENTS_DEFAULT_LIMIT = 200;
 export const THREAD_EVENTS_MAXIMUM_LIMIT = 200;
 export const THREAD_EVENTS_RESULT_BUDGET_BYTES = 768 * 1_024;
+export const THREAD_SEARCH_DEFAULT_LIMIT = 50;
+export const THREAD_SEARCH_MAXIMUM_LIMIT = 100;
+export const THREAD_SEARCH_QUERY_BUDGET_BYTES = 256;
+export const THREAD_SEARCH_MAXIMUM_TERMS = 8;
+export const THREAD_SEARCH_SNIPPET_BUDGET_BYTES = 512;
+export const THREAD_SEARCH_RESULT_BUDGET_BYTES = 256 * 1_024;
 
 export const APP_SERVER_RPC_ERROR_CODE = {
   PARSE: -32700,
@@ -110,6 +116,8 @@ export const initializeResultSchema = z
         interactiveApproval: z.literal(true),
         durableEventNotifications: z.literal(true),
         threadEvents: z.literal(true),
+        threadSearch: z.literal(true),
+        bidirectionalThreadEvents: z.literal(true),
       })
       .strict(),
     providers: z.array(providerMetadataSchema).min(1),
@@ -202,6 +210,7 @@ export const threadEventsParamsSchema = z
       .regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u)
       .transform((value) => threadIdSchema.parse(value)),
     beforeSequence: z.number().int().safe().nonnegative().optional(),
+    afterSequence: z.number().int().safe().nonnegative().optional(),
     limit: z
       .number()
       .int()
@@ -210,13 +219,28 @@ export const threadEventsParamsSchema = z
       .max(THREAD_EVENTS_MAXIMUM_LIMIT)
       .optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((params, context) => {
+    if (
+      params.beforeSequence !== undefined &&
+      params.afterSequence !== undefined
+    ) {
+      context.addIssue({
+        code: "custom",
+        message:
+          "beforeSequence and afterSequence are mutually exclusive cursors.",
+        path: ["afterSequence"],
+      });
+    }
+  });
 
 export const threadEventsResultSchema = z
   .object({
     events: z.array(agentEventSchema).max(THREAD_EVENTS_MAXIMUM_LIMIT),
     hasEarlier: z.boolean(),
+    hasLater: z.boolean(),
     nextBeforeSequence: z.number().int().safe().nonnegative().optional(),
+    nextAfterSequence: z.number().int().safe().nonnegative().optional(),
   })
   .strict()
   .superRefine((result, context) => {
@@ -238,11 +262,8 @@ export const threadEventsResultSchema = z
         }
       }
     }
-    if (result.hasEarlier) {
-      if (
-        result.events.length === 0 ||
-        result.nextBeforeSequence !== result.events[0]?.sequence
-      ) {
+    if (result.hasEarlier && result.events.length > 0) {
+      if (result.nextBeforeSequence !== result.events[0]?.sequence) {
         context.addIssue({
           code: "custom",
           message:
@@ -255,6 +276,133 @@ export const threadEventsResultSchema = z
         code: "custom",
         message: "A final page cannot provide a next cursor.",
         path: ["nextBeforeSequence"],
+      });
+    }
+    if (result.hasLater && result.events.length > 0) {
+      if (result.nextAfterSequence !== result.events.at(-1)?.sequence) {
+        context.addIssue({
+          code: "custom",
+          message:
+            "A page with later events must provide its last sequence as the next cursor.",
+          path: ["nextAfterSequence"],
+        });
+      }
+    } else if (result.nextAfterSequence !== undefined) {
+      context.addIssue({
+        code: "custom",
+        message: "A latest page cannot provide a next cursor.",
+        path: ["nextAfterSequence"],
+      });
+    }
+  });
+
+export const threadSearchItemKindSchema = z.enum([
+  "user_message",
+  "assistant_message",
+  "tool_result",
+  "compaction",
+  "recovery",
+  "tool_failure",
+  "turn_cancelled",
+  "turn_failed",
+]);
+
+export const threadSearchCursorSchema = z
+  .object({
+    revision: z.number().int().safe().nonnegative(),
+    updatedAt: z.string().datetime({ offset: true }),
+    threadId: threadIdSchema,
+    sequence: z.number().int().safe().nonnegative(),
+  })
+  .strict();
+
+export const threadSearchParamsSchema = z
+  .object({
+    workspace: z.string().min(1),
+    query: z
+      .string()
+      .min(1)
+      .refine(
+        (value) => value.trim().length > 0,
+        "Search query must contain a non-whitespace term.",
+      )
+      .refine(
+        (value) =>
+          new TextEncoder().encode(value).byteLength <=
+          THREAD_SEARCH_QUERY_BUDGET_BYTES,
+        `Search query must not exceed ${THREAD_SEARCH_QUERY_BUDGET_BYTES} UTF-8 bytes.`,
+      )
+      .refine(
+        (value) =>
+          value.trim().split(/\s+/u).filter(Boolean).length <=
+          THREAD_SEARCH_MAXIMUM_TERMS,
+        `Search query must contain at most ${THREAD_SEARCH_MAXIMUM_TERMS} terms.`,
+      ),
+    cursor: threadSearchCursorSchema.optional(),
+    limit: z
+      .number()
+      .int()
+      .safe()
+      .min(1)
+      .max(THREAD_SEARCH_MAXIMUM_LIMIT)
+      .optional(),
+  })
+  .strict();
+
+export const threadSearchMatchSchema = z
+  .object({
+    threadId: threadIdSchema,
+    sequence: z.number().int().safe().nonnegative(),
+    kind: threadSearchItemKindSchema,
+    timestamp: z.string().datetime({ offset: true }),
+    snippet: z
+      .string()
+      .refine(
+        (value) =>
+          new TextEncoder().encode(value).byteLength <=
+          THREAD_SEARCH_SNIPPET_BUDGET_BYTES,
+        `Search snippet must not exceed ${THREAD_SEARCH_SNIPPET_BUDGET_BYTES} UTF-8 bytes.`,
+      ),
+    threadUpdatedAt: z.string().datetime({ offset: true }),
+    status: threadMetadataSchema.shape.status,
+    provider: modelProviderIdSchema.optional(),
+    model: z.string().optional(),
+    turnCount: z.number().int().nonnegative(),
+  })
+  .strict();
+
+export const threadSearchResultSchema = z
+  .object({
+    matches: z.array(threadSearchMatchSchema).max(THREAD_SEARCH_MAXIMUM_LIMIT),
+    revision: z.number().int().safe().nonnegative(),
+    hasMore: z.boolean(),
+    nextCursor: threadSearchCursorSchema.optional(),
+    diagnostics: z.array(threadIndexDiagnosticSchema),
+    recovery: threadIndexRecoverySchema.optional(),
+  })
+  .strict()
+  .superRefine((result, context) => {
+    if (result.hasMore) {
+      const last = result.matches.at(-1);
+      if (
+        last === undefined ||
+        result.nextCursor?.revision !== result.revision ||
+        result.nextCursor.updatedAt !== last.threadUpdatedAt ||
+        result.nextCursor.threadId !== last.threadId ||
+        result.nextCursor.sequence !== last.sequence
+      ) {
+        context.addIssue({
+          code: "custom",
+          message:
+            "A paginated search result must provide the last match as its revision-bound cursor.",
+          path: ["nextCursor"],
+        });
+      }
+    } else if (result.nextCursor !== undefined) {
+      context.addIssue({
+        code: "custom",
+        message: "A final search result cannot provide a next cursor.",
+        path: ["nextCursor"],
       });
     }
   });
@@ -336,6 +484,11 @@ export type ThreadGetParams = z.infer<typeof threadGetParamsSchema>;
 export type ThreadGetResult = z.infer<typeof threadGetResultSchema>;
 export type ThreadEventsParams = z.infer<typeof threadEventsParamsSchema>;
 export type ThreadEventsResult = z.infer<typeof threadEventsResultSchema>;
+export type ThreadSearchItemKind = z.infer<typeof threadSearchItemKindSchema>;
+export type ThreadSearchCursor = z.infer<typeof threadSearchCursorSchema>;
+export type ThreadSearchParams = z.infer<typeof threadSearchParamsSchema>;
+export type ThreadSearchMatch = z.infer<typeof threadSearchMatchSchema>;
+export type ThreadSearchResult = z.infer<typeof threadSearchResultSchema>;
 export type ThreadMetadataMessage = z.infer<typeof threadMetadataSchema>;
 export type TurnStartParams = z.infer<typeof turnStartParamsSchema>;
 export type TurnStartResult = z.infer<typeof turnStartResultSchema>;

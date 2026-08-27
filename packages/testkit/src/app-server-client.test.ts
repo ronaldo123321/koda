@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -131,20 +131,65 @@ describe("NodeAppServerClient", () => {
   it("initializes the real app-server and performs credential-free queries", async () => {
     const root = await mkdtemp(join(tmpdir(), "koda-app-client-smoke-"));
     temporaryDirectories.push(root);
+    const canonicalRoot = await realpath(root);
     const stateRoot = join(root, "state");
     const eventLogDirectory = join(stateRoot, "threads");
     await mkdir(eventLogDirectory, { recursive: true });
     await writeFile(
       join(eventLogDirectory, "client-history.jsonl"),
-      `${JSON.stringify({
-        schemaVersion: 1,
-        sequence: 0,
-        timestamp: "2026-08-27T00:00:00.000Z",
-        threadId: "client-history",
-        turnId: "client-history-turn",
-        type: "turn.started",
-        payload: {},
-      })}\n`,
+      [
+        {
+          schemaVersion: 1,
+          sequence: 0,
+          timestamp: "2026-08-27T00:00:00.000Z",
+          threadId: "client-history",
+          turnId: "client-history-turn",
+          type: "turn.started",
+          payload: {},
+        },
+        {
+          schemaVersion: 1,
+          sequence: 1,
+          timestamp: "2026-08-27T00:00:01.000Z",
+          threadId: "client-history",
+          turnId: "client-history-turn",
+          type: "turn.context",
+          payload: {
+            provider: "openai",
+            model: "fixture-model",
+            workspaceRoot: canonicalRoot,
+            approvalMode: "on-request",
+            instructionsSha256: "a".repeat(64),
+            repositoryInstructions: [],
+          },
+        },
+        {
+          schemaVersion: 1,
+          sequence: 2,
+          timestamp: "2026-08-27T00:00:02.000Z",
+          threadId: "client-history",
+          turnId: "client-history-turn",
+          type: "item.recorded",
+          payload: {
+            item: {
+              type: "user_message",
+              id: "client-search-message",
+              content: "searchable client history",
+            },
+          },
+        },
+        {
+          schemaVersion: 1,
+          sequence: 3,
+          timestamp: "2026-08-27T00:00:03.000Z",
+          threadId: "client-history",
+          turnId: "client-history-turn",
+          type: "turn.completed",
+          payload: { steps: 1 },
+        },
+      ]
+        .map((value) => JSON.stringify(value))
+        .join("\n") + "\n",
       "utf8",
     );
     const client = await NodeAppServerClient.connect({
@@ -159,7 +204,12 @@ describe("NodeAppServerClient", () => {
 
     expect(client.initialization).toMatchObject({
       protocolVersion: APP_SERVER_PROTOCOL_VERSION,
-      capabilities: { interactiveApproval: true, threadEvents: true },
+      capabilities: {
+        interactiveApproval: true,
+        threadEvents: true,
+        threadSearch: true,
+        bidirectionalThreadEvents: true,
+      },
       providers: [
         { id: "openai" },
         { id: "anthropic" },
@@ -176,8 +226,30 @@ describe("NodeAppServerClient", () => {
         threadId: threadIdSchema.parse("client-history"),
       }),
     ).resolves.toMatchObject({
-      events: [{ sequence: 0, type: "turn.started" }],
+      events: expect.arrayContaining([
+        expect.objectContaining({
+          sequence: 0,
+          type: "turn.started",
+          payload: {},
+        }),
+      ]),
       hasEarlier: false,
+      hasLater: false,
+    });
+    await expect(
+      client.searchThreads({
+        workspace: canonicalRoot,
+        query: "client history",
+      }),
+    ).resolves.toMatchObject({
+      matches: [
+        {
+          threadId: "client-history",
+          sequence: 2,
+          kind: "user_message",
+        },
+      ],
+      hasMore: false,
     });
     await expect(
       client.readThreadEvents({
@@ -276,6 +348,8 @@ function fixtureServerScript(options: {
       interactiveApproval: true,
       durableEventNotifications: true,
       threadEvents: true,
+      threadSearch: true,
+      bidirectionalThreadEvents: true,
     },
     providers: [
       {

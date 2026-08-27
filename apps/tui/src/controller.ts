@@ -8,6 +8,8 @@ import {
   type ModelProviderId,
   type ProviderMetadata,
   type ThreadMetadataMessage,
+  type ThreadSearchCursor,
+  type ThreadSearchMatch,
   type TokenUsage,
   type ToolCallId,
   type TurnId,
@@ -16,11 +18,22 @@ import {
 
 const MAXIMUM_INPUT_CHARACTERS = 32_768;
 const MAXIMUM_PRESENTATION_CHARACTERS = 8_192;
-const MAXIMUM_HISTORY_ROWS = 100;
+const MAXIMUM_HISTORY_ROWS = 200;
+const MAXIMUM_HISTORY_EVENTS = 400;
+const MAXIMUM_SEARCH_RESULTS = 500;
 const THREAD_BROWSER_LIMIT = 100;
+const THREAD_SEARCH_PAGE_LIMIT = 100;
+const DEFAULT_VIEWPORT_HEIGHT = 12;
+const MINIMUM_VIEWPORT_HEIGHT = 5;
+const MAXIMUM_VIEWPORT_HEIGHT = 30;
 
 export type TuiConnectionStatus = "ready" | "closing" | "closed" | "error";
-export type TuiMode = "chat" | "thread_list" | "thread_preview";
+export type TuiMode =
+  | "chat"
+  | "thread_list"
+  | "thread_search_input"
+  | "thread_search_results"
+  | "thread_preview";
 export type TuiTurnStatus =
   "starting" | "running" | "cancelling" | "completed" | "cancelled" | "failed";
 export type TuiToolStatus =
@@ -53,6 +66,8 @@ export interface TuiTranscriptEntry {
   id: string;
   kind: "user" | "assistant" | "tool" | "usage" | "system" | "error";
   text: string;
+  sequence?: number;
+  matched?: boolean;
 }
 
 export interface TuiToolState {
@@ -87,15 +102,39 @@ export interface TuiActiveTurnState {
 }
 
 export interface TuiThreadPreviewState {
+  source: "list" | "search_results";
   thread: ThreadMetadataMessage;
+  events: readonly AgentEvent[];
   entries: readonly TuiTranscriptEntry[];
+  scrollOffset: number;
   hasEarlier: boolean;
+  hasLater: boolean;
+  hasProjectedEarlier: boolean;
+  hasProjectedLater: boolean;
+  match?: ThreadSearchMatch;
+  query?: string;
+}
+
+export interface TuiThreadSearchState {
+  origin: "chat" | "thread_list";
+  input: string;
+  query: string;
+  matches: readonly ThreadSearchMatch[];
+  selectedIndex: number;
+  scrollOffset: number;
+  loading: boolean;
+  hasMore: boolean;
+  revision?: number;
+  nextCursor?: ThreadSearchCursor;
 }
 
 export interface TuiThreadBrowserState {
   threads: readonly ThreadMetadataMessage[];
   selectedIndex: number;
+  listScrollOffset: number;
+  viewportHeight: number;
   loading: boolean;
+  search?: TuiThreadSearchState;
   preview?: TuiThreadPreviewState;
 }
 
@@ -122,6 +161,8 @@ export class TuiController {
   private readonly unsubscribeDisconnect: () => void;
   private nextTranscriptId = 1;
   private nextLocalTurnId = 1;
+  private navigationGeneration = 0;
+  private navigationBusy = false;
   private cancelPromise: Promise<void> | undefined;
   private shutdownPromise: Promise<void> | undefined;
 
@@ -198,6 +239,10 @@ export class TuiController {
       await this.startPrompt(input);
       return "handled";
     }
+    if (input.startsWith("/search ")) {
+      await this.openThreadSearch(input.slice("/search ".length), "chat");
+      return "handled";
+    }
     switch (input) {
       case "/help":
         this.appendTranscript(
@@ -207,6 +252,7 @@ export class TuiController {
             "/status — show connection and session state",
             "/clear — clear displayed history only",
             "/threads — browse threads in this workspace",
+            "/search <query> — search durable history in this workspace",
             "/new — detach so the next prompt creates a thread",
             "/exit — shut down Koda",
             "Ctrl+T — open the thread browser",
@@ -312,17 +358,19 @@ export class TuiController {
   }
 
   public async openThreadBrowser(): Promise<void> {
-    if (!this.canBrowseThreads()) {
+    if (!this.canBrowseThreads() || this.navigationBusy) {
       this.update({ notice: "Thread browsing is available only while idle." });
       return;
     }
+    const generation = this.beginNavigation();
+    this.navigationBusy = true;
     this.update({ notice: "Loading recent threads…" });
     try {
       const result = await this.client.listThreads({
         workspace: this.state.configuration.cwd,
         limit: THREAD_BROWSER_LIMIT,
       });
-      if (!this.canBrowseThreads()) {
+      if (!this.isCurrentNavigation(generation) || !this.canBrowseThreads()) {
         return;
       }
       this.update({
@@ -330,6 +378,8 @@ export class TuiController {
         threadBrowser: {
           threads: result.threads,
           selectedIndex: 0,
+          listScrollOffset: 0,
+          viewportHeight: DEFAULT_VIEWPORT_HEIGHT,
           loading: false,
         },
         notice:
@@ -338,15 +388,49 @@ export class TuiController {
             : `${result.diagnostics.length} thread index diagnostic(s) reported.`,
       });
     } catch (error) {
+      if (!this.isCurrentNavigation(generation)) {
+        return;
+      }
       this.update({
         mode: "chat",
         threadBrowser: undefined,
         notice: `Could not list threads: ${errorMessage(error)}`,
       });
+    } finally {
+      if (this.isCurrentNavigation(generation)) {
+        this.navigationBusy = false;
+      }
     }
   }
 
   public selectThread(offset: -1 | 1): void {
+    const browser = this.state.threadBrowser;
+    if (
+      (this.state.mode !== "thread_list" &&
+        this.state.mode !== "thread_search_results") ||
+      browser === undefined ||
+      browser.loading ||
+      browser.threads.length === 0
+    ) {
+      return;
+    }
+    const selectedIndex = Math.min(
+      browser.threads.length - 1,
+      Math.max(0, browser.selectedIndex + offset),
+    );
+    const listScrollOffset = keepSelectionVisible(
+      selectedIndex,
+      browser.listScrollOffset,
+      browser.viewportHeight,
+      browser.threads.length,
+    );
+    this.update({
+      threadBrowser: { ...browser, selectedIndex, listScrollOffset },
+      notice: undefined,
+    });
+  }
+
+  public pageThreadList(direction: -1 | 1): void {
     const browser = this.state.threadBrowser;
     if (
       this.state.mode !== "thread_list" ||
@@ -358,12 +442,298 @@ export class TuiController {
     }
     const selectedIndex = Math.min(
       browser.threads.length - 1,
-      Math.max(0, browser.selectedIndex + offset),
+      Math.max(0, browser.selectedIndex + direction * browser.viewportHeight),
     );
     this.update({
-      threadBrowser: { ...browser, selectedIndex },
+      threadBrowser: {
+        ...browser,
+        selectedIndex,
+        listScrollOffset: keepSelectionVisible(
+          selectedIndex,
+          browser.listScrollOffset,
+          browser.viewportHeight,
+          browser.threads.length,
+        ),
+      },
       notice: undefined,
     });
+  }
+
+  public enterThreadSearch(): void {
+    const browser = this.state.threadBrowser;
+    if (
+      this.state.mode !== "thread_list" ||
+      browser === undefined ||
+      browser.loading ||
+      this.navigationBusy
+    ) {
+      return;
+    }
+    this.update({
+      mode: "thread_search_input",
+      threadBrowser: {
+        ...browser,
+        search:
+          browser.search === undefined
+            ? emptySearchState("thread_list")
+            : {
+                ...browser.search,
+                input: browser.search.query,
+                loading: false,
+              },
+      },
+      notice: undefined,
+    });
+  }
+
+  public setThreadSearchInput(input: string): void {
+    const browser = this.state.threadBrowser;
+    const search = browser?.search;
+    if (
+      this.state.mode !== "thread_search_input" ||
+      browser === undefined ||
+      search === undefined ||
+      search.loading
+    ) {
+      return;
+    }
+    this.update({
+      threadBrowser: {
+        ...browser,
+        search: {
+          ...search,
+          input: boundText(input, 256),
+        },
+      },
+      notice: undefined,
+    });
+  }
+
+  public async submitThreadSearch(): Promise<void> {
+    const search = this.state.threadBrowser?.search;
+    if (this.state.mode !== "thread_search_input" || search === undefined) {
+      return;
+    }
+    await this.openThreadSearch(search.input, search.origin);
+  }
+
+  public selectSearchResult(offset: -1 | 1): void {
+    const browser = this.state.threadBrowser;
+    const search = browser?.search;
+    if (
+      this.state.mode !== "thread_search_results" ||
+      browser === undefined ||
+      search === undefined ||
+      search.loading ||
+      search.matches.length === 0
+    ) {
+      return;
+    }
+    const selectedIndex = Math.min(
+      search.matches.length - 1,
+      Math.max(0, search.selectedIndex + offset),
+    );
+    this.update({
+      threadBrowser: {
+        ...browser,
+        search: {
+          ...search,
+          selectedIndex,
+          scrollOffset: keepSelectionVisible(
+            selectedIndex,
+            search.scrollOffset,
+            browser.viewportHeight,
+            search.matches.length,
+          ),
+        },
+      },
+      notice: undefined,
+    });
+  }
+
+  public async pageSearchResults(direction: -1 | 1): Promise<void> {
+    const browser = this.state.threadBrowser;
+    const search = browser?.search;
+    if (
+      this.state.mode !== "thread_search_results" ||
+      browser === undefined ||
+      search === undefined ||
+      search.loading ||
+      search.matches.length === 0
+    ) {
+      return;
+    }
+    if (
+      direction === 1 &&
+      search.hasMore &&
+      search.selectedIndex + browser.viewportHeight >= search.matches.length
+    ) {
+      const loaded = await this.loadMoreSearchResults();
+      if (!loaded) {
+        return;
+      }
+    }
+    const currentBrowser = this.state.threadBrowser;
+    const currentSearch = currentBrowser?.search;
+    if (
+      this.state.mode !== "thread_search_results" ||
+      currentBrowser === undefined ||
+      currentSearch === undefined ||
+      currentSearch.matches.length === 0
+    ) {
+      return;
+    }
+    const selectedIndex = Math.min(
+      currentSearch.matches.length - 1,
+      Math.max(
+        0,
+        currentSearch.selectedIndex + direction * currentBrowser.viewportHeight,
+      ),
+    );
+    this.update({
+      threadBrowser: {
+        ...currentBrowser,
+        search: {
+          ...currentSearch,
+          selectedIndex,
+          scrollOffset: keepSelectionVisible(
+            selectedIndex,
+            currentSearch.scrollOffset,
+            currentBrowser.viewportHeight,
+            currentSearch.matches.length,
+          ),
+        },
+      },
+      notice: undefined,
+    });
+  }
+
+  public async previewSelectedSearchResult(): Promise<void> {
+    const browser = this.state.threadBrowser;
+    const search = browser?.search;
+    const match = search?.matches[search.selectedIndex];
+    if (
+      this.state.mode !== "thread_search_results" ||
+      browser === undefined ||
+      search === undefined ||
+      match === undefined ||
+      search.loading ||
+      this.navigationBusy
+    ) {
+      return;
+    }
+    const generation = this.beginNavigation();
+    this.navigationBusy = true;
+    this.update({
+      threadBrowser: {
+        ...browser,
+        loading: true,
+        search: { ...search, loading: true },
+      },
+      notice: `Loading search match in ${match.threadId}…`,
+    });
+    try {
+      const metadata = await this.client.getThread({
+        threadId: match.threadId,
+      });
+      if (metadata.thread.workspaceRoot !== this.state.configuration.cwd) {
+        throw new Error(
+          `Thread workspace '${metadata.thread.workspaceRoot ?? "unknown"}' does not match '${this.state.configuration.cwd}'.`,
+        );
+      }
+      const [before, after] = await Promise.all([
+        this.client.readThreadEvents({
+          threadId: match.threadId,
+          beforeSequence: match.sequence + 1,
+          limit: 200,
+        }),
+        this.client.readThreadEvents({
+          threadId: match.threadId,
+          afterSequence: match.sequence,
+          limit: 200,
+        }),
+      ]);
+      if (!this.isCurrentNavigation(generation)) {
+        return;
+      }
+      const events = mergeEventWindow(before.events, after.events, "around");
+      const matchedEvent = events.find(
+        (event) => event.sequence === match.sequence,
+      );
+      if (
+        matchedEvent === undefined ||
+        threadSearchKindForEvent(matchedEvent, events) !== match.kind
+      ) {
+        throw new Error(
+          "The indexed search match no longer exists in authoritative history; rerun the search.",
+        );
+      }
+      const projection = projectHistoryWindow(events, match.sequence, "center");
+      const entries = projection.entries.map((entry) =>
+        this.withTranscriptId({
+          ...entry,
+          ...(entry.sequence === match.sequence ? { matched: true } : {}),
+        }),
+      );
+      const matchIndex = entries.findIndex((entry) => entry.matched === true);
+      const currentBrowser = this.state.threadBrowser;
+      if (
+        this.state.mode !== "thread_search_results" ||
+        currentBrowser === undefined
+      ) {
+        return;
+      }
+      this.update({
+        mode: "thread_preview",
+        threadBrowser: {
+          ...currentBrowser,
+          loading: false,
+          search: { ...search, loading: false },
+          preview: {
+            source: "search_results",
+            thread: metadata.thread,
+            events,
+            entries,
+            scrollOffset: Math.max(
+              0,
+              matchIndex - Math.floor(currentBrowser.viewportHeight / 2),
+            ),
+            hasEarlier: before.hasEarlier,
+            hasLater: after.hasLater,
+            hasProjectedEarlier: projection.hasEarlier,
+            hasProjectedLater: projection.hasLater,
+            match,
+            query: search.query,
+          },
+        },
+        notice:
+          metadata.diagnostics.length === 0
+            ? undefined
+            : `${metadata.diagnostics.length} thread index diagnostic(s) reported.`,
+      });
+    } catch (error) {
+      const currentBrowser = this.state.threadBrowser;
+      const currentSearch = currentBrowser?.search;
+      if (
+        this.isCurrentNavigation(generation) &&
+        this.state.mode === "thread_search_results" &&
+        currentBrowser !== undefined &&
+        currentSearch !== undefined
+      ) {
+        this.update({
+          threadBrowser: {
+            ...currentBrowser,
+            loading: false,
+            search: { ...currentSearch, loading: false },
+          },
+          notice: `Could not load search match: ${errorMessage(error)}`,
+        });
+      }
+    } finally {
+      if (this.isCurrentNavigation(generation)) {
+        this.navigationBusy = false;
+      }
+    }
   }
 
   public async previewSelectedThread(): Promise<void> {
@@ -380,6 +750,11 @@ export class TuiController {
       this.update({ notice: "No thread is available to preview." });
       return;
     }
+    if (this.navigationBusy) {
+      return;
+    }
+    const generation = this.beginNavigation();
+    this.navigationBusy = true;
     this.update({
       threadBrowser: { ...browser, loading: true },
       notice: `Loading thread ${thread.threadId}…`,
@@ -389,49 +764,120 @@ export class TuiController {
         threadId: thread.threadId,
         limit: 200,
       });
-      if (this.state.mode !== "thread_list") {
+      if (
+        !this.isCurrentNavigation(generation) ||
+        this.state.mode !== "thread_list"
+      ) {
         return;
       }
       const currentBrowser = this.state.threadBrowser;
       if (currentBrowser === undefined) {
         return;
       }
+      const projection = projectHistoryWindow(result.events, undefined, "end");
+      const entries = projection.entries.map((entry) =>
+        this.withTranscriptId(entry),
+      );
       this.update({
         mode: "thread_preview",
         threadBrowser: {
           ...currentBrowser,
           loading: false,
           preview: {
+            source: "list",
             thread,
-            entries: projectThreadHistory(result.events).map((entry) =>
-              this.withTranscriptId(entry),
+            events: result.events,
+            entries,
+            scrollOffset: Math.max(
+              0,
+              entries.length - currentBrowser.viewportHeight,
             ),
             hasEarlier: result.hasEarlier,
+            hasLater: result.hasLater,
+            hasProjectedEarlier: projection.hasEarlier,
+            hasProjectedLater: projection.hasLater,
           },
         },
         notice: undefined,
       });
     } catch (error) {
       const currentBrowser = this.state.threadBrowser;
-      if (this.state.mode !== "thread_list" || currentBrowser === undefined) {
+      if (
+        !this.isCurrentNavigation(generation) ||
+        this.state.mode !== "thread_list" ||
+        currentBrowser === undefined
+      ) {
         return;
       }
       this.update({
         threadBrowser: { ...currentBrowser, loading: false },
         notice: `Could not load thread history: ${errorMessage(error)}`,
       });
+    } finally {
+      if (this.isCurrentNavigation(generation)) {
+        this.navigationBusy = false;
+      }
     }
   }
 
   public closeThreadBrowserLevel(): void {
+    this.cancelNavigation();
     const browser = this.state.threadBrowser;
     if (this.state.mode === "thread_preview" && browser !== undefined) {
+      if (browser.preview?.source === "search_results") {
+        const { preview: _preview, ...searchState } = browser;
+        this.update({
+          mode: "thread_search_results",
+          threadBrowser: { ...searchState, loading: false },
+          notice: undefined,
+        });
+        return;
+      }
       const { preview: _preview, ...listState } = browser;
       this.update({
         mode: "thread_list",
         threadBrowser: { ...listState, loading: false },
         notice: undefined,
       });
+      return;
+    }
+    if (
+      this.state.mode === "thread_search_results" &&
+      browser?.search !== undefined
+    ) {
+      if (browser.search.origin === "chat") {
+        this.update({
+          mode: "chat",
+          threadBrowser: undefined,
+          notice: undefined,
+        });
+      } else {
+        this.update({
+          mode: "thread_search_input",
+          threadBrowser: {
+            ...browser,
+            loading: false,
+            search: { ...browser.search, loading: false },
+          },
+          notice: undefined,
+        });
+      }
+      return;
+    }
+    if (this.state.mode === "thread_search_input" && browser !== undefined) {
+      if (browser.search?.origin === "chat") {
+        this.update({
+          mode: "chat",
+          threadBrowser: undefined,
+          notice: undefined,
+        });
+      } else {
+        this.update({
+          mode: "thread_list",
+          threadBrowser: { ...browser, loading: false },
+          notice: undefined,
+        });
+      }
       return;
     }
     if (this.state.mode === "thread_list") {
@@ -450,7 +896,8 @@ export class TuiController {
       this.state.mode !== "thread_preview" ||
       browser === undefined ||
       preview === undefined ||
-      browser.loading
+      browser.loading ||
+      this.navigationBusy
     ) {
       return;
     }
@@ -458,6 +905,8 @@ export class TuiController {
       this.update({ notice: "Invalid threads cannot be resumed." });
       return;
     }
+    const generation = this.beginNavigation();
+    this.navigationBusy = true;
     this.update({
       threadBrowser: { ...browser, loading: true },
       notice: `Checking thread ${preview.thread.threadId}…`,
@@ -466,7 +915,10 @@ export class TuiController {
       const result = await this.client.getThread({
         threadId: preview.thread.threadId,
       });
-      if (this.state.mode !== "thread_preview") {
+      if (
+        !this.isCurrentNavigation(generation) ||
+        this.state.mode !== "thread_preview"
+      ) {
         return;
       }
       const thread = result.thread;
@@ -516,6 +968,7 @@ export class TuiController {
     } catch (error) {
       const currentBrowser = this.state.threadBrowser;
       if (
+        this.isCurrentNavigation(generation) &&
         this.state.mode === "thread_preview" &&
         currentBrowser !== undefined
       ) {
@@ -524,7 +977,627 @@ export class TuiController {
           notice: `Could not resume thread: ${errorMessage(error)}`,
         });
       }
+    } finally {
+      if (this.isCurrentNavigation(generation)) {
+        this.navigationBusy = false;
+      }
     }
+  }
+
+  public setViewportHeight(height: number): void {
+    const browser = this.state.threadBrowser;
+    if (browser === undefined || !Number.isFinite(height)) {
+      return;
+    }
+    const viewportHeight = Math.min(
+      MAXIMUM_VIEWPORT_HEIGHT,
+      Math.max(MINIMUM_VIEWPORT_HEIGHT, Math.floor(height)),
+    );
+    const search = browser.search;
+    const preview = browser.preview;
+    this.update({
+      threadBrowser: {
+        ...browser,
+        viewportHeight,
+        listScrollOffset: keepSelectionVisible(
+          browser.selectedIndex,
+          browser.listScrollOffset,
+          viewportHeight,
+          browser.threads.length,
+        ),
+        ...(search === undefined
+          ? {}
+          : {
+              search: {
+                ...search,
+                scrollOffset: keepSelectionVisible(
+                  search.selectedIndex,
+                  search.scrollOffset,
+                  viewportHeight,
+                  search.matches.length,
+                ),
+              },
+            }),
+        ...(preview === undefined
+          ? {}
+          : {
+              preview: {
+                ...preview,
+                scrollOffset: Math.min(
+                  preview.scrollOffset,
+                  maximumScrollOffset(preview.entries.length, viewportHeight),
+                ),
+              },
+            }),
+      },
+    });
+  }
+
+  public async scrollPreview(
+    action: "up" | "down" | "page_up" | "page_down" | "home" | "end",
+  ): Promise<void> {
+    const browser = this.state.threadBrowser;
+    const preview = browser?.preview;
+    if (
+      this.state.mode !== "thread_preview" ||
+      browser === undefined ||
+      preview === undefined ||
+      browser.loading ||
+      this.navigationBusy
+    ) {
+      return;
+    }
+    if (action === "home") {
+      await this.loadPreviewBoundary("older", true);
+      return;
+    }
+    if (action === "end") {
+      await this.loadLatestPreview();
+      return;
+    }
+    const amount =
+      action === "page_up" || action === "page_down"
+        ? browser.viewportHeight
+        : 1;
+    const maximum = maximumScrollOffset(
+      preview.entries.length,
+      browser.viewportHeight,
+    );
+    if (action === "up" || action === "page_up") {
+      if (preview.scrollOffset > 0) {
+        this.update({
+          threadBrowser: {
+            ...browser,
+            preview: {
+              ...preview,
+              scrollOffset: Math.max(0, preview.scrollOffset - amount),
+            },
+          },
+          notice: undefined,
+        });
+        return;
+      }
+      if (preview.hasProjectedEarlier) {
+        this.reprojectPreview("older");
+        return;
+      }
+      if (preview.hasEarlier) {
+        await this.loadPreviewBoundary("older", false);
+      }
+      return;
+    }
+    if (preview.scrollOffset < maximum) {
+      this.update({
+        threadBrowser: {
+          ...browser,
+          preview: {
+            ...preview,
+            scrollOffset: Math.min(maximum, preview.scrollOffset + amount),
+          },
+        },
+        notice: undefined,
+      });
+      return;
+    }
+    if (preview.hasProjectedLater) {
+      this.reprojectPreview("newer");
+      return;
+    }
+    if (preview.hasLater) {
+      await this.loadPreviewBoundary("newer", false);
+    }
+  }
+
+  private async openThreadSearch(
+    queryInput: string,
+    origin: "chat" | "thread_list",
+  ): Promise<void> {
+    const query = queryInput.trim();
+    if (query.length === 0) {
+      this.update({ notice: "Enter a non-empty history search query." });
+      return;
+    }
+    if (this.navigationBusy) {
+      return;
+    }
+    if (
+      origin === "chat" &&
+      this.state.mode === "chat" &&
+      !this.canBrowseThreads()
+    ) {
+      this.update({ notice: "History search is available only while idle." });
+      return;
+    }
+    const existing = this.state.threadBrowser;
+    if (
+      origin === "thread_list" &&
+      (existing === undefined ||
+        (this.state.mode !== "thread_search_input" &&
+          this.state.mode !== "thread_search_results"))
+    ) {
+      return;
+    }
+    const generation = this.beginNavigation();
+    this.navigationBusy = true;
+    const browser: TuiThreadBrowserState = existing ?? {
+      threads: [],
+      selectedIndex: 0,
+      listScrollOffset: 0,
+      viewportHeight: DEFAULT_VIEWPORT_HEIGHT,
+      loading: false,
+    };
+    const search: TuiThreadSearchState = {
+      origin,
+      input: queryInput,
+      query,
+      matches: [],
+      selectedIndex: 0,
+      scrollOffset: 0,
+      loading: true,
+      hasMore: false,
+    };
+    this.update({
+      mode: "thread_search_results",
+      threadBrowser: { ...browser, loading: true, search },
+      notice: `Searching for “${boundText(query, 128)}”…`,
+    });
+    try {
+      const result = await this.client.searchThreads({
+        workspace: this.state.configuration.cwd,
+        query,
+        limit: THREAD_SEARCH_PAGE_LIMIT,
+      });
+      if (
+        !this.isCurrentNavigation(generation) ||
+        this.state.mode !== "thread_search_results"
+      ) {
+        return;
+      }
+      const currentBrowser = this.state.threadBrowser;
+      if (currentBrowser === undefined) {
+        return;
+      }
+      this.update({
+        threadBrowser: {
+          ...currentBrowser,
+          loading: false,
+          search: {
+            ...search,
+            matches: result.matches,
+            loading: false,
+            hasMore: result.hasMore,
+            revision: result.revision,
+            ...(result.nextCursor === undefined
+              ? {}
+              : { nextCursor: result.nextCursor }),
+          },
+        },
+        notice:
+          result.diagnostics.length === 0
+            ? result.matches.length === 0
+              ? `No history matches “${boundText(query, 128)}”.`
+              : undefined
+            : `${result.diagnostics.length} thread index diagnostic(s) reported.`,
+      });
+    } catch (error) {
+      if (!this.isCurrentNavigation(generation)) {
+        return;
+      }
+      const currentBrowser = this.state.threadBrowser;
+      if (currentBrowser !== undefined) {
+        this.update({
+          threadBrowser: {
+            ...currentBrowser,
+            loading: false,
+            search: { ...search, loading: false },
+          },
+          notice: `Could not search thread history: ${errorMessage(error)}`,
+        });
+      }
+    } finally {
+      if (this.isCurrentNavigation(generation)) {
+        this.navigationBusy = false;
+      }
+    }
+  }
+
+  private async loadMoreSearchResults(): Promise<boolean> {
+    const browser = this.state.threadBrowser;
+    const search = browser?.search;
+    if (
+      this.state.mode !== "thread_search_results" ||
+      browser === undefined ||
+      search === undefined ||
+      search.loading ||
+      !search.hasMore ||
+      search.nextCursor === undefined ||
+      this.navigationBusy
+    ) {
+      return false;
+    }
+    if (search.matches.length >= MAXIMUM_SEARCH_RESULTS) {
+      this.update({
+        threadBrowser: {
+          ...browser,
+          search: { ...search, hasMore: false },
+        },
+        notice: `Search result cache is limited to ${MAXIMUM_SEARCH_RESULTS} matches.`,
+      });
+      return false;
+    }
+    const generation = this.beginNavigation();
+    this.navigationBusy = true;
+    this.update({
+      threadBrowser: {
+        ...browser,
+        loading: true,
+        search: { ...search, loading: true },
+      },
+      notice: "Loading more search results…",
+    });
+    try {
+      const result = await this.client.searchThreads({
+        workspace: this.state.configuration.cwd,
+        query: search.query,
+        cursor: search.nextCursor,
+        limit: THREAD_SEARCH_PAGE_LIMIT,
+      });
+      if (
+        !this.isCurrentNavigation(generation) ||
+        this.state.mode !== "thread_search_results"
+      ) {
+        return false;
+      }
+      const currentBrowser = this.state.threadBrowser;
+      const currentSearch = currentBrowser?.search;
+      if (currentBrowser === undefined || currentSearch === undefined) {
+        return false;
+      }
+      const seen = new Set(
+        currentSearch.matches.map(
+          (match) => `${match.threadId}:${match.sequence}`,
+        ),
+      );
+      const additions = result.matches.filter(
+        (match) => !seen.has(`${match.threadId}:${match.sequence}`),
+      );
+      const matches = [...currentSearch.matches, ...additions].slice(
+        0,
+        MAXIMUM_SEARCH_RESULTS,
+      );
+      const atCapacity = matches.length >= MAXIMUM_SEARCH_RESULTS;
+      const { nextCursor: _previousCursor, ...searchWithoutCursor } =
+        currentSearch;
+      this.update({
+        threadBrowser: {
+          ...currentBrowser,
+          loading: false,
+          search: {
+            ...searchWithoutCursor,
+            matches,
+            loading: false,
+            hasMore: result.hasMore && !atCapacity,
+            revision: result.revision,
+            ...(result.nextCursor === undefined || atCapacity
+              ? {}
+              : { nextCursor: result.nextCursor }),
+          },
+        },
+        notice: atCapacity
+          ? `Search result cache is limited to ${MAXIMUM_SEARCH_RESULTS} matches.`
+          : undefined,
+      });
+      return true;
+    } catch (error) {
+      const currentBrowser = this.state.threadBrowser;
+      const currentSearch = currentBrowser?.search;
+      if (
+        this.isCurrentNavigation(generation) &&
+        currentBrowser !== undefined &&
+        currentSearch !== undefined
+      ) {
+        const indexChanged =
+          structuredErrorCode(error) === "THREAD_SEARCH_INDEX_CHANGED";
+        this.update({
+          threadBrowser: {
+            ...currentBrowser,
+            loading: false,
+            search: {
+              ...currentSearch,
+              loading: false,
+              ...(indexChanged ? { hasMore: false } : {}),
+            },
+          },
+          notice: indexChanged
+            ? "The history index changed. Press / to keep the query and rerun it."
+            : `Could not load more search results: ${errorMessage(error)}`,
+        });
+      }
+      return false;
+    } finally {
+      if (this.isCurrentNavigation(generation)) {
+        this.navigationBusy = false;
+      }
+    }
+  }
+
+  private reprojectPreview(direction: "older" | "newer"): void {
+    const browser = this.state.threadBrowser;
+    const preview = browser?.preview;
+    if (browser === undefined || preview === undefined) {
+      return;
+    }
+    const edge =
+      direction === "older"
+        ? preview.entries[0]?.sequence
+        : preview.entries.at(-1)?.sequence;
+    if (edge === undefined) {
+      return;
+    }
+    const projection = projectHistoryWindow(
+      preview.events,
+      direction === "older" ? Math.max(0, edge - 1) : edge + 1,
+      direction === "older" ? "end" : "start",
+    );
+    const entries = this.previewEntries(projection.entries, preview.match);
+    this.update({
+      threadBrowser: {
+        ...browser,
+        preview: {
+          ...preview,
+          entries,
+          scrollOffset:
+            direction === "older"
+              ? maximumScrollOffset(entries.length, browser.viewportHeight)
+              : 0,
+          hasProjectedEarlier: projection.hasEarlier,
+          hasProjectedLater: projection.hasLater,
+        },
+      },
+      notice: undefined,
+    });
+  }
+
+  private async loadPreviewBoundary(
+    direction: "older" | "newer",
+    toBoundary: boolean,
+  ): Promise<void> {
+    const browser = this.state.threadBrowser;
+    const preview = browser?.preview;
+    if (browser === undefined || preview === undefined || this.navigationBusy) {
+      return;
+    }
+    const generation = this.beginNavigation();
+    this.navigationBusy = true;
+    this.update({
+      threadBrowser: { ...browser, loading: true },
+      notice:
+        direction === "older"
+          ? "Loading older history…"
+          : "Loading newer history…",
+    });
+    try {
+      let events = [...preview.events];
+      let hasEarlier = preview.hasEarlier;
+      let hasLater = preview.hasLater;
+      do {
+        const cursor =
+          direction === "older" ? events[0]?.sequence : events.at(-1)?.sequence;
+        if (cursor === undefined) {
+          break;
+        }
+        const page = await this.client.readThreadEvents({
+          threadId: preview.thread.threadId,
+          ...(direction === "older"
+            ? { beforeSequence: cursor }
+            : { afterSequence: cursor }),
+          limit: 200,
+        });
+        if (!this.isCurrentNavigation(generation)) {
+          return;
+        }
+        if (page.events.length === 0) {
+          if (
+            (direction === "older" && page.hasEarlier) ||
+            (direction === "newer" && page.hasLater)
+          ) {
+            throw new Error("History pagination returned no cursor progress.");
+          }
+          hasEarlier = direction === "older" ? false : hasEarlier;
+          hasLater = direction === "newer" ? false : hasLater;
+          break;
+        }
+        const combinedCount = uniqueEventCount(events, page.events);
+        events = mergeEventWindow(
+          events,
+          page.events,
+          direction === "older" ? "older" : "newer",
+        );
+        if (direction === "older") {
+          hasEarlier = page.hasEarlier;
+          hasLater = hasLater || combinedCount > events.length;
+        } else {
+          hasLater = page.hasLater;
+          hasEarlier = hasEarlier || combinedCount > events.length;
+        }
+      } while (toBoundary && (direction === "older" ? hasEarlier : hasLater));
+
+      const previousEdge =
+        direction === "older"
+          ? preview.events[0]?.sequence
+          : preview.events.at(-1)?.sequence;
+      const projection = projectHistoryWindow(
+        events,
+        toBoundary || previousEdge === undefined
+          ? undefined
+          : direction === "older"
+            ? Math.max(0, previousEdge - 1)
+            : previousEdge + 1,
+        toBoundary
+          ? direction === "older"
+            ? "start"
+            : "end"
+          : direction === "older"
+            ? "end"
+            : "start",
+      );
+      const entries = this.previewEntries(projection.entries, preview.match);
+      const currentBrowser = this.state.threadBrowser;
+      if (
+        this.state.mode !== "thread_preview" ||
+        currentBrowser === undefined
+      ) {
+        return;
+      }
+      this.update({
+        threadBrowser: {
+          ...currentBrowser,
+          loading: false,
+          preview: {
+            ...preview,
+            events,
+            entries,
+            scrollOffset:
+              direction === "older"
+                ? toBoundary
+                  ? 0
+                  : maximumScrollOffset(
+                      entries.length,
+                      currentBrowser.viewportHeight,
+                    )
+                : toBoundary
+                  ? maximumScrollOffset(
+                      entries.length,
+                      currentBrowser.viewportHeight,
+                    )
+                  : 0,
+            hasEarlier,
+            hasLater,
+            hasProjectedEarlier: projection.hasEarlier,
+            hasProjectedLater: projection.hasLater,
+          },
+        },
+        notice: undefined,
+      });
+    } catch (error) {
+      const currentBrowser = this.state.threadBrowser;
+      if (
+        this.isCurrentNavigation(generation) &&
+        this.state.mode === "thread_preview" &&
+        currentBrowser !== undefined
+      ) {
+        this.update({
+          threadBrowser: { ...currentBrowser, loading: false },
+          notice: `Could not load thread history: ${errorMessage(error)}`,
+        });
+      }
+    } finally {
+      if (this.isCurrentNavigation(generation)) {
+        this.navigationBusy = false;
+      }
+    }
+  }
+
+  private async loadLatestPreview(): Promise<void> {
+    const browser = this.state.threadBrowser;
+    const preview = browser?.preview;
+    if (browser === undefined || preview === undefined || this.navigationBusy) {
+      return;
+    }
+    const generation = this.beginNavigation();
+    this.navigationBusy = true;
+    this.update({
+      threadBrowser: { ...browser, loading: true },
+      notice: "Loading latest history…",
+    });
+    try {
+      const page = await this.client.readThreadEvents({
+        threadId: preview.thread.threadId,
+        limit: 200,
+      });
+      if (!this.isCurrentNavigation(generation)) {
+        return;
+      }
+      const projection = projectHistoryWindow(page.events, undefined, "end");
+      const entries = this.previewEntries(projection.entries, preview.match);
+      const currentBrowser = this.state.threadBrowser;
+      if (
+        this.state.mode !== "thread_preview" ||
+        currentBrowser === undefined
+      ) {
+        return;
+      }
+      this.update({
+        threadBrowser: {
+          ...currentBrowser,
+          loading: false,
+          preview: {
+            ...preview,
+            events: page.events,
+            entries,
+            scrollOffset: maximumScrollOffset(
+              entries.length,
+              currentBrowser.viewportHeight,
+            ),
+            hasEarlier: page.hasEarlier,
+            hasLater: page.hasLater,
+            hasProjectedEarlier: projection.hasEarlier,
+            hasProjectedLater: projection.hasLater,
+          },
+        },
+        notice: undefined,
+      });
+    } catch (error) {
+      const currentBrowser = this.state.threadBrowser;
+      if (
+        this.isCurrentNavigation(generation) &&
+        this.state.mode === "thread_preview" &&
+        currentBrowser !== undefined
+      ) {
+        this.update({
+          threadBrowser: { ...currentBrowser, loading: false },
+          notice: `Could not load latest history: ${errorMessage(error)}`,
+        });
+      }
+    } finally {
+      if (this.isCurrentNavigation(generation)) {
+        this.navigationBusy = false;
+      }
+    }
+  }
+
+  private previewEntries(
+    entries: ReadonlyArray<Omit<TuiTranscriptEntry, "id">>,
+    match: ThreadSearchMatch | undefined,
+  ): TuiTranscriptEntry[] {
+    return entries.map((entry) =>
+      this.withTranscriptId({
+        ...entry,
+        ...(match !== undefined && entry.sequence === match.sequence
+          ? { matched: true }
+          : {}),
+      }),
+    );
   }
 
   private detachThread(): void {
@@ -632,6 +1705,7 @@ export class TuiController {
     if (this.state.connection === "closed") {
       return;
     }
+    this.cancelNavigation();
     this.update({ connection: "closing", notice: "Shutting down…" });
     try {
       await this.client.shutdown();
@@ -865,6 +1939,7 @@ export class TuiController {
     ) {
       return;
     }
+    this.cancelNavigation();
     const message =
       error === undefined
         ? "The app-server connection closed."
@@ -919,6 +1994,20 @@ export class TuiController {
       this.state.activeTurn === undefined &&
       this.state.approval === undefined
     );
+  }
+
+  private beginNavigation(): number {
+    this.navigationGeneration += 1;
+    return this.navigationGeneration;
+  }
+
+  private cancelNavigation(): void {
+    this.navigationGeneration += 1;
+    this.navigationBusy = false;
+  }
+
+  private isCurrentNavigation(generation: number): boolean {
+    return generation === this.navigationGeneration;
   }
 
   private recordSemanticProtocolError(message: string): void {
@@ -1026,7 +2115,7 @@ function receiveItem(
   };
 }
 
-export function projectThreadHistory(
+function projectThreadHistoryRows(
   events: readonly AgentEvent[],
 ): Array<Omit<TuiTranscriptEntry, "id">> {
   const recordedToolResults = new Set(
@@ -1043,10 +2132,18 @@ export function projectThreadHistory(
       const item = event.payload.item;
       switch (item.type) {
         case "user_message":
-          entries.push({ kind: "user", text: item.content });
+          entries.push({
+            kind: "user",
+            text: item.content,
+            sequence: event.sequence,
+          });
           break;
         case "assistant_message":
-          entries.push({ kind: "assistant", text: item.content });
+          entries.push({
+            kind: "assistant",
+            text: item.content,
+            sequence: event.sequence,
+          });
           break;
         case "tool_result":
           entries.push({
@@ -1055,12 +2152,14 @@ export function projectThreadHistory(
               item.status === "error"
                 ? `${item.name}: ${item.error?.code ?? "error"}${item.error?.message === undefined ? "" : ` — ${item.error.message}`}`
                 : `${item.name}: success${item.output === undefined ? "" : ` — ${jsonSummary(item.output)}`}`,
+            sequence: event.sequence,
           });
           break;
         case "compaction":
           entries.push({
             kind: "system",
             text: `Context compacted: ${item.summary.objective || "summary recorded"}.`,
+            sequence: event.sequence,
           });
           break;
         case "recovery": {
@@ -1071,6 +2170,7 @@ export function projectThreadHistory(
           entries.push({
             kind: item.uncertainToolCalls.length === 0 ? "system" : "error",
             text: `Recovery (${item.previousStatus}): ${item.message}${uncertain}`,
+            sequence: event.sequence,
           });
           break;
         }
@@ -1087,6 +2187,7 @@ export function projectThreadHistory(
       entries.push({
         kind: "error",
         text: `${event.payload.name}: tool execution failed.`,
+        sequence: event.sequence,
       });
       continue;
     }
@@ -1097,14 +2198,23 @@ export function projectThreadHistory(
       entries.push({
         kind: "error",
         text: `${event.payload.name}: process termination outcome is uncertain (pid ${event.payload.pid}).`,
+        sequence: event.sequence,
       });
       continue;
     }
     if (event.type === "turn.completed") {
       entries.push(
         event.payload.usage === undefined
-          ? { kind: "system", text: "Turn completed." }
-          : { kind: "usage", text: formatUsage(event.payload.usage) },
+          ? {
+              kind: "system",
+              text: "Turn completed.",
+              sequence: event.sequence,
+            }
+          : {
+              kind: "usage",
+              text: formatUsage(event.payload.usage),
+              sequence: event.sequence,
+            },
       );
       continue;
     }
@@ -1112,6 +2222,7 @@ export function projectThreadHistory(
       entries.push({
         kind: "system",
         text: `Turn cancelled: ${event.payload.reason}`,
+        sequence: event.sequence,
       });
       continue;
     }
@@ -1119,13 +2230,23 @@ export function projectThreadHistory(
       entries.push({
         kind: "error",
         text: `${event.payload.code}: ${event.payload.message}`,
+        sequence: event.sequence,
       });
     }
   }
-  const bounded = entries.map((entry) => ({
+  return entries.map((entry) => ({
     ...entry,
     text: boundText(entry.text),
   }));
+}
+
+export function projectThreadHistory(
+  events: readonly AgentEvent[],
+): Array<Omit<TuiTranscriptEntry, "id" | "sequence" | "matched">> {
+  const rows = projectThreadHistoryRows(events).map(
+    ({ sequence: _sequence, matched: _matched, ...entry }) => entry,
+  );
+  const bounded = rows;
   if (bounded.length <= MAXIMUM_HISTORY_ROWS) {
     return bounded;
   }
@@ -1136,6 +2257,197 @@ export function projectThreadHistory(
     },
     ...bounded.slice(-(MAXIMUM_HISTORY_ROWS - 1)),
   ];
+}
+
+function projectHistoryWindow(
+  events: readonly AgentEvent[],
+  focusSequence: number | undefined,
+  alignment: "start" | "center" | "end",
+): {
+  entries: Array<Omit<TuiTranscriptEntry, "id">>;
+  hasEarlier: boolean;
+  hasLater: boolean;
+} {
+  const rows = projectThreadHistoryRows(events);
+  if (rows.length <= MAXIMUM_HISTORY_ROWS) {
+    return { entries: rows, hasEarlier: false, hasLater: false };
+  }
+  let focusIndex: number;
+  if (focusSequence === undefined) {
+    focusIndex = alignment === "start" ? 0 : rows.length - 1;
+  } else if (alignment === "end") {
+    let found = -1;
+    for (let index = rows.length - 1; index >= 0; index -= 1) {
+      if ((rows[index]?.sequence ?? -1) <= focusSequence) {
+        found = index;
+        break;
+      }
+    }
+    focusIndex = found === -1 ? 0 : found;
+  } else {
+    const found = rows.findIndex(
+      (entry) => (entry.sequence ?? Number.MAX_SAFE_INTEGER) >= focusSequence,
+    );
+    focusIndex = found === -1 ? rows.length - 1 : found;
+  }
+  const maximumStart = rows.length - MAXIMUM_HISTORY_ROWS;
+  const start = Math.min(
+    maximumStart,
+    Math.max(
+      0,
+      alignment === "start"
+        ? focusIndex
+        : alignment === "end"
+          ? focusIndex - MAXIMUM_HISTORY_ROWS + 1
+          : focusIndex - Math.floor(MAXIMUM_HISTORY_ROWS / 2),
+    ),
+  );
+  const end = start + MAXIMUM_HISTORY_ROWS;
+  return {
+    entries: rows.slice(start, end),
+    hasEarlier: start > 0,
+    hasLater: end < rows.length,
+  };
+}
+
+function emptySearchState(
+  origin: "chat" | "thread_list",
+): TuiThreadSearchState {
+  return {
+    origin,
+    input: "",
+    query: "",
+    matches: [],
+    selectedIndex: 0,
+    scrollOffset: 0,
+    loading: false,
+    hasMore: false,
+  };
+}
+
+function keepSelectionVisible(
+  selectedIndex: number,
+  currentOffset: number,
+  viewportHeight: number,
+  itemCount: number,
+): number {
+  if (itemCount === 0) {
+    return 0;
+  }
+  const maximum = maximumScrollOffset(itemCount, viewportHeight);
+  if (selectedIndex < currentOffset) {
+    return Math.max(0, selectedIndex);
+  }
+  if (selectedIndex >= currentOffset + viewportHeight) {
+    return Math.min(maximum, selectedIndex - viewportHeight + 1);
+  }
+  return Math.min(maximum, currentOffset);
+}
+
+function maximumScrollOffset(
+  itemCount: number,
+  viewportHeight: number,
+): number {
+  return Math.max(0, itemCount - viewportHeight);
+}
+
+function mergeEventWindow(
+  first: readonly AgentEvent[],
+  second: readonly AgentEvent[],
+  retain: "older" | "newer" | "around",
+): AgentEvent[] {
+  const bySequence = new Map<number, AgentEvent>();
+  for (const event of [...first, ...second]) {
+    const existing = bySequence.get(event.sequence);
+    if (
+      existing !== undefined &&
+      JSON.stringify(existing) !== JSON.stringify(event)
+    ) {
+      throw new Error(`History pages disagree about event ${event.sequence}.`);
+    }
+    bySequence.set(event.sequence, event);
+  }
+  const events = [...bySequence.values()].sort(
+    (left, right) => left.sequence - right.sequence,
+  );
+  const threadId = events[0]?.threadId;
+  for (let index = 0; index < events.length; index += 1) {
+    const event = events[index];
+    const previous = events[index - 1];
+    if (event?.threadId !== threadId) {
+      throw new Error("History pages contain events from different threads.");
+    }
+    if (
+      previous !== undefined &&
+      event !== undefined &&
+      event.sequence !== previous.sequence + 1
+    ) {
+      throw new Error("History pages are not contiguous at their boundary.");
+    }
+  }
+  if (events.length <= MAXIMUM_HISTORY_EVENTS) {
+    return events;
+  }
+  if (retain === "older") {
+    return events.slice(0, MAXIMUM_HISTORY_EVENTS);
+  }
+  if (retain === "newer") {
+    return events.slice(-MAXIMUM_HISTORY_EVENTS);
+  }
+  const middle = Math.floor(events.length / 2);
+  const start = Math.max(0, middle - Math.floor(MAXIMUM_HISTORY_EVENTS / 2));
+  return events.slice(start, start + MAXIMUM_HISTORY_EVENTS);
+}
+
+function uniqueEventCount(
+  first: readonly AgentEvent[],
+  second: readonly AgentEvent[],
+): number {
+  return new Set([...first, ...second].map((event) => event.sequence)).size;
+}
+
+function threadSearchKindForEvent(
+  event: AgentEvent,
+  _events: readonly AgentEvent[],
+): ThreadSearchMatch["kind"] | undefined {
+  if (event.type === "item.recorded") {
+    switch (event.payload.item.type) {
+      case "user_message":
+        return "user_message";
+      case "assistant_message":
+        return "assistant_message";
+      case "tool_result":
+        return "tool_result";
+      case "compaction":
+        return "compaction";
+      case "recovery":
+        return "recovery";
+      default:
+        return undefined;
+    }
+  }
+  if (event.type === "tool.completed" && event.payload.status === "error") {
+    return "tool_failure";
+  }
+  if (event.type === "turn.cancelled") {
+    return "turn_cancelled";
+  }
+  if (event.type === "turn.failed") {
+    return "turn_failed";
+  }
+  return undefined;
+}
+
+function structuredErrorCode(error: unknown): string | undefined {
+  return error instanceof Error &&
+    "dataCode" in error &&
+    typeof (error as { dataCode?: unknown }).dataCode === "string"
+    ? (error as { dataCode: string }).dataCode
+    : error instanceof Error &&
+        "code" in error &&
+        typeof (error as { code?: unknown }).code === "string"
+      ? (error as { code: string }).code
+      : undefined;
 }
 
 function addModelUsage(

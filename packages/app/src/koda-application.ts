@@ -22,6 +22,11 @@ import {
   THREAD_EVENTS_DEFAULT_LIMIT,
   THREAD_EVENTS_MAXIMUM_LIMIT,
   THREAD_EVENTS_RESULT_BUDGET_BYTES,
+  THREAD_SEARCH_DEFAULT_LIMIT,
+  THREAD_SEARCH_MAXIMUM_LIMIT,
+  THREAD_SEARCH_MAXIMUM_TERMS,
+  THREAD_SEARCH_QUERY_BUDGET_BYTES,
+  THREAD_SEARCH_RESULT_BUDGET_BYTES,
   threadIdSchema,
   turnContextSnapshotSchema,
   turnIdSchema,
@@ -31,6 +36,8 @@ import {
   type ProviderMetadata,
   type AgentEvent,
   type ThreadId,
+  type ThreadSearchCursor,
+  type ThreadSearchMatch,
   type TurnId,
 } from "@koda/protocol";
 import {
@@ -45,6 +52,7 @@ import {
   ReadOnlyWorkspace,
   ThreadLease,
   ThreadMetadataIndex,
+  normalizeThreadSearchText,
   ThreadRecoveryError,
   WorkspaceCommandRunner,
   assertResumeWorkspace,
@@ -116,13 +124,30 @@ export interface ThreadListInput {
 export interface ThreadEventsInput {
   threadId: string;
   beforeSequence?: number;
+  afterSequence?: number;
   limit?: number;
 }
 
 export interface ThreadEventsPage {
   events: AgentEvent[];
   hasEarlier: boolean;
+  hasLater: boolean;
   nextBeforeSequence?: number;
+  nextAfterSequence?: number;
+}
+
+export interface ThreadSearchInput {
+  workspace: string;
+  query: string;
+  cursor?: ThreadSearchCursor;
+  limit?: number;
+}
+
+export interface ThreadSearchPage {
+  matches: ThreadSearchMatch[];
+  revision: number;
+  hasMore: boolean;
+  nextCursor?: ThreadSearchCursor;
 }
 
 export class ThreadHistoryError extends Error {
@@ -273,9 +298,25 @@ export class KodaApplication {
   ): Promise<ThreadEventsPage> {
     const threadId = parseLocalThreadId(input.threadId);
     const beforeSequence = input.beforeSequence;
+    const afterSequence = input.afterSequence;
+    if (beforeSequence !== undefined && afterSequence !== undefined) {
+      throw new ThreadHistoryError(
+        "INVALID_THREAD_EVENT_CURSOR",
+        "beforeSequence and afterSequence are mutually exclusive cursors.",
+      );
+    }
     if (
       beforeSequence !== undefined &&
       (!Number.isSafeInteger(beforeSequence) || beforeSequence < 0)
+    ) {
+      throw new ThreadHistoryError(
+        "INVALID_THREAD_EVENT_CURSOR",
+        "Thread event cursor must be a non-negative safe integer.",
+      );
+    }
+    if (
+      afterSequence !== undefined &&
+      (!Number.isSafeInteger(afterSequence) || afterSequence < 0)
     ) {
       throw new ThreadHistoryError(
         "INVALID_THREAD_EVENT_CURSOR",
@@ -313,11 +354,21 @@ export class KodaApplication {
         `Thread '${threadId}' has an incomplete trailing event and cannot be browsed safely.`,
       );
     }
+    if (readResult.events.length === 0) {
+      throw new ThreadHistoryError(
+        "THREAD_EVENT_LOG_CORRUPT",
+        `Thread '${threadId}' event log does not contain a durable event.`,
+      );
+    }
     if (readResult.events.some((event) => event.threadId !== threadId)) {
       throw new ThreadHistoryError(
         "THREAD_EVENT_LOG_CORRUPT",
         `Thread '${threadId}' event log contains an event for another thread.`,
       );
+    }
+
+    if (afterSequence !== undefined) {
+      return readForwardEventPage(readResult.events, afterSequence, limit);
     }
 
     const endIndex = findEventPageEnd(readResult.events, beforeSequence);
@@ -329,12 +380,12 @@ export class KodaApplication {
         break;
       }
       const candidate = [event, ...selected];
-      const hasEarlier = startIndex - 1 > 0;
-      const page: ThreadEventsPage = {
-        events: candidate,
-        hasEarlier,
-        ...(hasEarlier ? { nextBeforeSequence: event.sequence } : {}),
-      };
+      const page = eventPage(
+        candidate,
+        startIndex - 1,
+        endIndex,
+        readResult.events.length,
+      );
       if (serializedBytes(page) > THREAD_EVENTS_RESULT_BUDGET_BYTES) {
         if (selected.length === 0) {
           throw new ThreadHistoryError(
@@ -348,22 +399,58 @@ export class KodaApplication {
       startIndex -= 1;
     }
 
-    const hasEarlier = startIndex > 0;
-    if (!hasEarlier) {
-      return { events: selected, hasEarlier: false };
-    }
-    const first = selected[0];
-    if (first === undefined) {
+    return eventPage(selected, startIndex, endIndex, readResult.events.length);
+  }
+
+  public async searchThreads(
+    input: ThreadSearchInput,
+  ): Promise<ThreadQueryResult<ThreadSearchPage>> {
+    if (
+      Buffer.byteLength(input.query, "utf8") > THREAD_SEARCH_QUERY_BUDGET_BYTES
+    ) {
       throw new ThreadHistoryError(
-        "THREAD_EVENT_READ_FAILED",
-        `Thread '${threadId}' history pagination produced an empty continuation page.`,
+        "INVALID_THREAD_SEARCH_QUERY",
+        `Thread search query must not exceed ${THREAD_SEARCH_QUERY_BUDGET_BYTES} UTF-8 bytes.`,
       );
     }
-    return {
-      events: selected,
-      hasEarlier: true,
-      nextBeforeSequence: first.sequence,
-    };
+    const normalizedQuery = normalizeThreadSearchText(input.query);
+    const terms = normalizedQuery.split(" ").filter(Boolean);
+    if (terms.length === 0 || terms.length > THREAD_SEARCH_MAXIMUM_TERMS) {
+      throw new ThreadHistoryError(
+        "INVALID_THREAD_SEARCH_QUERY",
+        `Thread search query must contain between 1 and ${THREAD_SEARCH_MAXIMUM_TERMS} terms.`,
+      );
+    }
+    const limit = input.limit ?? THREAD_SEARCH_DEFAULT_LIMIT;
+    if (
+      !Number.isSafeInteger(limit) ||
+      limit < 1 ||
+      limit > THREAD_SEARCH_MAXIMUM_LIMIT
+    ) {
+      throw new ThreadHistoryError(
+        "INVALID_THREAD_SEARCH_LIMIT",
+        `Thread search limit must be between 1 and ${THREAD_SEARCH_MAXIMUM_LIMIT}.`,
+      );
+    }
+    const workspaceRoot = await realpath(
+      resolve(this.processDirectory, input.workspace),
+    );
+    return this.withMetadataIndex(async (index) => {
+      const refresh = await index.refresh();
+      const page = index.search({
+        workspaceRoot,
+        query: normalizedQuery,
+        limit,
+        ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+      });
+      if (serializedSearchBytes(page) > THREAD_SEARCH_RESULT_BUDGET_BYTES) {
+        throw new ThreadHistoryError(
+          "THREAD_SEARCH_RESULT_TOO_LARGE",
+          `Thread search result exceeds the ${THREAD_SEARCH_RESULT_BUDGET_BYTES}-byte response budget.`,
+        );
+      }
+      return { value: page, diagnostics: refresh.diagnostics };
+    });
   }
 
   private async executeTurn(
@@ -706,7 +793,65 @@ function findEventPageEnd(
   return index === -1 ? events.length : index;
 }
 
+function readForwardEventPage(
+  events: readonly AgentEvent[],
+  afterSequence: number,
+  limit: number,
+): ThreadEventsPage {
+  const found = events.findIndex((event) => event.sequence > afterSequence);
+  const startIndex = found === -1 ? events.length : found;
+  let endIndex = startIndex;
+  const selected: AgentEvent[] = [];
+  while (endIndex < events.length && selected.length < limit) {
+    const event = events[endIndex];
+    if (event === undefined) {
+      break;
+    }
+    const candidate = [...selected, event];
+    const page = eventPage(candidate, startIndex, endIndex + 1, events.length);
+    if (serializedBytes(page) > THREAD_EVENTS_RESULT_BUDGET_BYTES) {
+      if (selected.length === 0) {
+        throw new ThreadHistoryError(
+          "THREAD_EVENT_TOO_LARGE",
+          `Thread event ${event.sequence} exceeds the ${THREAD_EVENTS_RESULT_BUDGET_BYTES}-byte history response budget.`,
+        );
+      }
+      break;
+    }
+    selected.push(event);
+    endIndex += 1;
+  }
+  return eventPage(selected, startIndex, endIndex, events.length);
+}
+
+function eventPage(
+  events: AgentEvent[],
+  startIndex: number,
+  endIndex: number,
+  eventCount: number,
+): ThreadEventsPage {
+  const hasEarlier = startIndex > 0;
+  const hasLater = endIndex < eventCount;
+  const first = events[0];
+  const last = events.at(-1);
+  return {
+    events,
+    hasEarlier,
+    hasLater,
+    ...(hasEarlier && first !== undefined
+      ? { nextBeforeSequence: first.sequence }
+      : {}),
+    ...(hasLater && last !== undefined
+      ? { nextAfterSequence: last.sequence }
+      : {}),
+  };
+}
+
 function serializedBytes(page: ThreadEventsPage): number {
+  return Buffer.byteLength(JSON.stringify(page), "utf8");
+}
+
+function serializedSearchBytes(page: ThreadSearchPage): number {
   return Buffer.byteLength(JSON.stringify(page), "utf8");
 }
 

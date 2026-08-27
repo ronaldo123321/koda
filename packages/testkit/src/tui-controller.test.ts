@@ -20,6 +20,8 @@ import {
   type ThreadEventsResult,
   type ThreadListParams,
   type ThreadListResult,
+  type ThreadSearchParams,
+  type ThreadSearchResult,
   type TurnCancelParams,
   type TurnCancelResult,
   type TurnStartParams,
@@ -258,6 +260,7 @@ describe("TuiController", () => {
         }),
       ],
       hasEarlier: false,
+      hasLater: false,
     };
     client.threadGetResult = { thread: selected, diagnostics: [] };
     const controller = createController(client);
@@ -310,7 +313,11 @@ describe("TuiController", () => {
       "gpt-5.6-terra",
     );
     client.threadListResult = { threads: [invalid], diagnostics: [] };
-    client.threadEventsResult = { events: [], hasEarlier: false };
+    client.threadEventsResult = {
+      events: [],
+      hasEarlier: false,
+      hasLater: false,
+    };
     const controller = createController(client);
     await controller.startPrompt("Create current thread");
     client.finish("completed");
@@ -397,6 +404,277 @@ describe("TuiController", () => {
     });
   });
 
+  it("searches workspace history, opens an authoritative match, and returns by layer", async () => {
+    const client = new FakeAppServerClient();
+    const selected = threadMetadata(
+      "search-thread",
+      "completed",
+      "openai",
+      "gpt-5.6-terra",
+    );
+    const match = searchMatch(
+      "search-thread",
+      1,
+      "assistant_message",
+      "Parser repaired",
+    );
+    client.threadSearchResult = {
+      matches: [match],
+      revision: 4,
+      hasMore: false,
+      diagnostics: [],
+    };
+    client.threadGetResult = { thread: selected, diagnostics: [] };
+    client.threadEventsImplementation = (params) => {
+      if (params.beforeSequence !== undefined) {
+        return Promise.resolve({
+          events: [
+            recordedItemEvent(0, "search-thread", {
+              type: "user_message",
+              id: "search-context-user",
+              content: "Repair the parser",
+            }),
+            recordedItemEvent(1, "search-thread", {
+              type: "assistant_message",
+              id: "search-context-assistant",
+              content: "Parser repaired",
+            }),
+          ],
+          hasEarlier: false,
+          hasLater: true,
+          nextAfterSequence: 1,
+        });
+      }
+      return Promise.resolve({
+        events: [
+          recordedItemEvent(2, "search-thread", {
+            type: "user_message",
+            id: "search-context-next",
+            content: "Run the tests",
+          }),
+        ],
+        hasEarlier: true,
+        hasLater: false,
+        nextBeforeSequence: 2,
+      });
+    };
+    const controller = createController(client);
+
+    controller.setInput("/search parser repaired");
+    await controller.submitInput();
+    expect(controller.getSnapshot()).toMatchObject({
+      mode: "thread_search_results",
+      threadBrowser: {
+        search: {
+          query: "parser repaired",
+          selectedIndex: 0,
+          matches: [{ threadId: "search-thread", sequence: 1 }],
+        },
+      },
+    });
+    expect(client.threadSearchRequests).toEqual([
+      {
+        workspace: "/workspace",
+        query: "parser repaired",
+        limit: 100,
+      },
+    ]);
+
+    await controller.previewSelectedSearchResult();
+    expect(client.threadEventRequests).toEqual([
+      { threadId: "search-thread", beforeSequence: 2, limit: 200 },
+      { threadId: "search-thread", afterSequence: 1, limit: 200 },
+    ]);
+    expect(controller.getSnapshot()).toMatchObject({
+      mode: "thread_preview",
+      threadBrowser: {
+        preview: {
+          source: "search_results",
+          match: { sequence: 1 },
+        },
+      },
+    });
+    expect(
+      controller
+        .getSnapshot()
+        .threadBrowser?.preview?.entries.find((entry) => entry.matched),
+    ).toMatchObject({ text: "Parser repaired", sequence: 1 });
+
+    controller.closeThreadBrowserLevel();
+    expect(controller.getSnapshot().mode).toBe("thread_search_results");
+    controller.closeThreadBrowserLevel();
+    expect(controller.getSnapshot()).toMatchObject({
+      mode: "chat",
+      threadBrowser: undefined,
+    });
+  });
+
+  it("loads older history to Home and restores the latest window with End", async () => {
+    const client = new FakeAppServerClient();
+    const selected = threadMetadata(
+      "paged-thread",
+      "completed",
+      "openai",
+      "gpt-5.6-terra",
+    );
+    client.threadListResult = { threads: [selected], diagnostics: [] };
+    const latest: ThreadEventsResult = {
+      events: [
+        recordedItemEvent(2, "paged-thread", {
+          type: "assistant_message",
+          id: "paged-two",
+          content: "newer two",
+        }),
+        recordedItemEvent(3, "paged-thread", {
+          type: "assistant_message",
+          id: "paged-three",
+          content: "newest three",
+        }),
+      ],
+      hasEarlier: true,
+      hasLater: false,
+      nextBeforeSequence: 2,
+    };
+    client.threadEventsImplementation = (params) =>
+      params.beforeSequence === undefined
+        ? Promise.resolve(latest)
+        : Promise.resolve({
+            events: [
+              recordedItemEvent(0, "paged-thread", {
+                type: "user_message",
+                id: "paged-zero",
+                content: "oldest zero",
+              }),
+              recordedItemEvent(1, "paged-thread", {
+                type: "assistant_message",
+                id: "paged-one",
+                content: "older one",
+              }),
+            ],
+            hasEarlier: false,
+            hasLater: true,
+            nextAfterSequence: 1,
+          });
+    const controller = createController(client);
+
+    await controller.openThreadBrowser();
+    await controller.previewSelectedThread();
+    await controller.scrollPreview("home");
+    expect(
+      controller.getSnapshot().threadBrowser?.preview?.entries[0],
+    ).toMatchObject({ text: "oldest zero", sequence: 0 });
+    expect(controller.getSnapshot().threadBrowser?.preview).toMatchObject({
+      hasEarlier: false,
+      hasLater: false,
+      scrollOffset: 0,
+    });
+
+    await controller.scrollPreview("end");
+    expect(
+      controller.getSnapshot().threadBrowser?.preview?.entries.at(-1),
+    ).toMatchObject({ text: "newest three", sequence: 3 });
+    expect(client.threadEventRequests).toEqual([
+      { threadId: "paged-thread", limit: 200 },
+      { threadId: "paged-thread", beforeSequence: 2, limit: 200 },
+      { threadId: "paged-thread", limit: 200 },
+    ]);
+  });
+
+  it("ignores a search response after Escape invalidates its UI generation", async () => {
+    const client = new FakeAppServerClient();
+    let release: ((result: ThreadSearchResult) => void) | undefined;
+    client.threadSearchImplementation = () =>
+      new Promise<ThreadSearchResult>((resolve) => {
+        release = resolve;
+      });
+    const controller = createController(client);
+    controller.setInput("/search delayed");
+    const pending = controller.submitInput();
+    await Promise.resolve();
+    expect(controller.getSnapshot().mode).toBe("thread_search_results");
+
+    controller.closeThreadBrowserLevel();
+    expect(controller.getSnapshot().mode).toBe("chat");
+    release?.({
+      matches: [
+        searchMatch("late-thread", 1, "assistant_message", "late result"),
+      ],
+      revision: 1,
+      hasMore: false,
+      diagnostics: [],
+    });
+    await pending;
+    expect(controller.getSnapshot()).toMatchObject({
+      mode: "chat",
+      threadBrowser: undefined,
+    });
+  });
+
+  it("keeps a query when a revision-bound search continuation expires", async () => {
+    const client = new FakeAppServerClient();
+    const matches = Array.from({ length: 100 }, (_, index) =>
+      searchMatch(
+        "revision-thread",
+        199 - index,
+        "assistant_message",
+        `result ${index}`,
+      ),
+    );
+    const last = matches.at(-1);
+    if (last === undefined) {
+      throw new Error("Revision search fixture is empty.");
+    }
+    client.threadSearchImplementation = (params) => {
+      if (params.cursor !== undefined) {
+        return Promise.reject(
+          Object.assign(new Error("index changed"), {
+            dataCode: "THREAD_SEARCH_INDEX_CHANGED",
+          }),
+        );
+      }
+      return Promise.resolve({
+        matches,
+        revision: 9,
+        hasMore: true,
+        nextCursor: {
+          revision: 9,
+          updatedAt: last.threadUpdatedAt,
+          threadId: last.threadId,
+          sequence: last.sequence,
+        },
+        diagnostics: [],
+      });
+    };
+    const controller = createController(client);
+    controller.setInput("/search revision");
+    await controller.submitInput();
+    controller.setViewportHeight(100);
+    expect(controller.getSnapshot().threadBrowser?.viewportHeight).toBe(30);
+    await controller.pageSearchResults(1);
+    await controller.pageSearchResults(1);
+    await controller.pageSearchResults(1);
+    await controller.pageSearchResults(1);
+
+    expect(client.threadSearchRequests).toHaveLength(2);
+    expect(controller.getSnapshot()).toMatchObject({
+      mode: "thread_search_results",
+      notice: expect.stringContaining("index changed"),
+      threadBrowser: {
+        search: {
+          query: "revision",
+          matches: expect.any(Array),
+          hasMore: false,
+          loading: false,
+        },
+      },
+    });
+    expect(
+      controller.getSnapshot().threadBrowser?.search?.matches,
+    ).toHaveLength(100);
+    controller.setViewportHeight(1);
+    expect(controller.getSnapshot().threadBrowser?.viewportHeight).toBe(5);
+  });
+
   it("projects durable items without replaying assistant deltas or approvals", () => {
     const events = [
       agentEventSchema.parse({
@@ -437,7 +715,7 @@ describe("TuiController", () => {
   });
 
   it("bounds restored history by row count and UTF-8 bytes", () => {
-    const events = Array.from({ length: 101 }, (_, sequence) =>
+    const events = Array.from({ length: 201 }, (_, sequence) =>
       recordedItemEvent(sequence, "bounded-history", {
         type: "assistant_message",
         id: `bounded-message-${sequence}`,
@@ -447,7 +725,7 @@ describe("TuiController", () => {
 
     const projected = projectThreadHistory(events);
 
-    expect(projected).toHaveLength(100);
+    expect(projected).toHaveLength(200);
     expect(projected[0]).toEqual({
       kind: "system",
       text: "2 older history row(s) omitted from this preview.",
@@ -479,6 +757,8 @@ class FakeAppServerClient implements AppServerClientApi {
         interactiveApproval: true,
         durableEventNotifications: true,
         threadEvents: true,
+        threadSearch: true,
+        bidirectionalThreadEvents: true,
       },
       providers: [
         provider("openai", "OpenAI", "OPENAI_API_KEY", "gpt-5.6-terra"),
@@ -499,14 +779,27 @@ class FakeAppServerClient implements AppServerClientApi {
   public readonly threadListRequests: ThreadListParams[] = [];
   public readonly threadGetRequests: ThreadGetParams[] = [];
   public readonly threadEventRequests: ThreadEventsParams[] = [];
+  public readonly threadSearchRequests: ThreadSearchParams[] = [];
   public threadListResult: ThreadListResult = { threads: [], diagnostics: [] };
   public threadGetResult: ThreadGetResult | undefined;
   public threadEventsResult: ThreadEventsResult = {
     events: [],
     hasEarlier: false,
+    hasLater: false,
+  };
+  public threadSearchResult: ThreadSearchResult = {
+    matches: [],
+    revision: 0,
+    hasMore: false,
+    diagnostics: [],
   };
   public threadListError: Error | undefined;
   public threadEventsError: Error | undefined;
+  public threadSearchError: Error | undefined;
+  public threadEventsImplementation:
+    ((params: ThreadEventsParams) => Promise<ThreadEventsResult>) | undefined;
+  public threadSearchImplementation:
+    ((params: ThreadSearchParams) => Promise<ThreadSearchResult>) | undefined;
   public diagnosticText = "";
   public beforeStartResult: (() => void) | undefined;
   public startImplementation:
@@ -537,10 +830,26 @@ class FakeAppServerClient implements AppServerClientApi {
     params: ThreadEventsParams,
   ): Promise<ThreadEventsResult> {
     this.threadEventRequests.push(params);
+    if (this.threadEventsImplementation !== undefined) {
+      return this.threadEventsImplementation(params);
+    }
     if (this.threadEventsError !== undefined) {
       return Promise.reject(this.threadEventsError);
     }
     return Promise.resolve(this.threadEventsResult);
+  }
+
+  public searchThreads(
+    params: ThreadSearchParams,
+  ): Promise<ThreadSearchResult> {
+    this.threadSearchRequests.push(params);
+    if (this.threadSearchImplementation !== undefined) {
+      return this.threadSearchImplementation(params);
+    }
+    if (this.threadSearchError !== undefined) {
+      return Promise.reject(this.threadSearchError);
+    }
+    return Promise.resolve(this.threadSearchResult);
   }
 
   public startTurn(params: TurnStartParams): Promise<TurnStartResult> {
@@ -683,6 +992,34 @@ function recordedItemEvent(sequence: number, threadId: string, item: unknown) {
     type: "item.recorded",
     payload: { item },
   });
+}
+
+function searchMatch(
+  threadId: string,
+  sequence: number,
+  kind:
+    | "user_message"
+    | "assistant_message"
+    | "tool_result"
+    | "compaction"
+    | "recovery"
+    | "tool_failure"
+    | "turn_cancelled"
+    | "turn_failed",
+  snippet: string,
+) {
+  return {
+    threadId: threadIdSchema.parse(threadId),
+    sequence,
+    kind,
+    timestamp: "2026-08-27T00:00:01.000Z",
+    snippet,
+    threadUpdatedAt: "2026-08-27T00:01:00.000Z",
+    status: "completed" as const,
+    provider: "openai" as const,
+    model: "gpt-5.6-terra",
+    turnCount: 1,
+  };
 }
 
 function createController(

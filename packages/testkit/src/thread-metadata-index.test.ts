@@ -154,6 +154,220 @@ describe("ThreadMetadataIndex", () => {
     index.close();
   });
 
+  it("searches bounded display-worthy history with stable revision cursors", async () => {
+    const kodaHome = await createKodaHome();
+    const firstId = threadIdSchema.parse("search-first");
+    const firstTurn = turnIdSchema.parse("search-first-turn");
+    await writeEvents(kodaHome, firstId, [
+      event(firstId, firstTurn, 0, "turn.started", {}, "00:00:00"),
+      contextEvent(firstId, firstTurn, 1, "/workspace/search", "model-a"),
+      itemEvent(firstId, firstTurn, 2, {
+        type: "user_message",
+        id: "search-user",
+        content: "你好 Parser one",
+      }),
+      itemEvent(firstId, firstTurn, 3, {
+        type: "assistant_message",
+        id: "search-assistant",
+        content: "Fixed HELLO parser",
+      }),
+      itemEvent(firstId, firstTurn, 4, {
+        type: "tool_call",
+        id: "search-call-item",
+        callId: "search-call",
+        name: "exec_command",
+        arguments: { secret: "do-not-index" },
+      }),
+      itemEvent(firstId, firstTurn, 5, {
+        type: "tool_result",
+        id: "search-result",
+        callId: "search-call",
+        name: "exec_command",
+        status: "success",
+        output: { summary: "compiled cleanly" },
+      }),
+      event(firstId, firstTurn, 6, "turn.completed", { steps: 1 }, "00:00:06"),
+    ]);
+
+    const secondId = threadIdSchema.parse("search-second");
+    const secondTurn = turnIdSchema.parse("search-second-turn");
+    await writeEvents(kodaHome, secondId, [
+      event(secondId, secondTurn, 0, "turn.started", {}, "01:00:00"),
+      contextEvent(secondId, secondTurn, 1, "/workspace/search", "model-b"),
+      itemEvent(secondId, secondTurn, 2, {
+        type: "user_message",
+        id: "search-second-user",
+        content: "parser from the newer thread",
+      }),
+      event(
+        secondId,
+        secondTurn,
+        3,
+        "turn.completed",
+        { steps: 1 },
+        "01:00:03",
+      ),
+    ]);
+
+    const isolatedId = threadIdSchema.parse("search-isolated");
+    const isolatedTurn = turnIdSchema.parse("search-isolated-turn");
+    await writeEvents(kodaHome, isolatedId, [
+      event(isolatedId, isolatedTurn, 0, "turn.started", {}, "02:00:00"),
+      contextEvent(isolatedId, isolatedTurn, 1, "/workspace/other", "model-c"),
+      itemEvent(isolatedId, isolatedTurn, 2, {
+        type: "user_message",
+        id: "search-isolated-user",
+        content: "你好 parser isolated",
+      }),
+      event(
+        isolatedId,
+        isolatedTurn,
+        3,
+        "turn.completed",
+        { steps: 1 },
+        "02:00:03",
+      ),
+    ]);
+
+    const index = await ThreadMetadataIndex.open(kodaHome);
+    await index.refresh();
+    expect(
+      index.search({
+        workspaceRoot: "/workspace/search",
+        query: "你好",
+      }).matches,
+    ).toEqual([
+      expect.objectContaining({
+        threadId: firstId,
+        sequence: 2,
+        kind: "user_message",
+      }),
+    ]);
+    expect(
+      index.search({
+        workspaceRoot: "/workspace/search",
+        query: "HELLO parser",
+      }).matches,
+    ).toEqual([
+      expect.objectContaining({
+        threadId: firstId,
+        sequence: 3,
+        kind: "assistant_message",
+      }),
+    ]);
+    expect(
+      index.search({
+        workspaceRoot: "/workspace/search",
+        query: "do-not-index",
+      }).matches,
+    ).toEqual([]);
+
+    const firstPage = index.search({
+      workspaceRoot: "/workspace/search",
+      query: "parser",
+      limit: 1,
+    });
+    expect(firstPage).toMatchObject({
+      matches: [{ threadId: secondId, sequence: 2 }],
+      hasMore: true,
+      nextCursor: { revision: firstPage.revision },
+    });
+    if (firstPage.nextCursor === undefined) {
+      throw new Error("First search page did not provide a cursor.");
+    }
+    const firstCursor = firstPage.nextCursor;
+    await index.refresh();
+    const secondPage = index.search({
+      workspaceRoot: "/workspace/search",
+      query: "parser",
+      limit: 1,
+      cursor: firstCursor,
+    });
+    expect(secondPage.matches).toEqual([
+      expect.objectContaining({ threadId: firstId, sequence: 3 }),
+    ]);
+
+    const firstStore = new JsonlEventStore(
+      join(kodaHome, "threads", `${firstId}.jsonl`),
+    );
+    const nextTurn = turnIdSchema.parse("search-next-turn");
+    await firstStore.append(
+      event(firstId, nextTurn, 7, "turn.started", {}, "03:00:00"),
+    );
+    await firstStore.append(
+      contextEvent(firstId, nextTurn, 8, "/workspace/search", "model-a"),
+    );
+    await firstStore.append(
+      event(firstId, nextTurn, 9, "turn.completed", { steps: 1 }, "03:00:02"),
+    );
+    await index.refreshThread(firstId);
+    expect(() =>
+      index.search({
+        workspaceRoot: "/workspace/search",
+        query: "parser",
+        cursor: firstCursor,
+      }),
+    ).toThrowError(
+      expect.objectContaining({ code: "THREAD_SEARCH_INDEX_CHANGED" }),
+    );
+
+    await appendFile(
+      join(kodaHome, "threads", `${firstId}.jsonl`),
+      '{"schemaVersion":1',
+      "utf8",
+    );
+    await index.refreshThread(firstId);
+    expect(
+      index.search({
+        workspaceRoot: "/workspace/search",
+        query: "hello",
+      }).matches,
+    ).toEqual([]);
+    index.close();
+  });
+
+  it("head-tail truncates large search items and sanitizes snippets", async () => {
+    const kodaHome = await createKodaHome();
+    const threadId = threadIdSchema.parse("search-large-item");
+    const turnId = turnIdSchema.parse("search-large-turn");
+    const content = `\u001b[31mHEADTERM ${"x".repeat(150_000)} MIDDLETERM ${"y".repeat(150_000)} TAILTERM`;
+    await writeEvents(kodaHome, threadId, [
+      event(threadId, turnId, 0, "turn.started", {}, "04:00:00"),
+      contextEvent(threadId, turnId, 1, "/workspace/search", "model-large"),
+      itemEvent(threadId, turnId, 2, {
+        type: "assistant_message",
+        id: "search-large-message",
+        content,
+      }),
+      event(threadId, turnId, 3, "turn.completed", { steps: 1 }, "04:00:03"),
+    ]);
+    const index = await ThreadMetadataIndex.open(kodaHome);
+    await index.refresh();
+
+    const head = index.search({
+      workspaceRoot: "/workspace/search",
+      query: "headterm",
+    });
+    expect(head.matches).toHaveLength(1);
+    expect(
+      Buffer.byteLength(head.matches[0]?.snippet ?? "", "utf8"),
+    ).toBeLessThanOrEqual(512);
+    expect(head.matches[0]?.snippet).not.toContain("\u001b");
+    expect(
+      index.search({
+        workspaceRoot: "/workspace/search",
+        query: "tailterm",
+      }).matches,
+    ).toHaveLength(1);
+    expect(
+      index.search({
+        workspaceRoot: "/workspace/search",
+        query: "middleterm",
+      }).matches,
+    ).toEqual([]);
+    index.close();
+  });
+
   it("keeps partial and invalid logs inspectable while rebuilding valid rows", async () => {
     const kodaHome = await createKodaHome();
     const partialId = threadIdSchema.parse("metadata-partial");
@@ -305,6 +519,22 @@ function contextEvent(
       repositoryInstructions: [],
     },
     `00:00:0${sequence}`,
+  );
+}
+
+function itemEvent(
+  threadId: ThreadId,
+  turnId: TurnId,
+  sequence: number,
+  item: unknown,
+): AgentEvent {
+  return event(
+    threadId,
+    turnId,
+    sequence,
+    "item.recorded",
+    { item },
+    `00:00:${String(sequence).padStart(2, "0")}`,
   );
 }
 

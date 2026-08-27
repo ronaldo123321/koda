@@ -6,7 +6,7 @@ The project is building the control plane around a coding model: typed conversat
 
 ## Current status
 
-Phase 3E1 is implemented. It adds workspace-scoped thread browsing, bounded durable-history preview, and safe interactive resume to the Phase 3D Ink client, on top of the Phase 3C five-provider runtime, Phase 3B local MCP client, Phase 3A transport-neutral application layer, and the completed Phase 0 through Phase 2 runtime:
+Phase 3E2 is implemented. It adds workspace-scoped durable-history search and bounded bidirectional navigation to the Phase 3E1 thread browser and safe resume flow, on top of the Phase 3C five-provider runtime, Phase 3B local MCP client, Phase 3A transport-neutral application layer, and the completed Phase 0 through Phase 2 runtime:
 
 - Versioned Thread, Turn, Item, and Agent Event schemas.
 - A provider-neutral streaming model interface.
@@ -41,7 +41,7 @@ Phase 3E1 is implemented. It adds workspace-scoped thread browsing, bounded dura
 - POSIX process-group ownership with graceful-to-force escalation, descendant cleanup, and bounded confirmation.
 - Windows tree-aware `taskkill` handling with explicit direct-child fallback and honest uncertain outcomes.
 - Structured interrupted-operation recovery that reports effect and process evidence without replaying a side effect or killing a historical PID.
-- A rebuildable SQLite projection for thread status, timestamps, context, usage, event counts, and valid JSONL byte offsets.
+- A rebuildable SQLite schema v2 projection for thread metadata plus bounded display-worthy history search; JSONL remains authoritative.
 - Credential-free `koda thread list` and `koda thread show` commands with canonical workspace filtering.
 - WAL-backed concurrent metadata writers, source fingerprint refresh, invalid-log visibility, and corrupt-database quarantine.
 - Best-effort post-run indexing that never makes the derived database authoritative over JSONL.
@@ -51,11 +51,13 @@ Phase 3E1 is implemented. It adds workspace-scoped thread browsing, bounded dura
 - A shared `KodaApplication` workflow used by both CLI and protocol clients.
 - A strict, versioned, newline-delimited JSON-RPC 2.0 app-server over local stdio.
 - Durable-before-notify event streaming, one-shot interactive approvals, active-turn cancellation, and graceful shutdown/EOF cleanup.
-- Credential-free app-server thread list/get operations, bounded cursor-paginated JSONL event history, and different-thread concurrency guarded by existing per-thread leases.
+- Credential-free app-server thread list/get/search operations, bounded bidirectional JSONL event history, and different-thread concurrency guarded by existing per-thread leases.
 - A reusable Node app-server client with strict NDJSON framing, typed JSON-RPC correlation, bounded stderr diagnostics, request timeouts, and owned child-process cleanup.
-- An Ink `koda-chat` REPL that uses app-server v3 exclusively for sequential multi-turn chat, streamed answers, tool state, one-shot approvals, cancellation, usage, errors, thread browsing, and resume.
-- Typed `thread/events` pages over authoritative JSONL with exclusive sequence cursors, a 200-event cap, a 768 KiB result budget, and explicit corruption/oversize errors.
-- Idle-only `/threads` and `Ctrl+T` browsing across the current canonical workspace, bounded history projection, metadata recheck before resume, and persisted provider/model adoption.
+- An Ink `koda-chat` REPL that uses app-server v4 exclusively for sequential chat, approvals, thread browsing, durable search, windowed history navigation, and resume.
+- Typed bidirectional `thread/events` pages over authoritative JSONL with exclusive sequence cursors, a 200-event cap, a 768 KiB result budget, and explicit corruption/oversize errors.
+- Revision-paginated `thread/search` over normalized SQLite substring projections, with 256-byte queries, eight-term AND semantics, 512-byte snippets, and an approximately 256 KiB result budget.
+- Idle-only `/threads`, `Ctrl+T`, and `/search <query>` interaction across the current canonical workspace, match-centered authoritative preview, metadata recheck before resume, and persisted provider/model adoption.
+- Bounded 400-event/200-row preview windows, 500 cached search results, terminal-resize-aware 5–30 row viewports, PageUp/PageDown/Home/End navigation, and stale-response generations.
 - Static completed transcript output plus one bounded live region, normal terminal scrollback, `/help`, `/status`, `/clear`, `/new`, `/exit`, `Esc` cancellation/navigation, and context-sensitive `Ctrl+C`.
 - Official MCP v2 client integration for explicitly configured local stdio servers, with one isolated session per turn.
 - Frozen, validated MCP tool catalogs exposed as stable `mcp__<server>__<tool>` aliases without importing MCP into `agent-core`.
@@ -63,7 +65,7 @@ Phase 3E1 is implemented. It adds workspace-scoped thread browsing, bounded dura
 - MCP call timeouts, turn cancellation, reverse-order child cleanup, bounded binary/result normalization, artifact-backed large output, and conservative interrupted-call recovery.
 - Offline provider, runtime, CLI, and deterministic agent-loop tests.
 
-Provider-assisted semantic compaction, exact provider tokenizers and pricing, custom endpoints/profiles, automatic routing/fallback, cross-provider resume, additional providers, older-history loading/search, full-screen navigation, provider/model settings, rich Markdown/diff/artifact views, richer patch operations, interactive process UX, and the non-Tool MCP capability surface remain later Phase 3 slices. Remote MCP/HTTP/OAuth, shared or remote artifact stores, remote app-server transports, strong sandboxing, Windows Job Objects, crash-surviving supervision, the Rust executor, and any high-risk shell-string support remain Phase 4 work. Parent/child thread lineage and multi-agent scenario matrices remain Phase 5 work. Workspace writes, process execution, and MCP tools not explicitly classified as read require approval by default.
+Provider-assisted semantic compaction, exact provider tokenizers and pricing, custom endpoints/profiles, automatic routing/fallback, cross-provider resume, additional providers, FTS5/fuzzy/live or cross-workspace search, alternate-screen navigation, provider/model settings, rich Markdown/diff/artifact views, richer patch operations, interactive process UX, and the non-Tool MCP capability surface remain later Phase 3 slices. Remote MCP/HTTP/OAuth, shared or remote artifact stores, remote app-server transports, strong sandboxing, Windows Job Objects, crash-surviving supervision, the Rust executor, and any high-risk shell-string support remain Phase 4 work. Parent/child thread lineage and multi-agent scenario matrices remain Phase 5 work. Workspace writes, process execution, and MCP tools not explicitly classified as read require approval by default.
 
 ## Run the CLI
 
@@ -128,7 +130,7 @@ node apps/tui/dist/main.js --cwd . --provider deepseek --model deepseek-v4-pro
 node apps/tui/dist/main.js --cwd . --provider openai --resume <thread-id>
 ```
 
-Workspace and approval mode are fixed at startup. The startup provider/model are the default for a new thread; resuming from the thread browser adopts that thread's persisted provider/model. Ordinary input starts a turn. `/threads` or `Ctrl+T` opens the latest 100 threads in the current canonical workspace; arrows select, Enter previews the latest durable history, `r` resumes, and `Esc` returns. `/new` detaches locally so the next prompt creates a new thread without deleting history. `/help`, `/status`, `/clear`, and `/exit` retain their existing behavior. Press `y` or `n` for a pending approval, `d` to toggle details, and `Esc` to cancel an active turn. `Ctrl+C` cancels while a turn is active and exits while idle. The client requires a TTY; scripts should continue to use `koda run` or the stdio app-server.
+Workspace and approval mode are fixed at startup. The startup provider/model are the default for a new thread; resuming from the thread browser adopts that thread's persisted provider/model. Ordinary input starts a turn. `/threads` or `Ctrl+T` opens the latest 100 threads in the current canonical workspace. Press `/` there to search, or run `/search <query>` from chat. Search uses case-normalized substring AND terms across durable display-worthy history; Enter opens authoritative context and marks the hit. Arrows move one row, PageUp/PageDown move a viewport, Home/End reach history boundaries, `r` resumes, and `Esc` returns one layer. `/new` detaches locally without deleting history. `/help`, `/status`, `/clear`, and `/exit` retain their existing behavior. Press `y` or `n` for a pending approval, `d` to toggle details, and `Esc` to cancel an active turn. `Ctrl+C` cancels while a turn is active and exits while idle. The client requires a TTY; scripts should continue to use `koda run` or the stdio app-server.
 
 ## Run the local app-server
 
@@ -142,12 +144,13 @@ OPENAI_API_KEY=... node apps/app-server/dist/main.js
 The process accepts one JSON-RPC 2.0 object per UTF-8 line. `initialize` must be the first request:
 
 ```json
-{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":3,"client":{"name":"my-koda-client","version":"0.1.0"}}}
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":4,"client":{"name":"my-koda-client","version":"0.1.0"}}}
 {"jsonrpc":"2.0","id":2,"method":"turn/start","params":{"prompt":"explain this repository","cwd":".","provider":"openai"}}
 {"jsonrpc":"2.0","id":3,"method":"thread/events","params":{"threadId":"<thread-id>","limit":200}}
+{"jsonrpc":"2.0","id":4,"method":"thread/search","params":{"workspace":".","query":"parser failure","limit":50}}
 ```
 
-The v3 initialize result advertises `threadEvents: true` plus the supported providers, credential environment-variable names, and default models. `thread/events` returns validated events in chronological order; `beforeSequence` is an exclusive cursor and `limit` is 1–200. Responses and `turn/event` / `turn/finished` notifications use stdout exclusively; diagnostics use stderr. Clients answer an `approval.requested` event with `approval/resolve`, may stop a live turn with `turn/cancel`, and should finish with `shutdown`. Provider credentials are server configuration and are never protocol fields.
+The v4 initialize result advertises `threadEvents`, `bidirectionalThreadEvents`, and `threadSearch` plus the supported providers, credential environment-variable names, and default models. `thread/events` returns validated events chronologically; mutually exclusive `beforeSequence` and `afterSequence` are exclusive cursors and `limit` is 1–200. `thread/search` is restricted to the canonical workspace and returns revision-bound cursor pages. Responses and `turn/event` / `turn/finished` notifications use stdout exclusively; diagnostics use stderr. Clients answer an `approval.requested` event with `approval/resolve`, may stop a live turn with `turn/cancel`, and should finish with `shutdown`. Provider credentials are server configuration and are never protocol fields.
 
 ## Configure local MCP tools
 
@@ -253,5 +256,6 @@ pnpm eval:scenarios
 - [Phase 3C multi-provider runtime design](docs/plans/2026-08-26-phase-3c-multi-provider-design.md)
 - [Phase 3D Ink chat REPL design](docs/plans/2026-08-26-phase-3d-ink-chat-repl-design.md)
 - [Phase 3E1 thread browser and history restore design](docs/plans/2026-08-27-phase-3e1-thread-browser-history-design.md)
+- [Phase 3E2 history search and windowed navigation design](docs/plans/2026-08-27-phase-3e2-history-search-navigation-design.md)
 
 The model can propose actions, but the Koda runtime owns validation, policy, approval, and execution. User interfaces consume typed events and do not own agent state.

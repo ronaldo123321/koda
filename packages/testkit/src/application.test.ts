@@ -168,6 +168,7 @@ describe("KodaApplication", () => {
     expect(latest.events.map((event) => event.sequence)).toEqual([3, 4]);
     expect(latest).toMatchObject({
       hasEarlier: true,
+      hasLater: false,
       nextBeforeSequence: 3,
     });
     if (latest.nextBeforeSequence === undefined) {
@@ -181,7 +182,12 @@ describe("KodaApplication", () => {
       limit: 2,
     });
     expect(earlier.events.map((event) => event.sequence)).toEqual([1, 2]);
-    expect(earlier.nextBeforeSequence).toBe(1);
+    expect(earlier).toMatchObject({
+      hasEarlier: true,
+      hasLater: true,
+      nextBeforeSequence: 1,
+      nextAfterSequence: 2,
+    });
     if (earlier.nextBeforeSequence === undefined) {
       throw new Error("Earlier history page did not provide a cursor.");
     }
@@ -192,7 +198,38 @@ describe("KodaApplication", () => {
     });
     expect(oldest.events.map((event) => event.sequence)).toEqual([0]);
     expect(oldest.hasEarlier).toBe(false);
+    expect(oldest.hasLater).toBe(true);
     expect(oldest.nextBeforeSequence).toBeUndefined();
+
+    const forward = await application.readThreadEvents({
+      threadId,
+      afterSequence: 2,
+      limit: 2,
+    });
+    expect(forward.events.map((event) => event.sequence)).toEqual([3, 4]);
+    expect(forward).toMatchObject({
+      hasEarlier: true,
+      hasLater: true,
+      nextBeforeSequence: 3,
+      nextAfterSequence: 4,
+    });
+    if (forward.nextAfterSequence === undefined) {
+      throw new Error("Forward history page did not provide a cursor.");
+    }
+    const newest = await application.readThreadEvents({
+      threadId,
+      afterSequence: forward.nextAfterSequence,
+    });
+    expect(newest.events.map((event) => event.sequence)).toEqual([5]);
+    expect(newest).toMatchObject({ hasEarlier: true, hasLater: false });
+
+    await expect(
+      application.readThreadEvents({
+        threadId,
+        beforeSequence: 3,
+        afterSequence: 1,
+      }),
+    ).rejects.toMatchObject({ code: "INVALID_THREAD_EVENT_CURSOR" });
   });
 
   it("bounds history pages without truncating durable events", async () => {
@@ -239,6 +276,17 @@ describe("KodaApplication", () => {
     await expect(
       application.readThreadEvents({ threadId: "missing-history" }),
     ).rejects.toMatchObject({ code: "THREAD_EVENT_LOG_NOT_FOUND" });
+
+    const emptyThread = threadIdSchema.parse("empty-history");
+    await mkdir(join(fixture.kodaHome, "threads"), { recursive: true });
+    await writeFile(
+      join(fixture.kodaHome, "threads", `${emptyThread}.jsonl`),
+      "",
+      "utf8",
+    );
+    await expect(
+      application.readThreadEvents({ threadId: emptyThread }),
+    ).rejects.toMatchObject({ code: "THREAD_EVENT_LOG_CORRUPT" });
 
     const partialThread = threadIdSchema.parse("partial-history");
     const partialPath = join(
