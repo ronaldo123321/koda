@@ -1,6 +1,6 @@
 # Koda Phase 3 Extensibility Roadmap
 
-- Status: In progress — Phase 3A through Phase 3F2 implemented and verified (2026-08-27)
+- Status: In progress — Phase 3A through Phase 3F2 implemented and verified; Phase 3F3 implementation in progress (2026-08-28)
 - Date: 2026-08-26
 - Depends on: Phase 2 reliability closure
 - Scope: stable client/tool/provider extension boundaries without weakening the local runtime's durable state and approval guarantees
@@ -157,6 +157,19 @@ Status: **Implemented and verified.**
 - Verify grammar limits, exact matching, line endings, one-shot approval, transaction evidence, recovery, provider schemas, CLI/app-server clients, Ink fixtures, reliability scenarios, and real TTY behavior.
 
 The accepted grammar, compilation rules, transaction reuse, failure model, verification matrix, and deliberate deferrals are in the [Phase 3F2 strict native patch documents design](2026-08-27-phase-3f2-native-patch-documents-design.md).
+
+## Phase 3F3: session-scoped exact-command approval grants
+
+Status: **Accepted; implementation in progress.**
+
+- Let a user approve one exact normalized built-in `exec_command` for a short application session without caching writes, MCP calls, unknown tools, or command prefixes.
+- Scope every grant to one canonical workspace and exact prepared command identity, with a 15-minute default, one-hour maximum, capacity bound, process-restart revocation, and `never` mode precedence.
+- Persist bounded grant-created and grant-used audit evidence before activation or execution while never reconstructing capabilities from historical JSONL.
+- Upgrade the local protocol to v10 with `approvalGrants: true` and strict list, revoke, and revoke-all use cases.
+- Add Ink `a` approval plus `/approvals` inspection and revocation commands while keeping the one-shot CLI on one-time `y/N` approval.
+- Verify identity normalization, expiry, concurrency, ordering, failure boundaries, recovery, protocol/app-server/client paths, TUI interaction, reliability scenarios, and real TTY behavior.
+
+The accepted authorization identity, lifecycle, audit, protocol, interaction, failure, and verification contract is in the [Phase 3F3 session-scoped exact-command approval grants design](2026-08-28-phase-3f3-session-command-approval-grants-design.md).
 
 ## Later Phase 3 slices
 
