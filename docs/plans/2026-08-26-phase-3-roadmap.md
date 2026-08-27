@@ -1,6 +1,6 @@
 # Koda Phase 3 Extensibility Roadmap
 
-- Status: In progress — Phase 3A through Phase 3E5 implemented and verified (2026-08-27)
+- Status: In progress — Phase 3A through Phase 3E5 implemented and verified; Phase 3F1 designed (2026-08-27)
 - Date: 2026-08-26
 - Depends on: Phase 2 reliability closure
 - Scope: stable client/tool/provider extension boundaries without weakening the local runtime's durable state and approval guarantees
@@ -131,6 +131,20 @@ Status: **Implemented and verified.**
 
 The accepted telemetry, reconstruction, protocol, instruction, interaction, failure, and verification contract is in the [Phase 3E5 auditable context and instruction inspection design](2026-08-27-phase-3e5-context-inspection-design.md).
 
+## Phase 3F1: auditable multi-file change transactions
+
+Status: **Design complete; implementation pending.**
+
+- Add a separate strict `apply_changes` tool for bounded coordinated text-file create, exact update, same-device move, and delete operations while preserving the existing `apply_patch` contract.
+- Prepare and preview the complete change set without mutation, ask once, then acquire a workspace-scoped mutation lease and revalidate every path before committing.
+- Serialize both Koda write tools across threads and processes without pretending that the lease can exclude external editors or Git.
+- Stage candidates, commit independent paths deterministically, and compensate completed operations in reverse order after ordinary failure or cancellation.
+- Persist bounded prepared, committed, rolled-back, or uncertain evidence; never truncate an approval, overwrite a third-party rollback conflict, or automatically replay an incomplete write.
+- Upgrade the local protocol to v8 for the new public event variants and advertise `multiFileChanges: true`.
+- Verify transaction limits, path confinement, exact edits, moves/deletes, races, fault-injected rollback, mutation leases, recovery classification, provider schemas, app-server/client behavior, Ink/CLI approvals, and real TTY interaction.
+
+The complete accepted tool grammar, safety invariants, transaction state machine, protocol, recovery model, failure semantics, verification matrix, and deliberate deferrals are in the [Phase 3F1 auditable multi-file change transactions design](2026-08-27-phase-3f1-multi-file-change-transactions-design.md).
+
 ## Later Phase 3 slices
 
 ### Provider and context extensions after Phase 3C
@@ -156,7 +170,8 @@ The accepted telemetry, reconstruction, protocol, instruction, interaction, fail
 
 ### Richer local workflows
 
-- Design richer or native patch support, multi-file transactions, moves, deletion, and explicit rollback evidence.
+- Implement the accepted Phase 3F1 boundary for bounded multi-file transactions, moves, deletion, mutation serialization, and explicit rollback evidence.
+- Evaluate richer or native patch languages only after Phase 3F1's exact structured transaction boundary is verified.
 - Add PTYs and managed background-process UX without weakening process ownership and termination records.
 - Add approval caching or trusted command-prefix UX only with inspectable scope, expiry, and revocation.
 - Evaluate automatic commits as an explicit product workflow, not an implicit consequence of file edits.
