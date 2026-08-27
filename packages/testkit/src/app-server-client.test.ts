@@ -195,6 +195,26 @@ describe("NodeAppServerClient", () => {
           timestamp: "2026-08-27T00:00:03.000Z",
           threadId: "client-history",
           turnId: "client-history-turn",
+          type: "model.usage",
+          payload: {
+            step: 1,
+            responseId: "legacy-client-response",
+            usage: {
+              inputTokens: 21,
+              cachedInputTokens: 0,
+              cacheWriteInputTokens: 0,
+              outputTokens: 4,
+              reasoningOutputTokens: 0,
+              totalTokens: 25,
+            },
+          },
+        },
+        {
+          schemaVersion: 1,
+          sequence: 4,
+          timestamp: "2026-08-27T00:00:04.000Z",
+          threadId: "client-history",
+          turnId: "client-history-turn",
           type: "artifact.recorded",
           payload: {
             callId: "client-artifact-call",
@@ -204,8 +224,8 @@ describe("NodeAppServerClient", () => {
         },
         {
           schemaVersion: 1,
-          sequence: 4,
-          timestamp: "2026-08-27T00:00:04.000Z",
+          sequence: 5,
+          timestamp: "2026-08-27T00:00:05.000Z",
           threadId: "client-history",
           turnId: "client-history-turn",
           type: "turn.completed",
@@ -235,6 +255,7 @@ describe("NodeAppServerClient", () => {
         bidirectionalThreadEvents: true,
         runtimeSettings: true,
         artifactInspection: true,
+        contextInspection: true,
       },
       providers: [
         { id: "openai", configured: true },
@@ -309,6 +330,50 @@ describe("NodeAppServerClient", () => {
       }),
     ).resolves.toMatchObject({
       artifact: materialized.artifact,
+      startByte: 0,
+      hasEarlier: false,
+      hasLater: true,
+    });
+    const contexts = await client.listThreadContexts({
+      workspace: canonicalRoot,
+      threadId: threadIdSchema.parse("client-history"),
+    });
+    expect(contexts).toMatchObject({
+      requests: [
+        {
+          anchorSequence: 3,
+          precise: false,
+          measuredInputTokens: 21,
+        },
+      ],
+      hasEarlier: false,
+    });
+    const detail = await client.readContext({
+      workspace: canonicalRoot,
+      threadId: threadIdSchema.parse("client-history"),
+      anchorSequence: 3,
+    });
+    expect(detail).toMatchObject({
+      request: { precise: false },
+      usage: { responseId: "legacy-client-response" },
+      instructions: { effectiveMatchesHistorical: false },
+    });
+    const effective = detail.instructions.sources.find(
+      (source) => source.kind === "effective",
+    );
+    if (effective?.sourceId === undefined) {
+      throw new Error("Expected a readable effective instruction source.");
+    }
+    await expect(
+      client.readContextInstruction({
+        workspace: canonicalRoot,
+        threadId: threadIdSchema.parse("client-history"),
+        anchorSequence: 3,
+        sourceId: effective.sourceId,
+        maxBytes: 64,
+      }),
+    ).resolves.toMatchObject({
+      path: "effective",
       startByte: 0,
       hasEarlier: false,
       hasLater: true,
@@ -414,6 +479,7 @@ function fixtureServerScript(options: {
       bidirectionalThreadEvents: true,
       runtimeSettings: true,
       artifactInspection: true,
+      contextInspection: true,
     },
     providers: [
       {

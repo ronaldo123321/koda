@@ -1,6 +1,6 @@
 # Koda Phase 3 Extensibility Roadmap
 
-- Status: In progress — Phase 3A through Phase 3E4 implemented and verified; Phase 3E5 design approved (2026-08-27)
+- Status: In progress — Phase 3A through Phase 3E5 implemented and verified (2026-08-27)
 - Date: 2026-08-26
 - Depends on: Phase 2 reliability closure
 - Scope: stable client/tool/provider extension boundaries without weakening the local runtime's durable state and approval guarantees
@@ -119,7 +119,7 @@ The accepted authorization, protocol, UTF-8 pagination, interaction, failure, an
 
 ## Phase 3E5: auditable context and instruction inspection
 
-Status: **Design approved; implementation pending.**
+Status: **Implemented and verified.**
 
 - Add a durable, bounded `context.prepared` event immediately before every provider request so context selection, estimates, calibration, Item identity, tool identity, and Compaction state remain auditable after restart.
 - Upgrade the local app-server contract to protocol v7 with thread-scoped request discovery, exact snapshot detail, and opaque-source bounded instruction reads.
@@ -144,11 +144,11 @@ The accepted telemetry, reconstruction, protocol, instruction, interaction, fail
 ### Interactive clients and client APIs
 
 - Maintain the completed Phase 3D Ink chat REPL on the Phase 3A application protocol.
-- Maintain the completed Phase 3E1 semantics for recent-thread selection, bounded history preview, and safe resume; protocol v6 supersedes its pre-release v3 transport.
-- Maintain the completed Phase 3E2 boundary as bounded bidirectional history navigation and workspace-scoped substring search over app-server protocol v6; retain the normal terminal buffer and a disposable SQLite projection.
+- Maintain the completed Phase 3E1 semantics for recent-thread selection, bounded history preview, and safe resume through the current protocol v7 transport.
+- Maintain the completed Phase 3E2 boundary as bounded bidirectional history navigation and workspace-scoped substring search over app-server protocol v7; retain the normal terminal buffer and a disposable SQLite projection.
 - Maintain the completed Phase 3E3 boundary for explicit provider/model preferences that affect only new threads.
 - Maintain the completed Phase 3E4 boundary for thread-scoped discovery and bounded UTF-8 artifact reads.
-- Implement and then maintain the accepted Phase 3E5 boundary for durable per-request context telemetry and bounded current-instruction inspection.
+- Maintain the completed Phase 3E5 boundary for durable per-request context telemetry and bounded current-instruction inspection.
 - Defer FTS5, fuzzy/relevance ranking, live search, cross-workspace search, alternate-screen navigation, and real-time subscriptions beyond Phase 3E2.
 - In Phase 3E or Phase 4, add Markdown/syntax rendering, dedicated diff views, artifact download/export, attachments, and richer prompt-diff or context-export views beyond Phase 3E5.
 - Build IDE or desktop clients only after the local protocol client and TUI have validated the shared boundary.

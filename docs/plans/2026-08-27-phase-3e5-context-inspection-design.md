@@ -1,6 +1,6 @@
 # Koda Phase 3E5: Auditable Context and Instruction Inspection
 
-- Status: Approved; implementation pending
+- Status: Implemented and verified
 - Date: 2026-08-27
 - Depends on: Phase 2C context budgeting and compaction, Phase 3A app-server, Phase 3E1/3E2 thread inspection, and Phase 3E4 thread-scoped authorization
 - Scope: durable per-model-request context telemetry, strict JSONL reconstruction, bounded current-instruction inspection, and an idle Ink viewer
@@ -151,3 +151,15 @@ Client and TUI tests cover typed round trips, real subprocess framing, `/context
 - Live following of a request while a turn is running.
 - Cross-thread or cross-workspace context aggregation and SQLite context indexing.
 - Remote transport authorization, shared app-server processes, and multi-client subscriptions.
+
+## 10. Implementation verification
+
+Phase 3E5 is implemented on `main` with protocol v7. The runtime records deterministic `context.prepared` telemetry after any Compaction Item and before Provider invocation. The application reconstructs precise snapshots from strict JSONL, projects legacy Usage without synthesizing exact data, compares current scoped instructions, and exposes bounded opaque-source reads. The typed client and Ink TUI provide `/context`, preview `c`, request/detail/instruction layers, pagination, resize handling, layered Escape, and stale-response rejection without transcript mutation.
+
+Verification completed on 2026-08-27:
+
+- formatting, workspace build, package and test typechecks;
+- 32 test files and 267 tests;
+- all six deterministic Phase 2 reliability scenarios;
+- real subprocess JSON-RPC framing and typed context round trips;
+- an isolated real-TTY smoke covering current-thread context list/detail/instruction, preview-scoped `c`, layered Escape, and graceful shutdown.

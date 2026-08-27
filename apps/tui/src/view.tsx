@@ -94,6 +94,16 @@ export interface TuiInputController {
     action: "up" | "down" | "page_up" | "page_down" | "home" | "end",
   ): Promise<void>;
   closeArtifactLevel(): void;
+  openPreviewContext(): Promise<void>;
+  selectContextRequest(offset: -1 | 1): void;
+  pageContextList(action: "newer" | "older" | "home" | "end"): Promise<void>;
+  openSelectedContext(): Promise<void>;
+  selectContextInstructionSource(offset: -1 | 1): void;
+  openSelectedContextInstruction(): Promise<void>;
+  scrollContextInstruction(
+    action: "up" | "down" | "page_up" | "page_down" | "home" | "end",
+  ): Promise<void>;
+  closeContextLevel(): void;
 }
 
 export function KodaView({ state }: KodaViewProps) {
@@ -128,6 +138,11 @@ export function KodaView({ state }: KodaViewProps) {
       ) : null}
       {state.mode === "artifact_list" ? <ArtifactList state={state} /> : null}
       {state.mode === "artifact_view" ? <ArtifactViewer state={state} /> : null}
+      {state.mode === "context_list" ? <ContextList state={state} /> : null}
+      {state.mode === "context_detail" ? <ContextDetail state={state} /> : null}
+      {state.mode === "context_instruction_view" ? (
+        <ContextInstructionViewer state={state} />
+      ) : null}
 
       {state.mode === "chat" ? (
         <>
@@ -198,6 +213,56 @@ export function routeTuiInput(
       requestExit();
     } else {
       void controller.cancelActiveTurn();
+    }
+    return;
+  }
+  if (state.mode === "context_list") {
+    if (key.escape) {
+      controller.closeContextLevel();
+    } else if (key.upArrow) {
+      controller.selectContextRequest(-1);
+    } else if (key.downArrow) {
+      controller.selectContextRequest(1);
+    } else if (key.pageUp) {
+      void controller.pageContextList("newer");
+    } else if (key.pageDown) {
+      void controller.pageContextList("older");
+    } else if (key.home) {
+      void controller.pageContextList("home");
+    } else if (key.end) {
+      void controller.pageContextList("end");
+    } else if (key.return) {
+      void controller.openSelectedContext();
+    }
+    return;
+  }
+  if (state.mode === "context_detail") {
+    if (key.escape) {
+      controller.closeContextLevel();
+    } else if (key.upArrow) {
+      controller.selectContextInstructionSource(-1);
+    } else if (key.downArrow) {
+      controller.selectContextInstructionSource(1);
+    } else if (key.return) {
+      void controller.openSelectedContextInstruction();
+    }
+    return;
+  }
+  if (state.mode === "context_instruction_view") {
+    if (key.escape) {
+      controller.closeContextLevel();
+    } else if (key.upArrow) {
+      void controller.scrollContextInstruction("up");
+    } else if (key.downArrow) {
+      void controller.scrollContextInstruction("down");
+    } else if (key.pageUp) {
+      void controller.scrollContextInstruction("page_up");
+    } else if (key.pageDown) {
+      void controller.scrollContextInstruction("page_down");
+    } else if (key.home) {
+      void controller.scrollContextInstruction("home");
+    } else if (key.end) {
+      void controller.scrollContextInstruction("end");
     }
     return;
   }
@@ -368,6 +433,8 @@ export function routeTuiInput(
       void controller.resumePreviewedThread();
     } else if (input.toLowerCase() === "a") {
       void controller.openPreviewArtifacts();
+    } else if (input.toLowerCase() === "c") {
+      void controller.openPreviewContext();
     }
     return;
   }
@@ -606,6 +673,184 @@ function ArtifactViewer({ state }: { state: TuiState }) {
   );
 }
 
+function ContextList({ state }: { state: TuiState }) {
+  const navigation = state.contextNavigation;
+  const list = navigation?.list;
+  if (navigation === undefined) {
+    return <Text color="red">Context navigation state is unavailable.</Text>;
+  }
+  const visible =
+    list === undefined
+      ? []
+      : list.requests.slice(
+          list.scrollOffset,
+          list.scrollOffset + navigation.viewportHeight,
+        );
+  return (
+    <Box flexDirection="column" borderStyle="round" paddingX={1}>
+      <Text bold>{`Prepared context · ${navigation.threadId}`}</Text>
+      {navigation.loading && list === undefined ? (
+        <Text dimColor>Loading context requests…</Text>
+      ) : list === undefined || list.requests.length === 0 ? (
+        <Text dimColor>No inspectable model requests in this thread.</Text>
+      ) : (
+        visible.map((request, visibleIndex) => {
+          const index = list.scrollOffset + visibleIndex;
+          const percentage =
+            request.estimatedInputTokens === undefined ||
+            request.inputBudgetTokens === undefined
+              ? "budget unknown"
+              : `${Math.round((request.estimatedInputTokens / request.inputBudgetTokens) * 100)}% budget`;
+          const measured =
+            request.measuredInputTokens === undefined
+              ? "unmeasured"
+              : `${request.measuredInputTokens} measured`;
+          return (
+            <Text
+              key={request.anchorSequence}
+              bold={index === list.selectedIndex}
+              {...(index === list.selectedIndex ? { color: "cyan" } : {})}
+            >
+              {`${index === list.selectedIndex ? ">" : " "} #${request.anchorSequence} · Turn ${request.turnId} step ${request.step} · ${request.precise ? "precise" : "legacy"} · ${request.estimatedInputTokens ?? "?"} estimated / ${percentage} · ${measured} · ${request.activeItemCount ?? "?"} items · ${request.toolCount ?? "?"} tools${request.compactionItemId === undefined ? "" : " · compacted"}`}
+            </Text>
+          );
+        })
+      )}
+      <Text dimColor>
+        {navigation.loading
+          ? "Loading context requests… · Esc back"
+          : "↑/↓ select · PgUp/PgDn page · Home/End boundary · Enter detail · Esc back"}
+      </Text>
+    </Box>
+  );
+}
+
+function ContextDetail({ state }: { state: TuiState }) {
+  const navigation = state.contextNavigation;
+  const detail = navigation?.detail;
+  if (navigation === undefined) {
+    return <Text color="red">Context detail state is unavailable.</Text>;
+  }
+  if (detail === undefined) {
+    return (
+      <Box flexDirection="column" borderStyle="round" paddingX={1}>
+        <Text bold>Context detail</Text>
+        <Text dimColor>Loading context detail…</Text>
+      </Box>
+    );
+  }
+  const result = detail.result;
+  const telemetry = result.telemetry;
+  const visibleSources = result.instructions.sources.slice(
+    detail.sourceScrollOffset,
+    detail.sourceScrollOffset + navigation.viewportHeight,
+  );
+  return (
+    <Box flexDirection="column" borderStyle="round" paddingX={1}>
+      <Text bold>
+        {`Context #${result.request.anchorSequence} · ${result.request.provider}/${boundPresentationText(result.request.model, 256)} · Turn ${result.request.turnId} step ${result.request.step}`}
+      </Text>
+      <Text dimColor>
+        {`${result.request.timestamp} · ${result.request.precise ? "precise durable telemetry" : "legacy Usage projection"}`}
+      </Text>
+      {telemetry === undefined ? (
+        <Text dimColor>Exact historical budget telemetry is unavailable.</Text>
+      ) : (
+        <>
+          <Text>
+            {`budget ${telemetry.estimatedInputTokens}/${telemetry.inputBudgetTokens} · raw ${telemetry.rawEstimatedInputTokens} · fixed ${telemetry.fixedInputTokens} · output reserve ${telemetry.maxOutputTokens} · safety ${telemetry.safetyMarginTokens}`}
+          </Text>
+          <Text>
+            {`calibration ×${telemetry.calibrationFactor.toFixed(3)} · ${telemetry.activeItemCount} items (${telemetry.activeItemTypes.map((entry) => `${entry.type}:${entry.count}`).join(", ") || "none"}) · ${telemetry.toolCount} tools`}
+          </Text>
+          <Text dimColor>
+            {`items sha256 ${shortDigest(telemetry.activeItemsSha256)} · tools sha256 ${shortDigest(telemetry.toolsSha256)} · reconstruction ${result.reconstruction?.valid === true ? "valid" : "unavailable"}`}
+          </Text>
+        </>
+      )}
+      <Text>
+        {result.usage === undefined
+          ? "measured Usage: unavailable"
+          : `measured Usage: ${result.usage.usage.inputTokens} input · ${result.usage.usage.outputTokens} output · ${result.usage.usage.totalTokens} total`}
+      </Text>
+      <Text>
+        {result.compaction === undefined
+          ? "Compaction: none"
+          : `Compaction: ${result.compaction.id} · ${result.compaction.estimatedTokensBefore ?? "?"} → ${result.compaction.estimatedTokensAfter ?? "?"} · ${boundPresentationText(result.compaction.summary.objective || "summary recorded", 256)}`}
+      </Text>
+      <Text
+        color={
+          result.instructions.effectiveMatchesHistorical ? "green" : "yellow"
+        }
+      >
+        {result.instructions.effectiveMatchesHistorical
+          ? "Current effective instructions exactly match this request."
+          : "Current effective instructions differ from this historical request."}
+      </Text>
+      {visibleSources.map((source, visibleIndex) => {
+        const index = detail.sourceScrollOffset + visibleIndex;
+        const bytes = source.current?.bytes ?? source.historical?.bytes ?? "?";
+        const digest = source.current?.sha256 ?? source.historical?.sha256;
+        return (
+          <Text
+            key={`${source.kind}:${source.path}`}
+            bold={index === detail.selectedSourceIndex}
+            {...(index === detail.selectedSourceIndex ? { color: "cyan" } : {})}
+          >
+            {`${index === detail.selectedSourceIndex ? ">" : " "} ${source.path} · ${source.status} · scope ${source.scope} · ${bytes} bytes · ${digest === undefined ? "no digest" : shortDigest(digest)}${source.sourceId === undefined ? " · unavailable" : ""}`}
+          </Text>
+        );
+      })}
+      <Text dimColor>
+        {navigation.loading
+          ? "Loading context detail… · Esc back"
+          : "↑/↓ select current instruction · Enter open · Esc request list"}
+      </Text>
+    </Box>
+  );
+}
+
+function ContextInstructionViewer({ state }: { state: TuiState }) {
+  const navigation = state.contextNavigation;
+  const view = navigation?.instructionView;
+  if (navigation === undefined) {
+    return <Text color="red">Instruction viewer state is unavailable.</Text>;
+  }
+  const rows =
+    view === undefined
+      ? []
+      : view.rows.slice(
+          view.scrollOffset,
+          view.scrollOffset + navigation.viewportHeight,
+        );
+  return (
+    <Box flexDirection="column" borderStyle="round" paddingX={1}>
+      <Text bold>{view?.page.path ?? "Current instruction source"}</Text>
+      {view === undefined ? null : (
+        <Text dimColor>
+          {`${view.page.startByte}–${view.page.endByte} / ${view.page.totalBytes} UTF-8 bytes · current content`}
+        </Text>
+      )}
+      {navigation.loading && view === undefined ? (
+        <Text dimColor>Loading instruction source…</Text>
+      ) : (
+        rows.map((row, index) => (
+          <Text
+            key={`${view?.page.startByte ?? 0}:${view?.scrollOffset ?? 0}:${index}`}
+          >
+            {row.length === 0 ? " " : row}
+          </Text>
+        ))
+      )}
+      <Text dimColor>
+        {navigation.loading
+          ? "Loading instruction range… · Esc detail"
+          : "↑/↓ scroll · PgUp/PgDn byte range · Home/End boundary · Esc detail"}
+      </Text>
+    </Box>
+  );
+}
+
 function ThreadSearchInput({ state }: { state: TuiState }) {
   const search = state.threadBrowser?.search;
   if (search === undefined) {
@@ -711,7 +956,7 @@ function ThreadPreview({ state }: { state: TuiState }) {
           ? "Checking thread… · Esc back"
           : preview.thread.status === "invalid"
             ? "Invalid thread · Esc back"
-            : "↑/↓ scroll · PgUp/PgDn page · Home/End boundary · a artifacts · r resume · Esc back"}
+            : "↑/↓ scroll · PgUp/PgDn page · Home/End boundary · a artifacts · c context · r resume · Esc back"}
       </Text>
     </Box>
   );
@@ -826,4 +1071,10 @@ function transcriptPresentation(kind: TuiTranscriptEntry["kind"]): {
 
 function shortArtifactId(id: string): string {
   return id.length <= 24 ? id : `${id.slice(0, 15)}…${id.slice(-8)}`;
+}
+
+function shortDigest(digest: string): string {
+  return digest.length <= 20
+    ? digest
+    : `${digest.slice(0, 12)}…${digest.slice(-7)}`;
 }

@@ -9,7 +9,10 @@ import {
 import { conversationItemSchema } from "./items.js";
 import { artifactReferenceSchema } from "./artifacts.js";
 import { tokenUsageSchema, turnUsageSchema } from "./usage.js";
-import { turnContextSnapshotSchema } from "./context.js";
+import {
+  contextPreparedPayloadSchema,
+  turnContextSnapshotSchema,
+} from "./context.js";
 
 const metadataShape = {
   schemaVersion: z.literal(1),
@@ -53,6 +56,11 @@ export const agentEventSchema = z.discriminatedUnion("type", [
     ...metadataShape,
     type: z.literal("turn.context"),
     payload: turnContextSnapshotSchema,
+  }),
+  z.object({
+    ...metadataShape,
+    type: z.literal("context.prepared"),
+    payload: contextPreparedPayloadSchema,
   }),
   z.object({
     ...metadataShape,

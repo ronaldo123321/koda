@@ -1,4 +1,10 @@
-import { ContextEngine } from "@koda/agent-core";
+import {
+  ContextEngine,
+  digestContextItems,
+  projectActiveContext,
+  sha256CanonicalJson,
+  summarizeContextItemTypes,
+} from "@koda/agent-core";
 import {
   assistantMessageItemSchema,
   itemIdSchema,
@@ -253,6 +259,40 @@ describe("ContextEngine", () => {
     expect(second.estimatedInputTokens).toBeGreaterThan(
       first.estimatedInputTokens,
     );
+  });
+
+  it("exposes an immutable budget snapshot captured with each preparation", () => {
+    const engine = createEngine({ contextWindowTokens: 10_000 });
+
+    const prepared = engine.prepare([user("budget-user", "Inspect it.")], []);
+
+    expect(prepared.budget).toEqual({
+      contextWindowTokens: 10_000,
+      maxOutputTokens: 100,
+      safetyMarginTokens: 100,
+      inputBudgetTokens: 9_800,
+      fixedInputTokens: 20,
+      calibrationFactor: 1,
+    });
+    expect(Object.isFrozen(prepared.budget)).toBe(true);
+  });
+
+  it("produces canonical digests and stable Item type ordering", () => {
+    const items = [
+      user("digest-user", "Inspect it."),
+      assistant("digest-assistant", "Done."),
+      user("digest-user-2", "Continue."),
+    ];
+
+    expect(sha256CanonicalJson({ b: 2, a: { d: 4, c: 3 } })).toBe(
+      sha256CanonicalJson({ a: { c: 3, d: 4 }, b: 2 }),
+    );
+    expect(digestContextItems(items)).toMatch(/^[a-f0-9]{64}$/u);
+    expect(summarizeContextItemTypes(items)).toEqual([
+      { type: "user_message", count: 2 },
+      { type: "assistant_message", count: 1 },
+    ]);
+    expect(projectActiveContext(items)).toEqual(items);
   });
 
   it("fails before provider use when the newest user turn cannot fit", () => {

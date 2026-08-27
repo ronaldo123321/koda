@@ -1,13 +1,22 @@
 import { z } from "zod";
 
-import { artifactIdSchema, artifactReferenceSchema } from "./artifacts.js";
+import {
+  artifactIdSchema,
+  artifactReferenceSchema,
+  artifactSha256Schema,
+} from "./artifacts.js";
+import {
+  contextPreparedPayloadSchema,
+  turnContextSnapshotSchema,
+} from "./context.js";
 import { agentEventSchema } from "./events.js";
 import { threadIdSchema, toolCallIdSchema, turnIdSchema } from "./ids.js";
+import { compactionItemSchema, conversationItemTypeSchema } from "./items.js";
 import { jsonValueSchema } from "./json.js";
 import { tokenUsageSchema } from "./usage.js";
 import { modelProviderIdSchema, providerMetadataSchema } from "./providers.js";
 
-export const APP_SERVER_PROTOCOL_VERSION = 6 as const;
+export const APP_SERVER_PROTOCOL_VERSION = 7 as const;
 
 export const THREAD_EVENTS_DEFAULT_LIMIT = 200;
 export const THREAD_EVENTS_MAXIMUM_LIMIT = 200;
@@ -31,6 +40,15 @@ export const ARTIFACT_READ_MAXIMUM_BYTES = 64 * 1_024;
 export const ARTIFACT_READ_RESULT_BUDGET_BYTES = 80 * 1_024;
 export const ARTIFACT_WORKSPACE_BUDGET_BYTES = 4_096;
 export const ARTIFACT_NAME_BUDGET_BYTES = 1_024;
+export const THREAD_CONTEXT_DEFAULT_LIMIT = 100;
+export const THREAD_CONTEXT_MAXIMUM_LIMIT = 100;
+export const THREAD_CONTEXT_RESULT_BUDGET_BYTES = 256 * 1_024;
+export const CONTEXT_DETAIL_RESULT_BUDGET_BYTES = 256 * 1_024;
+export const CONTEXT_INSTRUCTION_READ_DEFAULT_BYTES = 16 * 1_024;
+export const CONTEXT_INSTRUCTION_READ_MINIMUM_BYTES = 4;
+export const CONTEXT_INSTRUCTION_READ_MAXIMUM_BYTES = 64 * 1_024;
+export const CONTEXT_INSTRUCTION_READ_RESULT_BUDGET_BYTES = 80 * 1_024;
+export const CONTEXT_WORKSPACE_BUDGET_BYTES = 4_096;
 
 export const APP_SERVER_RPC_ERROR_CODE = {
   PARSE: -32700,
@@ -141,6 +159,7 @@ export const initializeResultSchema = z
         bidirectionalThreadEvents: z.literal(true),
         runtimeSettings: z.literal(true),
         artifactInspection: z.literal(true),
+        contextInspection: z.literal(true),
       })
       .strict(),
     providers: z.array(runtimeProviderMetadataSchema).min(1),
@@ -432,6 +451,296 @@ export const artifactReadResultSchema = z
         code: "custom",
         message: "Artifact range boundary flags are inconsistent.",
         path: ["hasEarlier"],
+      });
+    }
+  });
+
+const contextWorkspaceSchema = z
+  .string()
+  .min(1)
+  .refine(
+    (value) =>
+      new TextEncoder().encode(value).byteLength <=
+      CONTEXT_WORKSPACE_BUDGET_BYTES,
+    `Workspace must not exceed ${CONTEXT_WORKSPACE_BUDGET_BYTES} UTF-8 bytes.`,
+  );
+
+export const contextRequestDescriptorSchema = z
+  .object({
+    anchorSequence: z.number().int().safe().nonnegative(),
+    turnId: turnIdSchema,
+    step: z.number().int().positive(),
+    timestamp: z.string().datetime({ offset: true }),
+    precise: z.boolean(),
+    provider: modelProviderIdSchema,
+    model: z.string().min(1),
+    estimatedInputTokens: z.number().int().nonnegative().optional(),
+    inputBudgetTokens: z.number().int().positive().optional(),
+    measuredInputTokens: z.number().int().nonnegative().optional(),
+    activeItemCount: z.number().int().nonnegative().optional(),
+    toolCount: z.number().int().nonnegative().optional(),
+    compactionItemId: compactionItemSchema.shape.id.optional(),
+  })
+  .strict()
+  .superRefine((descriptor, context) => {
+    if (
+      descriptor.precise &&
+      (descriptor.estimatedInputTokens === undefined ||
+        descriptor.inputBudgetTokens === undefined ||
+        descriptor.activeItemCount === undefined ||
+        descriptor.toolCount === undefined)
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "Precise context descriptors require recorded telemetry.",
+      });
+    }
+  });
+
+export const threadContextParamsSchema = z
+  .object({
+    workspace: contextWorkspaceSchema,
+    threadId: localThreadIdSchema,
+    beforeSequence: z.number().int().safe().nonnegative().optional(),
+    limit: z
+      .number()
+      .int()
+      .safe()
+      .min(1)
+      .max(THREAD_CONTEXT_MAXIMUM_LIMIT)
+      .optional(),
+  })
+  .strict();
+
+export const threadContextResultSchema = z
+  .object({
+    workspace: contextWorkspaceSchema,
+    threadId: threadIdSchema,
+    requests: z
+      .array(contextRequestDescriptorSchema)
+      .max(THREAD_CONTEXT_MAXIMUM_LIMIT),
+    nextBeforeSequence: z.number().int().safe().nonnegative().optional(),
+    hasEarlier: z.boolean(),
+  })
+  .strict()
+  .superRefine((result, context) => {
+    for (let index = 1; index < result.requests.length; index += 1) {
+      const previous = result.requests[index - 1];
+      const current = result.requests[index];
+      if (
+        previous !== undefined &&
+        current !== undefined &&
+        current.anchorSequence >= previous.anchorSequence
+      ) {
+        context.addIssue({
+          code: "custom",
+          message: "Context request pages must be newest first.",
+          path: ["requests", index, "anchorSequence"],
+        });
+      }
+    }
+    if (result.hasEarlier) {
+      if (
+        result.requests.length === 0 ||
+        result.nextBeforeSequence !== result.requests.at(-1)?.anchorSequence
+      ) {
+        context.addIssue({
+          code: "custom",
+          message:
+            "A paginated context list must expose its oldest anchor as the next cursor.",
+          path: ["nextBeforeSequence"],
+        });
+      }
+    } else if (result.nextBeforeSequence !== undefined) {
+      context.addIssue({
+        code: "custom",
+        message: "A final context list cannot expose a next cursor.",
+        path: ["nextBeforeSequence"],
+      });
+    }
+  });
+
+export const contextReadParamsSchema = z
+  .object({
+    workspace: contextWorkspaceSchema,
+    threadId: localThreadIdSchema,
+    anchorSequence: z.number().int().safe().nonnegative(),
+  })
+  .strict();
+
+export const contextUsageRecordSchema = z
+  .object({
+    sequence: z.number().int().safe().nonnegative(),
+    responseId: z.string().min(1).optional(),
+    usage: tokenUsageSchema,
+  })
+  .strict();
+
+export const contextReconstructionSchema = z
+  .object({
+    activeItemCount: z.number().int().nonnegative(),
+    activeItemTypes: z.array(
+      z
+        .object({
+          type: conversationItemTypeSchema,
+          count: z.number().int().positive(),
+        })
+        .strict(),
+    ),
+    activeItemsSha256: artifactSha256Schema,
+    valid: z.literal(true),
+  })
+  .strict();
+
+export const contextInstructionStatusSchema = z.enum([
+  "unchanged",
+  "modified",
+  "missing",
+  "added",
+]);
+
+const contextInstructionIdentitySchema = z
+  .object({
+    bytes: z.number().int().safe().nonnegative().optional(),
+    sha256: artifactSha256Schema,
+  })
+  .strict();
+
+export const contextInstructionSourceSchema = z
+  .object({
+    kind: z.enum(["effective", "repository"]),
+    sourceId: z
+      .string()
+      .regex(/^ctxsrc:[a-f0-9]{64}$/u)
+      .optional(),
+    path: z.string().min(1),
+    scope: z.string().min(1),
+    status: contextInstructionStatusSchema,
+    historical: contextInstructionIdentitySchema.optional(),
+    current: contextInstructionIdentitySchema.optional(),
+  })
+  .strict()
+  .superRefine((source, context) => {
+    if (
+      source.status === "missing" &&
+      (source.current !== undefined || source.sourceId !== undefined)
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "Missing instruction sources cannot be read.",
+      });
+    }
+    if (source.status !== "missing" && source.current === undefined) {
+      context.addIssue({
+        code: "custom",
+        message: "Readable instruction sources require current identity.",
+      });
+    }
+    if (source.status !== "missing" && source.sourceId === undefined) {
+      context.addIssue({
+        code: "custom",
+        message: "Readable instruction sources require an opaque source ID.",
+      });
+    }
+  });
+
+export const contextInstructionSummarySchema = z
+  .object({
+    historicalEffectiveSha256: artifactSha256Schema,
+    currentEffectiveSha256: artifactSha256Schema,
+    effectiveMatchesHistorical: z.boolean(),
+    sources: z.array(contextInstructionSourceSchema).max(33),
+  })
+  .strict();
+
+export const contextReadResultSchema = z
+  .object({
+    workspace: contextWorkspaceSchema,
+    threadId: threadIdSchema,
+    request: contextRequestDescriptorSchema,
+    turnContext: turnContextSnapshotSchema,
+    telemetry: contextPreparedPayloadSchema.optional(),
+    usage: contextUsageRecordSchema.optional(),
+    reconstruction: contextReconstructionSchema.optional(),
+    compaction: compactionItemSchema.optional(),
+    instructions: contextInstructionSummarySchema,
+  })
+  .strict()
+  .superRefine((result, context) => {
+    if (
+      result.request.precise &&
+      (result.telemetry === undefined || result.reconstruction === undefined)
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "Precise context detail requires telemetry reconstruction.",
+      });
+    }
+    if (
+      !result.request.precise &&
+      (result.telemetry !== undefined || result.reconstruction !== undefined)
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "Legacy context detail cannot synthesize exact telemetry.",
+      });
+    }
+  });
+
+export const contextInstructionReadParamsSchema = z
+  .object({
+    workspace: contextWorkspaceSchema,
+    threadId: localThreadIdSchema,
+    anchorSequence: z.number().int().safe().nonnegative(),
+    sourceId: z.string().regex(/^ctxsrc:[a-f0-9]{64}$/u),
+    beforeByte: z.number().int().safe().nonnegative().optional(),
+    afterByte: z.number().int().safe().nonnegative().optional(),
+    maxBytes: z
+      .number()
+      .int()
+      .safe()
+      .min(CONTEXT_INSTRUCTION_READ_MINIMUM_BYTES)
+      .max(CONTEXT_INSTRUCTION_READ_MAXIMUM_BYTES)
+      .optional(),
+  })
+  .strict()
+  .superRefine((params, context) => {
+    if (params.beforeByte !== undefined && params.afterByte !== undefined) {
+      context.addIssue({
+        code: "custom",
+        message: "beforeByte and afterByte are mutually exclusive cursors.",
+        path: ["afterByte"],
+      });
+    }
+  });
+
+export const contextInstructionReadResultSchema = z
+  .object({
+    workspace: contextWorkspaceSchema,
+    threadId: threadIdSchema,
+    anchorSequence: z.number().int().safe().nonnegative(),
+    sourceId: z.string().regex(/^ctxsrc:[a-f0-9]{64}$/u),
+    path: z.string().min(1),
+    content: z.string(),
+    startByte: z.number().int().safe().nonnegative(),
+    endByte: z.number().int().safe().nonnegative(),
+    totalBytes: z.number().int().safe().nonnegative(),
+    hasEarlier: z.boolean(),
+    hasLater: z.boolean(),
+  })
+  .strict()
+  .superRefine((result, context) => {
+    if (
+      result.startByte > result.endByte ||
+      result.endByte > result.totalBytes ||
+      new TextEncoder().encode(result.content).byteLength !==
+        result.endByte - result.startByte ||
+      result.hasEarlier !== result.startByte > 0 ||
+      result.hasLater !== result.endByte < result.totalBytes
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "Instruction byte range metadata is inconsistent.",
       });
     }
   });
@@ -805,6 +1114,30 @@ export type ThreadArtifactsParams = z.infer<typeof threadArtifactsParamsSchema>;
 export type ThreadArtifactsResult = z.infer<typeof threadArtifactsResultSchema>;
 export type ArtifactReadParams = z.infer<typeof artifactReadParamsSchema>;
 export type ArtifactReadResult = z.infer<typeof artifactReadResultSchema>;
+export type ContextRequestDescriptor = z.infer<
+  typeof contextRequestDescriptorSchema
+>;
+export type ThreadContextParams = z.infer<typeof threadContextParamsSchema>;
+export type ThreadContextResult = z.infer<typeof threadContextResultSchema>;
+export type ContextReadParams = z.infer<typeof contextReadParamsSchema>;
+export type ContextUsageRecord = z.infer<typeof contextUsageRecordSchema>;
+export type ContextReconstruction = z.infer<typeof contextReconstructionSchema>;
+export type ContextInstructionStatus = z.infer<
+  typeof contextInstructionStatusSchema
+>;
+export type ContextInstructionSource = z.infer<
+  typeof contextInstructionSourceSchema
+>;
+export type ContextInstructionSummary = z.infer<
+  typeof contextInstructionSummarySchema
+>;
+export type ContextReadResult = z.infer<typeof contextReadResultSchema>;
+export type ContextInstructionReadParams = z.infer<
+  typeof contextInstructionReadParamsSchema
+>;
+export type ContextInstructionReadResult = z.infer<
+  typeof contextInstructionReadResultSchema
+>;
 export type ThreadListParams = z.infer<typeof threadListParamsSchema>;
 export type ThreadListResult = z.infer<typeof threadListResultSchema>;
 export type ThreadGetParams = z.infer<typeof threadGetParamsSchema>;

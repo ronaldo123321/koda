@@ -1,4 +1,10 @@
-import { AgentLoop, ContextEngine, ToolRegistry } from "@koda/agent-core";
+import {
+  AgentLoop,
+  ContextEngine,
+  ToolRegistry,
+  digestContextItems,
+  type EventSink,
+} from "@koda/agent-core";
 import {
   artifactReferenceSchema,
   assistantMessageItemSchema,
@@ -213,6 +219,7 @@ describe("AgentLoop", () => {
     const provider = new ScriptedModelProvider([
       {
         assertRequest: (request) => {
+          expect(events.events.at(-1)?.type).toBe("context.prepared");
           expect(request.items[0]).toMatchObject({
             type: "compaction",
             reason: "context_budget",
@@ -266,6 +273,129 @@ describe("AgentLoop", () => {
           event.payload.item.type === "compaction",
       ),
     ).toBe(true);
+    const compactionIndex = events.events.findIndex(
+      (event) =>
+        event.type === "item.recorded" &&
+        event.payload.item.type === "compaction",
+    );
+    const preparedIndex = events.events.findIndex(
+      (event) => event.type === "context.prepared",
+    );
+    expect(preparedIndex).toBe(compactionIndex + 1);
+    expect(events.events[preparedIndex]).toMatchObject({
+      type: "context.prepared",
+      payload: {
+        step: 1,
+        contextWindowTokens: 1_000,
+        maxOutputTokens: 100,
+        safetyMarginTokens: 100,
+        inputBudgetTokens: 800,
+        fixedInputTokens: 20,
+        calibrationFactor: 1,
+        toolCount: 1,
+      },
+    });
+    const prepared = events.events[preparedIndex];
+    if (prepared?.type !== "context.prepared") {
+      throw new Error("Expected context.prepared event.");
+    }
+    const recordedCompaction = result.items.find(
+      (item) => item.id === prepared.payload.compactionItemId,
+    );
+    const currentUser = result.items.find(
+      (item) =>
+        item.type === "user_message" && item.content === "Continue now.",
+    );
+    expect(recordedCompaction).toBeDefined();
+    expect(currentUser).toBeDefined();
+    const projected = [recordedCompaction!, currentUser!];
+    expect(prepared.payload.activeItemsSha256).toBe(
+      digestContextItems(projected),
+    );
+  });
+
+  it("suppresses the provider when context telemetry cannot be persisted", async () => {
+    const provider = new ScriptedModelProvider([
+      {
+        events: [
+          { type: "assistant_delta", text: "Must not run." },
+          { type: "completed", finishReason: "stop" },
+        ],
+      },
+    ]);
+    const stored = new MemoryEventStore();
+    const events: EventSink = {
+      append: async (event) => {
+        if (event.type === "context.prepared") {
+          throw new Error("telemetry write failed");
+        }
+        await stored.append(event);
+      },
+    };
+    const ids = new DeterministicItemIdFactory("telemetry-failure-item");
+
+    const result = await new AgentLoop({
+      provider,
+      tools: createTools(),
+      events,
+      ids,
+      clock: new FixedClock(),
+      contextEngine: new ContextEngine({
+        contextWindowTokens: 10_000,
+        maxOutputTokens: 100,
+        safetyMarginTokens: 100,
+        fixedInputTokens: 20,
+        ids,
+      }),
+    }).runTurn({ threadId, turnId, userInput: "Inspect safely." });
+
+    expect(result).toMatchObject({
+      status: "failed",
+      steps: 0,
+      error: { code: "CONTEXT_PREPARATION_ERROR" },
+      usage: { modelRequests: 0 },
+    });
+    expect(provider.remainingSteps()).toBe(1);
+    expect(stored.events.at(-1)).toMatchObject({
+      type: "turn.failed",
+      payload: { code: "CONTEXT_PREPARATION_ERROR" },
+    });
+  });
+
+  it("keeps a prepared request when the provider fails before Usage", async () => {
+    const events = new MemoryEventStore();
+    const ids = new DeterministicItemIdFactory("prepared-failure-item");
+    const result = await new AgentLoop({
+      provider: {
+        stream: async function* () {
+          throw new ProviderError("PROVIDER_REQUEST_FAILED", "Unavailable.");
+        },
+      },
+      tools: createTools(),
+      events,
+      ids,
+      clock: new FixedClock(),
+      contextEngine: new ContextEngine({
+        contextWindowTokens: 10_000,
+        maxOutputTokens: 100,
+        safetyMarginTokens: 100,
+        fixedInputTokens: 20,
+        ids,
+      }),
+    }).runTurn({ threadId, turnId, userInput: "Try once." });
+
+    expect(result).toMatchObject({
+      status: "failed",
+      steps: 1,
+      error: { code: "PROVIDER_REQUEST_FAILED" },
+      usage: { modelRequests: 1, reportedRequests: 0 },
+    });
+    expect(
+      events.events.filter((event) => event.type === "context.prepared"),
+    ).toHaveLength(1);
+    expect(
+      events.events.filter((event) => event.type === "model.usage"),
+    ).toHaveLength(0);
   });
 
   it("fails before provider use when mandatory context cannot fit", async () => {

@@ -26,7 +26,13 @@ import {
   type Clock,
   type EventSink,
 } from "./events.js";
-import { ContextBudgetError, type ContextEngine } from "./context-engine.js";
+import {
+  ContextBudgetError,
+  digestContextItems,
+  digestModelTools,
+  summarizeContextItemTypes,
+  type ContextEngine,
+} from "./context-engine.js";
 import type { ModelEvent, ModelProvider } from "./model.js";
 import {
   denySideEffectsPolicy,
@@ -199,6 +205,23 @@ export class AgentLoop {
               payload: { item: prepared.compaction },
             });
           }
+          await recorder.record({
+            type: "context.prepared",
+            payload: {
+              step,
+              ...prepared.budget,
+              rawEstimatedInputTokens: prepared.rawEstimatedInputTokens,
+              estimatedInputTokens: prepared.estimatedInputTokens,
+              activeItemCount: prepared.items.length,
+              activeItemTypes: summarizeContextItemTypes(prepared.items),
+              activeItemsSha256: digestContextItems(prepared.items),
+              toolCount: toolDefinitions.length,
+              toolsSha256: digestModelTools(toolDefinitions),
+              ...(prepared.compaction === undefined
+                ? {}
+                : { compactionItemId: prepared.compaction.id }),
+            },
+          });
         } catch (error) {
           return this.fail(
             recorder,

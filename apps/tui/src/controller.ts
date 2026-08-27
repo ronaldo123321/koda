@@ -4,6 +4,7 @@ import type {
 } from "@koda/app-server-client-node";
 import {
   ARTIFACT_READ_DEFAULT_BYTES,
+  CONTEXT_INSTRUCTION_READ_DEFAULT_BYTES,
   RUNTIME_SETTINGS_MODEL_BUDGET_BYTES,
   artifactIdSchema,
   modelProviderIdSchema,
@@ -12,6 +13,9 @@ import {
   type AgentEvent,
   type ArtifactId,
   type ArtifactReadResult,
+  type ContextInstructionReadResult,
+  type ContextReadResult,
+  type ContextRequestDescriptor,
   type ModelProviderId,
   type RuntimePreference,
   type RuntimeProviderMetadata,
@@ -47,6 +51,9 @@ export type TuiMode =
   | "settings_model"
   | "artifact_list"
   | "artifact_view"
+  | "context_list"
+  | "context_detail"
+  | "context_instruction_view"
   | "thread_list"
   | "thread_search_input"
   | "thread_search_results"
@@ -118,6 +125,39 @@ export interface TuiArtifactNavigationState {
   threadId: ThreadId;
   list?: TuiArtifactListState;
   view?: TuiArtifactViewState;
+  loading: boolean;
+  viewportHeight: number;
+  viewportWidth: number;
+}
+
+export interface TuiContextListState {
+  requests: readonly ContextRequestDescriptor[];
+  selectedIndex: number;
+  scrollOffset: number;
+  currentCursor: number | null;
+  newerCursors: readonly (number | null)[];
+  hasEarlier: boolean;
+  nextBeforeSequence?: number;
+}
+
+export interface TuiContextDetailState {
+  result: ContextReadResult;
+  selectedSourceIndex: number;
+  sourceScrollOffset: number;
+}
+
+export interface TuiContextInstructionViewState {
+  page: ContextInstructionReadResult;
+  rows: readonly string[];
+  scrollOffset: number;
+}
+
+export interface TuiContextNavigationState {
+  origin: "chat" | "thread_preview";
+  threadId: ThreadId;
+  list?: TuiContextListState;
+  detail?: TuiContextDetailState;
+  instructionView?: TuiContextInstructionViewState;
   loading: boolean;
   viewportHeight: number;
   viewportWidth: number;
@@ -214,6 +254,7 @@ export interface TuiState {
   threadBrowser: TuiThreadBrowserState | undefined;
   runtimeSettings: TuiRuntimeSettingsState | undefined;
   artifactNavigation: TuiArtifactNavigationState | undefined;
+  contextNavigation: TuiContextNavigationState | undefined;
 }
 
 export type TuiSubmitResult = "handled" | "exit";
@@ -273,6 +314,7 @@ export class TuiController {
       threadBrowser: undefined,
       runtimeSettings: undefined,
       artifactNavigation: undefined,
+      contextNavigation: undefined,
     };
     this.unsubscribeNotification = client.onNotification((notification) => {
       this.receiveNotification(notification);
@@ -336,6 +378,7 @@ export class TuiController {
             "/settings — choose provider/model for the next new thread",
             "/artifacts — browse artifacts referenced by this thread",
             "/artifact <id> — open a referenced text artifact",
+            "/context — inspect prepared model context and instructions",
             "/new — detach so the next prompt creates a thread",
             "/exit — shut down Koda",
             "Ctrl+T — open the thread browser",
@@ -358,6 +401,9 @@ export class TuiController {
         return "handled";
       case "/artifacts":
         await this.openCurrentThreadArtifacts();
+        return "handled";
+      case "/context":
+        await this.openCurrentThreadContext();
         return "handled";
       case "/new":
         this.detachThread();
@@ -1333,6 +1379,591 @@ export class TuiController {
     });
   }
 
+  public async openCurrentThreadContext(): Promise<void> {
+    if (!this.canEditInput() || this.navigationBusy) {
+      this.update({
+        notice: "Context inspection is available only while idle.",
+      });
+      return;
+    }
+    if (this.state.threadId === undefined) {
+      this.update({ notice: "No current thread is selected." });
+      return;
+    }
+    await this.openContextList("chat", this.state.threadId);
+  }
+
+  public async openPreviewContext(): Promise<void> {
+    const preview = this.state.threadBrowser?.preview;
+    if (
+      this.state.mode !== "thread_preview" ||
+      preview === undefined ||
+      this.navigationBusy
+    ) {
+      return;
+    }
+    await this.openContextList("thread_preview", preview.thread.threadId);
+  }
+
+  public selectContextRequest(offset: -1 | 1): void {
+    const navigation = this.state.contextNavigation;
+    const list = navigation?.list;
+    if (
+      this.state.mode !== "context_list" ||
+      navigation === undefined ||
+      list === undefined ||
+      navigation.loading ||
+      list.requests.length === 0
+    ) {
+      return;
+    }
+    const selectedIndex = Math.min(
+      list.requests.length - 1,
+      Math.max(0, list.selectedIndex + offset),
+    );
+    this.update({
+      contextNavigation: {
+        ...navigation,
+        list: {
+          ...list,
+          selectedIndex,
+          scrollOffset: keepSelectionVisible(
+            selectedIndex,
+            list.scrollOffset,
+            navigation.viewportHeight,
+            list.requests.length,
+          ),
+        },
+      },
+      notice: undefined,
+    });
+  }
+
+  public async pageContextList(
+    action: "newer" | "older" | "home" | "end",
+  ): Promise<void> {
+    const navigation = this.state.contextNavigation;
+    const list = navigation?.list;
+    if (
+      this.state.mode !== "context_list" ||
+      navigation === undefined ||
+      list === undefined ||
+      navigation.loading ||
+      this.navigationBusy
+    ) {
+      return;
+    }
+    if (
+      (action === "older" &&
+        (!list.hasEarlier || list.nextBeforeSequence === undefined)) ||
+      (action === "newer" && list.newerCursors.length === 0) ||
+      (action === "home" && list.currentCursor === null) ||
+      (action === "end" && !list.hasEarlier)
+    ) {
+      return;
+    }
+    const generation = this.beginNavigation();
+    this.navigationBusy = true;
+    this.update({
+      contextNavigation: { ...navigation, loading: true },
+      notice: "Loading context requests…",
+    });
+    try {
+      let cursor = list.currentCursor;
+      let newerCursors = [...list.newerCursors];
+      let result;
+      if (action === "newer") {
+        cursor = newerCursors.at(-1) ?? null;
+        newerCursors = newerCursors.slice(0, -1);
+        result = await this.fetchContextList(navigation.threadId, cursor);
+      } else if (action === "home") {
+        cursor = null;
+        newerCursors = [];
+        result = await this.fetchContextList(navigation.threadId, cursor);
+      } else {
+        let hasEarlier = list.hasEarlier;
+        let nextBeforeSequence = list.nextBeforeSequence;
+        result = {
+          requests: list.requests,
+          hasEarlier,
+          ...(nextBeforeSequence === undefined ? {} : { nextBeforeSequence }),
+        };
+        do {
+          if (nextBeforeSequence === undefined) {
+            break;
+          }
+          newerCursors.push(cursor);
+          cursor = nextBeforeSequence;
+          result = await this.fetchContextList(navigation.threadId, cursor);
+          if (!this.isCurrentNavigation(generation)) {
+            return;
+          }
+          hasEarlier = result.hasEarlier;
+          nextBeforeSequence = result.nextBeforeSequence;
+        } while (action === "end" && hasEarlier);
+      }
+      if (
+        !this.isCurrentNavigation(generation) ||
+        this.state.mode !== "context_list"
+      ) {
+        return;
+      }
+      const current = this.state.contextNavigation;
+      if (current === undefined) {
+        return;
+      }
+      this.update({
+        contextNavigation: {
+          ...current,
+          loading: false,
+          list: contextListState(
+            result,
+            cursor,
+            newerCursors,
+            current.viewportHeight,
+          ),
+        },
+        notice:
+          result.requests.length === 0
+            ? "No context requests on this page."
+            : undefined,
+      });
+    } catch (error) {
+      const current = this.state.contextNavigation;
+      if (
+        this.isCurrentNavigation(generation) &&
+        current !== undefined &&
+        this.state.mode === "context_list"
+      ) {
+        this.update({
+          contextNavigation: { ...current, loading: false },
+          notice: `Could not load context requests: ${errorMessage(error)}`,
+        });
+      }
+    } finally {
+      if (this.isCurrentNavigation(generation)) {
+        this.navigationBusy = false;
+      }
+    }
+  }
+
+  public async openSelectedContext(): Promise<void> {
+    const navigation = this.state.contextNavigation;
+    const list = navigation?.list;
+    const selected = list?.requests[list.selectedIndex];
+    if (
+      this.state.mode !== "context_list" ||
+      navigation === undefined ||
+      list === undefined ||
+      selected === undefined ||
+      navigation.loading ||
+      this.navigationBusy
+    ) {
+      return;
+    }
+    const generation = this.beginNavigation();
+    this.navigationBusy = true;
+    this.update({
+      mode: "context_detail",
+      contextNavigation: { ...navigation, loading: true },
+      notice: "Loading context detail…",
+    });
+    try {
+      const result = await this.client.readContext({
+        workspace: this.state.configuration.cwd,
+        threadId: navigation.threadId,
+        anchorSequence: selected.anchorSequence,
+      });
+      if (
+        !this.isCurrentNavigation(generation) ||
+        this.getSnapshot().mode !== "context_detail"
+      ) {
+        return;
+      }
+      const current = this.state.contextNavigation;
+      if (current === undefined) {
+        return;
+      }
+      this.update({
+        contextNavigation: {
+          ...current,
+          loading: false,
+          detail: {
+            result,
+            selectedSourceIndex: 0,
+            sourceScrollOffset: 0,
+          },
+        },
+        notice: undefined,
+      });
+    } catch (error) {
+      if (this.isCurrentNavigation(generation)) {
+        this.update({
+          mode: "context_list",
+          contextNavigation: { ...navigation, loading: false },
+          notice: `Could not load context detail: ${errorMessage(error)}`,
+        });
+      }
+    } finally {
+      if (this.isCurrentNavigation(generation)) {
+        this.navigationBusy = false;
+      }
+    }
+  }
+
+  public selectContextInstructionSource(offset: -1 | 1): void {
+    const navigation = this.state.contextNavigation;
+    const detail = navigation?.detail;
+    const sources = detail?.result.instructions.sources;
+    if (
+      this.state.mode !== "context_detail" ||
+      navigation === undefined ||
+      detail === undefined ||
+      sources === undefined ||
+      navigation.loading ||
+      sources.length === 0
+    ) {
+      return;
+    }
+    const selectedSourceIndex = Math.min(
+      sources.length - 1,
+      Math.max(0, detail.selectedSourceIndex + offset),
+    );
+    this.update({
+      contextNavigation: {
+        ...navigation,
+        detail: {
+          ...detail,
+          selectedSourceIndex,
+          sourceScrollOffset: keepSelectionVisible(
+            selectedSourceIndex,
+            detail.sourceScrollOffset,
+            navigation.viewportHeight,
+            sources.length,
+          ),
+        },
+      },
+      notice: undefined,
+    });
+  }
+
+  public async openSelectedContextInstruction(): Promise<void> {
+    const navigation = this.state.contextNavigation;
+    const detail = navigation?.detail;
+    const source =
+      detail?.result.instructions.sources[detail.selectedSourceIndex];
+    if (
+      this.state.mode !== "context_detail" ||
+      navigation === undefined ||
+      detail === undefined ||
+      source === undefined ||
+      navigation.loading ||
+      this.navigationBusy
+    ) {
+      return;
+    }
+    if (source.sourceId === undefined) {
+      this.update({ notice: "This historical instruction source is missing." });
+      return;
+    }
+    const generation = this.beginNavigation();
+    this.navigationBusy = true;
+    const { instructionView: _instructionView, ...withoutInstructionView } =
+      navigation;
+    this.update({
+      mode: "context_instruction_view",
+      contextNavigation: { ...withoutInstructionView, loading: true },
+      notice: "Loading current instruction source…",
+    });
+    try {
+      const result = await this.client.readContextInstruction({
+        workspace: this.state.configuration.cwd,
+        threadId: navigation.threadId,
+        anchorSequence: detail.result.request.anchorSequence,
+        sourceId: source.sourceId,
+        maxBytes: CONTEXT_INSTRUCTION_READ_DEFAULT_BYTES,
+      });
+      if (
+        !this.isCurrentNavigation(generation) ||
+        this.getSnapshot().mode !== "context_instruction_view"
+      ) {
+        return;
+      }
+      const current = this.state.contextNavigation;
+      if (current === undefined) {
+        return;
+      }
+      this.update({
+        contextNavigation: {
+          ...current,
+          loading: false,
+          instructionView: contextInstructionViewState(
+            result,
+            current.viewportWidth,
+            current.viewportHeight,
+            "start",
+          ),
+        },
+        notice: undefined,
+      });
+    } catch (error) {
+      if (this.isCurrentNavigation(generation)) {
+        this.update({
+          mode: "context_detail",
+          contextNavigation: { ...navigation, loading: false },
+          notice: `Could not open instruction source: ${errorMessage(error)}`,
+        });
+      }
+    } finally {
+      if (this.isCurrentNavigation(generation)) {
+        this.navigationBusy = false;
+      }
+    }
+  }
+
+  public async scrollContextInstruction(
+    action: "up" | "down" | "page_up" | "page_down" | "home" | "end",
+  ): Promise<void> {
+    const navigation = this.state.contextNavigation;
+    const view = navigation?.instructionView;
+    if (
+      this.state.mode !== "context_instruction_view" ||
+      navigation === undefined ||
+      view === undefined ||
+      navigation.loading ||
+      this.navigationBusy
+    ) {
+      return;
+    }
+    const maximum = maximumScrollOffset(
+      view.rows.length,
+      navigation.viewportHeight,
+    );
+    if (action === "up" || action === "down") {
+      this.update({
+        contextNavigation: {
+          ...navigation,
+          instructionView: {
+            ...view,
+            scrollOffset: Math.min(
+              maximum,
+              Math.max(0, view.scrollOffset + (action === "up" ? -1 : 1)),
+            ),
+          },
+        },
+        notice: undefined,
+      });
+      return;
+    }
+    if (action === "page_up" && !view.page.hasEarlier) {
+      this.update({
+        contextNavigation: {
+          ...navigation,
+          instructionView: { ...view, scrollOffset: 0 },
+        },
+      });
+      return;
+    }
+    if (action === "page_down" && !view.page.hasLater) {
+      this.update({
+        contextNavigation: {
+          ...navigation,
+          instructionView: { ...view, scrollOffset: maximum },
+        },
+      });
+      return;
+    }
+    const cursor =
+      action === "page_up"
+        ? { beforeByte: view.page.startByte }
+        : action === "page_down"
+          ? { afterByte: view.page.endByte }
+          : action === "end"
+            ? { beforeByte: view.page.totalBytes }
+            : {};
+    await this.loadContextInstructionRange(view.page.sourceId, cursor);
+  }
+
+  public closeContextLevel(): void {
+    const navigation = this.state.contextNavigation;
+    if (navigation === undefined) {
+      return;
+    }
+    this.cancelNavigation();
+    if (
+      this.state.mode === "context_instruction_view" &&
+      navigation.detail !== undefined
+    ) {
+      const { instructionView: _view, ...withoutView } = navigation;
+      this.update({
+        mode: "context_detail",
+        contextNavigation: { ...withoutView, loading: false },
+        notice: undefined,
+      });
+      return;
+    }
+    if (this.state.mode === "context_detail" && navigation.list !== undefined) {
+      const {
+        detail: _detail,
+        instructionView: _view,
+        ...withoutDetail
+      } = navigation;
+      this.update({
+        mode: "context_list",
+        contextNavigation: { ...withoutDetail, loading: false },
+        notice: undefined,
+      });
+      return;
+    }
+    if (
+      this.state.mode === "context_instruction_view" ||
+      this.state.mode === "context_detail" ||
+      this.state.mode === "context_list"
+    ) {
+      this.update({
+        mode: navigation.origin,
+        contextNavigation: undefined,
+        notice: undefined,
+      });
+    }
+  }
+
+  private async openContextList(
+    origin: "chat" | "thread_preview",
+    threadIdInput: string,
+  ): Promise<void> {
+    const threadId = threadIdSchema.parse(threadIdInput);
+    const generation = this.beginNavigation();
+    this.navigationBusy = true;
+    const navigation: TuiContextNavigationState = {
+      origin,
+      threadId,
+      loading: true,
+      viewportHeight: this.viewportHeight,
+      viewportWidth: this.viewportWidth,
+    };
+    this.update({
+      mode: "context_list",
+      contextNavigation: navigation,
+      notice: "Loading prepared context requests…",
+    });
+    try {
+      const result = await this.fetchContextList(threadId, null);
+      if (
+        !this.isCurrentNavigation(generation) ||
+        this.state.mode !== "context_list"
+      ) {
+        return;
+      }
+      const current = this.state.contextNavigation;
+      if (current === undefined) {
+        return;
+      }
+      this.update({
+        contextNavigation: {
+          ...current,
+          loading: false,
+          list: contextListState(result, null, [], current.viewportHeight),
+        },
+        notice:
+          result.requests.length === 0
+            ? "This thread has no inspectable model requests."
+            : undefined,
+      });
+    } catch (error) {
+      if (this.isCurrentNavigation(generation)) {
+        this.update({
+          mode: origin,
+          contextNavigation: undefined,
+          notice: `Could not load prepared context: ${errorMessage(error)}`,
+        });
+      }
+    } finally {
+      if (this.isCurrentNavigation(generation)) {
+        this.navigationBusy = false;
+      }
+    }
+  }
+
+  private async loadContextInstructionRange(
+    sourceId: string,
+    cursor: { beforeByte?: number; afterByte?: number },
+  ): Promise<void> {
+    const navigation = this.state.contextNavigation;
+    const detail = navigation?.detail;
+    const view = navigation?.instructionView;
+    if (
+      navigation === undefined ||
+      detail === undefined ||
+      view === undefined
+    ) {
+      return;
+    }
+    const generation = this.beginNavigation();
+    this.navigationBusy = true;
+    this.update({
+      contextNavigation: { ...navigation, loading: true },
+      notice: "Loading instruction range…",
+    });
+    try {
+      const result = await this.client.readContextInstruction({
+        workspace: this.state.configuration.cwd,
+        threadId: navigation.threadId,
+        anchorSequence: detail.result.request.anchorSequence,
+        sourceId,
+        ...cursor,
+        maxBytes: CONTEXT_INSTRUCTION_READ_DEFAULT_BYTES,
+      });
+      if (
+        !this.isCurrentNavigation(generation) ||
+        this.state.mode !== "context_instruction_view"
+      ) {
+        return;
+      }
+      const current = this.state.contextNavigation;
+      if (current === undefined) {
+        return;
+      }
+      this.update({
+        contextNavigation: {
+          ...current,
+          loading: false,
+          instructionView: contextInstructionViewState(
+            result,
+            current.viewportWidth,
+            current.viewportHeight,
+            cursor.beforeByte === undefined ? "start" : "end",
+          ),
+        },
+        notice: undefined,
+      });
+    } catch (error) {
+      const current = this.state.contextNavigation;
+      if (
+        this.isCurrentNavigation(generation) &&
+        current !== undefined &&
+        this.state.mode === "context_instruction_view"
+      ) {
+        this.update({
+          contextNavigation: { ...current, loading: false },
+          notice: `Could not load instruction range: ${errorMessage(error)}`,
+        });
+      }
+    } finally {
+      if (this.isCurrentNavigation(generation)) {
+        this.navigationBusy = false;
+      }
+    }
+  }
+
+  private fetchContextList(threadId: ThreadId, beforeSequence: number | null) {
+    return this.client.listThreadContexts({
+      workspace: this.state.configuration.cwd,
+      threadId,
+      ...(beforeSequence === null ? {} : { beforeSequence }),
+    });
+  }
+
   public async openThreadBrowser(): Promise<void> {
     if (!this.canBrowseThreads() || this.navigationBusy) {
       this.update({ notice: "Thread browsing is available only while idle." });
@@ -1966,6 +2597,7 @@ export class TuiController {
   ): void {
     const browser = this.state.threadBrowser;
     const artifactNavigation = this.state.artifactNavigation;
+    const contextNavigation = this.state.contextNavigation;
     if (!Number.isFinite(height) || !Number.isFinite(width)) {
       return;
     }
@@ -1979,13 +2611,20 @@ export class TuiController {
     );
     this.viewportHeight = viewportHeight;
     this.viewportWidth = viewportWidth;
-    if (browser === undefined && artifactNavigation === undefined) {
+    if (
+      browser === undefined &&
+      artifactNavigation === undefined &&
+      contextNavigation === undefined
+    ) {
       return;
     }
     const search = browser?.search;
     const preview = browser?.preview;
     const artifactList = artifactNavigation?.list;
     const artifactView = artifactNavigation?.view;
+    const contextList = contextNavigation?.list;
+    const contextDetail = contextNavigation?.detail;
+    const contextView = contextNavigation?.instructionView;
     this.update({
       ...(browser === undefined
         ? {}
@@ -2061,6 +2700,59 @@ export class TuiController {
                         rows,
                         scrollOffset: Math.min(
                           artifactView.scrollOffset,
+                          maximumScrollOffset(rows.length, viewportHeight),
+                        ),
+                      };
+                    })(),
+                  }),
+            },
+          }),
+      ...(contextNavigation === undefined
+        ? {}
+        : {
+            contextNavigation: {
+              ...contextNavigation,
+              viewportHeight,
+              viewportWidth,
+              ...(contextList === undefined
+                ? {}
+                : {
+                    list: {
+                      ...contextList,
+                      scrollOffset: keepSelectionVisible(
+                        contextList.selectedIndex,
+                        contextList.scrollOffset,
+                        viewportHeight,
+                        contextList.requests.length,
+                      ),
+                    },
+                  }),
+              ...(contextDetail === undefined
+                ? {}
+                : {
+                    detail: {
+                      ...contextDetail,
+                      sourceScrollOffset: keepSelectionVisible(
+                        contextDetail.selectedSourceIndex,
+                        contextDetail.sourceScrollOffset,
+                        viewportHeight,
+                        contextDetail.result.instructions.sources.length,
+                      ),
+                    },
+                  }),
+              ...(contextView === undefined
+                ? {}
+                : {
+                    instructionView: (() => {
+                      const rows = artifactPresentationRows(
+                        contextView.page.content,
+                        viewportWidth,
+                      );
+                      return {
+                        ...contextView,
+                        rows,
+                        scrollOffset: Math.min(
+                          contextView.scrollOffset,
                           maximumScrollOffset(rows.length, viewportHeight),
                         ),
                       };
@@ -2764,6 +3456,7 @@ export class TuiController {
         threadBrowser: undefined,
         runtimeSettings: undefined,
         artifactNavigation: undefined,
+        contextNavigation: undefined,
         notice: undefined,
       });
     } catch (error) {
@@ -2775,6 +3468,7 @@ export class TuiController {
         threadBrowser: undefined,
         runtimeSettings: undefined,
         artifactNavigation: undefined,
+        contextNavigation: undefined,
         notice: `Shutdown failed: ${errorMessage(error)}`,
       });
     }
@@ -3007,6 +3701,7 @@ export class TuiController {
       threadBrowser: undefined,
       runtimeSettings: undefined,
       artifactNavigation: undefined,
+      contextNavigation: undefined,
       transcript: [
         ...this.state.transcript,
         ...activeEntries.map((entry) => this.withTranscriptId(entry)),
@@ -3139,6 +3834,51 @@ function artifactViewState(
   viewportHeight: number,
   alignment: "start" | "end",
 ): TuiArtifactViewState {
+  const rows = artifactPresentationRows(page.content, viewportWidth);
+  return {
+    page,
+    rows,
+    scrollOffset:
+      alignment === "start"
+        ? 0
+        : maximumScrollOffset(rows.length, viewportHeight),
+  };
+}
+
+function contextListState(
+  result: {
+    requests: readonly ContextRequestDescriptor[];
+    hasEarlier: boolean;
+    nextBeforeSequence?: number | undefined;
+  },
+  currentCursor: number | null,
+  newerCursors: readonly (number | null)[],
+  viewportHeight: number,
+): TuiContextListState {
+  return {
+    requests: result.requests,
+    selectedIndex: 0,
+    scrollOffset: keepSelectionVisible(
+      0,
+      0,
+      viewportHeight,
+      result.requests.length,
+    ),
+    currentCursor,
+    newerCursors,
+    hasEarlier: result.hasEarlier,
+    ...(result.nextBeforeSequence === undefined
+      ? {}
+      : { nextBeforeSequence: result.nextBeforeSequence }),
+  };
+}
+
+function contextInstructionViewState(
+  page: ContextInstructionReadResult,
+  viewportWidth: number,
+  viewportHeight: number,
+  alignment: "start" | "end",
+): TuiContextInstructionViewState {
   const rows = artifactPresentationRows(page.content, viewportWidth);
   return {
     page,

@@ -7,13 +7,20 @@ import {
   APP_SERVER_PROTOCOL_VERSION,
   APP_SERVER_RPC_ERROR_CODE,
   ARTIFACT_READ_RESULT_BUDGET_BYTES,
+  CONTEXT_DETAIL_RESULT_BUDGET_BYTES,
+  CONTEXT_INSTRUCTION_READ_RESULT_BUDGET_BYTES,
   RUNTIME_SETTINGS_RESULT_BUDGET_BYTES,
   THREAD_ARTIFACTS_RESULT_BUDGET_BYTES,
+  THREAD_CONTEXT_RESULT_BUDGET_BYTES,
   THREAD_SEARCH_RESULT_BUDGET_BYTES,
   approvalResolveParamsSchema,
   approvalResolveResultSchema,
   artifactReadParamsSchema,
   artifactReadResultSchema,
+  contextInstructionReadParamsSchema,
+  contextInstructionReadResultSchema,
+  contextReadParamsSchema,
+  contextReadResultSchema,
   initializeParamsSchema,
   initializeResultSchema,
   jsonRpcRequestSchema,
@@ -28,6 +35,8 @@ import {
   threadEventsResultSchema,
   threadArtifactsParamsSchema,
   threadArtifactsResultSchema,
+  threadContextParamsSchema,
+  threadContextResultSchema,
   threadGetParamsSchema,
   threadGetResultSchema,
   threadListParamsSchema,
@@ -190,6 +199,12 @@ export class KodaAppServer {
         return this.listThreadArtifacts(request.params);
       case "artifact/read":
         return this.readArtifact(request.params);
+      case "thread/context":
+        return this.listThreadContexts(request.params);
+      case "context/read":
+        return this.readContext(request.params);
+      case "context/instruction/read":
+        return this.readContextInstruction(request.params);
       case "settings/get":
         return this.getRuntimeSettings(request.params);
       case "settings/update":
@@ -249,6 +264,7 @@ export class KodaAppServer {
           bidirectionalThreadEvents: true,
           runtimeSettings: true,
           artifactInspection: true,
+          contextInspection: true,
         },
         providers: this.application.listProviders(),
       }),
@@ -355,6 +371,82 @@ export class KodaAppServer {
         ARTIFACT_READ_RESULT_BUDGET_BYTES,
         "ARTIFACT_READ_RESULT_TOO_LARGE",
         "Artifact read",
+      );
+      return response;
+    } catch (error) {
+      throw rpcError(
+        APP_SERVER_RPC_ERROR_CODE.APPLICATION,
+        errorMessage(error),
+        applicationErrorCode(error),
+      );
+    }
+  }
+
+  private async listThreadContexts(
+    params: JsonValue | undefined,
+  ): Promise<JsonValue> {
+    const input = parseParams(threadContextParamsSchema, params);
+    try {
+      const response = jsonValueSchema.parse(
+        threadContextResultSchema.parse(
+          await this.application.listThreadContexts(input),
+        ),
+      );
+      assertResultBudget(
+        response,
+        THREAD_CONTEXT_RESULT_BUDGET_BYTES,
+        "CONTEXT_RESULT_TOO_LARGE",
+        "Thread context list",
+      );
+      return response;
+    } catch (error) {
+      throw rpcError(
+        APP_SERVER_RPC_ERROR_CODE.APPLICATION,
+        errorMessage(error),
+        applicationErrorCode(error),
+      );
+    }
+  }
+
+  private async readContext(params: JsonValue | undefined): Promise<JsonValue> {
+    const input = parseParams(contextReadParamsSchema, params);
+    try {
+      const response = jsonValueSchema.parse(
+        contextReadResultSchema.parse(
+          await this.application.readContext(input),
+        ),
+      );
+      assertResultBudget(
+        response,
+        CONTEXT_DETAIL_RESULT_BUDGET_BYTES,
+        "CONTEXT_RESULT_TOO_LARGE",
+        "Context detail",
+      );
+      return response;
+    } catch (error) {
+      throw rpcError(
+        APP_SERVER_RPC_ERROR_CODE.APPLICATION,
+        errorMessage(error),
+        applicationErrorCode(error),
+      );
+    }
+  }
+
+  private async readContextInstruction(
+    params: JsonValue | undefined,
+  ): Promise<JsonValue> {
+    const input = parseParams(contextInstructionReadParamsSchema, params);
+    try {
+      const response = jsonValueSchema.parse(
+        contextInstructionReadResultSchema.parse(
+          await this.application.readContextInstruction(input),
+        ),
+      );
+      assertResultBudget(
+        response,
+        CONTEXT_INSTRUCTION_READ_RESULT_BUDGET_BYTES,
+        "CONTEXT_RESULT_TOO_LARGE",
+        "Context instruction read",
       );
       return response;
     } catch (error) {

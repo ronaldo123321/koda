@@ -1,9 +1,13 @@
+import { createHash } from "node:crypto";
+
 import {
+  CONVERSATION_ITEM_TYPES,
   collectArtifactReferences,
   compactionItemSchema,
   itemIdSchema,
   type CompactionItem,
   type ConversationItem,
+  type ConversationItemType,
   type ItemId,
 } from "@koda/protocol";
 
@@ -26,7 +30,22 @@ export interface PreparedModelContext {
   rawEstimatedInputTokens: number;
   estimatedInputTokens: number;
   inputBudgetTokens: number;
+  budget: Readonly<ContextBudgetSnapshot>;
   compaction?: CompactionItem;
+}
+
+export interface ContextBudgetSnapshot {
+  contextWindowTokens: number;
+  maxOutputTokens: number;
+  safetyMarginTokens: number;
+  inputBudgetTokens: number;
+  fixedInputTokens: number;
+  calibrationFactor: number;
+}
+
+export interface ContextItemTypeCount {
+  type: ConversationItemType;
+  count: number;
 }
 
 export type ContextBudgetErrorCode =
@@ -57,11 +76,13 @@ const PLACEHOLDER_ID = itemIdSchema.parse(`context-${"x".repeat(256)}`);
 export class ContextEngine {
   public readonly inputBudgetTokens: number;
   private readonly fixedInputTokens: number;
+  private readonly safetyMarginTokens: number;
   private calibrationFactor = 1;
 
   public constructor(private readonly options: ContextEngineOptions) {
     const safetyMarginTokens =
       options.safetyMarginTokens ?? DEFAULT_CONTEXT_SAFETY_MARGIN_TOKENS;
+    this.safetyMarginTokens = safetyMarginTokens;
     for (const [name, value] of [
       ["contextWindowTokens", options.contextWindowTokens],
       ["maxOutputTokens", options.maxOutputTokens],
@@ -104,7 +125,7 @@ export class ContextEngine {
     transcript: readonly ConversationItem[],
     tools: readonly ModelToolDefinition[],
   ): PreparedModelContext {
-    const active = buildActiveContext(transcript);
+    const active = projectActiveContext(transcript);
     const beforeRaw = this.estimateRaw(active, tools);
     const before = this.calibrate(beforeRaw);
     if (before <= this.inputBudgetTokens) {
@@ -113,6 +134,7 @@ export class ContextEngine {
         rawEstimatedInputTokens: beforeRaw,
         estimatedInputTokens: before,
         inputBudgetTokens: this.inputBudgetTokens,
+        budget: this.getBudgetSnapshot(),
       };
     }
 
@@ -178,6 +200,7 @@ export class ContextEngine {
       rawEstimatedInputTokens: finalCandidate.rawEstimatedInputTokens,
       estimatedInputTokens: finalCandidate.estimatedInputTokens,
       inputBudgetTokens: this.inputBudgetTokens,
+      budget: this.getBudgetSnapshot(),
       compaction: finalCandidate.compaction,
     };
   }
@@ -204,6 +227,17 @@ export class ContextEngine {
 
   public getCalibrationFactor(): number {
     return this.calibrationFactor;
+  }
+
+  public getBudgetSnapshot(): Readonly<ContextBudgetSnapshot> {
+    return Object.freeze({
+      contextWindowTokens: this.options.contextWindowTokens,
+      maxOutputTokens: this.options.maxOutputTokens,
+      safetyMarginTokens: this.safetyMarginTokens,
+      inputBudgetTokens: this.inputBudgetTokens,
+      fixedInputTokens: this.fixedInputTokens,
+      calibrationFactor: this.calibrationFactor,
+    });
   }
 
   private buildCompactedCandidate(
@@ -288,7 +322,7 @@ function estimateJsonTokens(value: unknown): number {
   return estimateTextTokens(JSON.stringify(value));
 }
 
-function buildActiveContext(
+export function projectActiveContext(
   transcript: readonly ConversationItem[],
 ): ConversationItem[] {
   let compactionIndex = -1;
@@ -336,6 +370,54 @@ function buildActiveContext(
     .slice(compactionIndex + 1)
     .filter((item) => item.type !== "compaction");
   return [compaction, ...retained, ...later];
+}
+
+export function summarizeContextItemTypes(
+  items: readonly ConversationItem[],
+): ContextItemTypeCount[] {
+  const counts = new Map<ConversationItemType, number>();
+  for (const item of items) {
+    counts.set(item.type, (counts.get(item.type) ?? 0) + 1);
+  }
+  return CONVERSATION_ITEM_TYPES.flatMap((type) => {
+    const count = counts.get(type);
+    return count === undefined ? [] : [{ type, count }];
+  });
+}
+
+export function digestContextItems(items: readonly ConversationItem[]): string {
+  return sha256CanonicalJson(items);
+}
+
+export function digestModelTools(
+  tools: readonly ModelToolDefinition[],
+): string {
+  return sha256CanonicalJson(tools);
+}
+
+export function sha256CanonicalJson(value: unknown): string {
+  return createHash("sha256")
+    .update(canonicalJson(value), "utf8")
+    .digest("hex");
+}
+
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== "object") {
+    const encoded = JSON.stringify(value);
+    if (encoded === undefined) {
+      throw new TypeError("Canonical JSON cannot encode undefined values.");
+    }
+    return encoded;
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((entry) => canonicalJson(entry)).join(",")}]`;
+  }
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record)
+    .filter((key) => record[key] !== undefined)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`)
+    .join(",")}}`;
 }
 
 function groupConversationItems(

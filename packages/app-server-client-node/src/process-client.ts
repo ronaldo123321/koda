@@ -7,6 +7,10 @@ import {
   approvalResolveResultSchema,
   artifactReadParamsSchema,
   artifactReadResultSchema,
+  contextInstructionReadParamsSchema,
+  contextInstructionReadResultSchema,
+  contextReadParamsSchema,
+  contextReadResultSchema,
   initializeResultSchema,
   jsonValueSchema,
   settingsGetParamsSchema,
@@ -18,6 +22,8 @@ import {
   threadEventsResultSchema,
   threadArtifactsParamsSchema,
   threadArtifactsResultSchema,
+  threadContextParamsSchema,
+  threadContextResultSchema,
   threadGetParamsSchema,
   threadGetResultSchema,
   threadListParamsSchema,
@@ -32,6 +38,10 @@ import {
   type ApprovalResolveResult,
   type ArtifactReadParams,
   type ArtifactReadResult,
+  type ContextInstructionReadParams,
+  type ContextInstructionReadResult,
+  type ContextReadParams,
+  type ContextReadResult,
   type InitializeResult,
   type SettingsGetParams,
   type SettingsGetResult,
@@ -43,6 +53,8 @@ import {
   type ThreadEventsResult,
   type ThreadArtifactsParams,
   type ThreadArtifactsResult,
+  type ThreadContextParams,
+  type ThreadContextResult,
   type ThreadListParams,
   type ThreadListResult,
   type ThreadSearchParams,
@@ -84,6 +96,11 @@ export interface AppServerClientApi {
     params: ThreadArtifactsParams,
   ): Promise<ThreadArtifactsResult>;
   readArtifact(params: ArtifactReadParams): Promise<ArtifactReadResult>;
+  listThreadContexts(params: ThreadContextParams): Promise<ThreadContextResult>;
+  readContext(params: ContextReadParams): Promise<ContextReadResult>;
+  readContextInstruction(
+    params: ContextInstructionReadParams,
+  ): Promise<ContextInstructionReadResult>;
   searchThreads(params: ThreadSearchParams): Promise<ThreadSearchResult>;
   getRuntimeSettings(params: SettingsGetParams): Promise<SettingsGetResult>;
   updateRuntimeSettings(
@@ -246,6 +263,34 @@ export class NodeAppServerClient implements AppServerClientApi {
       "artifact/read",
       jsonValueSchema.parse(artifactReadParamsSchema.parse(params)),
       artifactReadResultSchema,
+    );
+  }
+
+  public listThreadContexts(
+    params: ThreadContextParams,
+  ): Promise<ThreadContextResult> {
+    return this.connection.request(
+      "thread/context",
+      jsonValueSchema.parse(threadContextParamsSchema.parse(params)),
+      threadContextResultSchema,
+    );
+  }
+
+  public readContext(params: ContextReadParams): Promise<ContextReadResult> {
+    return this.connection.request(
+      "context/read",
+      jsonValueSchema.parse(contextReadParamsSchema.parse(params)),
+      contextReadResultSchema,
+    );
+  }
+
+  public readContextInstruction(
+    params: ContextInstructionReadParams,
+  ): Promise<ContextInstructionReadResult> {
+    return this.connection.request(
+      "context/instruction/read",
+      jsonValueSchema.parse(contextInstructionReadParamsSchema.parse(params)),
+      contextInstructionReadResultSchema,
     );
   }
 

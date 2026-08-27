@@ -16,6 +16,10 @@ import {
   type ApprovalResolveResult,
   type ArtifactReadParams,
   type ArtifactReadResult,
+  type ContextInstructionReadParams,
+  type ContextInstructionReadResult,
+  type ContextReadParams,
+  type ContextReadResult,
   type InitializeResult,
   type SettingsGetParams,
   type SettingsGetResult,
@@ -25,6 +29,8 @@ import {
   type ThreadGetResult,
   type ThreadArtifactsParams,
   type ThreadArtifactsResult,
+  type ThreadContextParams,
+  type ThreadContextResult,
   type ThreadEventsParams,
   type ThreadEventsResult,
   type ThreadListParams,
@@ -926,6 +932,166 @@ describe("TuiController", () => {
     });
   });
 
+  it("inspects context, current instructions, and layered Escape without transcript mutation", async () => {
+    const client = new FakeAppServerClient();
+    const hash = "a".repeat(64);
+    const sourceId = `ctxsrc:${"b".repeat(64)}`;
+    const request = {
+      anchorSequence: 7,
+      turnId: turnIdSchema.parse("tui-turn-1"),
+      step: 1,
+      timestamp: "2026-08-27T00:00:00.000Z",
+      precise: true,
+      provider: "openai" as const,
+      model: "gpt-5.6-terra",
+      estimatedInputTokens: 220,
+      inputBudgetTokens: 8_000,
+      measuredInputTokens: 210,
+      activeItemCount: 1,
+      toolCount: 2,
+    };
+    client.threadContextResult = {
+      workspace: "/workspace",
+      threadId: threadIdSchema.parse("tui-thread"),
+      requests: [request],
+      hasEarlier: false,
+    };
+    client.contextReadResult = {
+      workspace: "/workspace",
+      threadId: threadIdSchema.parse("tui-thread"),
+      request,
+      turnContext: {
+        provider: "openai",
+        model: "gpt-5.6-terra",
+        workspaceRoot: "/workspace",
+        approvalMode: "on-request",
+        instructionsSha256: hash,
+        repositoryInstructions: [],
+      },
+      telemetry: {
+        step: 1,
+        contextWindowTokens: 10_000,
+        maxOutputTokens: 1_000,
+        safetyMarginTokens: 1_000,
+        inputBudgetTokens: 8_000,
+        fixedInputTokens: 100,
+        rawEstimatedInputTokens: 200,
+        estimatedInputTokens: 220,
+        calibrationFactor: 1.1,
+        activeItemCount: 1,
+        activeItemTypes: [{ type: "user_message", count: 1 }],
+        activeItemsSha256: hash,
+        toolCount: 2,
+        toolsSha256: "c".repeat(64),
+      },
+      reconstruction: {
+        activeItemCount: 1,
+        activeItemTypes: [{ type: "user_message", count: 1 }],
+        activeItemsSha256: hash,
+        valid: true,
+      },
+      instructions: {
+        historicalEffectiveSha256: hash,
+        currentEffectiveSha256: hash,
+        effectiveMatchesHistorical: true,
+        sources: [
+          {
+            kind: "effective",
+            sourceId,
+            path: "effective",
+            scope: ".",
+            status: "unchanged",
+            historical: { sha256: hash },
+            current: { bytes: 8, sha256: hash },
+          },
+        ],
+      },
+    };
+    client.contextInstructionReadImplementation = (params) =>
+      Promise.resolve(
+        params.afterByte === 6
+          ? {
+              workspace: "/workspace",
+              threadId: threadIdSchema.parse("tui-thread"),
+              anchorSequence: 7,
+              sourceId,
+              path: "effective",
+              content: "ok",
+              startByte: 6,
+              endByte: 8,
+              totalBytes: 8,
+              hasEarlier: true,
+              hasLater: false,
+            }
+          : {
+              workspace: "/workspace",
+              threadId: threadIdSchema.parse("tui-thread"),
+              anchorSequence: 7,
+              sourceId,
+              path: "effective",
+              content: "你好",
+              startByte: 0,
+              endByte: 6,
+              totalBytes: 8,
+              hasEarlier: false,
+              hasLater: true,
+            },
+      );
+    const controller = createController(client);
+    await controller.startPrompt("Create context thread");
+    client.finish("completed");
+    const transcriptLength = controller.getSnapshot().transcript.length;
+
+    controller.setInput("/context");
+    await controller.submitInput();
+    expect(controller.getSnapshot()).toMatchObject({
+      mode: "context_list",
+      contextNavigation: {
+        origin: "chat",
+        list: { requests: [{ anchorSequence: 7 }], selectedIndex: 0 },
+      },
+    });
+    await controller.openSelectedContext();
+    expect(controller.getSnapshot()).toMatchObject({
+      mode: "context_detail",
+      contextNavigation: {
+        detail: {
+          result: { request: { anchorSequence: 7 } },
+          selectedSourceIndex: 0,
+        },
+      },
+    });
+    await controller.openSelectedContextInstruction();
+    expect(controller.getSnapshot()).toMatchObject({
+      mode: "context_instruction_view",
+      contextNavigation: {
+        instructionView: {
+          page: { content: "你好", startByte: 0, endByte: 6 },
+        },
+      },
+    });
+    await controller.scrollContextInstruction("page_down");
+    expect(
+      controller.getSnapshot().contextNavigation?.instructionView?.page,
+    ).toMatchObject({ content: "ok", startByte: 6, endByte: 8 });
+    expect(client.contextInstructionReadRequests).toEqual([
+      expect.objectContaining({ sourceId, maxBytes: 16_384 }),
+      expect.objectContaining({ sourceId, afterByte: 6, maxBytes: 16_384 }),
+    ]);
+
+    controller.closeContextLevel();
+    expect(controller.getSnapshot().mode).toBe("context_detail");
+    controller.closeContextLevel();
+    expect(controller.getSnapshot().mode).toBe("context_list");
+    controller.closeContextLevel();
+    expect(controller.getSnapshot()).toMatchObject({
+      mode: "chat",
+      contextNavigation: undefined,
+      threadId: "tui-thread",
+    });
+    expect(controller.getSnapshot().transcript).toHaveLength(transcriptLength);
+  });
+
   it("ignores a late artifact response after Escape restores the list", async () => {
     const client = new FakeAppServerClient();
     const artifact = textArtifact("c", 2);
@@ -954,6 +1120,71 @@ describe("TuiController", () => {
     await opening;
     expect(controller.getSnapshot().mode).toBe("artifact_list");
     expect(controller.getSnapshot().artifactNavigation?.view).toBeUndefined();
+  });
+
+  it("ignores late context detail and preserves preview origin", async () => {
+    const client = new FakeAppServerClient();
+    const detail = legacyContextResult("tui-thread");
+    client.threadContextResult = {
+      workspace: "/workspace",
+      threadId: threadIdSchema.parse("tui-thread"),
+      requests: [detail.request],
+      hasEarlier: false,
+    };
+    let release: ((result: ContextReadResult) => void) | undefined;
+    client.contextReadImplementation = () =>
+      new Promise<ContextReadResult>((resolve) => {
+        release = resolve;
+      });
+    const controller = createController(client);
+    await controller.startPrompt("Create context thread");
+    client.finish("completed");
+    await controller.openCurrentThreadContext();
+
+    const opening = controller.openSelectedContext();
+    await Promise.resolve();
+    expect(controller.getSnapshot().mode).toBe("context_detail");
+    controller.closeContextLevel();
+    expect(controller.getSnapshot().mode).toBe("context_list");
+    release?.(detail);
+    await opening;
+    expect(controller.getSnapshot().mode).toBe("context_list");
+    expect(controller.getSnapshot().contextNavigation?.detail).toBeUndefined();
+    controller.closeContextLevel();
+
+    const previewed = threadMetadata(
+      "preview-context",
+      "completed",
+      "openai",
+      "gpt-5.6-terra",
+    );
+    client.threadListResult = { threads: [previewed], diagnostics: [] };
+    client.threadEventsResult = {
+      events: [],
+      hasEarlier: false,
+      hasLater: false,
+    };
+    client.threadContextResult = {
+      workspace: "/workspace",
+      threadId: previewed.threadId,
+      requests: [],
+      hasEarlier: false,
+    };
+    await controller.openThreadBrowser();
+    await controller.previewSelectedThread();
+    await controller.openPreviewContext();
+    expect(controller.getSnapshot()).toMatchObject({
+      mode: "context_list",
+      contextNavigation: {
+        origin: "thread_preview",
+        threadId: "preview-context",
+      },
+    });
+    controller.closeContextLevel();
+    expect(controller.getSnapshot()).toMatchObject({
+      mode: "thread_preview",
+      contextNavigation: undefined,
+    });
   });
 
   it("keeps a query when a revision-bound search continuation expires", async () => {
@@ -1107,6 +1338,7 @@ class FakeAppServerClient implements AppServerClientApi {
         bidirectionalThreadEvents: true,
         runtimeSettings: true,
         artifactInspection: true,
+        contextInspection: true,
       },
       providers: [
         provider("openai", "OpenAI", "OPENAI_API_KEY", "gpt-5.6-terra"),
@@ -1132,6 +1364,10 @@ class FakeAppServerClient implements AppServerClientApi {
   public readonly settingsUpdateRequests: SettingsUpdateParams[] = [];
   public readonly threadArtifactRequests: ThreadArtifactsParams[] = [];
   public readonly artifactReadRequests: ArtifactReadParams[] = [];
+  public readonly threadContextRequests: ThreadContextParams[] = [];
+  public readonly contextReadRequests: ContextReadParams[] = [];
+  public readonly contextInstructionReadRequests: ContextInstructionReadParams[] =
+    [];
   public threadListResult: ThreadListResult = { threads: [], diagnostics: [] };
   public threadGetResult: ThreadGetResult | undefined;
   public threadEventsResult: ThreadEventsResult = {
@@ -1158,6 +1394,14 @@ class FakeAppServerClient implements AppServerClientApi {
     hasEarlier: false,
   };
   public artifactReadResult: ArtifactReadResult | undefined;
+  public threadContextResult: ThreadContextResult = {
+    workspace: "/workspace",
+    threadId: threadIdSchema.parse("tui-thread"),
+    requests: [],
+    hasEarlier: false,
+  };
+  public contextReadResult: ContextReadResult | undefined;
+  public contextInstructionReadResult: ContextInstructionReadResult | undefined;
   public threadListError: Error | undefined;
   public threadEventsError: Error | undefined;
   public threadSearchError: Error | undefined;
@@ -1172,6 +1416,13 @@ class FakeAppServerClient implements AppServerClientApi {
     | undefined;
   public artifactReadImplementation:
     ((params: ArtifactReadParams) => Promise<ArtifactReadResult>) | undefined;
+  public contextInstructionReadImplementation:
+    | ((
+        params: ContextInstructionReadParams,
+      ) => Promise<ContextInstructionReadResult>)
+    | undefined;
+  public contextReadImplementation:
+    ((params: ContextReadParams) => Promise<ContextReadResult>) | undefined;
   public diagnosticText = "";
   public beforeStartResult: (() => void) | undefined;
   public startImplementation:
@@ -1227,6 +1478,37 @@ class FakeAppServerClient implements AppServerClientApi {
       return Promise.reject(new Error("Artifact fixture is unavailable."));
     }
     return Promise.resolve(this.artifactReadResult);
+  }
+
+  public listThreadContexts(
+    params: ThreadContextParams,
+  ): Promise<ThreadContextResult> {
+    this.threadContextRequests.push(params);
+    return Promise.resolve(this.threadContextResult);
+  }
+
+  public readContext(params: ContextReadParams): Promise<ContextReadResult> {
+    this.contextReadRequests.push(params);
+    if (this.contextReadImplementation !== undefined) {
+      return this.contextReadImplementation(params);
+    }
+    if (this.contextReadResult === undefined) {
+      return Promise.reject(new Error("Context fixture is unavailable."));
+    }
+    return Promise.resolve(this.contextReadResult);
+  }
+
+  public readContextInstruction(
+    params: ContextInstructionReadParams,
+  ): Promise<ContextInstructionReadResult> {
+    this.contextInstructionReadRequests.push(params);
+    if (this.contextInstructionReadImplementation !== undefined) {
+      return this.contextInstructionReadImplementation(params);
+    }
+    if (this.contextInstructionReadResult === undefined) {
+      return Promise.reject(new Error("Instruction fixture is unavailable."));
+    }
+    return Promise.resolve(this.contextInstructionReadResult);
   }
 
   public searchThreads(
@@ -1454,6 +1736,49 @@ function artifactPage(
     totalBytes: artifact.bytes,
     hasEarlier: startByte > 0,
     hasLater: endByte < artifact.bytes,
+  };
+}
+
+function legacyContextResult(threadIdInput: string): ContextReadResult {
+  const hash = "d".repeat(64);
+  const threadId = threadIdSchema.parse(threadIdInput);
+  return {
+    workspace: "/workspace",
+    threadId,
+    request: {
+      anchorSequence: 4,
+      turnId: turnIdSchema.parse("legacy-context-turn"),
+      step: 1,
+      timestamp: "2026-08-27T00:00:00.000Z",
+      precise: false,
+      provider: "openai",
+      model: "gpt-5.6-terra",
+      measuredInputTokens: 10,
+    },
+    turnContext: {
+      provider: "openai",
+      model: "gpt-5.6-terra",
+      workspaceRoot: "/workspace",
+      approvalMode: "on-request",
+      instructionsSha256: hash,
+      repositoryInstructions: [],
+    },
+    instructions: {
+      historicalEffectiveSha256: hash,
+      currentEffectiveSha256: hash,
+      effectiveMatchesHistorical: true,
+      sources: [
+        {
+          kind: "effective",
+          sourceId: `ctxsrc:${"e".repeat(64)}`,
+          path: "effective",
+          scope: ".",
+          status: "unchanged",
+          historical: { sha256: hash },
+          current: { bytes: 10, sha256: hash },
+        },
+      ],
+    },
   };
 }
 

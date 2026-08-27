@@ -5,6 +5,11 @@ import {
   approvalResolveParamsSchema,
   artifactReadParamsSchema,
   artifactReadResultSchema,
+  contextInstructionReadParamsSchema,
+  contextInstructionReadResultSchema,
+  contextPreparedPayloadSchema,
+  contextReadParamsSchema,
+  contextReadResultSchema,
   initializeParamsSchema,
   jsonRpcErrorResponseSchema,
   jsonRpcRequestSchema,
@@ -15,6 +20,8 @@ import {
   threadEventsResultSchema,
   threadArtifactsParamsSchema,
   threadArtifactsResultSchema,
+  threadContextParamsSchema,
+  threadContextResultSchema,
   threadGetParamsSchema,
   threadSearchParamsSchema,
   threadSearchResultSchema,
@@ -24,6 +31,7 @@ import { describe, expect, it } from "vitest";
 
 describe("app-server protocol", () => {
   it("accepts strict versioned requests and safe JSON-RPC IDs", () => {
+    expect(APP_SERVER_PROTOCOL_VERSION).toBe(7);
     expect(
       jsonRpcRequestSchema.parse({
         jsonrpc: "2.0",
@@ -35,6 +43,12 @@ describe("app-server protocol", () => {
         },
       }),
     ).toMatchObject({ id: 1, method: "initialize" });
+    expect(() =>
+      initializeParamsSchema.parse({
+        protocolVersion: 6,
+        client: { name: "legacy-client" },
+      }),
+    ).toThrow();
     expect(() =>
       jsonRpcRequestSchema.parse({
         jsonrpc: "2.0",
@@ -421,6 +435,208 @@ describe("app-server protocol", () => {
         totalBytes: 6,
         hasEarlier: false,
         hasLater: false,
+      }),
+    ).toThrow();
+  });
+
+  it("validates precise context snapshots and opaque instruction ranges", () => {
+    const hash = "a".repeat(64);
+    const toolHash = "b".repeat(64);
+    const sourceId = `ctxsrc:${"c".repeat(64)}`;
+    const telemetry = {
+      step: 1,
+      contextWindowTokens: 10_000,
+      maxOutputTokens: 1_000,
+      safetyMarginTokens: 1_000,
+      inputBudgetTokens: 8_000,
+      fixedInputTokens: 100,
+      rawEstimatedInputTokens: 200,
+      estimatedInputTokens: 220,
+      calibrationFactor: 1.1,
+      activeItemCount: 1,
+      activeItemTypes: [{ type: "user_message", count: 1 }],
+      activeItemsSha256: hash,
+      toolCount: 2,
+      toolsSha256: toolHash,
+    } as const;
+    const request = {
+      anchorSequence: 3,
+      turnId: "context-turn",
+      step: 1,
+      timestamp: "2026-08-27T00:00:00.000Z",
+      precise: true,
+      provider: "openai",
+      model: "gpt-test",
+      estimatedInputTokens: 220,
+      inputBudgetTokens: 8_000,
+      activeItemCount: 1,
+      toolCount: 2,
+    } as const;
+
+    expect(
+      threadContextParamsSchema.parse({
+        workspace: "/workspace",
+        threadId: "context-thread",
+        beforeSequence: 10,
+        limit: 100,
+      }),
+    ).toMatchObject({ beforeSequence: 10, limit: 100 });
+    expect(() =>
+      threadContextParamsSchema.parse({
+        workspace: "/workspace",
+        threadId: "context-thread",
+        limit: 101,
+      }),
+    ).toThrow();
+    expect(
+      threadContextResultSchema.parse({
+        workspace: "/workspace",
+        threadId: "context-thread",
+        requests: [request],
+        hasEarlier: true,
+        nextBeforeSequence: 3,
+      }),
+    ).toMatchObject({ hasEarlier: true, nextBeforeSequence: 3 });
+    expect(() =>
+      threadContextResultSchema.parse({
+        workspace: "/workspace",
+        threadId: "context-thread",
+        requests: [request],
+        hasEarlier: false,
+        nextBeforeSequence: 3,
+      }),
+    ).toThrow();
+
+    expect(
+      contextReadParamsSchema.parse({
+        workspace: "/workspace",
+        threadId: "context-thread",
+        anchorSequence: 3,
+      }),
+    ).toMatchObject({ anchorSequence: 3 });
+    expect(
+      contextReadResultSchema.parse({
+        workspace: "/workspace",
+        threadId: "context-thread",
+        request,
+        turnContext: {
+          provider: "openai",
+          model: "gpt-test",
+          workspaceRoot: "/workspace",
+          approvalMode: "on-request",
+          instructionsSha256: hash,
+          repositoryInstructions: [],
+        },
+        telemetry,
+        reconstruction: {
+          activeItemCount: 1,
+          activeItemTypes: [{ type: "user_message", count: 1 }],
+          activeItemsSha256: hash,
+          valid: true,
+        },
+        instructions: {
+          historicalEffectiveSha256: hash,
+          currentEffectiveSha256: hash,
+          effectiveMatchesHistorical: true,
+          sources: [
+            {
+              kind: "effective",
+              sourceId,
+              path: "effective",
+              scope: ".",
+              status: "unchanged",
+              historical: { sha256: hash },
+              current: { bytes: 10, sha256: hash },
+            },
+          ],
+        },
+      }),
+    ).toMatchObject({ telemetry: { step: 1 } });
+    expect(() =>
+      contextReadResultSchema.parse({
+        workspace: "/workspace",
+        threadId: "context-thread",
+        request,
+        turnContext: {
+          provider: "openai",
+          model: "gpt-test",
+          workspaceRoot: "/workspace",
+          approvalMode: "on-request",
+          instructionsSha256: hash,
+          repositoryInstructions: [],
+        },
+        instructions: {
+          historicalEffectiveSha256: hash,
+          currentEffectiveSha256: hash,
+          effectiveMatchesHistorical: true,
+          sources: [],
+        },
+      }),
+    ).toThrow();
+
+    expect(
+      contextInstructionReadParamsSchema.parse({
+        workspace: "/workspace",
+        threadId: "context-thread",
+        anchorSequence: 3,
+        sourceId,
+        afterByte: 0,
+        maxBytes: 16_384,
+      }),
+    ).toMatchObject({ sourceId, afterByte: 0 });
+    expect(() =>
+      contextInstructionReadParamsSchema.parse({
+        workspace: "/workspace",
+        threadId: "context-thread",
+        anchorSequence: 3,
+        sourceId: "AGENTS.md",
+      }),
+    ).toThrow();
+    expect(() =>
+      contextInstructionReadParamsSchema.parse({
+        workspace: "/workspace",
+        threadId: "context-thread",
+        anchorSequence: 3,
+        sourceId,
+        beforeByte: 6,
+        afterByte: 0,
+      }),
+    ).toThrow();
+    expect(
+      contextInstructionReadResultSchema.parse({
+        workspace: "/workspace",
+        threadId: "context-thread",
+        anchorSequence: 3,
+        sourceId,
+        path: "AGENTS.md",
+        content: "你好",
+        startByte: 0,
+        endByte: 6,
+        totalBytes: 6,
+        hasEarlier: false,
+        hasLater: false,
+      }),
+    ).toMatchObject({ content: "你好" });
+
+    expect(
+      agentEventSchema.parse({
+        schemaVersion: 1,
+        sequence: 3,
+        timestamp: "2026-08-27T00:00:00.000Z",
+        threadId: "context-thread",
+        turnId: "context-turn",
+        type: "context.prepared",
+        payload: telemetry,
+      }),
+    ).toMatchObject({ type: "context.prepared" });
+    expect(() =>
+      contextPreparedPayloadSchema.parse({
+        ...telemetry,
+        activeItemCount: 2,
+        activeItemTypes: [
+          { type: "assistant_message", count: 1 },
+          { type: "user_message", count: 1 },
+        ],
       }),
     ).toThrow();
   });

@@ -308,6 +308,239 @@ describe("KodaApplication", () => {
     ).rejects.toMatchObject({ code: "INVALID_THREAD_EVENT_CURSOR" });
   });
 
+  it("audits precise and legacy context requests with bounded current instructions", async () => {
+    const fixture = await createFixture();
+    await writeFile(
+      join(fixture.workspaceRoot, "AGENTS.md"),
+      "Use the repository test command.\n",
+      "utf8",
+    );
+    const threadId = threadIdSchema.parse("context-inspection-thread");
+    const application = new KodaApplication({
+      environment: {
+        OPENAI_API_KEY: "offline-test-key",
+        KODA_HOME: fixture.kodaHome,
+      },
+      processDirectory: fixture.root,
+      dependencies: {
+        openWorkspace: (root) => ReadOnlyWorkspace.open(root),
+        createProvider: () =>
+          new ScriptedModelProvider([
+            {
+              events: [
+                { type: "assistant_delta", text: "Inspected." },
+                {
+                  type: "completed",
+                  finishReason: "stop",
+                  responseId: "context-response",
+                  usage: {
+                    inputTokens: 42,
+                    cachedInputTokens: 0,
+                    cacheWriteInputTokens: 0,
+                    outputTokens: 8,
+                    reasoningOutputTokens: 0,
+                    totalTokens: 50,
+                  },
+                },
+              ],
+            },
+          ]),
+        createIds: () => ({
+          threadId,
+          turnId: turnIdSchema.parse("context-inspection-turn"),
+          itemIds: new DeterministicItemIdFactory("context-inspection-item"),
+        }),
+      },
+    });
+    const handle = application.startTurn(
+      { prompt: "Inspect context.", cwd: fixture.workspaceRoot },
+      {
+        events: { append: async () => undefined },
+        approvals: rejectApprovals(),
+      },
+    );
+    await expect(handle.completion).resolves.toMatchObject({
+      status: "completed",
+    });
+    const canonicalWorkspace = await realpath(fixture.workspaceRoot);
+
+    const page = await application.listThreadContexts({
+      workspace: fixture.workspaceRoot,
+      threadId,
+    });
+    expect(page).toMatchObject({
+      workspace: canonicalWorkspace,
+      threadId,
+      hasEarlier: false,
+      requests: [
+        {
+          precise: true,
+          provider: "openai",
+          measuredInputTokens: 42,
+          activeItemCount: 1,
+        },
+      ],
+    });
+    const anchorSequence = page.requests[0]?.anchorSequence;
+    if (anchorSequence === undefined) {
+      throw new Error("Expected a context request anchor.");
+    }
+    const detail = await application.readContext({
+      workspace: fixture.workspaceRoot,
+      threadId,
+      anchorSequence,
+    });
+    expect(detail).toMatchObject({
+      request: { precise: true },
+      usage: { responseId: "context-response" },
+      reconstruction: { activeItemCount: 1, valid: true },
+      instructions: { effectiveMatchesHistorical: true },
+    });
+    expect(
+      detail.instructions.sources.find((source) => source.path === "AGENTS.md"),
+    ).toMatchObject({ status: "unchanged" });
+
+    await writeFile(
+      join(fixture.workspaceRoot, "AGENTS.md"),
+      "Use the changed repository command.\n",
+      "utf8",
+    );
+    const changed = await application.readContext({
+      workspace: fixture.workspaceRoot,
+      threadId,
+      anchorSequence,
+    });
+    expect(changed.instructions.effectiveMatchesHistorical).toBe(false);
+    const changedSource = changed.instructions.sources.find(
+      (source) => source.path === "AGENTS.md",
+    );
+    expect(changedSource).toMatchObject({ status: "modified" });
+    if (changedSource?.sourceId === undefined) {
+      throw new Error("Expected a readable current instruction source.");
+    }
+    await expect(
+      application.readContextInstruction({
+        workspace: fixture.workspaceRoot,
+        threadId,
+        anchorSequence,
+        sourceId: changedSource.sourceId,
+        maxBytes: 64,
+      }),
+    ).resolves.toMatchObject({
+      path: "AGENTS.md",
+      content: "Use the changed repository command.\n",
+      hasEarlier: false,
+      hasLater: false,
+    });
+
+    await writeFile(
+      join(fixture.workspaceRoot, "KODA.md"),
+      "Use the newly added instruction.\n",
+      "utf8",
+    );
+    const added = await application.readContext({
+      workspace: fixture.workspaceRoot,
+      threadId,
+      anchorSequence,
+    });
+    expect(
+      added.instructions.sources.find((source) => source.path === "KODA.md"),
+    ).toMatchObject({ status: "added" });
+
+    await rm(join(fixture.workspaceRoot, "AGENTS.md"));
+    const missing = await application.readContext({
+      workspace: fixture.workspaceRoot,
+      threadId,
+      anchorSequence,
+    });
+    const missingSource = missing.instructions.sources.find(
+      (source) => source.path === "AGENTS.md",
+    );
+    expect(missingSource).toMatchObject({ status: "missing" });
+    expect(missingSource).not.toHaveProperty("sourceId");
+
+    const otherWorkspace = join(fixture.root, "other-context-workspace");
+    await mkdir(otherWorkspace);
+    await expect(
+      application.listThreadContexts({
+        workspace: otherWorkspace,
+        threadId,
+      }),
+    ).rejects.toMatchObject({ code: "THREAD_WORKSPACE_MISMATCH" });
+
+    await expect(
+      application.readContextInstruction({
+        workspace: fixture.workspaceRoot,
+        threadId,
+        anchorSequence,
+        sourceId: `ctxsrc:${"f".repeat(64)}`,
+      }),
+    ).rejects.toMatchObject({ code: "CONTEXT_INSTRUCTION_NOT_FOUND" });
+
+    const eventPath = join(fixture.kodaHome, "threads", `${threadId}.jsonl`);
+    const original = await new JsonlEventStore(eventPath).readAllRequired();
+    const preparedIndex = original.events.findIndex(
+      (event) => event.type === "context.prepared",
+    );
+    const prepared = original.events[preparedIndex];
+    if (prepared?.type !== "context.prepared") {
+      throw new Error("Expected durable context telemetry.");
+    }
+    const corrupt = original.events.map((event, index) =>
+      index === preparedIndex
+        ? agentEventSchema.parse({
+            ...event,
+            payload: {
+              ...prepared.payload,
+              activeItemsSha256: "0".repeat(64),
+            },
+          })
+        : event,
+    );
+    await writeFile(
+      eventPath,
+      `${corrupt.map((event) => JSON.stringify(event)).join("\n")}\n`,
+      "utf8",
+    );
+    await expect(
+      application.readContext({
+        workspace: fixture.workspaceRoot,
+        threadId,
+        anchorSequence,
+      }),
+    ).rejects.toMatchObject({ code: "CONTEXT_SNAPSHOT_CORRUPT" });
+
+    const legacy = original.events
+      .filter((event) => event.type !== "context.prepared")
+      .map((event, sequence) => agentEventSchema.parse({ ...event, sequence }));
+    await writeFile(
+      eventPath,
+      `${legacy.map((event) => JSON.stringify(event)).join("\n")}\n`,
+      "utf8",
+    );
+    const legacyPage = await application.listThreadContexts({
+      workspace: fixture.workspaceRoot,
+      threadId,
+    });
+    expect(legacyPage.requests).toEqual([
+      expect.objectContaining({ precise: false, measuredInputTokens: 42 }),
+    ]);
+    const legacyAnchor = legacyPage.requests[0]?.anchorSequence;
+    if (legacyAnchor === undefined) {
+      throw new Error("Expected a legacy request anchor.");
+    }
+    await expect(
+      application.readContext({
+        workspace: fixture.workspaceRoot,
+        threadId,
+        anchorSequence: legacyAnchor,
+      }),
+    ).resolves.toMatchObject({
+      request: { precise: false },
+      usage: { usage: { inputTokens: 42 } },
+    });
+  });
+
   it("authorizes thread-scoped artifact discovery and verified reads", async () => {
     const fixture = await createFixture();
     const threadId = threadIdSchema.parse("artifact-application-thread");

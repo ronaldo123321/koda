@@ -7,6 +7,7 @@ import {
   modelProviderIdSchema,
   threadIdSchema,
   toolCallIdSchema,
+  turnIdSchema,
 } from "@koda/protocol";
 import {
   KodaView,
@@ -405,6 +406,157 @@ describe("Koda Ink view", () => {
     routeTuiInput(controller, state, "a", key(), vi.fn());
     expect(controller.openPreviewArtifacts).toHaveBeenCalledOnce();
   });
+
+  it("renders and routes context list, detail, instruction, and preview entry modes", () => {
+    const controller = fakeInputController();
+    const state = baseState();
+    const hash = "a".repeat(64);
+    const sourceId = `ctxsrc:${"b".repeat(64)}`;
+    const request = {
+      anchorSequence: 8,
+      turnId: turnIdSchema.parse("context-view-turn"),
+      step: 1,
+      timestamp: "2026-08-27T00:00:00.000Z",
+      precise: true as const,
+      provider: "openai" as const,
+      model: "gpt-5.6-terra",
+      estimatedInputTokens: 220,
+      inputBudgetTokens: 8_000,
+      measuredInputTokens: 210,
+      activeItemCount: 1,
+      toolCount: 2,
+    };
+    state.mode = "context_list";
+    state.contextNavigation = {
+      origin: "chat",
+      threadId: threadIdSchema.parse("context-view-thread"),
+      loading: false,
+      viewportHeight: 10,
+      viewportWidth: 80,
+      list: {
+        requests: [request],
+        selectedIndex: 0,
+        scrollOffset: 0,
+        currentCursor: null,
+        newerCursors: [],
+        hasEarlier: false,
+      },
+    };
+
+    let frame = renderToString(createElement(KodaView, { state }));
+    expect(frame).toContain("Prepared context · context-view-thread");
+    expect(frame).toContain("precise");
+    expect(frame).toContain("210 measured");
+    routeTuiInput(controller, state, "", key({ downArrow: true }), vi.fn());
+    routeTuiInput(controller, state, "", key({ pageUp: true }), vi.fn());
+    routeTuiInput(controller, state, "", key({ return: true }), vi.fn());
+    routeTuiInput(controller, state, "", key({ escape: true }), vi.fn());
+    expect(controller.selectContextRequest).toHaveBeenCalledWith(1);
+    expect(controller.pageContextList).toHaveBeenCalledWith("newer");
+    expect(controller.openSelectedContext).toHaveBeenCalledOnce();
+    expect(controller.closeContextLevel).toHaveBeenCalledOnce();
+
+    state.mode = "context_detail";
+    state.contextNavigation = {
+      ...state.contextNavigation,
+      detail: {
+        selectedSourceIndex: 0,
+        sourceScrollOffset: 0,
+        result: {
+          workspace: "/workspace",
+          threadId: threadIdSchema.parse("context-view-thread"),
+          request,
+          turnContext: {
+            provider: "openai",
+            model: "gpt-5.6-terra",
+            workspaceRoot: "/workspace",
+            approvalMode: "on-request",
+            instructionsSha256: hash,
+            repositoryInstructions: [],
+          },
+          telemetry: {
+            step: 1,
+            contextWindowTokens: 10_000,
+            maxOutputTokens: 1_000,
+            safetyMarginTokens: 1_000,
+            inputBudgetTokens: 8_000,
+            fixedInputTokens: 100,
+            rawEstimatedInputTokens: 200,
+            estimatedInputTokens: 220,
+            calibrationFactor: 1.1,
+            activeItemCount: 1,
+            activeItemTypes: [{ type: "user_message", count: 1 }],
+            activeItemsSha256: hash,
+            toolCount: 2,
+            toolsSha256: "c".repeat(64),
+          },
+          reconstruction: {
+            activeItemCount: 1,
+            activeItemTypes: [{ type: "user_message", count: 1 }],
+            activeItemsSha256: hash,
+            valid: true,
+          },
+          instructions: {
+            historicalEffectiveSha256: hash,
+            currentEffectiveSha256: hash,
+            effectiveMatchesHistorical: true,
+            sources: [
+              {
+                kind: "effective",
+                sourceId,
+                path: "effective",
+                scope: ".",
+                status: "unchanged",
+                historical: { sha256: hash },
+                current: { bytes: 6, sha256: hash },
+              },
+            ],
+          },
+        },
+      },
+    };
+    frame = renderToString(createElement(KodaView, { state }));
+    expect(frame).toContain("Context #8");
+    expect(frame).toContain("Current effective instructions exactly match");
+    expect(frame).toContain("reconstruction valid");
+    routeTuiInput(controller, state, "", key({ downArrow: true }), vi.fn());
+    routeTuiInput(controller, state, "", key({ return: true }), vi.fn());
+    expect(controller.selectContextInstructionSource).toHaveBeenCalledWith(1);
+    expect(controller.openSelectedContextInstruction).toHaveBeenCalledOnce();
+
+    state.mode = "context_instruction_view";
+    state.contextNavigation = {
+      ...state.contextNavigation,
+      instructionView: {
+        page: {
+          workspace: "/workspace",
+          threadId: threadIdSchema.parse("context-view-thread"),
+          anchorSequence: 8,
+          sourceId,
+          path: "effective",
+          content: "你好",
+          startByte: 0,
+          endByte: 6,
+          totalBytes: 6,
+          hasEarlier: false,
+          hasLater: false,
+        },
+        rows: ["你好"],
+        scrollOffset: 0,
+      },
+    };
+    frame = renderToString(createElement(KodaView, { state }));
+    expect(frame).toContain("0–6 / 6 UTF-8 bytes");
+    expect(frame).toContain("你好");
+    routeTuiInput(controller, state, "", key({ pageDown: true }), vi.fn());
+    expect(controller.scrollContextInstruction).toHaveBeenCalledWith(
+      "page_down",
+    );
+
+    state.mode = "thread_preview";
+    routeTuiInput(controller, state, "c", key(), vi.fn());
+    expect(controller.openPreviewContext).toHaveBeenCalledOnce();
+  });
 });
 
 describe("koda-chat program", () => {
@@ -503,6 +655,7 @@ function baseState(): TuiState {
       bidirectionalThreadEvents: true,
       runtimeSettings: true,
       artifactInspection: true,
+      contextInspection: true,
     },
     providers: [
       {
@@ -537,6 +690,7 @@ function baseState(): TuiState {
     threadBrowser: undefined,
     runtimeSettings: undefined,
     artifactNavigation: undefined,
+    contextNavigation: undefined,
   };
 }
 
@@ -575,6 +729,14 @@ function fakeInputController() {
     openSelectedArtifact: vi.fn(() => Promise.resolve()),
     scrollArtifact: vi.fn(() => Promise.resolve()),
     closeArtifactLevel: vi.fn(),
+    openPreviewContext: vi.fn(() => Promise.resolve()),
+    selectContextRequest: vi.fn(),
+    pageContextList: vi.fn(() => Promise.resolve()),
+    openSelectedContext: vi.fn(() => Promise.resolve()),
+    selectContextInstructionSource: vi.fn(),
+    openSelectedContextInstruction: vi.fn(() => Promise.resolve()),
+    scrollContextInstruction: vi.fn(() => Promise.resolve()),
+    closeContextLevel: vi.fn(),
   } satisfies TuiInputController;
 }
 

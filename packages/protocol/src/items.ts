@@ -5,6 +5,19 @@ import { itemIdSchema, toolCallIdSchema, turnIdSchema } from "./ids.js";
 import { jsonObjectSchema, jsonValueSchema } from "./json.js";
 import { modelProviderIdSchema, providerStateSchema } from "./providers.js";
 
+export const CONVERSATION_ITEM_TYPES = [
+  "user_message",
+  "assistant_message",
+  "provider_state",
+  "tool_call",
+  "tool_result",
+  "approval",
+  "compaction",
+  "recovery",
+] as const;
+
+export const conversationItemTypeSchema = z.enum(CONVERSATION_ITEM_TYPES);
+
 export const userMessageItemSchema = z.object({
   type: z.literal("user_message"),
   id: itemIdSchema,
@@ -157,3 +170,4 @@ export type ApprovalItem = z.infer<typeof approvalItemSchema>;
 export type CompactionItem = z.infer<typeof compactionItemSchema>;
 export type RecoveryItem = z.infer<typeof recoveryItemSchema>;
 export type ConversationItem = z.infer<typeof conversationItemSchema>;
+export type ConversationItemType = z.infer<typeof conversationItemTypeSchema>;

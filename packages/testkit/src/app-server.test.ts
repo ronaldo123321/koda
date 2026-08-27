@@ -88,6 +88,7 @@ describe("KodaAppServer", () => {
         bidirectionalThreadEvents: true,
         runtimeSettings: true,
         artifactInspection: true,
+        contextInspection: true,
       },
       providers: [
         { id: "openai", defaultModel: "gpt-5.6-terra", configured: true },
@@ -418,8 +419,60 @@ describe("KodaAppServer", () => {
       hasMore: false,
       diagnostics: [],
     });
-    await request(server, 9, "shutdown", {});
-    expect(responseResult(writer, 9)).toEqual({});
+    await request(server, 9, "thread/context", {
+      workspace: fixture.workspaceRoot,
+      threadId: "server-patch-thread",
+    });
+    const contextPage = responseResult(writer, 9) as {
+      requests?: Array<{ anchorSequence?: number; step?: number }>;
+    };
+    expect(contextPage).toMatchObject({
+      requests: [
+        { precise: true, step: 2 },
+        { precise: true, step: 1 },
+      ],
+      hasEarlier: false,
+    });
+    const contextAnchor = contextPage.requests?.[0]?.anchorSequence;
+    if (contextAnchor === undefined) {
+      throw new Error("Context list did not provide an anchor.");
+    }
+    await request(server, 10, "context/read", {
+      workspace: fixture.workspaceRoot,
+      threadId: "server-patch-thread",
+      anchorSequence: contextAnchor,
+    });
+    const contextDetail = responseResult(writer, 10) as {
+      instructions?: {
+        sources?: Array<{ kind?: string; sourceId?: string }>;
+      };
+    };
+    expect(contextDetail).toMatchObject({
+      request: { precise: true, step: 2 },
+      reconstruction: { valid: true },
+      instructions: { effectiveMatchesHistorical: true },
+    });
+    const effectiveSource = contextDetail.instructions?.sources?.find(
+      (source) => source.kind === "effective",
+    );
+    if (effectiveSource?.sourceId === undefined) {
+      throw new Error("Context detail did not expose the effective source.");
+    }
+    await request(server, 11, "context/instruction/read", {
+      workspace: fixture.workspaceRoot,
+      threadId: "server-patch-thread",
+      anchorSequence: contextAnchor,
+      sourceId: effectiveSource.sourceId,
+      maxBytes: 128,
+    });
+    expect(responseResult(writer, 11)).toMatchObject({
+      path: "effective",
+      startByte: 0,
+      hasEarlier: false,
+      hasLater: true,
+    });
+    await request(server, 12, "shutdown", {});
+    expect(responseResult(writer, 12)).toEqual({});
     expect(server.shouldClose).toBe(true);
   });
 

@@ -8,7 +8,10 @@ import {
   EffectToolPolicy,
   FanoutEventSink,
   ToolRegistry,
+  digestContextItems,
   estimateTextTokens,
+  projectActiveContext,
+  summarizeContextItemTypes,
   type ApprovalBroker,
   type EventSink,
   type ItemIdFactory,
@@ -17,6 +20,9 @@ import {
 import { McpClientError, McpTurnSession } from "@koda/mcp-client-node";
 import {
   ARTIFACT_READ_DEFAULT_BYTES,
+  CONTEXT_INSTRUCTION_READ_DEFAULT_BYTES,
+  THREAD_CONTEXT_DEFAULT_LIMIT,
+  THREAD_CONTEXT_MAXIMUM_LIMIT,
   THREAD_ARTIFACTS_DEFAULT_LIMIT,
   THREAD_ARTIFACTS_MAXIMUM_LIMIT,
   collectArtifactReferences,
@@ -36,6 +42,14 @@ import {
   turnContextSnapshotSchema,
   turnIdSchema,
   type ConversationItem,
+  type ContextInstructionReadParams,
+  type ContextInstructionReadResult,
+  type ContextInstructionSource,
+  type ContextInstructionSummary,
+  type ContextReadParams,
+  type ContextReadResult,
+  type ContextRequestDescriptor,
+  type ContextUsageRecord,
   type ArtifactReadParams,
   type ArtifactReadResult,
   type ItemId,
@@ -49,8 +63,11 @@ import {
   type ThreadArtifactDescriptor,
   type ThreadArtifactsParams,
   type ThreadArtifactsResult,
+  type ThreadContextParams,
+  type ThreadContextResult,
   type ThreadSearchCursor,
   type ThreadSearchMatch,
+  type TurnContextSnapshot,
   type TurnId,
 } from "@koda/protocol";
 import {
@@ -63,6 +80,7 @@ import {
   ArtifactStore,
   JsonlEventStore,
   ReadOnlyWorkspace,
+  RepositoryInstructionError,
   ThreadLease,
   ThreadMetadataIndex,
   normalizeThreadSearchText,
@@ -198,6 +216,17 @@ export class ArtifactInspectionError extends Error {
   ) {
     super(message, options);
     this.name = "ArtifactInspectionError";
+  }
+}
+
+export class ContextInspectionError extends Error {
+  public constructor(
+    public readonly code: string,
+    message: string,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = "ContextInspectionError";
   }
 }
 
@@ -567,6 +596,227 @@ export class KodaApplication {
       totalBytes: range.totalBytes,
       hasEarlier: range.hasEarlier,
       hasLater: range.hasLater,
+    };
+  }
+
+  public async listThreadContexts(
+    input: ThreadContextParams,
+  ): Promise<ThreadContextResult> {
+    const authorized = await this.authorizedThreadContext(
+      input.workspace,
+      input.threadId,
+    );
+    const limit = input.limit ?? THREAD_CONTEXT_DEFAULT_LIMIT;
+    if (
+      !Number.isSafeInteger(limit) ||
+      limit < 1 ||
+      limit > THREAD_CONTEXT_MAXIMUM_LIMIT
+    ) {
+      throw new ContextInspectionError(
+        "INVALID_CONTEXT_LIMIT",
+        `Context request limit must be between 1 and ${THREAD_CONTEXT_MAXIMUM_LIMIT}.`,
+      );
+    }
+    if (
+      input.beforeSequence !== undefined &&
+      (!Number.isSafeInteger(input.beforeSequence) || input.beforeSequence < 0)
+    ) {
+      throw new ContextInspectionError(
+        "INVALID_CONTEXT_CURSOR",
+        "Context request cursor must be a non-negative safe integer.",
+      );
+    }
+    const available = buildContextRequestDescriptors(authorized.events).filter(
+      (descriptor) =>
+        input.beforeSequence === undefined ||
+        descriptor.anchorSequence < input.beforeSequence,
+    );
+    const requests = available.slice(0, limit);
+    const hasEarlier = available.length > requests.length;
+    return {
+      workspace: authorized.workspace,
+      threadId: authorized.threadId,
+      requests,
+      hasEarlier,
+      ...(hasEarlier && requests.length > 0
+        ? { nextBeforeSequence: requests.at(-1)?.anchorSequence }
+        : {}),
+    };
+  }
+
+  public async readContext(
+    input: ContextReadParams,
+  ): Promise<ContextReadResult> {
+    const authorized = await this.authorizedThreadContext(
+      input.workspace,
+      input.threadId,
+    );
+    const descriptors = buildContextRequestDescriptors(authorized.events);
+    const request = descriptors.find(
+      (descriptor) => descriptor.anchorSequence === input.anchorSequence,
+    );
+    if (request === undefined) {
+      throw new ContextInspectionError(
+        "CONTEXT_SNAPSHOT_NOT_FOUND",
+        `Context request ${input.anchorSequence} was not found in thread '${authorized.threadId}'.`,
+      );
+    }
+    const turnContext = governingTurnContext(
+      authorized.events,
+      request.anchorSequence,
+      request.turnId,
+    );
+    const usage = matchingUsage(authorized.events, request);
+    const instructionInspection = await inspectCurrentInstructions({
+      workspace: authorized.workspace,
+      threadId: authorized.threadId,
+      anchorSequence: request.anchorSequence,
+      turnContext,
+    });
+
+    if (!request.precise) {
+      const legacyItems = recordedItemsBefore(
+        authorized.events,
+        request.anchorSequence,
+      );
+      const active = projectActiveContext(legacyItems);
+      const compaction = active.find((item) => item.type === "compaction");
+      return {
+        workspace: authorized.workspace,
+        threadId: authorized.threadId,
+        request,
+        turnContext,
+        ...(usage === undefined ? {} : { usage }),
+        ...(compaction === undefined ? {} : { compaction }),
+        instructions: instructionInspection.summary,
+      };
+    }
+
+    const prepared = authorized.events.find(
+      (event) =>
+        event.sequence === request.anchorSequence &&
+        event.type === "context.prepared",
+    );
+    if (prepared?.type !== "context.prepared") {
+      throw new ContextInspectionError(
+        "CONTEXT_SNAPSHOT_CORRUPT",
+        `Precise context request ${request.anchorSequence} has no prepared event.`,
+      );
+    }
+    const active = projectActiveContext(
+      recordedItemsBefore(authorized.events, request.anchorSequence),
+    );
+    const reconstructedTypes = summarizeContextItemTypes(active);
+    const reconstructedSha256 = digestContextItems(active);
+    if (
+      active.length !== prepared.payload.activeItemCount ||
+      JSON.stringify(reconstructedTypes) !==
+        JSON.stringify(prepared.payload.activeItemTypes) ||
+      reconstructedSha256 !== prepared.payload.activeItemsSha256
+    ) {
+      throw new ContextInspectionError(
+        "CONTEXT_SNAPSHOT_CORRUPT",
+        `Context request ${request.anchorSequence} does not match its durable Item history.`,
+      );
+    }
+    const compaction =
+      prepared.payload.compactionItemId === undefined
+        ? undefined
+        : active.find(
+            (item) =>
+              item.type === "compaction" &&
+              item.id === prepared.payload.compactionItemId,
+          );
+    if (
+      prepared.payload.compactionItemId !== undefined &&
+      compaction?.type !== "compaction"
+    ) {
+      throw new ContextInspectionError(
+        "CONTEXT_SNAPSHOT_CORRUPT",
+        `Context request ${request.anchorSequence} references a missing Compaction Item.`,
+      );
+    }
+    return {
+      workspace: authorized.workspace,
+      threadId: authorized.threadId,
+      request,
+      turnContext,
+      telemetry: prepared.payload,
+      ...(usage === undefined ? {} : { usage }),
+      reconstruction: {
+        activeItemCount: active.length,
+        activeItemTypes: reconstructedTypes,
+        activeItemsSha256: reconstructedSha256,
+        valid: true,
+      },
+      ...(compaction?.type === "compaction" ? { compaction } : {}),
+      instructions: instructionInspection.summary,
+    };
+  }
+
+  public async readContextInstruction(
+    input: ContextInstructionReadParams,
+  ): Promise<ContextInstructionReadResult> {
+    const authorized = await this.authorizedThreadContext(
+      input.workspace,
+      input.threadId,
+    );
+    const request = buildContextRequestDescriptors(authorized.events).find(
+      (descriptor) => descriptor.anchorSequence === input.anchorSequence,
+    );
+    if (request === undefined) {
+      throw new ContextInspectionError(
+        "CONTEXT_SNAPSHOT_NOT_FOUND",
+        `Context request ${input.anchorSequence} was not found in thread '${authorized.threadId}'.`,
+      );
+    }
+    const turnContext = governingTurnContext(
+      authorized.events,
+      request.anchorSequence,
+      request.turnId,
+    );
+    let instructionInspection: CurrentInstructionInspection;
+    try {
+      instructionInspection = await inspectCurrentInstructions({
+        workspace: authorized.workspace,
+        threadId: authorized.threadId,
+        anchorSequence: request.anchorSequence,
+        turnContext,
+      });
+    } catch (error) {
+      if (
+        error instanceof RepositoryInstructionError &&
+        error.code === "INSTRUCTION_READ_FAILED"
+      ) {
+        throw new ContextInspectionError(
+          "CONTEXT_INSTRUCTION_CHANGED_DURING_READ",
+          "Repository instructions changed while the requested source was being read.",
+          { cause: error },
+        );
+      }
+      throw error;
+    }
+    const source = instructionInspection.readable.get(input.sourceId);
+    if (source === undefined) {
+      throw new ContextInspectionError(
+        "CONTEXT_INSTRUCTION_NOT_FOUND",
+        "The instruction source is unavailable for this context request.",
+      );
+    }
+    const range = readUtf8Range(source.content, {
+      ...(input.beforeByte === undefined
+        ? {}
+        : { beforeByte: input.beforeByte }),
+      ...(input.afterByte === undefined ? {} : { afterByte: input.afterByte }),
+      maxBytes: input.maxBytes ?? CONTEXT_INSTRUCTION_READ_DEFAULT_BYTES,
+    });
+    return {
+      workspace: authorized.workspace,
+      threadId: authorized.threadId,
+      anchorSequence: request.anchorSequence,
+      sourceId: input.sourceId,
+      path: source.path,
+      ...range,
     };
   }
 
@@ -978,6 +1228,33 @@ export class KodaApplication {
     return { workspace, threadId, artifacts };
   }
 
+  private async authorizedThreadContext(
+    workspaceInput: string,
+    threadIdInput: string,
+  ): Promise<{
+    workspace: string;
+    threadId: ThreadId;
+    events: AgentEvent[];
+  }> {
+    const workspace = await this.canonicalContextWorkspace(workspaceInput);
+    const threadId = parseLocalThreadId(threadIdInput);
+    const events = await this.readValidatedThreadLog(threadId);
+    const contexts = events.filter((event) => event.type === "turn.context");
+    if (contexts.length === 0) {
+      throw new ContextInspectionError(
+        "THREAD_EVENT_LOG_CORRUPT",
+        `Thread '${threadId}' does not contain a durable workspace context.`,
+      );
+    }
+    if (contexts.some((event) => event.payload.workspaceRoot !== workspace)) {
+      throw new ContextInspectionError(
+        "THREAD_WORKSPACE_MISMATCH",
+        `Thread '${threadId}' does not belong to workspace '${workspace}'.`,
+      );
+    }
+    return { workspace, threadId, events };
+  }
+
   private async canonicalArtifactWorkspace(
     workspaceInput: string,
   ): Promise<string> {
@@ -992,6 +1269,26 @@ export class KodaApplication {
     } catch (error) {
       throw new ArtifactInspectionError(
         "INVALID_ARTIFACT_WORKSPACE",
+        `Workspace '${workspaceInput}' could not be resolved to an existing directory.`,
+        { cause: error },
+      );
+    }
+  }
+
+  private async canonicalContextWorkspace(
+    workspaceInput: string,
+  ): Promise<string> {
+    try {
+      const workspace = await realpath(
+        resolve(this.processDirectory, workspaceInput),
+      );
+      if (!(await stat(workspace)).isDirectory()) {
+        throw new Error("Workspace is not a directory.");
+      }
+      return workspace;
+    } catch (error) {
+      throw new ContextInspectionError(
+        "INVALID_CONTEXT_WORKSPACE",
         `Workspace '${workspaceInput}' could not be resolved to an existing directory.`,
         { cause: error },
       );
@@ -1017,6 +1314,362 @@ export class KodaApplication {
       );
     }
   }
+}
+
+function buildContextRequestDescriptors(
+  events: readonly AgentEvent[],
+): ContextRequestDescriptor[] {
+  const preciseKeys = new Set<string>();
+  const descriptors: ContextRequestDescriptor[] = [];
+  for (const event of events) {
+    if (event.type !== "context.prepared") {
+      continue;
+    }
+    const key = `${event.turnId}\0${event.payload.step}`;
+    if (preciseKeys.has(key)) {
+      throw new ContextInspectionError(
+        "CONTEXT_SNAPSHOT_CORRUPT",
+        `Thread contains duplicate prepared context for Turn '${event.turnId}' step ${event.payload.step}.`,
+      );
+    }
+    preciseKeys.add(key);
+    const turnContext = governingTurnContext(
+      events,
+      event.sequence,
+      event.turnId,
+    );
+    const usage = findUsageEvent(events, event.turnId, event.payload.step);
+    if (usage !== undefined && usage.sequence <= event.sequence) {
+      throw new ContextInspectionError(
+        "CONTEXT_SNAPSHOT_CORRUPT",
+        `Usage for Turn '${event.turnId}' step ${event.payload.step} precedes its prepared context.`,
+      );
+    }
+    descriptors.push({
+      anchorSequence: event.sequence,
+      turnId: event.turnId,
+      step: event.payload.step,
+      timestamp: event.timestamp,
+      precise: true,
+      provider: turnContext.provider,
+      model: turnContext.model,
+      estimatedInputTokens: event.payload.estimatedInputTokens,
+      inputBudgetTokens: event.payload.inputBudgetTokens,
+      ...(usage === undefined
+        ? {}
+        : { measuredInputTokens: usage.payload.usage.inputTokens }),
+      activeItemCount: event.payload.activeItemCount,
+      toolCount: event.payload.toolCount,
+      ...(event.payload.compactionItemId === undefined
+        ? {}
+        : { compactionItemId: event.payload.compactionItemId }),
+    });
+  }
+  for (const event of events) {
+    if (event.type !== "model.usage") {
+      continue;
+    }
+    const key = `${event.turnId}\0${event.payload.step}`;
+    if (preciseKeys.has(key)) {
+      continue;
+    }
+    const turnContext = governingTurnContext(
+      events,
+      event.sequence,
+      event.turnId,
+    );
+    descriptors.push({
+      anchorSequence: event.sequence,
+      turnId: event.turnId,
+      step: event.payload.step,
+      timestamp: event.timestamp,
+      precise: false,
+      provider: turnContext.provider,
+      model: turnContext.model,
+      measuredInputTokens: event.payload.usage.inputTokens,
+    });
+  }
+  return descriptors.sort(
+    (left, right) => right.anchorSequence - left.anchorSequence,
+  );
+}
+
+function governingTurnContext(
+  events: readonly AgentEvent[],
+  anchorSequence: number,
+  turnId: TurnId,
+): TurnContextSnapshot {
+  const contexts = events.filter(
+    (event) =>
+      event.sequence < anchorSequence &&
+      event.turnId === turnId &&
+      event.type === "turn.context",
+  );
+  if (contexts.length !== 1 || contexts[0]?.type !== "turn.context") {
+    throw new ContextInspectionError(
+      "CONTEXT_SNAPSHOT_CORRUPT",
+      `Context request ${anchorSequence} requires exactly one preceding Turn context.`,
+    );
+  }
+  return contexts[0].payload;
+}
+
+function findUsageEvent(
+  events: readonly AgentEvent[],
+  turnId: TurnId,
+  step: number,
+): Extract<AgentEvent, { type: "model.usage" }> | undefined {
+  const matches = events.filter(
+    (event): event is Extract<AgentEvent, { type: "model.usage" }> =>
+      event.type === "model.usage" &&
+      event.turnId === turnId &&
+      event.payload.step === step,
+  );
+  if (matches.length > 1) {
+    throw new ContextInspectionError(
+      "CONTEXT_SNAPSHOT_CORRUPT",
+      `Turn '${turnId}' step ${step} contains duplicate Usage records.`,
+    );
+  }
+  return matches[0];
+}
+
+function matchingUsage(
+  events: readonly AgentEvent[],
+  request: ContextRequestDescriptor,
+): ContextUsageRecord | undefined {
+  const usage = findUsageEvent(events, request.turnId, request.step);
+  if (usage === undefined) {
+    return undefined;
+  }
+  return {
+    sequence: usage.sequence,
+    ...(usage.payload.responseId === undefined
+      ? {}
+      : { responseId: usage.payload.responseId }),
+    usage: usage.payload.usage,
+  };
+}
+
+function recordedItemsBefore(
+  events: readonly AgentEvent[],
+  anchorSequence: number,
+): ConversationItem[] {
+  return events.flatMap((event) =>
+    event.sequence < anchorSequence && event.type === "item.recorded"
+      ? [event.payload.item]
+      : [],
+  );
+}
+
+interface CurrentInstructionInspection {
+  summary: ContextInstructionSummary;
+  readable: Map<string, { path: string; content: string }>;
+}
+
+async function inspectCurrentInstructions(input: {
+  workspace: string;
+  threadId: ThreadId;
+  anchorSequence: number;
+  turnContext: TurnContextSnapshot;
+}): Promise<CurrentInstructionInspection> {
+  const current = await loadRepositoryInstructions(input.workspace);
+  const effectiveContent = buildInstructions(input.workspace, current);
+  const effectiveBytes = Buffer.byteLength(effectiveContent, "utf8");
+  const effectiveSha256 = createHash("sha256")
+    .update(effectiveContent, "utf8")
+    .digest("hex");
+  const readable = new Map<string, { path: string; content: string }>();
+  const effectiveSourceId = contextInstructionSourceId({
+    threadId: input.threadId,
+    anchorSequence: input.anchorSequence,
+    kind: "effective",
+    path: "effective",
+  });
+  readable.set(effectiveSourceId, {
+    path: "effective",
+    content: effectiveContent,
+  });
+  const sources: ContextInstructionSource[] = [
+    {
+      kind: "effective",
+      sourceId: effectiveSourceId,
+      path: "effective",
+      scope: ".",
+      status:
+        effectiveSha256 === input.turnContext.instructionsSha256
+          ? "unchanged"
+          : "modified",
+      historical: { sha256: input.turnContext.instructionsSha256 },
+      current: { bytes: effectiveBytes, sha256: effectiveSha256 },
+    },
+  ];
+  const historicalByPath = new Map(
+    input.turnContext.repositoryInstructions.map((source) => [
+      source.path,
+      source,
+    ]),
+  );
+  const currentByPath = new Map(
+    current.sources.map((source) => [source.path, source]),
+  );
+  const paths = [
+    ...new Set([...historicalByPath.keys(), ...currentByPath.keys()]),
+  ].sort();
+  for (const path of paths) {
+    const historical = historicalByPath.get(path);
+    const currentSource = currentByPath.get(path);
+    if (currentSource === undefined && historical !== undefined) {
+      sources.push({
+        kind: "repository",
+        path,
+        scope: historical.scope,
+        status: "missing",
+        historical: {
+          bytes: historical.bytes,
+          sha256: historical.sha256,
+        },
+      });
+      continue;
+    }
+    if (currentSource === undefined) {
+      continue;
+    }
+    const sourceId = contextInstructionSourceId({
+      threadId: input.threadId,
+      anchorSequence: input.anchorSequence,
+      kind: "repository",
+      path,
+    });
+    readable.set(sourceId, { path, content: currentSource.content });
+    const status =
+      historical === undefined
+        ? "added"
+        : historical.scope === currentSource.scope &&
+            historical.bytes === currentSource.bytes &&
+            historical.sha256 === currentSource.sha256
+          ? "unchanged"
+          : "modified";
+    sources.push({
+      kind: "repository",
+      sourceId,
+      path,
+      scope: currentSource.scope,
+      status,
+      ...(historical === undefined
+        ? {}
+        : {
+            historical: {
+              bytes: historical.bytes,
+              sha256: historical.sha256,
+            },
+          }),
+      current: {
+        bytes: currentSource.bytes,
+        sha256: currentSource.sha256,
+      },
+    });
+  }
+  return {
+    summary: {
+      historicalEffectiveSha256: input.turnContext.instructionsSha256,
+      currentEffectiveSha256: effectiveSha256,
+      effectiveMatchesHistorical:
+        effectiveSha256 === input.turnContext.instructionsSha256,
+      sources,
+    },
+    readable,
+  };
+}
+
+function contextInstructionSourceId(input: {
+  threadId: ThreadId;
+  anchorSequence: number;
+  kind: "effective" | "repository";
+  path: string;
+}): string {
+  const digest = createHash("sha256")
+    .update(
+      `${input.threadId}\0${input.anchorSequence}\0${input.kind}\0${input.path}`,
+      "utf8",
+    )
+    .digest("hex");
+  return `ctxsrc:${digest}`;
+}
+
+function readUtf8Range(
+  content: string,
+  options: { beforeByte?: number; afterByte?: number; maxBytes: number },
+): {
+  content: string;
+  startByte: number;
+  endByte: number;
+  totalBytes: number;
+  hasEarlier: boolean;
+  hasLater: boolean;
+} {
+  if (options.beforeByte !== undefined && options.afterByte !== undefined) {
+    throw new ContextInspectionError(
+      "INVALID_CONTEXT_CURSOR",
+      "Instruction byte cursors are mutually exclusive.",
+    );
+  }
+  if (
+    !Number.isSafeInteger(options.maxBytes) ||
+    options.maxBytes < 4 ||
+    options.maxBytes > 65_536
+  ) {
+    throw new ContextInspectionError(
+      "INVALID_CONTEXT_CURSOR",
+      "Instruction maxBytes must be a safe integer between 4 and 65536.",
+    );
+  }
+  const bytes = Buffer.from(content, "utf8");
+  const cursor = options.beforeByte ?? options.afterByte ?? 0;
+  if (
+    !Number.isSafeInteger(cursor) ||
+    cursor < 0 ||
+    cursor > bytes.byteLength ||
+    !isUtf8Boundary(bytes, cursor)
+  ) {
+    throw new ContextInspectionError(
+      "INVALID_CONTEXT_CURSOR",
+      "Instruction byte cursor is outside the source or not a UTF-8 boundary.",
+    );
+  }
+  let startByte: number;
+  let endByte: number;
+  if (options.beforeByte !== undefined) {
+    endByte = cursor;
+    startByte = Math.max(0, endByte - options.maxBytes);
+    while (startByte < endByte && !isUtf8Boundary(bytes, startByte)) {
+      startByte += 1;
+    }
+  } else {
+    startByte = cursor;
+    endByte = Math.min(bytes.byteLength, startByte + options.maxBytes);
+    while (endByte > startByte && !isUtf8Boundary(bytes, endByte)) {
+      endByte -= 1;
+    }
+  }
+  return {
+    content: new TextDecoder("utf-8", { fatal: true }).decode(
+      bytes.subarray(startByte, endByte),
+    ),
+    startByte,
+    endByte,
+    totalBytes: bytes.byteLength,
+    hasEarlier: startByte > 0,
+    hasLater: endByte < bytes.byteLength,
+  };
+}
+
+function isUtf8Boundary(bytes: Buffer, offset: number): boolean {
+  return (
+    offset === 0 ||
+    offset === bytes.byteLength ||
+    ((bytes[offset] ?? 0) & 0xc0) !== 0x80
+  );
 }
 
 function buildInstructions(
