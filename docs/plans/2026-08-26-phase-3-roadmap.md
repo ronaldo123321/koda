@@ -1,6 +1,6 @@
 # Koda Phase 3 Extensibility Roadmap
 
-- Status: In progress — Phase 3A through Phase 3E1 implemented (2026-08-27)
+- Status: In progress — Phase 3A through Phase 3E1 implemented; Phase 3E2 approved for implementation (2026-08-27)
 - Date: 2026-08-26
 - Depends on: Phase 2 reliability closure
 - Scope: stable client/tool/provider extension boundaries without weakening the local runtime's durable state and approval guarantees
@@ -77,6 +77,20 @@ Status: **Complete.**
 
 The complete API contract, interaction model, consistency rules, verification matrix, and deferred boundaries are in the [Phase 3E1 thread browser and history restore design](2026-08-27-phase-3e1-thread-browser-history-design.md).
 
+## Phase 3E2: history search and windowed navigation
+
+Status: **Approved for implementation.**
+
+- Upgrade the local app-server contract to protocol v4 with bidirectional `thread/events` cursors and workspace-scoped `thread/search`.
+- Add a rebuildable SQLite schema v2 search projection for bounded substring matching across display-worthy durable history; JSONL remains authoritative.
+- Add explicit search input and result modes, match-centered preview, highlighted hits, and layered Escape navigation to the Ink client.
+- Add bounded older/newer history loading with arrows, PageUp/PageDown, Home, and End while retaining the normal terminal screen buffer.
+- Bound raw events, projected rows, search results, query size, snippets, response sizes, and async request concurrency.
+- Revalidate authoritative metadata and JSONL before preview or resume; never replay historical approvals, tools, or processes.
+- Verify protocol v4, index rebuild/search semantics, client paging, TUI navigation, subprocess integration, TTY behavior, and all existing reliability gates.
+
+The accepted API contract, index rules, navigation model, verification matrix, and deferred boundaries are in the [Phase 3E2 history search and windowed navigation design](2026-08-27-phase-3e2-history-search-navigation-design.md).
+
 ## Later Phase 3 slices
 
 ### Provider and context extensions after Phase 3C
@@ -91,8 +105,9 @@ The complete API contract, interaction model, consistency rules, verification ma
 
 - Maintain the completed Phase 3D Ink chat REPL on the Phase 3A application protocol.
 - Maintain the completed Phase 3E1 boundary for recent-thread selection, bounded history preview, and safe resume over app-server protocol v3.
-- In Phase 3E2, add older-history loading, infinite scrolling, full-text search, full-screen navigation, and custom scrolling.
+- Implement the approved Phase 3E2 boundary as bounded bidirectional history navigation and workspace-scoped substring search over app-server protocol v4; retain the normal terminal buffer and a disposable SQLite projection.
 - In Phase 3E3, add an explicit provider/model settings panel and intentional runtime selection changes.
+- Defer FTS5, fuzzy/relevance ranking, live search, cross-workspace search, alternate-screen navigation, and real-time subscriptions beyond Phase 3E2.
 - In Phase 3E or Phase 4, add Markdown/syntax rendering, diff and artifact viewers, range/download APIs, attachments, context-budget inspection, and instruction-change views.
 - Build IDE or desktop clients only after the local protocol client and TUI have validated the shared boundary.
 - Keep presentation state outside the agent runtime and keep approvals fail-closed on client loss.
