@@ -22,13 +22,18 @@ import {
 import type { ModelProvider } from "@koda/agent-core";
 import {
   APP_SERVER_PROTOCOL_VERSION,
+  agentEventSchema,
   threadIdSchema,
   toolCallIdSchema,
   turnIdSchema,
   type JsonValue,
 } from "@koda/protocol";
 import { ScriptedModelProvider } from "@koda/providers";
-import { ReadOnlyWorkspace } from "@koda/runtime-node";
+import {
+  ArtifactStore,
+  JsonlEventStore,
+  ReadOnlyWorkspace,
+} from "@koda/runtime-node";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { DeterministicItemIdFactory } from "./deterministic.js";
@@ -60,7 +65,7 @@ describe("KodaAppServer", () => {
     await server.handleLine("not-json");
     await request(server, 1, "thread/list", {});
     await request(server, 2, "initialize", {
-      protocolVersion: 4,
+      protocolVersion: 5,
       client: { name: "wrong-version" },
     });
     await initialize(server, 3);
@@ -82,6 +87,7 @@ describe("KodaAppServer", () => {
         threadSearch: true,
         bidirectionalThreadEvents: true,
         runtimeSettings: true,
+        artifactInspection: true,
       },
       providers: [
         { id: "openai", defaultModel: "gpt-5.6-terra", configured: true },
@@ -143,6 +149,117 @@ describe("KodaAppServer", () => {
       expectedRevision: 1,
     });
     expect(errorDataCode(writer, 5)).toBe("PROVIDER_CREDENTIAL_MISSING");
+  });
+
+  it("serves thread-authorized artifact lists and UTF-8 ranges", async () => {
+    const fixture = await createFixture();
+    const threadId = threadIdSchema.parse("server-artifact-thread");
+    const canonicalWorkspace = await realpath(fixture.workspaceRoot);
+    const store = await ArtifactStore.open(join(fixture.kodaHome, "artifacts"));
+    const materialized = await store.materializeText(
+      "server artifact 中文 content",
+      { inlineBytes: 4 },
+    );
+    if (materialized.artifact === undefined) {
+      throw new Error("Expected a published artifact.");
+    }
+    const log = new JsonlEventStore(
+      join(fixture.kodaHome, "threads", `${threadId}.jsonl`),
+    );
+    await log.append(
+      agentEventSchema.parse({
+        schemaVersion: 1,
+        sequence: 0,
+        timestamp: "2026-08-27T00:00:00.000Z",
+        threadId,
+        turnId: "server-artifact-turn",
+        type: "turn.context",
+        payload: {
+          provider: "openai",
+          model: "gpt-test",
+          workspaceRoot: canonicalWorkspace,
+          approvalMode: "on-request",
+          instructionsSha256: "0".repeat(64),
+          repositoryInstructions: [],
+        },
+      }),
+    );
+    await log.append(
+      agentEventSchema.parse({
+        schemaVersion: 1,
+        sequence: 1,
+        timestamp: "2026-08-27T00:00:00.000Z",
+        threadId,
+        turnId: "server-artifact-turn",
+        type: "artifact.recorded",
+        payload: {
+          callId: "server-artifact-call",
+          name: "read_file",
+          artifact: materialized.artifact,
+        },
+      }),
+    );
+    const writer = new MemoryProtocolWriter();
+    const server = createServer(fixture, writer);
+    await initialize(server, 1);
+    await request(server, 2, "thread/artifacts", {
+      workspace: fixture.workspaceRoot,
+      threadId,
+    });
+    expect(responseResult(writer, 2)).toMatchObject({
+      workspace: canonicalWorkspace,
+      threadId,
+      artifacts: [{ artifact: materialized.artifact }],
+      hasEarlier: false,
+    });
+    await request(server, 3, "artifact/read", {
+      workspace: fixture.workspaceRoot,
+      threadId,
+      artifactId: materialized.artifact.id,
+      afterByte: 0,
+      maxBytes: 8,
+    });
+    expect(responseResult(writer, 3)).toMatchObject({
+      artifact: materialized.artifact,
+      startByte: 0,
+      hasEarlier: false,
+      hasLater: true,
+    });
+    const escaped = await store.materializeText("\u0000".repeat(20_000), {
+      inlineBytes: 4,
+    });
+    if (escaped.artifact === undefined) {
+      throw new Error("Expected a response-budget artifact.");
+    }
+    await log.append(
+      agentEventSchema.parse({
+        schemaVersion: 1,
+        sequence: 2,
+        timestamp: "2026-08-27T00:00:00.000Z",
+        threadId,
+        turnId: "server-artifact-turn",
+        type: "artifact.recorded",
+        payload: {
+          callId: "server-budget-artifact-call",
+          name: "exec_command",
+          artifact: escaped.artifact,
+        },
+      }),
+    );
+    await request(server, 4, "artifact/read", {
+      workspace: fixture.workspaceRoot,
+      threadId,
+      artifactId: escaped.artifact.id,
+      maxBytes: 20_000,
+    });
+    expect(errorDataCode(writer, 4)).toBe("ARTIFACT_READ_RESULT_TOO_LARGE");
+    await request(server, 5, "artifact/read", {
+      workspace: fixture.workspaceRoot,
+      threadId,
+      artifactId: `sha256:${"f".repeat(64)}`,
+      maxBytes: 8,
+    });
+    expect(errorDataCode(writer, 5)).toBe("ARTIFACT_NOT_REFERENCED");
   });
 
   it("maps synchronous application failures to structured server errors", async () => {

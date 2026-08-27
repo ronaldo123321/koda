@@ -1,7 +1,8 @@
-import { createReadStream } from "node:fs";
+import { createReadStream, type Stats } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import {
   link,
+  lstat,
   mkdir,
   open,
   readdir,
@@ -24,6 +25,7 @@ export type ArtifactErrorCode =
   | "INVALID_ARTIFACT_RANGE"
   | "ARTIFACT_NOT_FOUND"
   | "ARTIFACT_CORRUPT"
+  | "ARTIFACT_MEDIA_TYPE_UNSUPPORTED"
   | "ARTIFACT_OUTPUT_LIMIT_EXCEEDED"
   | "ARTIFACT_WRITE_FAILED";
 
@@ -71,6 +73,18 @@ export interface ArtifactRange {
   truncated: boolean;
 }
 
+export interface VerifiedTextArtifactRange extends ArtifactRange {
+  artifact: ArtifactReference;
+  hasEarlier: boolean;
+  hasLater: boolean;
+}
+
+export interface VerifiedTextArtifactRangeOptions {
+  beforeByte?: number;
+  afterByte?: number;
+  maxBytes: number;
+}
+
 export interface UnavailableArtifact {
   id: ArtifactId;
   reason: "missing" | "corrupt";
@@ -102,6 +116,29 @@ export class ArtifactStore {
       (options.now ?? Date.now)(),
     );
     return store;
+  }
+
+  public static async openReadOnly(root: string): Promise<ArtifactStore> {
+    const requestedRoot = resolve(root);
+    try {
+      const canonicalRoot = await realpath(requestedRoot);
+      if (!(await stat(canonicalRoot)).isDirectory()) {
+        throw new ArtifactError(
+          "ARTIFACT_CORRUPT",
+          "Artifact store root is not a directory.",
+        );
+      }
+      return new ArtifactStore(canonicalRoot, join(canonicalRoot, "tmp"));
+    } catch (error) {
+      if (isNodeError(error, "ENOENT")) {
+        throw new ArtifactError(
+          "ARTIFACT_NOT_FOUND",
+          "Artifact store does not exist.",
+          { cause: error },
+        );
+      }
+      throw error;
+    }
   }
 
   public async materializeText(
@@ -245,6 +282,141 @@ export class ArtifactStore {
     };
   }
 
+  public async readVerifiedTextRange(
+    referenceInput: ArtifactReference,
+    options: VerifiedTextArtifactRangeOptions,
+  ): Promise<VerifiedTextArtifactRange> {
+    const reference = artifactReferenceSchema.parse(referenceInput);
+    if (
+      reference.mediaType !== "text/plain; charset=utf-8" &&
+      reference.mediaType !== "application/json"
+    ) {
+      throw new ArtifactError(
+        "ARTIFACT_MEDIA_TYPE_UNSUPPORTED",
+        `Artifact '${reference.id}' has unsupported media type '${reference.mediaType}'.`,
+      );
+    }
+    if (options.beforeByte !== undefined && options.afterByte !== undefined) {
+      throw new ArtifactError(
+        "INVALID_ARTIFACT_RANGE",
+        "Artifact beforeByte and afterByte cursors are mutually exclusive.",
+      );
+    }
+    if (
+      !Number.isSafeInteger(options.maxBytes) ||
+      options.maxBytes < 4 ||
+      options.maxBytes > 65_536
+    ) {
+      throw new ArtifactError(
+        "INVALID_ARTIFACT_RANGE",
+        "Artifact maxBytes must be a safe integer between 4 and 65536.",
+      );
+    }
+    const cursor = options.beforeByte ?? options.afterByte ?? 0;
+    if (!Number.isSafeInteger(cursor) || cursor < 0) {
+      throw new ArtifactError(
+        "INVALID_ARTIFACT_RANGE",
+        "Artifact byte cursor must be a non-negative safe integer.",
+      );
+    }
+
+    const path = this.pathForId(reference.id);
+    await this.assertRegularPath(path, reference.id);
+    let handle: FileHandle;
+    try {
+      handle = await open(path, "r");
+    } catch (error) {
+      if (isNodeError(error, "ENOENT")) {
+        throw new ArtifactError(
+          "ARTIFACT_NOT_FOUND",
+          `Artifact '${reference.id}' does not exist.`,
+          { cause: error },
+        );
+      }
+      throw error;
+    }
+    try {
+      const before = await handle.stat();
+      if (!before.isFile()) {
+        throw new ArtifactError(
+          "ARTIFACT_CORRUPT",
+          `Artifact '${reference.id}' is not a regular file.`,
+        );
+      }
+      if (before.size !== reference.bytes) {
+        throw new ArtifactError(
+          "ARTIFACT_CORRUPT",
+          `Artifact '${reference.id}' has ${before.size} bytes instead of ${reference.bytes}.`,
+        );
+      }
+      if (cursor > before.size) {
+        throw new ArtifactError(
+          "INVALID_ARTIFACT_RANGE",
+          `Artifact byte cursor ${cursor} exceeds its ${before.size}-byte size.`,
+        );
+      }
+      await assertUtf8Boundary(handle, cursor, before.size, reference.id);
+      const digest = await hashAndValidateUtf8(
+        handle,
+        before.size,
+        reference.id,
+      );
+      if (digest !== reference.sha256) {
+        throw new ArtifactError(
+          "ARTIFACT_CORRUPT",
+          `Artifact '${reference.id}' does not match its SHA-256 digest.`,
+        );
+      }
+
+      let startByte: number;
+      let endByte: number;
+      let contentBuffer: Buffer;
+      if (options.beforeByte !== undefined) {
+        endByte = options.beforeByte;
+        const requestedStart = Math.max(0, endByte - options.maxBytes);
+        const raw = await readHandleRange(
+          handle,
+          requestedStart,
+          endByte - requestedStart,
+        );
+        contentBuffer = safeUtf8Tail(raw);
+        startByte = endByte - contentBuffer.byteLength;
+      } else {
+        startByte = options.afterByte ?? 0;
+        const raw = await readHandleRange(
+          handle,
+          startByte,
+          Math.min(options.maxBytes + 3, before.size - startByte),
+        );
+        contentBuffer = safeUtf8Prefix(raw, options.maxBytes);
+        endByte = startByte + contentBuffer.byteLength;
+      }
+
+      const after = await handle.stat();
+      if (!sameFileSnapshot(before, after)) {
+        throw new ArtifactError(
+          "ARTIFACT_CORRUPT",
+          `Artifact '${reference.id}' changed while it was being read.`,
+        );
+      }
+      return {
+        id: reference.id,
+        artifact: reference,
+        content: new TextDecoder("utf-8", { fatal: true }).decode(
+          contentBuffer,
+        ),
+        startByte,
+        endByte,
+        totalBytes: before.size,
+        truncated: endByte < before.size,
+        hasEarlier: startByte > 0,
+        hasLater: endByte < before.size,
+      };
+    } finally {
+      await handle.close();
+    }
+  }
+
   public async publish(
     temporaryPath: string,
     sha256: string,
@@ -307,6 +479,30 @@ export class ArtifactStore {
         );
       }
       return fileStats;
+    } catch (error) {
+      if (error instanceof ArtifactError) {
+        throw error;
+      }
+      if (isNodeError(error, "ENOENT")) {
+        throw new ArtifactError(
+          "ARTIFACT_NOT_FOUND",
+          `Artifact '${id}' does not exist.`,
+          { cause: error },
+        );
+      }
+      throw error;
+    }
+  }
+
+  private async assertRegularPath(path: string, id: ArtifactId): Promise<void> {
+    try {
+      const pathStats = await lstat(path);
+      if (!pathStats.isFile()) {
+        throw new ArtifactError(
+          "ARTIFACT_CORRUPT",
+          `Artifact '${id}' is not a regular file.`,
+        );
+      }
     } catch (error) {
       if (error instanceof ArtifactError) {
         throw error;
@@ -573,6 +769,94 @@ function safeUtf8Tail(buffer: Buffer): Buffer {
 
 function isUtf8ContinuationByte(value: number): boolean {
   return (value & 0xc0) === 0x80;
+}
+
+async function assertUtf8Boundary(
+  handle: FileHandle,
+  offset: number,
+  totalBytes: number,
+  id: ArtifactId,
+): Promise<void> {
+  if (offset === 0 || offset === totalBytes) {
+    return;
+  }
+  const value = await readHandleRange(handle, offset, 1);
+  if (isUtf8ContinuationByte(value[0] ?? 0)) {
+    throw new ArtifactError(
+      "INVALID_ARTIFACT_RANGE",
+      `Artifact byte cursor ${offset} is not a UTF-8 character boundary for '${id}'.`,
+    );
+  }
+}
+
+async function hashAndValidateUtf8(
+  handle: FileHandle,
+  totalBytes: number,
+  id: ArtifactId,
+): Promise<string> {
+  const hash = createHash("sha256");
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  const buffer = Buffer.allocUnsafe(65_536);
+  let position = 0;
+  try {
+    while (position < totalBytes) {
+      const length = Math.min(buffer.byteLength, totalBytes - position);
+      const { bytesRead } = await handle.read(buffer, 0, length, position);
+      if (bytesRead === 0) {
+        throw new ArtifactError(
+          "ARTIFACT_CORRUPT",
+          `Artifact '${id}' ended while it was being verified.`,
+        );
+      }
+      const chunk = buffer.subarray(0, bytesRead);
+      hash.update(chunk);
+      decoder.decode(chunk, { stream: true });
+      position += bytesRead;
+    }
+    decoder.decode();
+  } catch (error) {
+    if (error instanceof ArtifactError) {
+      throw error;
+    }
+    throw new ArtifactError(
+      "ARTIFACT_CORRUPT",
+      `Artifact '${id}' is not valid UTF-8 text.`,
+      { cause: error },
+    );
+  }
+  return hash.digest("hex");
+}
+
+async function readHandleRange(
+  handle: FileHandle,
+  position: number,
+  length: number,
+): Promise<Buffer> {
+  const buffer = Buffer.alloc(length);
+  let totalRead = 0;
+  while (totalRead < length) {
+    const { bytesRead } = await handle.read(
+      buffer,
+      totalRead,
+      length - totalRead,
+      position + totalRead,
+    );
+    if (bytesRead === 0) {
+      break;
+    }
+    totalRead += bytesRead;
+  }
+  return buffer.subarray(0, totalRead);
+}
+
+function sameFileSnapshot(before: Stats, after: Stats): boolean {
+  return (
+    before.dev === after.dev &&
+    before.ino === after.ino &&
+    before.size === after.size &&
+    before.mtimeMs === after.mtimeMs &&
+    before.ctimeMs === after.ctimeMs
+  );
 }
 
 async function hashFile(path: string): Promise<string> {

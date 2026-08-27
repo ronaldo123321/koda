@@ -6,7 +6,7 @@ The project is building the control plane around a coding model: typed conversat
 
 ## Current status
 
-Phase 3E3 is implemented. It adds credential-safe workspace runtime settings for new threads to the Phase 3E2 durable-history search and navigation client, on top of the Phase 3C five-provider runtime, Phase 3B local MCP client, Phase 3A transport-neutral application layer, and the completed Phase 0 through Phase 2 runtime:
+Phase 3E4 is implemented. It adds thread-authorized artifact discovery and bounded UTF-8 inspection to the Phase 3E3 runtime-settings and durable-history client, on top of the Phase 3C five-provider runtime, Phase 3B local MCP client, Phase 3A transport-neutral application layer, and the completed Phase 0 through Phase 2 runtime:
 
 - Versioned Thread, Turn, Item, and Agent Event schemas.
 - A provider-neutral streaming model interface.
@@ -53,13 +53,15 @@ Phase 3E3 is implemented. It adds credential-safe workspace runtime settings for
 - Durable-before-notify event streaming, one-shot interactive approvals, active-turn cancellation, and graceful shutdown/EOF cleanup.
 - Credential-free app-server thread list/get/search operations, bounded bidirectional JSONL event history, and different-thread concurrency guarded by existing per-thread leases.
 - A reusable Node app-server client with strict NDJSON framing, typed JSON-RPC correlation, bounded stderr diagnostics, request timeouts, and owned child-process cleanup.
-- An Ink `koda-chat` REPL that uses app-server v5 exclusively for sequential chat, approvals, thread browsing, durable search, windowed history navigation, runtime settings, and resume.
+- An Ink `koda-chat` REPL that uses app-server v6 exclusively for sequential chat, approvals, thread browsing, durable search, windowed history navigation, runtime settings, artifact inspection, and resume.
 - Typed bidirectional `thread/events` pages over authoritative JSONL with exclusive sequence cursors, a 200-event cap, a 768 KiB result budget, and explicit corruption/oversize errors.
 - Revision-paginated `thread/search` over normalized SQLite substring projections, with 256-byte queries, eight-term AND semantics, 512-byte snippets, and an approximately 256 KiB result budget.
 - Idle-only `/threads`, `Ctrl+T`, and `/search <query>` interaction across the current canonical workspace, match-centered authoritative preview, metadata recheck before resume, and persisted provider/model adoption.
 - Bounded 400-event/200-row preview windows, 500 cached search results, terminal-resize-aware 5–30 row viewports, PageUp/PageDown/Home/End navigation, and stale-response generations.
 - Workspace-scoped provider/model preferences with revision-checked atomic persistence, corruption quarantine, credential-availability metadata, and no API-key transport or storage.
 - Idle-only `/settings` provider selection and editable model IDs, with explicit Apply, layered Escape, startup precedence, and separate current-thread versus next-new-thread configuration.
+- Thread-scoped `thread/artifacts` discovery and `artifact/read` ranges authorized by canonical workspace plus authoritative JSONL references, with ArtifactStore size, SHA-256, regular-file, and UTF-8 verification.
+- Idle-only `/artifacts`, `/artifact <id>`, and preview `a` navigation with newest-first deduplication, 16 KiB bidirectional byte pages, terminal-aware wrapping, stale-response rejection, and layered Escape.
 - Static completed transcript output plus one bounded live region, normal terminal scrollback, `/help`, `/status`, `/clear`, `/new`, `/exit`, `Esc` cancellation/navigation, and context-sensitive `Ctrl+C`.
 - Official MCP v2 client integration for explicitly configured local stdio servers, with one isolated session per turn.
 - Frozen, validated MCP tool catalogs exposed as stable `mcp__<server>__<tool>` aliases without importing MCP into `agent-core`.
@@ -67,7 +69,7 @@ Phase 3E3 is implemented. It adds credential-safe workspace runtime settings for
 - MCP call timeouts, turn cancellation, reverse-order child cleanup, bounded binary/result normalization, artifact-backed large output, and conservative interrupted-call recovery.
 - Offline provider, runtime, CLI, and deterministic agent-loop tests.
 
-Provider-assisted semantic compaction, exact provider tokenizers and pricing, custom endpoints/profiles, live model discovery, automatic routing/fallback, cross-provider resume, additional providers, FTS5/fuzzy/live or cross-workspace search, alternate-screen navigation, rich Markdown/diff/artifact views, richer patch operations, interactive process UX, and the non-Tool MCP capability surface remain later Phase 3 slices. Remote MCP/HTTP/OAuth, shared or remote artifact stores, remote app-server transports, strong sandboxing, Windows Job Objects, crash-surviving supervision, the Rust executor, and any high-risk shell-string support remain Phase 4 work. Parent/child thread lineage and multi-agent scenario matrices remain Phase 5 work. Workspace writes, process execution, and MCP tools not explicitly classified as read require approval by default.
+Provider-assisted semantic compaction, exact provider tokenizers and pricing, custom endpoints/profiles, live model discovery, automatic routing/fallback, cross-provider resume, additional providers, FTS5/fuzzy/live or cross-workspace search, alternate-screen navigation, rich Markdown/syntax/diff rendering, binary artifact views and export, richer patch operations, interactive process UX, and the non-Tool MCP capability surface remain later Phase 3 slices. Remote MCP/HTTP/OAuth, shared or remote artifact stores, remote app-server transports, strong sandboxing, Windows Job Objects, crash-surviving supervision, the Rust executor, and any high-risk shell-string support remain Phase 4 work. Parent/child thread lineage and multi-agent scenario matrices remain Phase 5 work. Workspace writes, process execution, and MCP tools not explicitly classified as read require approval by default.
 
 ## Run the CLI
 
@@ -132,7 +134,7 @@ node apps/tui/dist/main.js --cwd . --provider deepseek --model deepseek-v4-pro
 node apps/tui/dist/main.js --cwd . --provider openai --resume <thread-id>
 ```
 
-Workspace and approval mode are fixed at startup. Provider/model startup precedence is CLI argument, environment variable, matching workspace preference, then registry default. `/settings` opens the configured-provider list and model editor; Apply persists the choice for the canonical workspace without storing credentials. Existing or resumed threads keep their durable provider/model, while `/new` adopts the saved next-thread choice. Ordinary input starts a turn. `/threads` or `Ctrl+T` opens the latest 100 threads in the current canonical workspace. Press `/` there to search, or run `/search <query>` from chat. Search uses case-normalized substring AND terms across durable display-worthy history; Enter opens authoritative context and marks the hit. Arrows move one row, PageUp/PageDown move a viewport, Home/End reach history boundaries, `r` resumes, and `Esc` returns one layer. `/new` detaches locally without deleting history. `/help`, `/status`, `/clear`, and `/exit` retain their existing behavior. Press `y` or `n` for a pending approval, `d` to toggle details, and `Esc` to cancel an active turn. `Ctrl+C` cancels while a turn is active and exits while idle. The client requires a TTY; scripts should continue to use `koda run` or the stdio app-server.
+Workspace and approval mode are fixed at startup. Provider/model startup precedence is CLI argument, environment variable, matching workspace preference, then registry default. `/settings` opens the configured-provider list and model editor; Apply persists the choice for the canonical workspace without storing credentials. Existing or resumed threads keep their durable provider/model, while `/new` adopts the saved next-thread choice. Ordinary input starts a turn. `/threads` or `Ctrl+T` opens the latest 100 threads in the current canonical workspace. Press `/` there to search, or run `/search <query>` from chat. Search uses case-normalized substring AND terms across durable display-worthy history; Enter opens authoritative context and marks the hit. `/artifacts` lists UTF-8 text/JSON artifacts referenced by the current thread, `/artifact <sha256:...>` opens a known referenced ID, and `a` opens artifacts from a thread preview without resuming it. Artifact PageUp/PageDown requests adjacent verified byte ranges; Home/End reaches content boundaries. Arrows move one row, `r` resumes a thread preview, and `Esc` returns one layer. `/new` detaches locally without deleting history. `/help`, `/status`, `/clear`, and `/exit` retain their existing behavior. Press `y` or `n` for a pending approval, `d` to toggle details, and `Esc` to cancel an active turn. `Ctrl+C` cancels while a turn is active and exits while idle. The client requires a TTY; scripts should continue to use `koda run` or the stdio app-server.
 
 Workspace preferences are stored under `${KODA_HOME:-$HOME/.koda}/settings/workspaces/` as bounded, versioned files keyed by the canonical workspace hash. API-key values stay only in the app-server environment; the protocol exposes only whether each named credential is configured.
 
@@ -148,15 +150,17 @@ OPENAI_API_KEY=... node apps/app-server/dist/main.js
 The process accepts one JSON-RPC 2.0 object per UTF-8 line. `initialize` must be the first request:
 
 ```json
-{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":5,"client":{"name":"my-koda-client","version":"0.1.0"}}}
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":6,"client":{"name":"my-koda-client","version":"0.1.0"}}}
 {"jsonrpc":"2.0","id":2,"method":"turn/start","params":{"prompt":"explain this repository","cwd":".","provider":"openai"}}
 {"jsonrpc":"2.0","id":3,"method":"thread/events","params":{"threadId":"<thread-id>","limit":200}}
 {"jsonrpc":"2.0","id":4,"method":"thread/search","params":{"workspace":".","query":"parser failure","limit":50}}
 {"jsonrpc":"2.0","id":5,"method":"settings/get","params":{"workspace":"."}}
 {"jsonrpc":"2.0","id":6,"method":"settings/update","params":{"workspace":".","provider":"deepseek","model":"deepseek-v4-pro","expectedRevision":0}}
+{"jsonrpc":"2.0","id":7,"method":"thread/artifacts","params":{"workspace":".","threadId":"<thread-id>","limit":100}}
+{"jsonrpc":"2.0","id":8,"method":"artifact/read","params":{"workspace":".","threadId":"<thread-id>","artifactId":"sha256:<64-lowercase-hex>","maxBytes":16384}}
 ```
 
-The v5 initialize result advertises `threadEvents`, `bidirectionalThreadEvents`, `threadSearch`, and `runtimeSettings` plus the supported providers, credential environment-variable names, default models, and runtime-only availability booleans. `thread/events` returns validated events chronologically; mutually exclusive `beforeSequence` and `afterSequence` are exclusive cursors and `limit` is 1–200. `thread/search` is restricted to the canonical workspace and returns revision-bound cursor pages. `settings/get` returns the canonical workspace preference and revision; `settings/update` requires that revision so concurrent writers cannot silently overwrite one another. Responses and `turn/event` / `turn/finished` notifications use stdout exclusively; diagnostics use stderr. Clients answer an `approval.requested` event with `approval/resolve`, may stop a live turn with `turn/cancel`, and should finish with `shutdown`. Provider credentials are server configuration and are never protocol fields.
+The v6 initialize result advertises `threadEvents`, `bidirectionalThreadEvents`, `threadSearch`, `runtimeSettings`, and `artifactInspection` plus the supported providers, credential environment-variable names, default models, and runtime-only availability booleans. `thread/events` returns validated events chronologically; mutually exclusive `beforeSequence` and `afterSequence` are exclusive cursors and `limit` is 1–200. `thread/search` is restricted to the canonical workspace and returns revision-bound cursor pages. `settings/get` returns the canonical workspace preference and revision; `settings/update` requires that revision so concurrent writers cannot silently overwrite one another. `thread/artifacts` lists newest unique references only after canonical-workspace and strict-JSONL authorization. `artifact/read` additionally requires that exact thread reference and returns a bounded, integrity-verified UTF-8 range with mutually exclusive `beforeByte`/`afterByte` cursors. Responses and `turn/event` / `turn/finished` notifications use stdout exclusively; diagnostics use stderr. Clients answer an `approval.requested` event with `approval/resolve`, may stop a live turn with `turn/cancel`, and should finish with `shutdown`. Provider credentials are server configuration and are never protocol fields.
 
 ## Configure local MCP tools
 
@@ -196,7 +200,7 @@ GC derives reachability from every valid JSONL event rather than SQLite. It refu
 
 Resume reads and validates the local JSONL log, rebuilds provider-neutral history, and projects it through the thread's selected provider. A legacy log without a context snapshot, a provider or workspace mismatch, a busy thread, or an invalid log fails closed. If the prior process stopped during a tool call, Koda reports the durable effect and process evidence it has and does not execute the call again automatically. It never sends a signal using only a PID recovered from an earlier process because operating systems can reuse PIDs.
 
-Oversized tool text keeps a bounded head/tail excerpt in the transcript and stores the complete captured bytes under `KODA_HOME/artifacts/sha256`. Artifact references are content-addressed and deduplicated. The model can call `read_artifact` with an ID, byte offset, and range size; missing or corrupt blobs are reported explicitly when a thread resumes. Koda removes stale temporary captures automatically and reclaims published blobs only through explicit reference-aware garbage collection.
+Oversized tool text keeps a bounded head/tail excerpt in the transcript and stores the complete captured bytes under `KODA_HOME/artifacts/sha256`. Artifact references are content-addressed and deduplicated. The model can call `read_artifact` with an ID, byte offset, and range size; the TUI can inspect only text artifacts authorized by the current or previewed thread's JSONL. Missing or corrupt blobs are reported explicitly rather than repaired silently. Koda removes stale temporary captures automatically and reclaims published blobs only through explicit reference-aware garbage collection.
 
 Before every model request, Koda budgets base instructions, scoped repository guidance, tool schemas, and the active transcript. The defaults are a 128,000-token context window, a 16,384-token output reserve, and an 8,192-token safety margin. Override the first two with `KODA_CONTEXT_WINDOW_TOKENS` and `KODA_MAX_OUTPUT_TOKENS`. When history no longer fits, Koda appends a structured compaction record to JSONL, preserves the newest coherent suffix, and rebuilds the same model-facing view after restart without deleting original events.
 
@@ -263,5 +267,7 @@ pnpm eval:scenarios
 - [Phase 3D Ink chat REPL design](docs/plans/2026-08-26-phase-3d-ink-chat-repl-design.md)
 - [Phase 3E1 thread browser and history restore design](docs/plans/2026-08-27-phase-3e1-thread-browser-history-design.md)
 - [Phase 3E2 history search and windowed navigation design](docs/plans/2026-08-27-phase-3e2-history-search-navigation-design.md)
+- [Phase 3E3 workspace runtime settings design](docs/plans/2026-08-27-phase-3e3-runtime-settings-design.md)
+- [Phase 3E4 thread-scoped artifact inspection design](docs/plans/2026-08-27-phase-3e4-artifact-inspection-design.md)
 
 The model can propose actions, but the Koda runtime owns validation, policy, approval, and execution. User interfaces consume typed events and do not own agent state.

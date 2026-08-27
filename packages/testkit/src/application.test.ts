@@ -18,13 +18,19 @@ import type { ModelProvider } from "@koda/agent-core";
 import {
   THREAD_EVENTS_RESULT_BUDGET_BYTES,
   agentEventSchema,
+  artifactIdSchema,
   threadIdSchema,
+  toolCallIdSchema,
   turnIdSchema,
   type AgentEvent,
   type ThreadId,
 } from "@koda/protocol";
 import { ScriptedModelProvider } from "@koda/providers";
-import { JsonlEventStore, ReadOnlyWorkspace } from "@koda/runtime-node";
+import {
+  ArtifactStore,
+  JsonlEventStore,
+  ReadOnlyWorkspace,
+} from "@koda/runtime-node";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { DeterministicItemIdFactory } from "./deterministic.js";
@@ -300,6 +306,196 @@ describe("KodaApplication", () => {
         afterSequence: 1,
       }),
     ).rejects.toMatchObject({ code: "INVALID_THREAD_EVENT_CURSOR" });
+  });
+
+  it("authorizes thread-scoped artifact discovery and verified reads", async () => {
+    const fixture = await createFixture();
+    const threadId = threadIdSchema.parse("artifact-application-thread");
+    const canonicalWorkspace = await realpath(fixture.workspaceRoot);
+    const artifactStore = await ArtifactStore.open(
+      join(fixture.kodaHome, "artifacts"),
+    );
+    const first = await artifactStore.materializeText(
+      "first artifact 中文 content",
+      { inlineBytes: 4 },
+    );
+    const second = await artifactStore.materializeText(
+      '{"second":"artifact content"}',
+      { inlineBytes: 4, mediaType: "application/json" },
+    );
+    const unsupported = await artifactStore.materializeText("binary artifact", {
+      inlineBytes: 4,
+      mediaType: "application/octet-stream",
+    });
+    if (
+      first.artifact === undefined ||
+      second.artifact === undefined ||
+      unsupported.artifact === undefined
+    ) {
+      throw new Error("Expected published artifacts.");
+    }
+    const log = new JsonlEventStore(
+      join(fixture.kodaHome, "threads", `${threadId}.jsonl`),
+    );
+    await log.append(
+      agentEventSchema.parse({
+        schemaVersion: 1,
+        sequence: 0,
+        timestamp: "2026-08-27T00:00:00.000Z",
+        threadId,
+        turnId: "artifact-turn",
+        type: "turn.context",
+        payload: {
+          provider: "openai",
+          model: "gpt-test",
+          workspaceRoot: canonicalWorkspace,
+          approvalMode: "on-request",
+          instructionsSha256: "0".repeat(64),
+          repositoryInstructions: [],
+        },
+      }),
+    );
+    for (const [sequence, artifact, name] of [
+      [1, first.artifact, "read_file"],
+      [2, first.artifact, "read_file_again"],
+      [3, second.artifact, "mcp_result"],
+    ] as const) {
+      await log.append(
+        agentEventSchema.parse({
+          schemaVersion: 1,
+          sequence,
+          timestamp: "2026-08-27T00:00:00.000Z",
+          threadId,
+          turnId: "artifact-turn",
+          type: "artifact.recorded",
+          payload: {
+            callId: toolCallIdSchema.parse(`artifact-call-${sequence}`),
+            name,
+            artifact,
+          },
+        }),
+      );
+    }
+    const application = new KodaApplication({
+      environment: { KODA_HOME: fixture.kodaHome },
+      processDirectory: fixture.root,
+    });
+
+    const latest = await application.listThreadArtifacts({
+      workspace: fixture.workspaceRoot,
+      threadId,
+      limit: 1,
+    });
+    expect(latest).toMatchObject({
+      workspace: canonicalWorkspace,
+      artifacts: [{ sequence: 3, artifact: second.artifact }],
+      hasEarlier: true,
+      nextBeforeSequence: 3,
+    });
+    const earlier = await application.listThreadArtifacts({
+      workspace: fixture.workspaceRoot,
+      threadId,
+      beforeSequence: latest.nextBeforeSequence,
+      limit: 10,
+    });
+    expect(earlier.artifacts).toEqual([
+      expect.objectContaining({ sequence: 2, artifact: first.artifact }),
+    ]);
+    expect(earlier.hasEarlier).toBe(false);
+
+    await expect(
+      application.readArtifact({
+        workspace: fixture.workspaceRoot,
+        threadId,
+        artifactId: first.artifact.id,
+        afterByte: 0,
+        maxBytes: 8,
+      }),
+    ).resolves.toMatchObject({
+      workspace: canonicalWorkspace,
+      threadId,
+      artifact: first.artifact,
+      startByte: 0,
+      hasEarlier: false,
+      hasLater: true,
+    });
+    await expect(
+      application.readArtifact({
+        workspace: fixture.workspaceRoot,
+        threadId,
+        artifactId: artifactIdSchema.parse(`sha256:${"f".repeat(64)}`),
+        maxBytes: 8,
+      }),
+    ).rejects.toMatchObject({ code: "ARTIFACT_NOT_REFERENCED" });
+    const otherWorkspace = join(fixture.root, "other");
+    await mkdir(otherWorkspace);
+    await expect(
+      application.listThreadArtifacts({
+        workspace: otherWorkspace,
+        threadId,
+      }),
+    ).rejects.toMatchObject({ code: "THREAD_WORKSPACE_MISMATCH" });
+
+    await log.append(
+      agentEventSchema.parse({
+        schemaVersion: 1,
+        sequence: 4,
+        timestamp: "2026-08-27T00:00:00.000Z",
+        threadId,
+        turnId: "artifact-turn",
+        type: "artifact.recorded",
+        payload: {
+          callId: "artifact-call-4",
+          name: "binary_result",
+          artifact: unsupported.artifact,
+        },
+      }),
+    );
+    await expect(
+      application.readArtifact({
+        workspace: fixture.workspaceRoot,
+        threadId,
+        artifactId: unsupported.artifact.id,
+        maxBytes: 8,
+      }),
+    ).rejects.toMatchObject({ code: "ARTIFACT_MEDIA_TYPE_UNSUPPORTED" });
+
+    await rm(
+      join(
+        fixture.kodaHome,
+        "artifacts",
+        "sha256",
+        first.artifact.sha256.slice(0, 2),
+        first.artifact.sha256,
+      ),
+    );
+    await expect(
+      application.readArtifact({
+        workspace: fixture.workspaceRoot,
+        threadId,
+        artifactId: first.artifact.id,
+        maxBytes: 8,
+      }),
+    ).rejects.toMatchObject({ code: "ARTIFACT_NOT_FOUND" });
+
+    await writeFile(
+      join(
+        fixture.kodaHome,
+        "artifacts",
+        "sha256",
+        second.artifact.sha256.slice(0, 2),
+        second.artifact.sha256,
+      ),
+      "x".repeat(second.artifact.bytes),
+    );
+    await expect(
+      application.readArtifact({
+        workspace: fixture.workspaceRoot,
+        threadId,
+        artifactId: second.artifact.id,
+        maxBytes: 8,
+      }),
+    ).rejects.toMatchObject({ code: "ARTIFACT_CORRUPT" });
   });
 
   it("bounds history pages without truncating durable events", async () => {

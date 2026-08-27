@@ -5,6 +5,7 @@ import type {
 import {
   APP_SERVER_PROTOCOL_VERSION,
   agentEventSchema,
+  artifactReferenceSchema,
   initializeResultSchema,
   threadIdSchema,
   threadMetadataSchema,
@@ -13,6 +14,8 @@ import {
   turnIdSchema,
   type ApprovalResolveParams,
   type ApprovalResolveResult,
+  type ArtifactReadParams,
+  type ArtifactReadResult,
   type InitializeResult,
   type SettingsGetParams,
   type SettingsGetResult,
@@ -20,6 +23,8 @@ import {
   type SettingsUpdateResult,
   type ThreadGetParams,
   type ThreadGetResult,
+  type ThreadArtifactsParams,
+  type ThreadArtifactsResult,
   type ThreadEventsParams,
   type ThreadEventsResult,
   type ThreadListParams,
@@ -791,6 +796,166 @@ describe("TuiController", () => {
     });
   });
 
+  it("browses a current thread's artifacts and pages UTF-8 byte ranges by layer", async () => {
+    const client = new FakeAppServerClient();
+    const artifact = textArtifact("a", 8);
+    client.threadArtifactsResult = {
+      workspace: "/workspace",
+      threadId: threadIdSchema.parse("tui-thread"),
+      artifacts: [artifactDescriptor(12, artifact)],
+      hasEarlier: false,
+    };
+    client.artifactReadImplementation = (params) => {
+      if (params.afterByte === 6) {
+        return Promise.resolve(artifactPage(artifact, "ok", 6, 8));
+      }
+      return Promise.resolve(artifactPage(artifact, "你好", 0, 6));
+    };
+    const controller = createController(client);
+    await controller.startPrompt("Create artifact thread");
+    client.finish("completed");
+
+    controller.setInput("/artifacts");
+    await controller.submitInput();
+    expect(controller.getSnapshot()).toMatchObject({
+      mode: "artifact_list",
+      artifactNavigation: {
+        origin: "chat",
+        threadId: "tui-thread",
+        list: { selectedIndex: 0, artifacts: [{ sequence: 12 }] },
+      },
+    });
+    expect(client.threadArtifactRequests).toEqual([
+      { workspace: "/workspace", threadId: "tui-thread" },
+    ]);
+
+    await controller.openSelectedArtifact();
+    expect(controller.getSnapshot()).toMatchObject({
+      mode: "artifact_view",
+      artifactNavigation: {
+        view: {
+          page: { content: "你好", startByte: 0, endByte: 6 },
+        },
+      },
+    });
+    await controller.scrollArtifact("page_down");
+    expect(
+      controller.getSnapshot().artifactNavigation?.view?.page,
+    ).toMatchObject({ content: "ok", startByte: 6, endByte: 8 });
+    await controller.scrollArtifact("page_up");
+    expect(
+      controller.getSnapshot().artifactNavigation?.view?.page,
+    ).toMatchObject({ content: "你好", startByte: 0, endByte: 6 });
+    expect(client.artifactReadRequests).toEqual([
+      expect.objectContaining({ artifactId: artifact.id, maxBytes: 16_384 }),
+      expect.objectContaining({
+        artifactId: artifact.id,
+        afterByte: 6,
+        maxBytes: 16_384,
+      }),
+      expect.objectContaining({
+        artifactId: artifact.id,
+        beforeByte: 6,
+        maxBytes: 16_384,
+      }),
+    ]);
+
+    controller.closeArtifactLevel();
+    expect(controller.getSnapshot().mode).toBe("artifact_list");
+    controller.closeArtifactLevel();
+    expect(controller.getSnapshot()).toMatchObject({
+      mode: "chat",
+      artifactNavigation: undefined,
+      threadId: "tui-thread",
+    });
+  });
+
+  it("opens direct and preview-scoped artifacts without accepting an invalid ID", async () => {
+    const client = new FakeAppServerClient();
+    const artifact = textArtifact("b", 2);
+    client.artifactReadResult = artifactPage(artifact, "ok", 0, 2);
+    const controller = createController(client);
+    await controller.startPrompt("Create current thread");
+    client.finish("completed");
+
+    controller.setInput("/artifact SHA256:not-valid");
+    await controller.submitInput();
+    expect(controller.getSnapshot().notice).toContain("64 lowercase");
+    expect(client.artifactReadRequests).toEqual([]);
+
+    controller.setInput(`/artifact ${artifact.id}`);
+    await controller.submitInput();
+    expect(controller.getSnapshot()).toMatchObject({
+      mode: "artifact_view",
+      artifactNavigation: { origin: "chat", threadId: "tui-thread" },
+    });
+    controller.closeArtifactLevel();
+
+    const previewed = threadMetadata(
+      "preview-artifacts",
+      "completed",
+      "openai",
+      "gpt-5.6-terra",
+    );
+    client.threadListResult = { threads: [previewed], diagnostics: [] };
+    client.threadEventsResult = {
+      events: [],
+      hasEarlier: false,
+      hasLater: false,
+    };
+    client.threadArtifactsResult = {
+      workspace: "/workspace",
+      threadId: previewed.threadId,
+      artifacts: [artifactDescriptor(4, artifact)],
+      hasEarlier: false,
+    };
+    await controller.openThreadBrowser();
+    await controller.previewSelectedThread();
+    await controller.openPreviewArtifacts();
+    expect(controller.getSnapshot()).toMatchObject({
+      mode: "artifact_list",
+      artifactNavigation: {
+        origin: "thread_preview",
+        threadId: "preview-artifacts",
+      },
+    });
+    controller.closeArtifactLevel();
+    expect(controller.getSnapshot()).toMatchObject({
+      mode: "thread_preview",
+      artifactNavigation: undefined,
+    });
+  });
+
+  it("ignores a late artifact response after Escape restores the list", async () => {
+    const client = new FakeAppServerClient();
+    const artifact = textArtifact("c", 2);
+    client.threadArtifactsResult = {
+      workspace: "/workspace",
+      threadId: threadIdSchema.parse("tui-thread"),
+      artifacts: [artifactDescriptor(2, artifact)],
+      hasEarlier: false,
+    };
+    let release: ((result: ArtifactReadResult) => void) | undefined;
+    client.artifactReadImplementation = () =>
+      new Promise<ArtifactReadResult>((resolve) => {
+        release = resolve;
+      });
+    const controller = createController(client);
+    await controller.startPrompt("Create artifact thread");
+    client.finish("completed");
+    await controller.openCurrentThreadArtifacts();
+
+    const opening = controller.openSelectedArtifact();
+    await Promise.resolve();
+    expect(controller.getSnapshot().mode).toBe("artifact_view");
+    controller.closeArtifactLevel();
+    expect(controller.getSnapshot().mode).toBe("artifact_list");
+    release?.(artifactPage(artifact, "ok", 0, 2));
+    await opening;
+    expect(controller.getSnapshot().mode).toBe("artifact_list");
+    expect(controller.getSnapshot().artifactNavigation?.view).toBeUndefined();
+  });
+
   it("keeps a query when a revision-bound search continuation expires", async () => {
     const client = new FakeAppServerClient();
     const matches = Array.from({ length: 100 }, (_, index) =>
@@ -941,6 +1106,7 @@ class FakeAppServerClient implements AppServerClientApi {
         threadSearch: true,
         bidirectionalThreadEvents: true,
         runtimeSettings: true,
+        artifactInspection: true,
       },
       providers: [
         provider("openai", "OpenAI", "OPENAI_API_KEY", "gpt-5.6-terra"),
@@ -964,6 +1130,8 @@ class FakeAppServerClient implements AppServerClientApi {
   public readonly threadSearchRequests: ThreadSearchParams[] = [];
   public readonly settingsGetRequests: SettingsGetParams[] = [];
   public readonly settingsUpdateRequests: SettingsUpdateParams[] = [];
+  public readonly threadArtifactRequests: ThreadArtifactsParams[] = [];
+  public readonly artifactReadRequests: ArtifactReadParams[] = [];
   public threadListResult: ThreadListResult = { threads: [], diagnostics: [] };
   public threadGetResult: ThreadGetResult | undefined;
   public threadEventsResult: ThreadEventsResult = {
@@ -983,6 +1151,13 @@ class FakeAppServerClient implements AppServerClientApi {
     diagnostics: [],
   };
   public settingsUpdateResult: SettingsUpdateResult | undefined;
+  public threadArtifactsResult: ThreadArtifactsResult = {
+    workspace: "/workspace",
+    threadId: threadIdSchema.parse("tui-thread"),
+    artifacts: [],
+    hasEarlier: false,
+  };
+  public artifactReadResult: ArtifactReadResult | undefined;
   public threadListError: Error | undefined;
   public threadEventsError: Error | undefined;
   public threadSearchError: Error | undefined;
@@ -995,6 +1170,8 @@ class FakeAppServerClient implements AppServerClientApi {
   public settingsUpdateImplementation:
     | ((params: SettingsUpdateParams) => Promise<SettingsUpdateResult>)
     | undefined;
+  public artifactReadImplementation:
+    ((params: ArtifactReadParams) => Promise<ArtifactReadResult>) | undefined;
   public diagnosticText = "";
   public beforeStartResult: (() => void) | undefined;
   public startImplementation:
@@ -1032,6 +1209,24 @@ class FakeAppServerClient implements AppServerClientApi {
       return Promise.reject(this.threadEventsError);
     }
     return Promise.resolve(this.threadEventsResult);
+  }
+
+  public listThreadArtifacts(
+    params: ThreadArtifactsParams,
+  ): Promise<ThreadArtifactsResult> {
+    this.threadArtifactRequests.push(params);
+    return Promise.resolve(this.threadArtifactsResult);
+  }
+
+  public readArtifact(params: ArtifactReadParams): Promise<ArtifactReadResult> {
+    this.artifactReadRequests.push(params);
+    if (this.artifactReadImplementation !== undefined) {
+      return this.artifactReadImplementation(params);
+    }
+    if (this.artifactReadResult === undefined) {
+      return Promise.reject(new Error("Artifact fixture is unavailable."));
+    }
+    return Promise.resolve(this.artifactReadResult);
   }
 
   public searchThreads(
@@ -1218,6 +1413,48 @@ function recordedItemEvent(sequence: number, threadId: string, item: unknown) {
     type: "item.recorded",
     payload: { item },
   });
+}
+
+function textArtifact(hashCharacter: string, bytes: number) {
+  const sha256 = hashCharacter.repeat(64);
+  return artifactReferenceSchema.parse({
+    type: "artifact",
+    id: `sha256:${sha256}`,
+    sha256,
+    bytes,
+    mediaType: "text/plain; charset=utf-8",
+  });
+}
+
+function artifactDescriptor(
+  sequence: number,
+  artifact: ReturnType<typeof textArtifact>,
+) {
+  return {
+    sequence,
+    callId: toolCallIdSchema.parse(`artifact-call-${sequence}`),
+    name: "read_file",
+    artifact,
+  };
+}
+
+function artifactPage(
+  artifact: ReturnType<typeof textArtifact>,
+  content: string,
+  startByte: number,
+  endByte: number,
+): ArtifactReadResult {
+  return {
+    workspace: "/workspace",
+    threadId: threadIdSchema.parse("tui-thread"),
+    artifact,
+    content,
+    startByte,
+    endByte,
+    totalBytes: artifact.bytes,
+    hasEarlier: startByte > 0,
+    hasLater: endByte < artifact.bytes,
+  };
 }
 
 function searchMatch(

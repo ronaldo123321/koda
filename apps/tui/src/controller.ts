@@ -3,14 +3,21 @@ import type {
   AppServerNotification,
 } from "@koda/app-server-client-node";
 import {
+  ARTIFACT_READ_DEFAULT_BYTES,
   RUNTIME_SETTINGS_MODEL_BUDGET_BYTES,
+  artifactIdSchema,
   modelProviderIdSchema,
   runtimeSettingsModelSchema,
+  threadIdSchema,
   type AgentEvent,
+  type ArtifactId,
+  type ArtifactReadResult,
   type ModelProviderId,
   type RuntimePreference,
   type RuntimeProviderMetadata,
   type ThreadMetadataMessage,
+  type ThreadArtifactDescriptor,
+  type ThreadId,
   type ThreadSearchCursor,
   type ThreadSearchMatch,
   type TokenUsage,
@@ -29,12 +36,17 @@ const THREAD_SEARCH_PAGE_LIMIT = 100;
 const DEFAULT_VIEWPORT_HEIGHT = 12;
 const MINIMUM_VIEWPORT_HEIGHT = 5;
 const MAXIMUM_VIEWPORT_HEIGHT = 30;
+const DEFAULT_VIEWPORT_WIDTH = 80;
+const MINIMUM_VIEWPORT_WIDTH = 20;
+const MAXIMUM_VIEWPORT_WIDTH = 240;
 
 export type TuiConnectionStatus = "ready" | "closing" | "closed" | "error";
 export type TuiMode =
   | "chat"
   | "settings_provider"
   | "settings_model"
+  | "artifact_list"
+  | "artifact_view"
   | "thread_list"
   | "thread_search_input"
   | "thread_search_results"
@@ -83,6 +95,32 @@ export interface TuiRuntimeSettingsState {
   draftModels: Partial<Record<ModelProviderId, string>>;
   persistedPreference?: RuntimePreference;
   loading: boolean;
+}
+
+export interface TuiArtifactListState {
+  artifacts: readonly ThreadArtifactDescriptor[];
+  selectedIndex: number;
+  scrollOffset: number;
+  currentCursor: number | null;
+  newerCursors: readonly (number | null)[];
+  hasEarlier: boolean;
+  nextBeforeSequence?: number;
+}
+
+export interface TuiArtifactViewState {
+  page: ArtifactReadResult;
+  rows: readonly string[];
+  scrollOffset: number;
+}
+
+export interface TuiArtifactNavigationState {
+  origin: "chat" | "thread_preview";
+  threadId: ThreadId;
+  list?: TuiArtifactListState;
+  view?: TuiArtifactViewState;
+  loading: boolean;
+  viewportHeight: number;
+  viewportWidth: number;
 }
 
 export interface TuiTranscriptEntry {
@@ -175,6 +213,7 @@ export interface TuiState {
   notice: string | undefined;
   threadBrowser: TuiThreadBrowserState | undefined;
   runtimeSettings: TuiRuntimeSettingsState | undefined;
+  artifactNavigation: TuiArtifactNavigationState | undefined;
 }
 
 export type TuiSubmitResult = "handled" | "exit";
@@ -188,6 +227,8 @@ export class TuiController {
   private nextLocalTurnId = 1;
   private navigationGeneration = 0;
   private navigationBusy = false;
+  private viewportHeight = DEFAULT_VIEWPORT_HEIGHT;
+  private viewportWidth = DEFAULT_VIEWPORT_WIDTH;
   private preferenceRevision: number;
   private persistedPreference: RuntimePreference | undefined;
   private cancelPromise: Promise<void> | undefined;
@@ -231,6 +272,7 @@ export class TuiController {
       notice: configuration.initialNotice,
       threadBrowser: undefined,
       runtimeSettings: undefined,
+      artifactNavigation: undefined,
     };
     this.unsubscribeNotification = client.onNotification((notification) => {
       this.receiveNotification(notification);
@@ -277,6 +319,10 @@ export class TuiController {
       await this.openThreadSearch(input.slice("/search ".length), "chat");
       return "handled";
     }
+    if (input === "/artifact" || input.startsWith("/artifact ")) {
+      await this.openDirectArtifact(input.slice("/artifact".length));
+      return "handled";
+    }
     switch (input) {
       case "/help":
         this.appendTranscript(
@@ -288,6 +334,8 @@ export class TuiController {
             "/threads — browse threads in this workspace",
             "/search <query> — search durable history in this workspace",
             "/settings — choose provider/model for the next new thread",
+            "/artifacts — browse artifacts referenced by this thread",
+            "/artifact <id> — open a referenced text artifact",
             "/new — detach so the next prompt creates a thread",
             "/exit — shut down Koda",
             "Ctrl+T — open the thread browser",
@@ -307,6 +355,9 @@ export class TuiController {
         return "handled";
       case "/settings":
         await this.openRuntimeSettings();
+        return "handled";
+      case "/artifacts":
+        await this.openCurrentThreadArtifacts();
         return "handled";
       case "/new":
         this.detachThread();
@@ -779,6 +830,507 @@ export class TuiController {
         notice: undefined,
       });
     }
+  }
+
+  public async openCurrentThreadArtifacts(): Promise<void> {
+    if (!this.canEditInput() || this.navigationBusy) {
+      this.update({ notice: "Artifacts are available only while idle." });
+      return;
+    }
+    if (this.state.threadId === undefined) {
+      this.update({
+        notice: "No current thread has referenced an artifact yet.",
+      });
+      return;
+    }
+    await this.openArtifactList("chat", this.state.threadId);
+  }
+
+  public async openPreviewArtifacts(): Promise<void> {
+    const preview = this.state.threadBrowser?.preview;
+    if (
+      this.state.mode !== "thread_preview" ||
+      preview === undefined ||
+      this.navigationBusy
+    ) {
+      return;
+    }
+    await this.openArtifactList("thread_preview", preview.thread.threadId);
+  }
+
+  public selectArtifact(offset: -1 | 1): void {
+    const navigation = this.state.artifactNavigation;
+    const list = navigation?.list;
+    if (
+      this.state.mode !== "artifact_list" ||
+      navigation === undefined ||
+      list === undefined ||
+      navigation.loading ||
+      list.artifacts.length === 0
+    ) {
+      return;
+    }
+    const selectedIndex = Math.min(
+      list.artifacts.length - 1,
+      Math.max(0, list.selectedIndex + offset),
+    );
+    this.update({
+      artifactNavigation: {
+        ...navigation,
+        list: {
+          ...list,
+          selectedIndex,
+          scrollOffset: keepSelectionVisible(
+            selectedIndex,
+            list.scrollOffset,
+            navigation.viewportHeight,
+            list.artifacts.length,
+          ),
+        },
+      },
+      notice: undefined,
+    });
+  }
+
+  public async pageArtifactList(
+    action: "newer" | "older" | "home" | "end",
+  ): Promise<void> {
+    const navigation = this.state.artifactNavigation;
+    const list = navigation?.list;
+    if (
+      this.state.mode !== "artifact_list" ||
+      navigation === undefined ||
+      list === undefined ||
+      navigation.loading ||
+      this.navigationBusy
+    ) {
+      return;
+    }
+    if (
+      (action === "older" &&
+        (!list.hasEarlier || list.nextBeforeSequence === undefined)) ||
+      (action === "newer" && list.newerCursors.length === 0) ||
+      (action === "home" && list.currentCursor === null) ||
+      (action === "end" && !list.hasEarlier)
+    ) {
+      return;
+    }
+
+    const generation = this.beginNavigation();
+    this.navigationBusy = true;
+    this.update({
+      artifactNavigation: { ...navigation, loading: true },
+      notice: "Loading artifact list…",
+    });
+    try {
+      let cursor = list.currentCursor;
+      let newerCursors = [...list.newerCursors];
+      let result;
+      if (action === "newer") {
+        cursor = newerCursors.at(-1) ?? null;
+        newerCursors = newerCursors.slice(0, -1);
+        result = await this.fetchArtifactList(navigation.threadId, cursor);
+      } else if (action === "home") {
+        cursor = null;
+        newerCursors = [];
+        result = await this.fetchArtifactList(navigation.threadId, cursor);
+      } else {
+        let hasEarlier = list.hasEarlier;
+        let nextBeforeSequence = list.nextBeforeSequence;
+        result = {
+          artifacts: list.artifacts,
+          hasEarlier,
+          ...(nextBeforeSequence === undefined ? {} : { nextBeforeSequence }),
+        };
+        do {
+          if (nextBeforeSequence === undefined) {
+            break;
+          }
+          newerCursors.push(cursor);
+          cursor = nextBeforeSequence;
+          result = await this.fetchArtifactList(navigation.threadId, cursor);
+          if (!this.isCurrentNavigation(generation)) {
+            return;
+          }
+          hasEarlier = result.hasEarlier;
+          nextBeforeSequence = result.nextBeforeSequence;
+        } while (action === "end" && hasEarlier);
+      }
+      if (
+        !this.isCurrentNavigation(generation) ||
+        this.state.mode !== "artifact_list"
+      ) {
+        return;
+      }
+      const current = this.state.artifactNavigation;
+      if (current === undefined) {
+        return;
+      }
+      this.update({
+        artifactNavigation: {
+          ...current,
+          loading: false,
+          list: artifactListState(
+            result,
+            cursor,
+            newerCursors,
+            current.viewportHeight,
+          ),
+        },
+        notice:
+          result.artifacts.length === 0
+            ? "No artifacts on this page."
+            : undefined,
+      });
+    } catch (error) {
+      const current = this.state.artifactNavigation;
+      if (
+        this.isCurrentNavigation(generation) &&
+        current !== undefined &&
+        this.state.mode === "artifact_list"
+      ) {
+        this.update({
+          artifactNavigation: { ...current, loading: false },
+          notice: `Could not load artifact list: ${errorMessage(error)}`,
+        });
+      }
+    } finally {
+      if (this.isCurrentNavigation(generation)) {
+        this.navigationBusy = false;
+      }
+    }
+  }
+
+  public async openSelectedArtifact(): Promise<void> {
+    const navigation = this.state.artifactNavigation;
+    const list = navigation?.list;
+    const selected = list?.artifacts[list.selectedIndex];
+    if (
+      this.state.mode !== "artifact_list" ||
+      navigation === undefined ||
+      list === undefined ||
+      selected === undefined ||
+      navigation.loading ||
+      this.navigationBusy
+    ) {
+      return;
+    }
+    await this.openArtifactView(navigation, selected.artifact.id);
+  }
+
+  public async scrollArtifact(
+    action: "up" | "down" | "page_up" | "page_down" | "home" | "end",
+  ): Promise<void> {
+    const navigation = this.state.artifactNavigation;
+    const view = navigation?.view;
+    if (
+      this.state.mode !== "artifact_view" ||
+      navigation === undefined ||
+      view === undefined ||
+      navigation.loading ||
+      this.navigationBusy
+    ) {
+      return;
+    }
+    const maximum = maximumScrollOffset(
+      view.rows.length,
+      navigation.viewportHeight,
+    );
+    if (action === "up" || action === "down") {
+      this.update({
+        artifactNavigation: {
+          ...navigation,
+          view: {
+            ...view,
+            scrollOffset: Math.min(
+              maximum,
+              Math.max(0, view.scrollOffset + (action === "up" ? -1 : 1)),
+            ),
+          },
+        },
+        notice: undefined,
+      });
+      return;
+    }
+    if (action === "page_up" && !view.page.hasEarlier) {
+      this.update({
+        artifactNavigation: {
+          ...navigation,
+          view: { ...view, scrollOffset: 0 },
+        },
+      });
+      return;
+    }
+    if (action === "page_down" && !view.page.hasLater) {
+      this.update({
+        artifactNavigation: {
+          ...navigation,
+          view: { ...view, scrollOffset: maximum },
+        },
+      });
+      return;
+    }
+    const cursor =
+      action === "page_up"
+        ? { beforeByte: view.page.startByte }
+        : action === "page_down"
+          ? { afterByte: view.page.endByte }
+          : action === "end"
+            ? { beforeByte: view.page.totalBytes }
+            : {};
+    await this.loadArtifactRange(view.page.artifact.id, cursor);
+  }
+
+  public closeArtifactLevel(): void {
+    const navigation = this.state.artifactNavigation;
+    if (navigation === undefined) {
+      return;
+    }
+    this.cancelNavigation();
+    if (this.state.mode === "artifact_view" && navigation.list !== undefined) {
+      const { view: _view, ...navigationWithoutView } = navigation;
+      this.update({
+        mode: "artifact_list",
+        artifactNavigation: {
+          ...navigationWithoutView,
+          loading: false,
+        },
+        notice: undefined,
+      });
+      return;
+    }
+    if (
+      this.state.mode === "artifact_view" ||
+      this.state.mode === "artifact_list"
+    ) {
+      this.update({
+        mode: navigation.origin,
+        artifactNavigation: undefined,
+        notice: undefined,
+      });
+    }
+  }
+
+  private async openArtifactList(
+    origin: "chat" | "thread_preview",
+    threadIdInput: string,
+  ): Promise<void> {
+    const threadId = threadIdSchema.parse(threadIdInput);
+    const generation = this.beginNavigation();
+    this.navigationBusy = true;
+    const navigation: TuiArtifactNavigationState = {
+      origin,
+      threadId,
+      loading: true,
+      viewportHeight: this.viewportHeight,
+      viewportWidth: this.viewportWidth,
+    };
+    this.update({
+      mode: "artifact_list",
+      artifactNavigation: navigation,
+      notice: "Loading thread artifacts…",
+    });
+    try {
+      const result = await this.fetchArtifactList(threadId, null);
+      if (
+        !this.isCurrentNavigation(generation) ||
+        this.state.mode !== "artifact_list"
+      ) {
+        return;
+      }
+      const current = this.state.artifactNavigation;
+      if (current === undefined) {
+        return;
+      }
+      this.update({
+        artifactNavigation: {
+          ...current,
+          loading: false,
+          list: artifactListState(result, null, [], current.viewportHeight),
+        },
+        notice:
+          result.artifacts.length === 0
+            ? "This thread has no recorded artifacts."
+            : undefined,
+      });
+    } catch (error) {
+      if (this.isCurrentNavigation(generation)) {
+        this.update({
+          mode: origin,
+          artifactNavigation: undefined,
+          notice: `Could not load thread artifacts: ${errorMessage(error)}`,
+        });
+      }
+    } finally {
+      if (this.isCurrentNavigation(generation)) {
+        this.navigationBusy = false;
+      }
+    }
+  }
+
+  private async openDirectArtifact(input: string): Promise<void> {
+    if (!this.canEditInput() || this.navigationBusy) {
+      this.update({ notice: "Artifacts are available only while idle." });
+      return;
+    }
+    if (this.state.threadId === undefined) {
+      this.update({ notice: "No current thread is selected." });
+      return;
+    }
+    const parsed = artifactIdSchema.safeParse(input.trim());
+    if (!parsed.success) {
+      this.update({
+        notice:
+          "Artifact ID must use 'sha256:' followed by 64 lowercase hexadecimal characters.",
+      });
+      return;
+    }
+    const navigation: TuiArtifactNavigationState = {
+      origin: "chat",
+      threadId: threadIdSchema.parse(this.state.threadId),
+      loading: false,
+      viewportHeight: this.viewportHeight,
+      viewportWidth: this.viewportWidth,
+    };
+    await this.openArtifactView(navigation, parsed.data);
+  }
+
+  private async openArtifactView(
+    navigation: TuiArtifactNavigationState,
+    artifactId: ArtifactId,
+  ): Promise<void> {
+    const generation = this.beginNavigation();
+    this.navigationBusy = true;
+    const { view: _view, ...navigationWithoutView } = navigation;
+    this.update({
+      mode: "artifact_view",
+      artifactNavigation: { ...navigationWithoutView, loading: true },
+      notice: "Loading artifact…",
+    });
+    try {
+      const result = await this.client.readArtifact({
+        workspace: this.state.configuration.cwd,
+        threadId: navigation.threadId,
+        artifactId,
+        maxBytes: ARTIFACT_READ_DEFAULT_BYTES,
+      });
+      if (
+        !this.isCurrentNavigation(generation) ||
+        this.state.mode !== "artifact_view"
+      ) {
+        return;
+      }
+      const current = this.state.artifactNavigation;
+      if (current === undefined) {
+        return;
+      }
+      this.update({
+        artifactNavigation: {
+          ...current,
+          loading: false,
+          view: artifactViewState(
+            result,
+            current.viewportWidth,
+            current.viewportHeight,
+            "start",
+          ),
+        },
+        notice: undefined,
+      });
+    } catch (error) {
+      if (this.isCurrentNavigation(generation)) {
+        if (navigation.list !== undefined) {
+          this.update({
+            mode: "artifact_list",
+            artifactNavigation: { ...navigation, loading: false },
+            notice: `Could not open artifact: ${errorMessage(error)}`,
+          });
+        } else {
+          this.update({
+            mode: navigation.origin,
+            artifactNavigation: undefined,
+            notice: `Could not open artifact: ${errorMessage(error)}`,
+          });
+        }
+      }
+    } finally {
+      if (this.isCurrentNavigation(generation)) {
+        this.navigationBusy = false;
+      }
+    }
+  }
+
+  private async loadArtifactRange(
+    artifactId: ArtifactId,
+    cursor: { beforeByte?: number; afterByte?: number },
+  ): Promise<void> {
+    const navigation = this.state.artifactNavigation;
+    const view = navigation?.view;
+    if (navigation === undefined || view === undefined) {
+      return;
+    }
+    const generation = this.beginNavigation();
+    this.navigationBusy = true;
+    this.update({
+      artifactNavigation: { ...navigation, loading: true },
+      notice: "Loading artifact range…",
+    });
+    try {
+      const result = await this.client.readArtifact({
+        workspace: this.state.configuration.cwd,
+        threadId: navigation.threadId,
+        artifactId,
+        ...cursor,
+        maxBytes: ARTIFACT_READ_DEFAULT_BYTES,
+      });
+      if (
+        !this.isCurrentNavigation(generation) ||
+        this.state.mode !== "artifact_view"
+      ) {
+        return;
+      }
+      const current = this.state.artifactNavigation;
+      if (current === undefined) {
+        return;
+      }
+      this.update({
+        artifactNavigation: {
+          ...current,
+          loading: false,
+          view: artifactViewState(
+            result,
+            current.viewportWidth,
+            current.viewportHeight,
+            cursor.beforeByte === undefined ? "start" : "end",
+          ),
+        },
+        notice: undefined,
+      });
+    } catch (error) {
+      const current = this.state.artifactNavigation;
+      if (
+        this.isCurrentNavigation(generation) &&
+        current !== undefined &&
+        this.state.mode === "artifact_view"
+      ) {
+        this.update({
+          artifactNavigation: { ...current, loading: false },
+          notice: `Could not load artifact range: ${errorMessage(error)}`,
+        });
+      }
+    } finally {
+      if (this.isCurrentNavigation(generation)) {
+        this.navigationBusy = false;
+      }
+    }
+  }
+
+  private fetchArtifactList(threadId: ThreadId, beforeSequence: number | null) {
+    return this.client.listThreadArtifacts({
+      workspace: this.state.configuration.cwd,
+      threadId,
+      ...(beforeSequence === null ? {} : { beforeSequence }),
+    });
   }
 
   public async openThreadBrowser(): Promise<void> {
@@ -1408,52 +1960,114 @@ export class TuiController {
     }
   }
 
-  public setViewportHeight(height: number): void {
+  public setViewportHeight(
+    height: number,
+    width = DEFAULT_VIEWPORT_WIDTH,
+  ): void {
     const browser = this.state.threadBrowser;
-    if (browser === undefined || !Number.isFinite(height)) {
+    const artifactNavigation = this.state.artifactNavigation;
+    if (!Number.isFinite(height) || !Number.isFinite(width)) {
       return;
     }
     const viewportHeight = Math.min(
       MAXIMUM_VIEWPORT_HEIGHT,
       Math.max(MINIMUM_VIEWPORT_HEIGHT, Math.floor(height)),
     );
-    const search = browser.search;
-    const preview = browser.preview;
+    const viewportWidth = Math.min(
+      MAXIMUM_VIEWPORT_WIDTH,
+      Math.max(MINIMUM_VIEWPORT_WIDTH, Math.floor(width)),
+    );
+    this.viewportHeight = viewportHeight;
+    this.viewportWidth = viewportWidth;
+    if (browser === undefined && artifactNavigation === undefined) {
+      return;
+    }
+    const search = browser?.search;
+    const preview = browser?.preview;
+    const artifactList = artifactNavigation?.list;
+    const artifactView = artifactNavigation?.view;
     this.update({
-      threadBrowser: {
-        ...browser,
-        viewportHeight,
-        listScrollOffset: keepSelectionVisible(
-          browser.selectedIndex,
-          browser.listScrollOffset,
-          viewportHeight,
-          browser.threads.length,
-        ),
-        ...(search === undefined
-          ? {}
-          : {
-              search: {
-                ...search,
-                scrollOffset: keepSelectionVisible(
-                  search.selectedIndex,
-                  search.scrollOffset,
-                  viewportHeight,
-                  search.matches.length,
-                ),
-              },
-            }),
-        ...(preview === undefined
-          ? {}
-          : {
-              preview: {
-                ...preview,
-                scrollOffset: Math.min(
-                  preview.scrollOffset,
-                  maximumScrollOffset(preview.entries.length, viewportHeight),
-                ),
-              },
-            }),
-      },
+      ...(browser === undefined
+        ? {}
+        : {
+            threadBrowser: {
+              ...browser,
+              viewportHeight,
+              listScrollOffset: keepSelectionVisible(
+                browser.selectedIndex,
+                browser.listScrollOffset,
+                viewportHeight,
+                browser.threads.length,
+              ),
+              ...(search === undefined
+                ? {}
+                : {
+                    search: {
+                      ...search,
+                      scrollOffset: keepSelectionVisible(
+                        search.selectedIndex,
+                        search.scrollOffset,
+                        viewportHeight,
+                        search.matches.length,
+                      ),
+                    },
+                  }),
+              ...(preview === undefined
+                ? {}
+                : {
+                    preview: {
+                      ...preview,
+                      scrollOffset: Math.min(
+                        preview.scrollOffset,
+                        maximumScrollOffset(
+                          preview.entries.length,
+                          viewportHeight,
+                        ),
+                      ),
+                    },
+                  }),
+            },
+          }),
+      ...(artifactNavigation === undefined
+        ? {}
+        : {
+            artifactNavigation: {
+              ...artifactNavigation,
+              viewportHeight,
+              viewportWidth,
+              ...(artifactList === undefined
+                ? {}
+                : {
+                    list: {
+                      ...artifactList,
+                      scrollOffset: keepSelectionVisible(
+                        artifactList.selectedIndex,
+                        artifactList.scrollOffset,
+                        viewportHeight,
+                        artifactList.artifacts.length,
+                      ),
+                    },
+                  }),
+              ...(artifactView === undefined
+                ? {}
+                : {
+                    view: (() => {
+                      const rows = artifactPresentationRows(
+                        artifactView.page.content,
+                        viewportWidth,
+                      );
+                      return {
+                        ...artifactView,
+                        rows,
+                        scrollOffset: Math.min(
+                          artifactView.scrollOffset,
+                          maximumScrollOffset(rows.length, viewportHeight),
+                        ),
+                      };
+                    })(),
+                  }),
+            },
+          }),
     });
   }
 
@@ -2149,6 +2763,7 @@ export class TuiController {
         approval: undefined,
         threadBrowser: undefined,
         runtimeSettings: undefined,
+        artifactNavigation: undefined,
         notice: undefined,
       });
     } catch (error) {
@@ -2159,6 +2774,7 @@ export class TuiController {
         approval: undefined,
         threadBrowser: undefined,
         runtimeSettings: undefined,
+        artifactNavigation: undefined,
         notice: `Shutdown failed: ${errorMessage(error)}`,
       });
     }
@@ -2390,6 +3006,7 @@ export class TuiController {
       approval: undefined,
       threadBrowser: undefined,
       runtimeSettings: undefined,
+      artifactNavigation: undefined,
       transcript: [
         ...this.state.transcript,
         ...activeEntries.map((entry) => this.withTranscriptId(entry)),
@@ -2486,6 +3103,78 @@ export class TuiController {
       listener();
     }
   }
+}
+
+function artifactListState(
+  result: {
+    artifacts: readonly ThreadArtifactDescriptor[];
+    hasEarlier: boolean;
+    nextBeforeSequence?: number | undefined;
+  },
+  currentCursor: number | null,
+  newerCursors: readonly (number | null)[],
+  viewportHeight: number,
+): TuiArtifactListState {
+  return {
+    artifacts: result.artifacts,
+    selectedIndex: 0,
+    scrollOffset: keepSelectionVisible(
+      0,
+      0,
+      viewportHeight,
+      result.artifacts.length,
+    ),
+    currentCursor,
+    newerCursors,
+    hasEarlier: result.hasEarlier,
+    ...(result.nextBeforeSequence === undefined
+      ? {}
+      : { nextBeforeSequence: result.nextBeforeSequence }),
+  };
+}
+
+function artifactViewState(
+  page: ArtifactReadResult,
+  viewportWidth: number,
+  viewportHeight: number,
+  alignment: "start" | "end",
+): TuiArtifactViewState {
+  const rows = artifactPresentationRows(page.content, viewportWidth);
+  return {
+    page,
+    rows,
+    scrollOffset:
+      alignment === "start"
+        ? 0
+        : maximumScrollOffset(rows.length, viewportHeight),
+  };
+}
+
+function artifactPresentationRows(
+  content: string,
+  viewportWidth: number,
+): string[] {
+  const normalized = content
+    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/gu, "")
+    .replace(/\r\n?/gu, "\n")
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/gu, "")
+    .replaceAll("\t", "    ");
+  const width = Math.min(
+    MAXIMUM_VIEWPORT_WIDTH,
+    Math.max(MINIMUM_VIEWPORT_WIDTH, Math.floor(viewportWidth) - 4),
+  );
+  const rows: string[] = [];
+  for (const logicalLine of normalized.split("\n")) {
+    const characters = [...logicalLine];
+    if (characters.length === 0) {
+      rows.push("");
+      continue;
+    }
+    for (let start = 0; start < characters.length; start += width) {
+      rows.push(characters.slice(start, start + width).join(""));
+    }
+  }
+  return rows.length === 0 ? [""] : rows;
 }
 
 function runtimeSettingsResultNotice(result: {

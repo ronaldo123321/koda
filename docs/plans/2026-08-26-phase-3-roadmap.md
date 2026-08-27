@@ -106,14 +106,14 @@ The accepted persistence, protocol, interaction, consistency, and verification c
 
 ## Phase 3E4: thread-scoped artifact inspection
 
-Status: **Design approved; implementation pending.**
+Status: **Complete.**
 
-- Upgrade the local app-server contract to protocol v6 with `thread/artifacts` discovery and thread-authorized `artifact/read` byte ranges.
-- Keep JSONL authoritative for workspace and reference authorization; keep ArtifactStore authoritative for regular-file, size, SHA-256, and UTF-8 integrity.
-- Add `/artifacts`, `/artifact <id>`, preview-origin discovery, bounded list navigation, and a bidirectional text viewer to the Ink client.
-- Preserve the normal terminal buffer, generation-based stale-response rejection, layered Escape, source views on failure, and strict response budgets.
-- Support current UTF-8 plain-text and JSON artifacts while deferring binary, download, rich Markdown, diff, and cross-thread catalogs.
-- Verify protocol, storage ranges, authorization, app-server/client paths, TUI navigation, subprocess behavior, real TTY interaction, and every existing reliability gate.
+- Upgrade the local app-server contract to protocol v6 with `thread/artifacts` discovery and thread-authorized `artifact/read` byte ranges. **Completed without a parallel pre-release v5 handler.**
+- Keep JSONL authoritative for workspace and reference authorization; keep ArtifactStore authoritative for regular-file, size, SHA-256, and UTF-8 integrity. **Completed with canonical-workspace checks, strict log validation, one-handle verified reads, and fail-closed stable errors.**
+- Add `/artifacts`, `/artifact <id>`, preview-origin discovery, bounded list navigation, and a bidirectional text viewer to the Ink client. **Completed with 100-reference pages and 16 KiB UTF-8 ranges.**
+- Preserve the normal terminal buffer, generation-based stale-response rejection, layered Escape, source views on failure, and strict response budgets. **Completed across list, direct-view, preview-view, paging, resize, and late-response paths.**
+- Support current UTF-8 plain-text and JSON artifacts while deferring binary, download, rich Markdown, diff, and cross-thread catalogs. **Completed at the intended media and authorization boundary.**
+- Verify protocol, storage ranges, authorization, app-server/client paths, TUI navigation, subprocess behavior, real TTY interaction, and every existing reliability gate. **Completed with 258/258 offline tests, 6/6 scenarios, and a real TTY list/direct-open/byte-paging/preview/Escape/shutdown smoke test.**
 
 The accepted authorization, protocol, UTF-8 pagination, interaction, failure, and verification contract is in the [Phase 3E4 thread-scoped artifact inspection design](2026-08-27-phase-3e4-artifact-inspection-design.md).
 
@@ -130,10 +130,10 @@ The accepted authorization, protocol, UTF-8 pagination, interaction, failure, an
 ### Interactive clients and client APIs
 
 - Maintain the completed Phase 3D Ink chat REPL on the Phase 3A application protocol.
-- Maintain the completed Phase 3E1 semantics for recent-thread selection, bounded history preview, and safe resume; protocol v5 supersedes its pre-release v3 transport.
-- Maintain the completed Phase 3E2 boundary as bounded bidirectional history navigation and workspace-scoped substring search over app-server protocol v5; retain the normal terminal buffer and a disposable SQLite projection.
+- Maintain the completed Phase 3E1 semantics for recent-thread selection, bounded history preview, and safe resume; protocol v6 supersedes its pre-release v3 transport.
+- Maintain the completed Phase 3E2 boundary as bounded bidirectional history navigation and workspace-scoped substring search over app-server protocol v6; retain the normal terminal buffer and a disposable SQLite projection.
 - Maintain the completed Phase 3E3 boundary for explicit provider/model preferences that affect only new threads.
-- Implement and then maintain the accepted Phase 3E4 boundary for thread-scoped discovery and bounded UTF-8 artifact reads.
+- Maintain the completed Phase 3E4 boundary for thread-scoped discovery and bounded UTF-8 artifact reads.
 - Defer FTS5, fuzzy/relevance ranking, live search, cross-workspace search, alternate-screen navigation, and real-time subscriptions beyond Phase 3E2.
 - In Phase 3E or Phase 4, add Markdown/syntax rendering, dedicated diff views, artifact download/export, attachments, context-budget inspection, and instruction-change views.
 - Build IDE or desktop clients only after the local protocol client and TUI have validated the shared boundary.

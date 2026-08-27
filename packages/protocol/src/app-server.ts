@@ -1,12 +1,13 @@
 import { z } from "zod";
 
+import { artifactIdSchema, artifactReferenceSchema } from "./artifacts.js";
 import { agentEventSchema } from "./events.js";
 import { threadIdSchema, toolCallIdSchema, turnIdSchema } from "./ids.js";
 import { jsonValueSchema } from "./json.js";
 import { tokenUsageSchema } from "./usage.js";
 import { modelProviderIdSchema, providerMetadataSchema } from "./providers.js";
 
-export const APP_SERVER_PROTOCOL_VERSION = 5 as const;
+export const APP_SERVER_PROTOCOL_VERSION = 6 as const;
 
 export const THREAD_EVENTS_DEFAULT_LIMIT = 200;
 export const THREAD_EVENTS_MAXIMUM_LIMIT = 200;
@@ -21,6 +22,15 @@ export const RUNTIME_SETTINGS_WORKSPACE_BUDGET_BYTES = 4_096;
 export const RUNTIME_SETTINGS_MODEL_BUDGET_BYTES = 256;
 export const RUNTIME_SETTINGS_RESULT_BUDGET_BYTES = 64 * 1_024;
 export const RUNTIME_SETTINGS_DIAGNOSTIC_BUDGET_BYTES = 1_024;
+export const THREAD_ARTIFACTS_DEFAULT_LIMIT = 100;
+export const THREAD_ARTIFACTS_MAXIMUM_LIMIT = 100;
+export const THREAD_ARTIFACTS_RESULT_BUDGET_BYTES = 256 * 1_024;
+export const ARTIFACT_READ_DEFAULT_BYTES = 16 * 1_024;
+export const ARTIFACT_READ_MINIMUM_BYTES = 4;
+export const ARTIFACT_READ_MAXIMUM_BYTES = 64 * 1_024;
+export const ARTIFACT_READ_RESULT_BUDGET_BYTES = 80 * 1_024;
+export const ARTIFACT_WORKSPACE_BUDGET_BYTES = 4_096;
+export const ARTIFACT_NAME_BUDGET_BYTES = 1_024;
 
 export const APP_SERVER_RPC_ERROR_CODE = {
   PARSE: -32700,
@@ -130,6 +140,7 @@ export const initializeResultSchema = z
         threadSearch: z.literal(true),
         bidirectionalThreadEvents: z.literal(true),
         runtimeSettings: z.literal(true),
+        artifactInspection: z.literal(true),
       })
       .strict(),
     providers: z.array(runtimeProviderMetadataSchema).min(1),
@@ -236,6 +247,195 @@ export const settingsUpdateResultSchema = z
   })
   .strict();
 
+const artifactWorkspaceSchema = z
+  .string()
+  .min(1)
+  .refine(
+    (value) =>
+      new TextEncoder().encode(value).byteLength <=
+      ARTIFACT_WORKSPACE_BUDGET_BYTES,
+    `Workspace must not exceed ${ARTIFACT_WORKSPACE_BUDGET_BYTES} UTF-8 bytes.`,
+  );
+
+const localThreadIdSchema = z
+  .string()
+  .regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u)
+  .transform((value) => threadIdSchema.parse(value));
+
+export const threadArtifactDescriptorSchema = z
+  .object({
+    sequence: z.number().int().safe().nonnegative(),
+    callId: toolCallIdSchema,
+    name: z
+      .string()
+      .min(1)
+      .refine(
+        (value) =>
+          new TextEncoder().encode(value).byteLength <=
+          ARTIFACT_NAME_BUDGET_BYTES,
+        `Artifact tool name must not exceed ${ARTIFACT_NAME_BUDGET_BYTES} UTF-8 bytes.`,
+      ),
+    artifact: artifactReferenceSchema,
+  })
+  .strict();
+
+export const threadArtifactsParamsSchema = z
+  .object({
+    workspace: artifactWorkspaceSchema,
+    threadId: localThreadIdSchema,
+    beforeSequence: z.number().int().safe().nonnegative().optional(),
+    limit: z
+      .number()
+      .int()
+      .safe()
+      .min(1)
+      .max(THREAD_ARTIFACTS_MAXIMUM_LIMIT)
+      .optional(),
+  })
+  .strict();
+
+export const threadArtifactsResultSchema = z
+  .object({
+    workspace: artifactWorkspaceSchema,
+    threadId: threadIdSchema,
+    artifacts: z
+      .array(threadArtifactDescriptorSchema)
+      .max(THREAD_ARTIFACTS_MAXIMUM_LIMIT),
+    nextBeforeSequence: z.number().int().safe().nonnegative().optional(),
+    hasEarlier: z.boolean(),
+  })
+  .strict()
+  .superRefine((result, context) => {
+    const ids = new Set<string>();
+    for (let index = 0; index < result.artifacts.length; index += 1) {
+      const artifact = result.artifacts[index];
+      const previous = result.artifacts[index - 1];
+      if (artifact !== undefined && ids.has(artifact.artifact.id)) {
+        context.addIssue({
+          code: "custom",
+          message: "Artifact list pages must contain unique artifact IDs.",
+          path: ["artifacts", index, "artifact", "id"],
+        });
+      }
+      if (artifact !== undefined) {
+        ids.add(artifact.artifact.id);
+      }
+      if (
+        artifact !== undefined &&
+        previous !== undefined &&
+        artifact.sequence >= previous.sequence
+      ) {
+        context.addIssue({
+          code: "custom",
+          message: "Artifact list pages must be newest first.",
+          path: ["artifacts", index, "sequence"],
+        });
+      }
+    }
+    if (result.hasEarlier) {
+      if (
+        result.artifacts.length === 0 ||
+        result.nextBeforeSequence !== result.artifacts.at(-1)?.sequence
+      ) {
+        context.addIssue({
+          code: "custom",
+          message:
+            "A paginated artifact list must provide its oldest sequence as the next cursor.",
+          path: ["nextBeforeSequence"],
+        });
+      }
+    } else if (result.nextBeforeSequence !== undefined) {
+      context.addIssue({
+        code: "custom",
+        message: "A final artifact list cannot provide a next cursor.",
+        path: ["nextBeforeSequence"],
+      });
+    }
+  });
+
+export const artifactReadParamsSchema = z
+  .object({
+    workspace: artifactWorkspaceSchema,
+    threadId: localThreadIdSchema,
+    artifactId: artifactIdSchema,
+    beforeByte: z.number().int().safe().nonnegative().optional(),
+    afterByte: z.number().int().safe().nonnegative().optional(),
+    maxBytes: z
+      .number()
+      .int()
+      .safe()
+      .min(ARTIFACT_READ_MINIMUM_BYTES)
+      .max(ARTIFACT_READ_MAXIMUM_BYTES)
+      .optional(),
+  })
+  .strict()
+  .superRefine((params, context) => {
+    if (params.beforeByte !== undefined && params.afterByte !== undefined) {
+      context.addIssue({
+        code: "custom",
+        message: "beforeByte and afterByte are mutually exclusive cursors.",
+        path: ["afterByte"],
+      });
+    }
+  });
+
+export const artifactReadResultSchema = z
+  .object({
+    workspace: artifactWorkspaceSchema,
+    threadId: threadIdSchema,
+    artifact: artifactReferenceSchema,
+    content: z.string(),
+    startByte: z.number().int().safe().nonnegative(),
+    endByte: z.number().int().safe().nonnegative(),
+    totalBytes: z.number().int().safe().nonnegative(),
+    hasEarlier: z.boolean(),
+    hasLater: z.boolean(),
+  })
+  .strict()
+  .superRefine((result, context) => {
+    if (
+      result.artifact.mediaType !== "text/plain; charset=utf-8" &&
+      result.artifact.mediaType !== "application/json"
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "Artifact media type is not inspectable as UTF-8 text.",
+        path: ["artifact", "mediaType"],
+      });
+    }
+    if (
+      result.startByte > result.endByte ||
+      result.endByte > result.totalBytes ||
+      result.artifact.bytes !== result.totalBytes
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "Artifact byte range metadata is inconsistent.",
+        path: ["endByte"],
+      });
+    }
+    if (
+      new TextEncoder().encode(result.content).byteLength !==
+      result.endByte - result.startByte
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "Artifact content must exactly match its UTF-8 byte range.",
+        path: ["content"],
+      });
+    }
+    if (
+      result.hasEarlier !== result.startByte > 0 ||
+      result.hasLater !== result.endByte < result.totalBytes
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "Artifact range boundary flags are inconsistent.",
+        path: ["hasEarlier"],
+      });
+    }
+  });
+
 export const threadListParamsSchema = z
   .object({
     limit: z.number().int().min(1).max(500).optional(),
@@ -245,10 +445,7 @@ export const threadListParamsSchema = z
 
 export const threadGetParamsSchema = z
   .object({
-    threadId: z
-      .string()
-      .regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u)
-      .transform((value) => threadIdSchema.parse(value)),
+    threadId: localThreadIdSchema,
   })
   .strict();
 
@@ -317,10 +514,7 @@ export const threadGetResultSchema = z
 
 export const threadEventsParamsSchema = z
   .object({
-    threadId: z
-      .string()
-      .regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u)
-      .transform((value) => threadIdSchema.parse(value)),
+    threadId: localThreadIdSchema,
     beforeSequence: z.number().int().safe().nonnegative().optional(),
     afterSequence: z.number().int().safe().nonnegative().optional(),
     limit: z
@@ -604,6 +798,13 @@ export type SettingsGetParams = z.infer<typeof settingsGetParamsSchema>;
 export type SettingsGetResult = z.infer<typeof settingsGetResultSchema>;
 export type SettingsUpdateParams = z.infer<typeof settingsUpdateParamsSchema>;
 export type SettingsUpdateResult = z.infer<typeof settingsUpdateResultSchema>;
+export type ThreadArtifactDescriptor = z.infer<
+  typeof threadArtifactDescriptorSchema
+>;
+export type ThreadArtifactsParams = z.infer<typeof threadArtifactsParamsSchema>;
+export type ThreadArtifactsResult = z.infer<typeof threadArtifactsResultSchema>;
+export type ArtifactReadParams = z.infer<typeof artifactReadParamsSchema>;
+export type ArtifactReadResult = z.infer<typeof artifactReadResultSchema>;
 export type ThreadListParams = z.infer<typeof threadListParamsSchema>;
 export type ThreadListResult = z.infer<typeof threadListResultSchema>;
 export type ThreadGetParams = z.infer<typeof threadGetParamsSchema>;

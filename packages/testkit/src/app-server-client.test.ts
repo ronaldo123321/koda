@@ -15,6 +15,7 @@ import {
   threadIdSchema,
   turnIdSchema,
 } from "@koda/protocol";
+import { ArtifactStore } from "@koda/runtime-node";
 import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
@@ -135,6 +136,16 @@ describe("NodeAppServerClient", () => {
     const stateRoot = join(root, "state");
     const eventLogDirectory = join(stateRoot, "threads");
     await mkdir(eventLogDirectory, { recursive: true });
+    const artifactStore = await ArtifactStore.open(
+      join(stateRoot, "artifacts"),
+    );
+    const materialized = await artifactStore.materializeText(
+      "client artifact 中文 content",
+      { inlineBytes: 4 },
+    );
+    if (materialized.artifact === undefined) {
+      throw new Error("Expected a published artifact.");
+    }
     await writeFile(
       join(eventLogDirectory, "client-history.jsonl"),
       [
@@ -184,6 +195,19 @@ describe("NodeAppServerClient", () => {
           timestamp: "2026-08-27T00:00:03.000Z",
           threadId: "client-history",
           turnId: "client-history-turn",
+          type: "artifact.recorded",
+          payload: {
+            callId: "client-artifact-call",
+            name: "read_file",
+            artifact: materialized.artifact,
+          },
+        },
+        {
+          schemaVersion: 1,
+          sequence: 4,
+          timestamp: "2026-08-27T00:00:04.000Z",
+          threadId: "client-history",
+          turnId: "client-history-turn",
           type: "turn.completed",
           payload: { steps: 1 },
         },
@@ -210,6 +234,7 @@ describe("NodeAppServerClient", () => {
         threadSearch: true,
         bidirectionalThreadEvents: true,
         runtimeSettings: true,
+        artifactInspection: true,
       },
       providers: [
         { id: "openai", configured: true },
@@ -265,6 +290,28 @@ describe("NodeAppServerClient", () => {
         },
       ],
       hasMore: false,
+    });
+    await expect(
+      client.listThreadArtifacts({
+        workspace: canonicalRoot,
+        threadId: threadIdSchema.parse("client-history"),
+      }),
+    ).resolves.toMatchObject({
+      artifacts: [{ artifact: materialized.artifact }],
+      hasEarlier: false,
+    });
+    await expect(
+      client.readArtifact({
+        workspace: canonicalRoot,
+        threadId: threadIdSchema.parse("client-history"),
+        artifactId: materialized.artifact.id,
+        maxBytes: 8,
+      }),
+    ).resolves.toMatchObject({
+      artifact: materialized.artifact,
+      startByte: 0,
+      hasEarlier: false,
+      hasLater: true,
     });
     await expect(
       client.readThreadEvents({
@@ -366,6 +413,7 @@ function fixtureServerScript(options: {
       threadSearch: true,
       bidirectionalThreadEvents: true,
       runtimeSettings: true,
+      artifactInspection: true,
     },
     providers: [
       {

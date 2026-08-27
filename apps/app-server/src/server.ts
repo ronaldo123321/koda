@@ -6,10 +6,14 @@ import {
 import {
   APP_SERVER_PROTOCOL_VERSION,
   APP_SERVER_RPC_ERROR_CODE,
+  ARTIFACT_READ_RESULT_BUDGET_BYTES,
   RUNTIME_SETTINGS_RESULT_BUDGET_BYTES,
+  THREAD_ARTIFACTS_RESULT_BUDGET_BYTES,
   THREAD_SEARCH_RESULT_BUDGET_BYTES,
   approvalResolveParamsSchema,
   approvalResolveResultSchema,
+  artifactReadParamsSchema,
+  artifactReadResultSchema,
   initializeParamsSchema,
   initializeResultSchema,
   jsonRpcRequestSchema,
@@ -22,6 +26,8 @@ import {
   shutdownResultSchema,
   threadEventsParamsSchema,
   threadEventsResultSchema,
+  threadArtifactsParamsSchema,
+  threadArtifactsResultSchema,
   threadGetParamsSchema,
   threadGetResultSchema,
   threadListParamsSchema,
@@ -180,6 +186,10 @@ export class KodaAppServer {
         return this.readThreadEvents(request.params);
       case "thread/search":
         return this.searchThreads(request.params);
+      case "thread/artifacts":
+        return this.listThreadArtifacts(request.params);
+      case "artifact/read":
+        return this.readArtifact(request.params);
       case "settings/get":
         return this.getRuntimeSettings(request.params);
       case "settings/update":
@@ -238,6 +248,7 @@ export class KodaAppServer {
           threadSearch: true,
           bidirectionalThreadEvents: true,
           runtimeSettings: true,
+          artifactInspection: true,
         },
         providers: this.application.listProviders(),
       }),
@@ -294,6 +305,58 @@ export class KodaAppServer {
         ...(input.limit === undefined ? {} : { limit: input.limit }),
       });
       return jsonValueSchema.parse(threadEventsResultSchema.parse(result));
+    } catch (error) {
+      throw rpcError(
+        APP_SERVER_RPC_ERROR_CODE.APPLICATION,
+        errorMessage(error),
+        applicationErrorCode(error),
+      );
+    }
+  }
+
+  private async listThreadArtifacts(
+    params: JsonValue | undefined,
+  ): Promise<JsonValue> {
+    const input = parseParams(threadArtifactsParamsSchema, params);
+    try {
+      const response = jsonValueSchema.parse(
+        threadArtifactsResultSchema.parse(
+          await this.application.listThreadArtifacts(input),
+        ),
+      );
+      assertResultBudget(
+        response,
+        THREAD_ARTIFACTS_RESULT_BUDGET_BYTES,
+        "THREAD_ARTIFACTS_RESULT_TOO_LARGE",
+        "Thread artifact list",
+      );
+      return response;
+    } catch (error) {
+      throw rpcError(
+        APP_SERVER_RPC_ERROR_CODE.APPLICATION,
+        errorMessage(error),
+        applicationErrorCode(error),
+      );
+    }
+  }
+
+  private async readArtifact(
+    params: JsonValue | undefined,
+  ): Promise<JsonValue> {
+    const input = parseParams(artifactReadParamsSchema, params);
+    try {
+      const response = jsonValueSchema.parse(
+        artifactReadResultSchema.parse(
+          await this.application.readArtifact(input),
+        ),
+      );
+      assertResultBudget(
+        response,
+        ARTIFACT_READ_RESULT_BUDGET_BYTES,
+        "ARTIFACT_READ_RESULT_TOO_LARGE",
+        "Artifact read",
+      );
+      return response;
     } catch (error) {
       throw rpcError(
         APP_SERVER_RPC_ERROR_CODE.APPLICATION,
@@ -657,6 +720,20 @@ function assertSettingsResultBudget(response: JsonValue): void {
     throw new AppServerResultError(
       "RUNTIME_SETTINGS_RESULT_TOO_LARGE",
       `Runtime settings result exceeds the ${RUNTIME_SETTINGS_RESULT_BUDGET_BYTES}-byte response budget.`,
+    );
+  }
+}
+
+function assertResultBudget(
+  response: JsonValue,
+  maximumBytes: number,
+  code: string,
+  label: string,
+): void {
+  if (Buffer.byteLength(JSON.stringify(response), "utf8") > maximumBytes) {
+    throw new AppServerResultError(
+      code,
+      `${label} exceeds the ${maximumBytes}-byte response budget.`,
     );
   }
 }

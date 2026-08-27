@@ -3,6 +3,8 @@ import {
   APP_SERVER_RPC_ERROR_CODE,
   agentEventSchema,
   approvalResolveParamsSchema,
+  artifactReadParamsSchema,
+  artifactReadResultSchema,
   initializeParamsSchema,
   jsonRpcErrorResponseSchema,
   jsonRpcRequestSchema,
@@ -11,6 +13,8 @@ import {
   settingsUpdateResultSchema,
   threadEventsParamsSchema,
   threadEventsResultSchema,
+  threadArtifactsParamsSchema,
+  threadArtifactsResultSchema,
   threadGetParamsSchema,
   threadSearchParamsSchema,
   threadSearchResultSchema,
@@ -301,6 +305,124 @@ describe("app-server protocol", () => {
         diagnostics: [],
       }),
     ).toMatchObject({ revision: 3 });
+  });
+
+  it("validates thread-scoped artifact discovery and UTF-8 ranges", () => {
+    const hash = "a".repeat(64);
+    const artifact = {
+      type: "artifact",
+      id: `sha256:${hash}`,
+      sha256: hash,
+      bytes: 6,
+      mediaType: "text/plain; charset=utf-8",
+    } as const;
+    expect(
+      threadArtifactsParamsSchema.parse({
+        workspace: "/workspace",
+        threadId: "artifact-thread",
+        beforeSequence: 20,
+        limit: 10,
+      }),
+    ).toMatchObject({ beforeSequence: 20, limit: 10 });
+    expect(() =>
+      threadArtifactsParamsSchema.parse({
+        workspace: "/workspace",
+        threadId: "artifact-thread",
+        limit: 0,
+      }),
+    ).toThrow();
+    expect(() =>
+      threadArtifactsParamsSchema.parse({
+        workspace: "/workspace",
+        threadId: "artifact-thread",
+        limit: 101,
+      }),
+    ).toThrow();
+    expect(
+      threadArtifactsResultSchema.parse({
+        workspace: "/workspace",
+        threadId: "artifact-thread",
+        artifacts: [
+          {
+            sequence: 12,
+            callId: "artifact-call",
+            name: "read_file",
+            artifact,
+          },
+        ],
+        hasEarlier: true,
+        nextBeforeSequence: 12,
+      }),
+    ).toMatchObject({ hasEarlier: true, nextBeforeSequence: 12 });
+    expect(() =>
+      threadArtifactsResultSchema.parse({
+        workspace: "/workspace",
+        threadId: "artifact-thread",
+        artifacts: [
+          {
+            sequence: 12,
+            callId: "artifact-call",
+            name: "read_file",
+            artifact,
+          },
+        ],
+        hasEarlier: false,
+        nextBeforeSequence: 12,
+      }),
+    ).toThrow();
+
+    expect(
+      artifactReadParamsSchema.parse({
+        workspace: "/workspace",
+        threadId: "artifact-thread",
+        artifactId: artifact.id,
+        afterByte: 0,
+        maxBytes: 16_384,
+      }),
+    ).toMatchObject({ artifactId: artifact.id, afterByte: 0 });
+    expect(() =>
+      artifactReadParamsSchema.parse({
+        workspace: "/workspace",
+        threadId: "artifact-thread",
+        artifactId: artifact.id,
+        maxBytes: 3,
+      }),
+    ).toThrow();
+    expect(() =>
+      artifactReadParamsSchema.parse({
+        workspace: "/workspace",
+        threadId: "artifact-thread",
+        artifactId: artifact.id,
+        beforeByte: 6,
+        afterByte: 0,
+      }),
+    ).toThrow();
+    expect(
+      artifactReadResultSchema.parse({
+        workspace: "/workspace",
+        threadId: "artifact-thread",
+        artifact,
+        content: "你好",
+        startByte: 0,
+        endByte: 6,
+        totalBytes: 6,
+        hasEarlier: false,
+        hasLater: false,
+      }),
+    ).toMatchObject({ content: "你好", endByte: 6 });
+    expect(() =>
+      artifactReadResultSchema.parse({
+        workspace: "/workspace",
+        threadId: "artifact-thread",
+        artifact,
+        content: "你",
+        startByte: 0,
+        endByte: 6,
+        totalBytes: 6,
+        hasEarlier: false,
+        hasLater: false,
+      }),
+    ).toThrow();
   });
 });
 

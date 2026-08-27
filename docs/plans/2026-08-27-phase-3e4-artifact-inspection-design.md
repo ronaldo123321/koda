@@ -1,6 +1,6 @@
 # Koda Phase 3E4: Thread-scoped Artifact Inspection
 
-- Status: Approved; implementation pending
+- Status: Implemented and verified
 - Date: 2026-08-27
 - Depends on: Phase 2B content-addressed ArtifactStore, Phase 3A app-server, and Phase 3E1/3E2 thread browsing
 - Scope: safe discovery and bounded UTF-8 reading of text artifacts referenced by one authoritative thread log
@@ -147,6 +147,8 @@ Application tests cover canonical workspace resolution, thread ownership, valid 
 Controller and Ink tests cover `/artifacts`, `/artifact <id>`, the preview `a` shortcut, selection, list pagination, direct and list-based viewer origins, within-range scrolling, byte paging, Home/End, resize behavior, layered Escape, empty state, failure preservation, and stale-response rejection.
 
 A real TTY smoke uses an isolated `KODA_HOME` and deterministic stored artifact to exercise list discovery, direct open, forward/backward navigation, the preview entry point, layered Escape, and graceful shutdown. Acceptance requires formatting, build, workspace typechecks, test TypeScript checks, the complete offline suite, all six deterministic reliability scenarios, and the real TTY smoke to pass.
+
+Implementation verification completed with app-server protocol v6, 258/258 offline tests, 6/6 deterministic reliability scenarios, and the isolated real-TTY interaction above. The implementation remains on `main`; no compatibility handler for the pre-release v5 protocol was retained.
 
 ## 8. Deferred destinations
 

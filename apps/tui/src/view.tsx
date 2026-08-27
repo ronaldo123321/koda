@@ -37,7 +37,10 @@ export function KodaTui({ controller }: KodaTuiProps) {
 
   useEffect(() => {
     const updateViewport = () => {
-      controller.setViewportHeight((stdout.rows ?? 20) - 8);
+      controller.setViewportHeight(
+        (stdout.rows ?? 20) - 8,
+        stdout.columns ?? 80,
+      );
     };
     updateViewport();
     stdout.on("resize", updateViewport);
@@ -74,7 +77,7 @@ export interface TuiInputController {
   ): Promise<void>;
   closeThreadBrowserLevel(): void;
   resumePreviewedThread(): Promise<void>;
-  setViewportHeight(height: number): void;
+  setViewportHeight(height: number, width?: number): void;
   openRuntimeSettings(): Promise<void>;
   selectRuntimeSettingsProvider(offset: -1 | 1): void;
   enterRuntimeSettingsModel(): void;
@@ -83,6 +86,14 @@ export interface TuiInputController {
   applyRuntimeSettings(): Promise<void>;
   reloadRuntimeSettings(): Promise<void>;
   closeRuntimeSettingsLevel(): void;
+  openPreviewArtifacts(): Promise<void>;
+  selectArtifact(offset: -1 | 1): void;
+  pageArtifactList(action: "newer" | "older" | "home" | "end"): Promise<void>;
+  openSelectedArtifact(): Promise<void>;
+  scrollArtifact(
+    action: "up" | "down" | "page_up" | "page_down" | "home" | "end",
+  ): Promise<void>;
+  closeArtifactLevel(): void;
 }
 
 export function KodaView({ state }: KodaViewProps) {
@@ -115,6 +126,8 @@ export function KodaView({ state }: KodaViewProps) {
       {state.mode === "settings_model" ? (
         <RuntimeSettingsModel state={state} />
       ) : null}
+      {state.mode === "artifact_list" ? <ArtifactList state={state} /> : null}
+      {state.mode === "artifact_view" ? <ArtifactViewer state={state} /> : null}
 
       {state.mode === "chat" ? (
         <>
@@ -185,6 +198,44 @@ export function routeTuiInput(
       requestExit();
     } else {
       void controller.cancelActiveTurn();
+    }
+    return;
+  }
+  if (state.mode === "artifact_list") {
+    if (key.escape) {
+      controller.closeArtifactLevel();
+    } else if (key.upArrow) {
+      controller.selectArtifact(-1);
+    } else if (key.downArrow) {
+      controller.selectArtifact(1);
+    } else if (key.pageUp) {
+      void controller.pageArtifactList("newer");
+    } else if (key.pageDown) {
+      void controller.pageArtifactList("older");
+    } else if (key.home) {
+      void controller.pageArtifactList("home");
+    } else if (key.end) {
+      void controller.pageArtifactList("end");
+    } else if (key.return) {
+      void controller.openSelectedArtifact();
+    }
+    return;
+  }
+  if (state.mode === "artifact_view") {
+    if (key.escape) {
+      controller.closeArtifactLevel();
+    } else if (key.upArrow) {
+      void controller.scrollArtifact("up");
+    } else if (key.downArrow) {
+      void controller.scrollArtifact("down");
+    } else if (key.pageUp) {
+      void controller.scrollArtifact("page_up");
+    } else if (key.pageDown) {
+      void controller.scrollArtifact("page_down");
+    } else if (key.home) {
+      void controller.scrollArtifact("home");
+    } else if (key.end) {
+      void controller.scrollArtifact("end");
     }
     return;
   }
@@ -315,6 +366,8 @@ export function routeTuiInput(
       void controller.scrollPreview("end");
     } else if (input.toLowerCase() === "r") {
       void controller.resumePreviewedThread();
+    } else if (input.toLowerCase() === "a") {
+      void controller.openPreviewArtifacts();
     }
     return;
   }
@@ -467,6 +520,92 @@ function RuntimeSettingsModel({ state }: { state: TuiState }) {
   );
 }
 
+function ArtifactList({ state }: { state: TuiState }) {
+  const navigation = state.artifactNavigation;
+  const list = navigation?.list;
+  if (navigation === undefined) {
+    return <Text color="red">Artifact navigation state is unavailable.</Text>;
+  }
+  const visible =
+    list === undefined
+      ? []
+      : list.artifacts.slice(
+          list.scrollOffset,
+          list.scrollOffset + navigation.viewportHeight,
+        );
+  return (
+    <Box flexDirection="column" borderStyle="round" paddingX={1}>
+      <Text bold>{`Thread artifacts · ${navigation.threadId}`}</Text>
+      {navigation.loading && list === undefined ? (
+        <Text dimColor>Loading artifacts…</Text>
+      ) : list === undefined || list.artifacts.length === 0 ? (
+        <Text dimColor>No recorded artifacts in this thread.</Text>
+      ) : (
+        visible.map((descriptor, visibleIndex) => {
+          const index = list.scrollOffset + visibleIndex;
+          return (
+            <Text
+              key={`${descriptor.sequence}:${descriptor.artifact.id}`}
+              bold={index === list.selectedIndex}
+              {...(index === list.selectedIndex ? { color: "cyan" } : {})}
+            >
+              {`${index === list.selectedIndex ? ">" : " "} ${boundPresentationText(descriptor.name, 128)} · ${descriptor.artifact.mediaType} · ${descriptor.artifact.bytes} bytes · ${shortArtifactId(descriptor.artifact.id)}`}
+            </Text>
+          );
+        })
+      )}
+      <Text dimColor>
+        {navigation.loading
+          ? "Loading artifact list… · Esc back"
+          : "↑/↓ select · PgUp/PgDn page · Home/End boundary · Enter open · Esc back"}
+      </Text>
+    </Box>
+  );
+}
+
+function ArtifactViewer({ state }: { state: TuiState }) {
+  const navigation = state.artifactNavigation;
+  const view = navigation?.view;
+  if (navigation === undefined) {
+    return <Text color="red">Artifact viewer state is unavailable.</Text>;
+  }
+  const rows =
+    view === undefined
+      ? []
+      : view.rows.slice(
+          view.scrollOffset,
+          view.scrollOffset + navigation.viewportHeight,
+        );
+  return (
+    <Box flexDirection="column" borderStyle="round" paddingX={1}>
+      <Text bold>
+        {view === undefined ? "Artifact" : view.page.artifact.id}
+      </Text>
+      {view === undefined ? null : (
+        <Text dimColor>
+          {`${view.page.artifact.mediaType} · ${view.page.startByte}–${view.page.endByte} / ${view.page.totalBytes} bytes`}
+        </Text>
+      )}
+      {navigation.loading && view === undefined ? (
+        <Text dimColor>Loading artifact…</Text>
+      ) : (
+        rows.map((row, index) => (
+          <Text
+            key={`${view?.page.startByte ?? 0}:${view?.scrollOffset ?? 0}:${index}`}
+          >
+            {row.length === 0 ? " " : row}
+          </Text>
+        ))
+      )}
+      <Text dimColor>
+        {navigation.loading
+          ? "Loading artifact range… · Esc back"
+          : "↑/↓ scroll · PgUp/PgDn byte range · Home/End boundary · Esc back"}
+      </Text>
+    </Box>
+  );
+}
+
 function ThreadSearchInput({ state }: { state: TuiState }) {
   const search = state.threadBrowser?.search;
   if (search === undefined) {
@@ -572,7 +711,7 @@ function ThreadPreview({ state }: { state: TuiState }) {
           ? "Checking thread… · Esc back"
           : preview.thread.status === "invalid"
             ? "Invalid thread · Esc back"
-            : "↑/↓ scroll · PgUp/PgDn page · Home/End boundary · r resume · Esc back"}
+            : "↑/↓ scroll · PgUp/PgDn page · Home/End boundary · a artifacts · r resume · Esc back"}
       </Text>
     </Box>
   );
@@ -683,4 +822,8 @@ function transcriptPresentation(kind: TuiTranscriptEntry["kind"]): {
     case "system":
       return { label: "Koda", color: undefined, dim: true };
   }
+}
+
+function shortArtifactId(id: string): string {
+  return id.length <= 24 ? id : `${id.slice(0, 15)}…${id.slice(-8)}`;
 }

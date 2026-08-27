@@ -5,6 +5,8 @@ import {
   APP_SERVER_PROTOCOL_VERSION,
   approvalResolveParamsSchema,
   approvalResolveResultSchema,
+  artifactReadParamsSchema,
+  artifactReadResultSchema,
   initializeResultSchema,
   jsonValueSchema,
   settingsGetParamsSchema,
@@ -14,6 +16,8 @@ import {
   shutdownResultSchema,
   threadEventsParamsSchema,
   threadEventsResultSchema,
+  threadArtifactsParamsSchema,
+  threadArtifactsResultSchema,
   threadGetParamsSchema,
   threadGetResultSchema,
   threadListParamsSchema,
@@ -26,6 +30,8 @@ import {
   turnStartResultSchema,
   type ApprovalResolveParams,
   type ApprovalResolveResult,
+  type ArtifactReadParams,
+  type ArtifactReadResult,
   type InitializeResult,
   type SettingsGetParams,
   type SettingsGetResult,
@@ -35,6 +41,8 @@ import {
   type ThreadGetResult,
   type ThreadEventsParams,
   type ThreadEventsResult,
+  type ThreadArtifactsParams,
+  type ThreadArtifactsResult,
   type ThreadListParams,
   type ThreadListResult,
   type ThreadSearchParams,
@@ -72,6 +80,10 @@ export interface AppServerClientApi {
   listThreads(params?: ThreadListParams): Promise<ThreadListResult>;
   getThread(params: ThreadGetParams): Promise<ThreadGetResult>;
   readThreadEvents(params: ThreadEventsParams): Promise<ThreadEventsResult>;
+  listThreadArtifacts(
+    params: ThreadArtifactsParams,
+  ): Promise<ThreadArtifactsResult>;
+  readArtifact(params: ArtifactReadParams): Promise<ArtifactReadResult>;
   searchThreads(params: ThreadSearchParams): Promise<ThreadSearchResult>;
   getRuntimeSettings(params: SettingsGetParams): Promise<SettingsGetResult>;
   updateRuntimeSettings(
@@ -216,6 +228,24 @@ export class NodeAppServerClient implements AppServerClientApi {
       "thread/events",
       jsonValueSchema.parse(threadEventsParamsSchema.parse(params)),
       threadEventsResultSchema,
+    );
+  }
+
+  public listThreadArtifacts(
+    params: ThreadArtifactsParams,
+  ): Promise<ThreadArtifactsResult> {
+    return this.connection.request(
+      "thread/artifacts",
+      jsonValueSchema.parse(threadArtifactsParamsSchema.parse(params)),
+      threadArtifactsResultSchema,
+    );
+  }
+
+  public readArtifact(params: ArtifactReadParams): Promise<ArtifactReadResult> {
+    return this.connection.request(
+      "artifact/read",
+      jsonValueSchema.parse(artifactReadParamsSchema.parse(params)),
+      artifactReadResultSchema,
     );
   }
 

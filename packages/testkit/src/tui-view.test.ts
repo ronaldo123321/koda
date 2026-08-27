@@ -2,6 +2,7 @@ import { PassThrough } from "node:stream";
 
 import {
   APP_SERVER_PROTOCOL_VERSION,
+  artifactReferenceSchema,
   initializeResultSchema,
   modelProviderIdSchema,
   threadIdSchema,
@@ -315,6 +316,95 @@ describe("Koda Ink view", () => {
     expect(controller.applyRuntimeSettings).toHaveBeenCalledOnce();
     expect(controller.closeRuntimeSettingsLevel).toHaveBeenCalledOnce();
   });
+
+  it("renders and routes artifact list, viewer, and preview entry modes", () => {
+    const controller = fakeInputController();
+    const state = baseState();
+    const sha256 = "d".repeat(64);
+    const artifact = artifactReferenceSchema.parse({
+      type: "artifact",
+      id: `sha256:${sha256}`,
+      sha256,
+      bytes: 11,
+      mediaType: "text/plain; charset=utf-8",
+    });
+    state.mode = "artifact_list";
+    state.artifactNavigation = {
+      origin: "chat",
+      threadId: threadIdSchema.parse("artifact-view-thread"),
+      loading: false,
+      viewportHeight: 10,
+      viewportWidth: 80,
+      list: {
+        artifacts: [
+          {
+            sequence: 7,
+            callId: toolCallIdSchema.parse("artifact-view-call"),
+            name: "report.txt",
+            artifact,
+          },
+        ],
+        selectedIndex: 0,
+        scrollOffset: 0,
+        currentCursor: null,
+        newerCursors: [],
+        hasEarlier: false,
+      },
+    };
+
+    let frame = renderToString(createElement(KodaView, { state }));
+    expect(frame).toContain("Thread artifacts · artifact-view-thread");
+    expect(frame).toContain("report.txt");
+    expect(frame).toContain("sha256:dddddddd…dddddddd");
+    routeTuiInput(controller, state, "", key({ downArrow: true }), vi.fn());
+    routeTuiInput(controller, state, "", key({ pageUp: true }), vi.fn());
+    routeTuiInput(controller, state, "", key({ pageDown: true }), vi.fn());
+    routeTuiInput(controller, state, "", key({ home: true }), vi.fn());
+    routeTuiInput(controller, state, "", key({ end: true }), vi.fn());
+    routeTuiInput(controller, state, "", key({ return: true }), vi.fn());
+    routeTuiInput(controller, state, "", key({ escape: true }), vi.fn());
+    expect(controller.selectArtifact).toHaveBeenCalledWith(1);
+    expect(controller.pageArtifactList).toHaveBeenCalledWith("newer");
+    expect(controller.pageArtifactList).toHaveBeenCalledWith("older");
+    expect(controller.pageArtifactList).toHaveBeenCalledWith("home");
+    expect(controller.pageArtifactList).toHaveBeenCalledWith("end");
+    expect(controller.openSelectedArtifact).toHaveBeenCalledOnce();
+    expect(controller.closeArtifactLevel).toHaveBeenCalledOnce();
+
+    state.mode = "artifact_view";
+    state.artifactNavigation = {
+      ...state.artifactNavigation,
+      view: {
+        page: {
+          workspace: "/workspace",
+          threadId: threadIdSchema.parse("artifact-view-thread"),
+          artifact,
+          content: "hello\nworld",
+          startByte: 0,
+          endByte: 11,
+          totalBytes: 11,
+          hasEarlier: false,
+          hasLater: false,
+        },
+        rows: ["hello", "world"],
+        scrollOffset: 0,
+      },
+    };
+    frame = renderToString(createElement(KodaView, { state }));
+    expect(frame).toContain(artifact.id);
+    expect(frame).toContain("0–11 / 11 bytes");
+    expect(frame).toContain("hello");
+    routeTuiInput(controller, state, "", key({ downArrow: true }), vi.fn());
+    routeTuiInput(controller, state, "", key({ pageDown: true }), vi.fn());
+    routeTuiInput(controller, state, "", key({ end: true }), vi.fn());
+    expect(controller.scrollArtifact).toHaveBeenCalledWith("down");
+    expect(controller.scrollArtifact).toHaveBeenCalledWith("page_down");
+    expect(controller.scrollArtifact).toHaveBeenCalledWith("end");
+
+    state.mode = "thread_preview";
+    routeTuiInput(controller, state, "a", key(), vi.fn());
+    expect(controller.openPreviewArtifacts).toHaveBeenCalledOnce();
+  });
 });
 
 describe("koda-chat program", () => {
@@ -412,6 +502,7 @@ function baseState(): TuiState {
       threadSearch: true,
       bidirectionalThreadEvents: true,
       runtimeSettings: true,
+      artifactInspection: true,
     },
     providers: [
       {
@@ -445,6 +536,7 @@ function baseState(): TuiState {
     notice: undefined,
     threadBrowser: undefined,
     runtimeSettings: undefined,
+    artifactNavigation: undefined,
   };
 }
 
@@ -477,6 +569,12 @@ function fakeInputController() {
     applyRuntimeSettings: vi.fn(() => Promise.resolve()),
     reloadRuntimeSettings: vi.fn(() => Promise.resolve()),
     closeRuntimeSettingsLevel: vi.fn(),
+    openPreviewArtifacts: vi.fn(() => Promise.resolve()),
+    selectArtifact: vi.fn(),
+    pageArtifactList: vi.fn(() => Promise.resolve()),
+    openSelectedArtifact: vi.fn(() => Promise.resolve()),
+    scrollArtifact: vi.fn(() => Promise.resolve()),
+    closeArtifactLevel: vi.fn(),
   } satisfies TuiInputController;
 }
 

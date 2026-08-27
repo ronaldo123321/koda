@@ -16,6 +16,9 @@ import {
 } from "@koda/agent-core";
 import { McpClientError, McpTurnSession } from "@koda/mcp-client-node";
 import {
+  ARTIFACT_READ_DEFAULT_BYTES,
+  THREAD_ARTIFACTS_DEFAULT_LIMIT,
+  THREAD_ARTIFACTS_MAXIMUM_LIMIT,
   collectArtifactReferences,
   itemIdSchema,
   recoveryItemSchema,
@@ -33,6 +36,8 @@ import {
   turnContextSnapshotSchema,
   turnIdSchema,
   type ConversationItem,
+  type ArtifactReadParams,
+  type ArtifactReadResult,
   type ItemId,
   type ModelProviderId,
   type RuntimeProviderMetadata,
@@ -41,6 +46,9 @@ import {
   type SettingsUpdateResult,
   type AgentEvent,
   type ThreadId,
+  type ThreadArtifactDescriptor,
+  type ThreadArtifactsParams,
+  type ThreadArtifactsResult,
   type ThreadSearchCursor,
   type ThreadSearchMatch,
   type TurnId,
@@ -179,6 +187,17 @@ export class RuntimeSettingsError extends Error {
   ) {
     super(message, options);
     this.name = "RuntimeSettingsError";
+  }
+}
+
+export class ArtifactInspectionError extends Error {
+  public constructor(
+    public readonly code: string,
+    message: string,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = "ArtifactInspectionError";
   }
 }
 
@@ -430,48 +449,17 @@ export class KodaApplication {
         `Thread event limit must be between 1 and ${THREAD_EVENTS_MAXIMUM_LIMIT}.`,
       );
     }
-    const eventLogPath = join(
-      resolveKodaHome(this.environment),
-      "threads",
-      `${threadId}.jsonl`,
-    );
-    let readResult;
-    try {
-      readResult = await new JsonlEventStore(eventLogPath).readAllRequired();
-    } catch (error) {
-      const code = applicationErrorCode(error);
-      throw new ThreadHistoryError(code, errorMessage(error), {
-        cause: error,
-      });
-    }
-    if (readResult.diagnostics.length > 0) {
-      throw new ThreadHistoryError(
-        "THREAD_EVENT_LOG_CORRUPT",
-        `Thread '${threadId}' has an incomplete trailing event and cannot be browsed safely.`,
-      );
-    }
-    if (readResult.events.length === 0) {
-      throw new ThreadHistoryError(
-        "THREAD_EVENT_LOG_CORRUPT",
-        `Thread '${threadId}' event log does not contain a durable event.`,
-      );
-    }
-    if (readResult.events.some((event) => event.threadId !== threadId)) {
-      throw new ThreadHistoryError(
-        "THREAD_EVENT_LOG_CORRUPT",
-        `Thread '${threadId}' event log contains an event for another thread.`,
-      );
-    }
+    const events = await this.readValidatedThreadLog(threadId);
 
     if (afterSequence !== undefined) {
-      return readForwardEventPage(readResult.events, afterSequence, limit);
+      return readForwardEventPage(events, afterSequence, limit);
     }
 
-    const endIndex = findEventPageEnd(readResult.events, beforeSequence);
+    const endIndex = findEventPageEnd(events, beforeSequence);
     const selected: AgentEvent[] = [];
     let startIndex = endIndex;
     while (startIndex > 0 && selected.length < limit) {
-      const event = readResult.events[startIndex - 1];
+      const event = events[startIndex - 1];
       if (event === undefined) {
         break;
       }
@@ -480,7 +468,7 @@ export class KodaApplication {
         candidate,
         startIndex - 1,
         endIndex,
-        readResult.events.length,
+        events.length,
       );
       if (serializedBytes(page) > THREAD_EVENTS_RESULT_BUDGET_BYTES) {
         if (selected.length === 0) {
@@ -495,7 +483,91 @@ export class KodaApplication {
       startIndex -= 1;
     }
 
-    return eventPage(selected, startIndex, endIndex, readResult.events.length);
+    return eventPage(selected, startIndex, endIndex, events.length);
+  }
+
+  public async listThreadArtifacts(
+    input: ThreadArtifactsParams,
+  ): Promise<ThreadArtifactsResult> {
+    const authorized = await this.authorizedThreadArtifacts(
+      input.workspace,
+      input.threadId,
+    );
+    const limit = input.limit ?? THREAD_ARTIFACTS_DEFAULT_LIMIT;
+    if (
+      !Number.isSafeInteger(limit) ||
+      limit < 1 ||
+      limit > THREAD_ARTIFACTS_MAXIMUM_LIMIT
+    ) {
+      throw new ArtifactInspectionError(
+        "INVALID_ARTIFACT_LIMIT",
+        `Artifact list limit must be between 1 and ${THREAD_ARTIFACTS_MAXIMUM_LIMIT}.`,
+      );
+    }
+    if (
+      input.beforeSequence !== undefined &&
+      (!Number.isSafeInteger(input.beforeSequence) || input.beforeSequence < 0)
+    ) {
+      throw new ArtifactInspectionError(
+        "INVALID_ARTIFACT_CURSOR",
+        "Artifact list cursor must be a non-negative safe integer.",
+      );
+    }
+    const available = authorized.artifacts.filter(
+      (descriptor) =>
+        input.beforeSequence === undefined ||
+        descriptor.sequence < input.beforeSequence,
+    );
+    const artifacts = available.slice(0, limit);
+    const hasEarlier = available.length > artifacts.length;
+    return {
+      workspace: authorized.workspace,
+      threadId: authorized.threadId,
+      artifacts,
+      hasEarlier,
+      ...(hasEarlier && artifacts.length > 0
+        ? { nextBeforeSequence: artifacts.at(-1)?.sequence }
+        : {}),
+    };
+  }
+
+  public async readArtifact(
+    input: ArtifactReadParams,
+  ): Promise<ArtifactReadResult> {
+    const authorized = await this.authorizedThreadArtifacts(
+      input.workspace,
+      input.threadId,
+    );
+    const descriptor = authorized.artifacts.find(
+      (candidate) => candidate.artifact.id === input.artifactId,
+    );
+    if (descriptor === undefined) {
+      throw new ArtifactInspectionError(
+        "ARTIFACT_NOT_REFERENCED",
+        `Artifact '${input.artifactId}' is not referenced by thread '${authorized.threadId}'.`,
+      );
+    }
+    const store = await ArtifactStore.openReadOnly(
+      join(resolveKodaHome(this.environment), "artifacts"),
+    );
+    const range = await store.readVerifiedTextRange(descriptor.artifact, {
+      ...(input.beforeByte === undefined
+        ? {}
+        : { beforeByte: input.beforeByte }),
+      ...(input.afterByte === undefined ? {} : { afterByte: input.afterByte }),
+      maxBytes: input.maxBytes ?? ARTIFACT_READ_DEFAULT_BYTES,
+    });
+    return {
+      workspace: authorized.workspace,
+      threadId: authorized.threadId,
+      artifact: range.artifact,
+      content: range.content,
+      startByte: range.startByte,
+      endByte: range.endByte,
+      totalBytes: range.totalBytes,
+      hasEarlier: range.hasEarlier,
+      hasLater: range.hasLater,
+    };
   }
 
   public async searchThreads(
@@ -807,6 +879,122 @@ export class KodaApplication {
       };
     } finally {
       index?.close();
+    }
+  }
+
+  private async readValidatedThreadLog(
+    threadId: ThreadId,
+  ): Promise<AgentEvent[]> {
+    const eventLogPath = join(
+      resolveKodaHome(this.environment),
+      "threads",
+      `${threadId}.jsonl`,
+    );
+    let readResult;
+    try {
+      readResult = await new JsonlEventStore(eventLogPath).readAllRequired();
+    } catch (error) {
+      const code = applicationErrorCode(error);
+      throw new ThreadHistoryError(code, errorMessage(error), {
+        cause: error,
+      });
+    }
+    if (readResult.diagnostics.length > 0) {
+      throw new ThreadHistoryError(
+        "THREAD_EVENT_LOG_CORRUPT",
+        `Thread '${threadId}' has an incomplete trailing event and cannot be browsed safely.`,
+      );
+    }
+    if (readResult.events.length === 0) {
+      throw new ThreadHistoryError(
+        "THREAD_EVENT_LOG_CORRUPT",
+        `Thread '${threadId}' event log does not contain a durable event.`,
+      );
+    }
+    if (readResult.events.some((event) => event.threadId !== threadId)) {
+      throw new ThreadHistoryError(
+        "THREAD_EVENT_LOG_CORRUPT",
+        `Thread '${threadId}' event log contains an event for another thread.`,
+      );
+    }
+    return readResult.events;
+  }
+
+  private async authorizedThreadArtifacts(
+    workspaceInput: string,
+    threadIdInput: string,
+  ): Promise<{
+    workspace: string;
+    threadId: ThreadId;
+    artifacts: ThreadArtifactDescriptor[];
+  }> {
+    const workspace = await this.canonicalArtifactWorkspace(workspaceInput);
+    const threadId = parseLocalThreadId(threadIdInput);
+    const events = await this.readValidatedThreadLog(threadId);
+    const contexts = events.filter((event) => event.type === "turn.context");
+    if (contexts.length === 0) {
+      throw new ArtifactInspectionError(
+        "THREAD_EVENT_LOG_CORRUPT",
+        `Thread '${threadId}' does not contain a durable workspace context.`,
+      );
+    }
+    if (contexts.some((event) => event.payload.workspaceRoot !== workspace)) {
+      throw new ArtifactInspectionError(
+        "THREAD_WORKSPACE_MISMATCH",
+        `Thread '${threadId}' does not belong to workspace '${workspace}'.`,
+      );
+    }
+
+    const references = new Map<string, ThreadArtifactDescriptor>();
+    const artifacts: ThreadArtifactDescriptor[] = [];
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index];
+      if (event?.type !== "artifact.recorded") {
+        continue;
+      }
+      const existing = references.get(event.payload.artifact.id);
+      if (existing !== undefined) {
+        if (
+          existing.artifact.sha256 !== event.payload.artifact.sha256 ||
+          existing.artifact.bytes !== event.payload.artifact.bytes ||
+          existing.artifact.mediaType !== event.payload.artifact.mediaType
+        ) {
+          throw new ArtifactInspectionError(
+            "THREAD_EVENT_LOG_CORRUPT",
+            `Thread '${threadId}' contains inconsistent references for artifact '${event.payload.artifact.id}'.`,
+          );
+        }
+        continue;
+      }
+      const descriptor = {
+        sequence: event.sequence,
+        callId: event.payload.callId,
+        name: event.payload.name,
+        artifact: event.payload.artifact,
+      } satisfies ThreadArtifactDescriptor;
+      references.set(descriptor.artifact.id, descriptor);
+      artifacts.push(descriptor);
+    }
+    return { workspace, threadId, artifacts };
+  }
+
+  private async canonicalArtifactWorkspace(
+    workspaceInput: string,
+  ): Promise<string> {
+    try {
+      const workspace = await realpath(
+        resolve(this.processDirectory, workspaceInput),
+      );
+      if (!(await stat(workspace)).isDirectory()) {
+        throw new Error("Workspace is not a directory.");
+      }
+      return workspace;
+    } catch (error) {
+      throw new ArtifactInspectionError(
+        "INVALID_ARTIFACT_WORKSPACE",
+        `Workspace '${workspaceInput}' could not be resolved to an existing directory.`,
+        { cause: error },
+      );
     }
   }
 

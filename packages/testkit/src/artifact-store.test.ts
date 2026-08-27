@@ -1,15 +1,21 @@
+import { createHash } from "node:crypto";
 import {
   access,
   mkdir,
   mkdtemp,
   readdir,
   rm,
+  symlink,
   utimes,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import {
+  artifactReferenceSchema,
+  type ArtifactReference,
+} from "@koda/protocol";
 import { ArtifactStore } from "@koda/runtime-node";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -74,6 +80,183 @@ describe("ArtifactStore", () => {
     expect(range.endByte).toBe(15);
     expect(range.totalBytes).toBe(Buffer.byteLength(content));
     expect(range.truncated).toBe(true);
+  });
+
+  it("reads contiguous verified UTF-8 ranges in both directions", async () => {
+    const { store } = await createStore();
+    const content = "开头🙂alpha中间omega尾巴".repeat(20);
+    const result = await store.materializeText(content, { inlineBytes: 8 });
+    if (result.artifact === undefined) {
+      throw new Error("Expected an oversized artifact.");
+    }
+
+    const forward: string[] = [];
+    let afterByte = 0;
+    do {
+      const page = await store.readVerifiedTextRange(result.artifact, {
+        afterByte,
+        maxBytes: 13,
+      });
+      expect(page.content).not.toContain("�");
+      expect(page.startByte).toBe(afterByte);
+      forward.push(page.content);
+      afterByte = page.endByte;
+      if (!page.hasLater) {
+        break;
+      }
+    } while (true);
+    expect(forward.join("")).toBe(content);
+
+    const backward: string[] = [];
+    let beforeByte = Buffer.byteLength(content);
+    do {
+      const page = await store.readVerifiedTextRange(result.artifact, {
+        beforeByte,
+        maxBytes: 13,
+      });
+      expect(page.content).not.toContain("�");
+      expect(page.endByte).toBe(beforeByte);
+      backward.unshift(page.content);
+      beforeByte = page.startByte;
+      if (!page.hasEarlier) {
+        break;
+      }
+    } while (true);
+    expect(backward.join("")).toBe(content);
+  });
+
+  it("rejects invalid boundaries, media types, and invalid UTF-8", async () => {
+    const { store, root } = await createStore();
+    const text = await store.materializeText("中文 artifact text", {
+      inlineBytes: 4,
+    });
+    const binary = await store.materializeText("binary-like output", {
+      inlineBytes: 4,
+      mediaType: "application/octet-stream",
+    });
+    if (text.artifact === undefined || binary.artifact === undefined) {
+      throw new Error("Expected published artifacts.");
+    }
+    await expect(
+      store.readVerifiedTextRange(text.artifact, {
+        afterByte: 1,
+        maxBytes: 8,
+      }),
+    ).rejects.toMatchObject({ code: "INVALID_ARTIFACT_RANGE" });
+    await expect(
+      store.readVerifiedTextRange(binary.artifact, {
+        afterByte: 0,
+        maxBytes: 8,
+      }),
+    ).rejects.toMatchObject({ code: "ARTIFACT_MEDIA_TYPE_UNSUPPORTED" });
+
+    const invalid = await writeRawArtifact(
+      root,
+      Buffer.from([0xc3, 0x28]),
+      "text/plain; charset=utf-8",
+    );
+    await expect(
+      store.readVerifiedTextRange(invalid, { afterByte: 0, maxBytes: 8 }),
+    ).rejects.toMatchObject({ code: "ARTIFACT_CORRUPT" });
+  });
+
+  it("reads empty and long JSON artifacts without breaking byte continuity", async () => {
+    const { store, root } = await createStore();
+    const empty = await writeRawArtifact(
+      root,
+      Buffer.alloc(0),
+      "text/plain; charset=utf-8",
+    );
+    await expect(
+      store.readVerifiedTextRange(empty, { afterByte: 0, maxBytes: 4 }),
+    ).resolves.toMatchObject({
+      content: "",
+      startByte: 0,
+      endByte: 0,
+      totalBytes: 0,
+      hasEarlier: false,
+      hasLater: false,
+    });
+
+    const content = JSON.stringify({ value: "中文🙂".repeat(100) });
+    const json = await writeRawArtifact(
+      root,
+      Buffer.from(content),
+      "application/json",
+    );
+    const pages: string[] = [];
+    let afterByte = 0;
+    do {
+      const page = await store.readVerifiedTextRange(json, {
+        afterByte,
+        maxBytes: 11,
+      });
+      pages.push(page.content);
+      afterByte = page.endByte;
+      if (!page.hasLater) {
+        break;
+      }
+    } while (true);
+    expect(pages.join("")).toBe(content);
+  });
+
+  it("rejects symlinks, size changes, and same-size digest corruption", async () => {
+    const { store, root } = await createStore();
+    const symlinkContent = Buffer.from("symlink target");
+    const symlinkHash = createHash("sha256")
+      .update(symlinkContent)
+      .digest("hex");
+    const symlinkTarget = join(root, "symlink-target");
+    await writeFile(symlinkTarget, symlinkContent);
+    await mkdir(join(root, "sha256", symlinkHash.slice(0, 2)), {
+      recursive: true,
+    });
+    await symlink(symlinkTarget, artifactPath(root, symlinkHash));
+    const symlinkReference = artifactReferenceSchema.parse({
+      type: "artifact",
+      id: `sha256:${symlinkHash}`,
+      sha256: symlinkHash,
+      bytes: symlinkContent.byteLength,
+      mediaType: "text/plain; charset=utf-8",
+    });
+    await expect(
+      store.readVerifiedTextRange(symlinkReference, {
+        afterByte: 0,
+        maxBytes: 8,
+      }),
+    ).rejects.toMatchObject({ code: "ARTIFACT_CORRUPT" });
+
+    const digestReference = await writeRawArtifact(
+      root,
+      Buffer.from("digest-original"),
+      "text/plain; charset=utf-8",
+    );
+    await writeFile(
+      artifactPath(root, digestReference.sha256),
+      "digest-modified",
+    );
+    await expect(
+      store.readVerifiedTextRange(digestReference, {
+        afterByte: 0,
+        maxBytes: 8,
+      }),
+    ).rejects.toMatchObject({ code: "ARTIFACT_CORRUPT" });
+
+    const sizeReference = await writeRawArtifact(
+      root,
+      Buffer.from("size-original"),
+      "text/plain; charset=utf-8",
+    );
+    await writeFile(
+      artifactPath(root, sizeReference.sha256),
+      "size-original-expanded",
+    );
+    await expect(
+      store.readVerifiedTextRange(sizeReference, {
+        afterByte: 0,
+        maxBytes: 8,
+      }),
+    ).rejects.toMatchObject({ code: "ARTIFACT_CORRUPT" });
   });
 
   it("reports missing and corrupt artifact references", async () => {
@@ -163,4 +346,22 @@ async function listPublishedHashes(root: string): Promise<string[]> {
 
 function artifactPath(root: string, sha256: string): string {
   return join(root, "sha256", sha256.slice(0, 2), sha256);
+}
+
+async function writeRawArtifact(
+  root: string,
+  content: Buffer,
+  mediaType: string,
+): Promise<ArtifactReference> {
+  const sha256 = createHash("sha256").update(content).digest("hex");
+  const path = artifactPath(root, sha256);
+  await mkdir(join(root, "sha256", sha256.slice(0, 2)), { recursive: true });
+  await writeFile(path, content);
+  return artifactReferenceSchema.parse({
+    type: "artifact",
+    id: `sha256:${sha256}`,
+    sha256,
+    bytes: content.byteLength,
+    mediaType,
+  });
 }
