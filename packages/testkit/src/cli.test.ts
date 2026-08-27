@@ -513,6 +513,117 @@ describe("Phase 1A CLI", () => {
     );
   });
 
+  it("applies one approved coordinated change set end to end", async () => {
+    const root = await mkdtemp(join(tmpdir(), "koda-change-set-cli-"));
+    temporaryDirectories.push(root);
+    const workspaceRoot = join(root, "repo");
+    const kodaHome = join(root, "state");
+    await mkdir(workspaceRoot);
+    await writeFile(join(workspaceRoot, "first.txt"), "Before\n");
+    await writeFile(join(workspaceRoot, "remove.txt"), "Remove me\n");
+    let approvalCalls = 0;
+
+    const provider = new ScriptedModelProvider([
+      {
+        assertRequest: (request) => {
+          const definition = request.tools.find(
+            (tool) => tool.name === "apply_changes",
+          );
+          expect(definition).toMatchObject({
+            inputJsonSchema: {
+              required: ["changes"],
+              additionalProperties: false,
+            },
+          });
+        },
+        events: [
+          {
+            type: "tool_call",
+            callId: toolCallIdSchema.parse("cli-change-set-call"),
+            name: "apply_changes",
+            arguments: {
+              changes: [
+                {
+                  operation: "update",
+                  path: "first.txt",
+                  edits: [{ old_text: "Before", new_text: "After" }],
+                },
+                {
+                  operation: "create",
+                  path: "created.txt",
+                  content: "Created\n",
+                },
+                { operation: "delete", path: "remove.txt" },
+              ],
+            },
+          },
+          { type: "completed", finishReason: "tool_calls" },
+        ],
+      },
+      {
+        assertRequest: (request) => {
+          expect(request.items.at(-1)).toMatchObject({
+            type: "tool_result",
+            status: "success",
+            output: { status: "committed" },
+          });
+        },
+        events: [
+          { type: "assistant_delta", text: "Applied the change set." },
+          { type: "completed", finishReason: "stop" },
+        ],
+      },
+    ]);
+    const dependencies: RunCommandDependencies = {
+      openWorkspace: (path) => ReadOnlyWorkspace.open(path),
+      createProvider: () => provider,
+      createApprovalBroker: () => ({
+        request: async (request) => {
+          approvalCalls += 1;
+          expect(request.details).toContain("*** Update File: first.txt");
+          expect(request.details).toContain("*** Create File: created.txt");
+          expect(request.details).toContain("*** Delete File: remove.txt");
+          return { decision: "approved" };
+        },
+      }),
+      createIds: () => ({
+        threadId: threadIdSchema.parse("change-set-cli-thread"),
+        turnId: turnIdSchema.parse("change-set-cli-turn"),
+        itemIds: new DeterministicItemIdFactory("change-set-cli-item"),
+      }),
+    };
+
+    const exitCode = await runCommand(
+      {
+        prompt: "Apply coordinated changes.",
+        cwd: workspaceRoot,
+        signal: new AbortController().signal,
+      },
+      {
+        environment: {
+          OPENAI_API_KEY: "offline-test-key",
+          KODA_HOME: kodaHome,
+        },
+        processDirectory: root,
+        stdout: new MemoryWriter(),
+        stderr: new MemoryWriter(),
+      },
+      dependencies,
+    );
+
+    expect(exitCode).toBe(0);
+    expect(approvalCalls).toBe(1);
+    expect(await readFile(join(workspaceRoot, "first.txt"), "utf8")).toBe(
+      "After\n",
+    );
+    expect(await readFile(join(workspaceRoot, "created.txt"), "utf8")).toBe(
+      "Created\n",
+    );
+    await expect(
+      readFile(join(workspaceRoot, "remove.txt"), "utf8"),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("runs an approved structured command end to end", async () => {
     const root = await mkdtemp(join(tmpdir(), "koda-exec-cli-"));
     temporaryDirectories.push(root);

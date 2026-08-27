@@ -8,6 +8,12 @@ import {
 } from "./ids.js";
 import { conversationItemSchema } from "./items.js";
 import { artifactReferenceSchema } from "./artifacts.js";
+import {
+  workspaceChangeSetCommittedPayloadSchema,
+  workspaceChangeSetPreparedPayloadSchema,
+  workspaceChangeSetRolledBackPayloadSchema,
+  workspaceChangeSetUncertainPayloadSchema,
+} from "./change-sets.js";
 import { tokenUsageSchema, turnUsageSchema } from "./usage.js";
 import {
   contextPreparedPayloadSchema,
@@ -21,6 +27,16 @@ const metadataShape = {
   threadId: threadIdSchema,
   turnId: turnIdSchema,
 };
+
+function utf8BoundedString(maximumBytes: number) {
+  return z
+    .string()
+    .min(1)
+    .refine(
+      (value) => new TextEncoder().encode(value).byteLength <= maximumBytes,
+      `Text must not exceed ${maximumBytes} UTF-8 bytes.`,
+    );
+}
 
 export const toolEffectSchema = z.enum(["read", "write", "execute"]);
 export const processOwnershipSchema = z.enum([
@@ -154,14 +170,50 @@ export const agentEventSchema = z.discriminatedUnion("type", [
   }),
   z.object({
     ...metadataShape,
+    type: z.literal("workspace.change_set_prepared"),
+    payload: z.object({
+      callId: toolCallIdSchema,
+      name: z.string().min(1),
+      ...workspaceChangeSetPreparedPayloadSchema.shape,
+    }),
+  }),
+  z.object({
+    ...metadataShape,
+    type: z.literal("workspace.change_set_committed"),
+    payload: z.object({
+      callId: toolCallIdSchema,
+      name: z.string().min(1),
+      ...workspaceChangeSetCommittedPayloadSchema.shape,
+    }),
+  }),
+  z.object({
+    ...metadataShape,
+    type: z.literal("workspace.change_set_rolled_back"),
+    payload: z.object({
+      callId: toolCallIdSchema,
+      name: z.string().min(1),
+      ...workspaceChangeSetRolledBackPayloadSchema.shape,
+    }),
+  }),
+  z.object({
+    ...metadataShape,
+    type: z.literal("workspace.change_set_uncertain"),
+    payload: z.object({
+      callId: toolCallIdSchema,
+      name: z.string().min(1),
+      ...workspaceChangeSetUncertainPayloadSchema.shape,
+    }),
+  }),
+  z.object({
+    ...metadataShape,
     type: z.literal("approval.requested"),
     payload: z.object({
       callId: toolCallIdSchema,
       name: z.string().min(1),
-      title: z.string().min(1),
-      summary: z.string().min(1),
-      details: z.string().min(1),
-      reason: z.string().min(1),
+      title: utf8BoundedString(1_024),
+      summary: utf8BoundedString(16_384),
+      details: utf8BoundedString(524_288),
+      reason: utf8BoundedString(4_096),
     }),
   }),
   z.object({

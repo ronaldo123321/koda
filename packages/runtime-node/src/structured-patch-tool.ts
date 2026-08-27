@@ -3,6 +3,7 @@ import type { JsonValue } from "@koda/protocol";
 import { z } from "zod";
 
 import { ReadOnlyWorkspace } from "./read-only-workspace.js";
+import { WorkspaceMutationCoordinator } from "./workspace-mutation-coordinator.js";
 
 const MAX_PATCH_FIELD_CHARACTERS = 65_536;
 
@@ -18,6 +19,7 @@ const structuredPatchInput = z
 export function registerStructuredPatchTool(
   registry: ToolRegistry,
   workspace: ReadOnlyWorkspace,
+  coordinator?: WorkspaceMutationCoordinator,
 ): void {
   registry.register({
     spec: {
@@ -65,9 +67,14 @@ export function registerStructuredPatchTool(
           summary: patch.summary,
           details: patch.preview,
         },
-        execute: async (): Promise<JsonValue> => ({
-          ...(await patch.apply(context.signal)),
-        }),
+        execute: async (): Promise<JsonValue> => {
+          const apply = async () => ({
+            ...(await patch.apply(context.signal)),
+          });
+          return coordinator === undefined
+            ? apply()
+            : coordinator.runExclusive(context.signal, apply);
+        },
       };
     },
   });

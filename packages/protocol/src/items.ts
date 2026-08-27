@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { artifactIdSchema } from "./artifacts.js";
+import { workspaceChangeSetRecoverySchema } from "./change-sets.js";
 import { itemIdSchema, toolCallIdSchema, turnIdSchema } from "./ids.js";
 import { jsonObjectSchema, jsonValueSchema } from "./json.js";
 import { modelProviderIdSchema, providerStateSchema } from "./providers.js";
@@ -148,6 +149,10 @@ export const recoveryItemSchema = z.object({
         .optional(),
     }),
   ),
+  workspaceChangeSets: z
+    .array(workspaceChangeSetRecoverySchema)
+    .max(16)
+    .default([]),
 });
 
 export const conversationItemSchema = z.discriminatedUnion("type", [

@@ -3540,7 +3540,7 @@ export class TuiController {
           name: boundText(event.payload.name),
           title: boundText(event.payload.title),
           summary: boundText(event.payload.summary),
-          details: boundText(event.payload.details),
+          details: event.payload.details,
           reason: boundText(event.payload.reason),
           detailsVisible: false,
           resolving: false,
@@ -3585,6 +3585,30 @@ export class TuiController {
         next = updateTool(next, event.payload.callId, event.payload.name, {
           status: event.payload.outcome === "uncertain" ? "error" : "success",
           detail: `termination ${event.payload.outcome}`,
+        });
+        break;
+      case "workspace.change_set_prepared":
+        next = updateTool(next, event.payload.callId, event.payload.name, {
+          status: "running",
+          detail: `${event.payload.changes.length} changes prepared`,
+        });
+        break;
+      case "workspace.change_set_committed":
+        next = updateTool(next, event.payload.callId, event.payload.name, {
+          status: "success",
+          detail: `${event.payload.changeCount} changes committed`,
+        });
+        break;
+      case "workspace.change_set_rolled_back":
+        next = updateTool(next, event.payload.callId, event.payload.name, {
+          status: "error",
+          detail: `${event.payload.appliedCount} changes rolled back`,
+        });
+        break;
+      case "workspace.change_set_uncertain":
+        next = updateTool(next, event.payload.callId, event.payload.name, {
+          status: "error",
+          detail: `uncertain: ${event.payload.uncertainPaths.join(", ")}`,
         });
         break;
       case "artifact.recorded":

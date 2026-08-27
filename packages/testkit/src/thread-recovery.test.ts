@@ -151,6 +151,111 @@ describe("recoverThread", () => {
     expect(recovered.message).toContain("effect write");
   });
 
+  it("classifies incomplete and durably committed change sets without replay", () => {
+    const callId = toolCallIdSchema.parse("recovery-change-set-call");
+    const base = [
+      event(0, "turn.started", {}),
+      contextEvent(1),
+      recorded(2, {
+        type: "tool_call",
+        id: itemIdSchema.parse("recovery-change-set-item"),
+        callId,
+        name: "apply_changes",
+        arguments: { changes: [] },
+      }),
+      event(3, "tool.started", {
+        callId,
+        name: "apply_changes",
+        executionBoundary: true,
+      }),
+      event(4, "tool.execution_started", {
+        callId,
+        name: "apply_changes",
+        effect: "write",
+      }),
+      event(5, "workspace.change_set_prepared", {
+        callId,
+        name: "apply_changes",
+        planSha256: "a".repeat(64),
+        changes: [changeEvidence()],
+      }),
+    ];
+
+    const incomplete = recoverThread(readResult(base), threadId);
+    expect(incomplete.workspaceChangeSets).toEqual([
+      {
+        planSha256: "a".repeat(64),
+        status: "incomplete",
+        paths: ["README.md"],
+      },
+    ]);
+    expect(incomplete.message).toContain("Do not automatically repeat");
+
+    const committed = recoverThread(
+      readResult([
+        ...base,
+        event(6, "workspace.change_set_committed", {
+          callId,
+          name: "apply_changes",
+          planSha256: "a".repeat(64),
+          changeCount: 1,
+        }),
+      ]),
+      threadId,
+    );
+    expect(committed.workspaceChangeSets).toEqual([
+      expect.objectContaining({ status: "committed" }),
+    ]);
+  });
+
+  it("retains explicit uncertain change-set evidence after tool completion", () => {
+    const callId = toolCallIdSchema.parse("uncertain-change-set-call");
+    const events = [
+      event(0, "turn.started", {}),
+      contextEvent(1),
+      event(2, "tool.started", {
+        callId,
+        name: "apply_changes",
+        executionBoundary: true,
+      }),
+      event(3, "tool.execution_started", {
+        callId,
+        name: "apply_changes",
+        effect: "write",
+      }),
+      event(4, "workspace.change_set_prepared", {
+        callId,
+        name: "apply_changes",
+        planSha256: "b".repeat(64),
+        changes: [changeEvidence()],
+      }),
+      event(5, "workspace.change_set_uncertain", {
+        callId,
+        name: "apply_changes",
+        planSha256: "b".repeat(64),
+        appliedCount: 1,
+        uncertainPaths: ["README.md"],
+        errorCode: "WORKSPACE_CHANGED",
+      }),
+      event(6, "tool.completed", {
+        callId,
+        name: "apply_changes",
+        status: "error",
+      }),
+    ];
+
+    const recovered = recoverThread(readResult(events), threadId);
+
+    expect(recovered.uncertainToolCalls).toEqual([]);
+    expect(recovered.workspaceChangeSets).toEqual([
+      {
+        planSha256: "b".repeat(64),
+        status: "uncertain",
+        paths: ["README.md"],
+      },
+    ]);
+  });
+
   it("recovers an interrupted external MCP call without replaying it", () => {
     const callId = toolCallIdSchema.parse("uncertain-mcp-call");
     const name = "mcp__github__create_issue";
@@ -639,6 +744,17 @@ function compactionSummary() {
     pendingWork: ["Current objective."],
     failedAttempts: [],
     criticalFacts: [],
+  };
+}
+
+function changeEvidence() {
+  return {
+    index: 0,
+    operation: "update" as const,
+    path: "README.md",
+    beforeSha256: "c".repeat(64),
+    afterSha256: "d".repeat(64),
+    bytes: 10,
   };
 }
 

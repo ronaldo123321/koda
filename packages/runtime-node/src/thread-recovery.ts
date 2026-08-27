@@ -8,6 +8,7 @@ import type {
   ToolCallId,
   TurnContextSnapshot,
   TurnId,
+  WorkspaceChangeSetRecovery,
 } from "@koda/protocol";
 
 export type ThreadRecoveryErrorCode =
@@ -40,6 +41,7 @@ export interface RecoveredThread {
   history: ConversationItem[];
   context: TurnContextSnapshot;
   uncertainToolCalls: UncertainToolCall[];
+  workspaceChangeSets: WorkspaceChangeSetRecovery[];
   partialTrailingEventDiscarded: boolean;
   message: string;
 }
@@ -122,12 +124,14 @@ export function recoverThread(
   validateCompactionHistory(history);
 
   const uncertainToolCalls = findUncertainToolCalls(previous.events);
+  const workspaceChangeSets = findWorkspaceChangeSets(previous.events);
   const partialTrailingEventDiscarded = readResult.diagnostics.some(
     (diagnostic) => diagnostic.code === "PARTIAL_TRAILING_LINE",
   );
   const message = buildRecoveryMessage({
     previousStatus,
     uncertainToolCalls,
+    workspaceChangeSets,
     partialTrailingEventDiscarded,
   });
   const lastEvent = events.at(-1);
@@ -143,6 +147,7 @@ export function recoverThread(
     history,
     context: contextEvent.payload,
     uncertainToolCalls,
+    workspaceChangeSets,
     partialTrailingEventDiscarded,
     message,
   };
@@ -590,6 +595,110 @@ function findUncertainToolCalls(
     });
 }
 
+interface WorkspaceChangeSetState {
+  name: string;
+  prepared: Extract<AgentEvent, { type: "workspace.change_set_prepared" }>;
+  terminal?: Extract<
+    AgentEvent,
+    {
+      type:
+        | "workspace.change_set_committed"
+        | "workspace.change_set_rolled_back"
+        | "workspace.change_set_uncertain";
+    }
+  >;
+}
+
+function findWorkspaceChangeSets(
+  events: readonly AgentEvent[],
+): WorkspaceChangeSetRecovery[] {
+  const executions = new Map<ToolCallId, string>();
+  const states = new Map<ToolCallId, WorkspaceChangeSetState>();
+  const completed = new Set<ToolCallId>();
+  for (const event of events) {
+    if (event.type === "tool.execution_started") {
+      executions.set(event.payload.callId, event.payload.name);
+      continue;
+    }
+    if (event.type === "tool.completed") {
+      completed.add(event.payload.callId);
+      continue;
+    }
+    if (event.type === "workspace.change_set_prepared") {
+      if (
+        event.payload.name !== "apply_changes" ||
+        executions.get(event.payload.callId) !== event.payload.name
+      ) {
+        throw invalidLog(
+          `Change set '${event.payload.callId}' has no matching apply_changes execution boundary.`,
+        );
+      }
+      if (
+        states.has(event.payload.callId) ||
+        completed.has(event.payload.callId)
+      ) {
+        throw invalidLog(
+          `Change set '${event.payload.callId}' was prepared more than once or after completion.`,
+        );
+      }
+      states.set(event.payload.callId, {
+        name: event.payload.name,
+        prepared: event,
+      });
+      continue;
+    }
+    if (
+      event.type !== "workspace.change_set_committed" &&
+      event.type !== "workspace.change_set_rolled_back" &&
+      event.type !== "workspace.change_set_uncertain"
+    ) {
+      continue;
+    }
+    const state = states.get(event.payload.callId);
+    if (
+      state === undefined ||
+      state.name !== event.payload.name ||
+      state.prepared.payload.planSha256 !== event.payload.planSha256 ||
+      state.terminal !== undefined ||
+      completed.has(event.payload.callId)
+    ) {
+      throw invalidLog(
+        `Change set '${event.payload.callId}' has an invalid terminal event.`,
+      );
+    }
+    if (
+      event.type === "workspace.change_set_committed" &&
+      event.payload.changeCount !== state.prepared.payload.changes.length
+    ) {
+      throw invalidLog(
+        `Committed change set '${event.payload.callId}' has an invalid operation count.`,
+      );
+    }
+    state.terminal = event;
+  }
+
+  return [...states.entries()].flatMap(([callId, state]) => {
+    const status =
+      state.terminal?.type === "workspace.change_set_committed"
+        ? "committed"
+        : state.terminal?.type === "workspace.change_set_rolled_back"
+          ? "rolled_back"
+          : state.terminal?.type === "workspace.change_set_uncertain"
+            ? "uncertain"
+            : "incomplete";
+    if (completed.has(callId) && status !== "uncertain") {
+      return [];
+    }
+    return [
+      {
+        planSha256: state.prepared.payload.planSha256,
+        status,
+        paths: state.prepared.payload.changes.map((change) => change.path),
+      } satisfies WorkspaceChangeSetRecovery,
+    ];
+  });
+}
+
 function matchingProcess(
   processes: Map<ToolCallId, RecoveryProcessState>,
   event: Extract<
@@ -631,6 +740,7 @@ function isTerminalEvent(
 function buildRecoveryMessage(options: {
   previousStatus: PreviousTurnStatus;
   uncertainToolCalls: readonly UncertainToolCall[];
+  workspaceChangeSets: readonly WorkspaceChangeSetRecovery[];
   partialTrailingEventDiscarded: boolean;
 }): string {
   const parts = [
@@ -639,6 +749,18 @@ function buildRecoveryMessage(options: {
   if (options.uncertainToolCalls.length > 0) {
     parts.push(
       `The following tool calls started without a durable completion and must not be assumed successful or automatically repeated: ${options.uncertainToolCalls.map(describeUncertainToolCall).join(", ")}. Inspect current repository and process state before proposing any new action.`,
+    );
+  }
+  if (options.workspaceChangeSets.length > 0) {
+    parts.push(
+      `Workspace change-set recovery evidence: ${options.workspaceChangeSets
+        .map(
+          (changeSet) =>
+            `${changeSet.planSha256.slice(0, 12)} ${changeSet.status} (${changeSet.paths.join(", ")})`,
+        )
+        .join(
+          "; ",
+        )}. Do not automatically repeat these writes; inspect affected paths first.`,
     );
   }
   if (options.partialTrailingEventDiscarded) {

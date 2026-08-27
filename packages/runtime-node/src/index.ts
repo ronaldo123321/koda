@@ -1,6 +1,7 @@
 export * from "./artifact-store.js";
 export * from "./artifact-garbage-collector.js";
 export * from "./artifact-tools.js";
+export * from "./change-set-tool.js";
 export * from "./exec-command-tool.js";
 export * from "./jsonl-event-store.js";
 export * from "./process-tree-controller.js";
@@ -12,4 +13,5 @@ export * from "./thread-lease.js";
 export * from "./thread-metadata-index.js";
 export * from "./thread-recovery.js";
 export * from "./workspace-command-runner.js";
+export * from "./workspace-mutation-coordinator.js";
 export * from "./workspace-preference-store.js";

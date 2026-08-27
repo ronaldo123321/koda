@@ -16,11 +16,11 @@ import { jsonValueSchema } from "./json.js";
 import { tokenUsageSchema } from "./usage.js";
 import { modelProviderIdSchema, providerMetadataSchema } from "./providers.js";
 
-export const APP_SERVER_PROTOCOL_VERSION = 7 as const;
+export const APP_SERVER_PROTOCOL_VERSION = 8 as const;
 
 export const THREAD_EVENTS_DEFAULT_LIMIT = 200;
 export const THREAD_EVENTS_MAXIMUM_LIMIT = 200;
-export const THREAD_EVENTS_RESULT_BUDGET_BYTES = 768 * 1_024;
+export const THREAD_EVENTS_RESULT_BUDGET_BYTES = 2 * 1_024 * 1_024;
 export const THREAD_SEARCH_DEFAULT_LIMIT = 50;
 export const THREAD_SEARCH_MAXIMUM_LIMIT = 100;
 export const THREAD_SEARCH_QUERY_BUDGET_BYTES = 256;
@@ -160,6 +160,7 @@ export const initializeResultSchema = z
         runtimeSettings: z.literal(true),
         artifactInspection: z.literal(true),
         contextInspection: z.literal(true),
+        multiFileChanges: z.literal(true),
       })
       .strict(),
     providers: z.array(runtimeProviderMetadataSchema).min(1),

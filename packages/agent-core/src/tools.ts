@@ -9,6 +9,10 @@ import type {
   ThreadId,
   ToolCallId,
   TurnId,
+  WorkspaceChangeSetCommittedPayload,
+  WorkspaceChangeSetPreparedPayload,
+  WorkspaceChangeSetRolledBackPayload,
+  WorkspaceChangeSetUncertainPayload,
 } from "@koda/protocol";
 import { jsonValueSchema } from "@koda/protocol";
 import type { z } from "zod";
@@ -53,6 +57,22 @@ export type ToolOperationalEvent =
         reason: ProcessTerminationReason;
         outcome: ProcessTerminationOutcome;
       };
+    }
+  | {
+      type: "workspace.change_set_prepared";
+      payload: WorkspaceChangeSetPreparedPayload;
+    }
+  | {
+      type: "workspace.change_set_committed";
+      payload: WorkspaceChangeSetCommittedPayload;
+    }
+  | {
+      type: "workspace.change_set_rolled_back";
+      payload: WorkspaceChangeSetRolledBackPayload;
+    }
+  | {
+      type: "workspace.change_set_uncertain";
+      payload: WorkspaceChangeSetUncertainPayload;
     };
 
 export class ToolOperationalEventError extends Error {

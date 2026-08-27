@@ -1,6 +1,6 @@
 # Koda Phase 3F1: Auditable Multi-File Change Transactions
 
-- Status: Design complete; implementation pending
+- Status: Implemented and verified
 - Date: 2026-08-27
 - Depends on: Phase 1B structured patching, Phase 2 recovery records, Phase 3A app-server, and Phase 3D Ink approvals
 - Scope: bounded coordinated text-file creates, exact updates, moves, deletions, compensating rollback, mutation serialization, and durable outcome evidence
@@ -92,7 +92,7 @@ Every source, destination, and parent is resolved beneath the canonical workspac
 
 Create destinations and move destinations must be absent. Update, move source, and delete paths must be existing regular files. Update and delete targets must be valid UTF-8 text. Move is also restricted to a regular UTF-8 file so the first richer write slice does not silently introduce binary mutation semantics. Directory moves, recursive deletion, hard-link preservation, symlinks, devices, sockets, chmod, ownership, timestamps, and extended attributes are outside the contract.
 
-Moves require source and destination parents to be on the same filesystem device so a single `rename` is available. Cross-device moves fail during preparation rather than degrading into an unapproved copy-and-delete sequence.
+Moves require source and destination parents to be on the same filesystem device so a no-overwrite hard-link/unlink sequence is available. Cross-device moves fail during preparation rather than degrading into an unapproved copy-and-delete sequence.
 
 The runtime compares normalized absolute endpoints and rejects duplicate lexical paths before approval. Filesystem case folding or an external process can still create a collision after preparation; execution detects that through revalidation and rolls back any earlier operations.
 
@@ -136,13 +136,13 @@ prepared in memory
         -> or workspace.change_set_uncertain
 ```
 
-Create and update candidates are written to uniquely named temporary files beside their targets, flushed, closed, and mode-adjusted before the first workspace mutation. The commit order is deterministic by canonical primary path, with the original input index retained in previews and results. Create links or renames its staged file into place, update atomically renames its staged file over the target, move uses same-device rename, and delete removes the verified target.
+Create and update candidates are written to uniquely named temporary files beside their targets, flushed, closed, and mode-adjusted before the first workspace mutation. The commit order is deterministic by canonical primary path, with the original input index retained in previews and results. Create links its staged file into place, update atomically renames its staged file over the target, move uses a same-device no-overwrite hard-link followed by source removal, and delete removes the verified target. A move failure between link and removal is treated as partially applied and enters uncertain-safe rollback rather than overwriting either endpoint.
 
 The plan keeps bounded original bytes and modes for update/delete restoration. If an operation fails or cancellation arrives after the first mutation, execution enters a non-cancellable bounded cleanup section and compensates completed operations in reverse order:
 
 - remove a created file only when it still has the planned after digest;
 - restore an updated or deleted file through the same atomic-write primitive;
-- rename a moved destination back only when the destination digest and source absence still match the plan.
+- restore a moved destination with the same no-overwrite link/removal sequence only when the destination digest and source absence still match the plan.
 
 Rollback success returns the original failure as `CHANGE_SET_APPLY_FAILED` and proves that observed before states were restored. Rollback conflict or failure returns `CHANGE_SET_OUTCOME_UNCERTAIN`, names the affected paths, and forbids any success claim. Temporary candidates are cleaned on every reachable terminal path.
 
@@ -252,3 +252,9 @@ Fault injection is a first-class test dependency: the runtime engine accepts det
 - Approval caching and trusted scopes: a later Phase 3 policy slice.
 - Strong OS sandboxing, network policy, Rust execution, PTY/background processes, and shell strings: Phase 4.
 - Worktree isolation and child-agent writes: Phase 5 multi-agent execution.
+
+## 15. Implementation verification
+
+Phase 3F1 is implemented on `main` with protocol v8. `apply_changes` exposes the accepted strict provider-neutral grammar, shares a cross-thread/process workspace mutation coordinator with `apply_patch`, preserves complete approval details in Ink, stages candidates before its durable prepared boundary, emits committed/rolled-back/uncertain evidence, and enriches interrupted-thread recovery without automatically replaying writes.
+
+The runtime test suite exercises coordinated create/update/move/delete success, ordered edits, stale and conflicting paths, path confinement, exact limits, reverse rollback, external-edit rollback refusal, cancellation after the mutation boundary, temporary cleanup, mutation serialization, live/stale owners, cancelled lease waits, one-shot approval, AgentLoop event ordering, recovery classification, protocol v8, CLI, app-server/client capability negotiation, and TUI projection. Final verification completed with formatting, build/typecheck, 35/35 offline test files and 283/283 tests, all 6 deterministic reliability scenarios, and a real TTY smoke covering protocol v8 startup, `/help`, `/status`, graceful shutdown, and normal terminal restoration.

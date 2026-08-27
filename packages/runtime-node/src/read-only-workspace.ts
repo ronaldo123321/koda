@@ -21,6 +21,14 @@ import {
   sep,
 } from "node:path";
 
+import type {
+  WorkspaceChangeEvidence,
+  WorkspaceChangeSetCommittedPayload,
+  WorkspaceChangeSetPreparedPayload,
+  WorkspaceChangeSetRolledBackPayload,
+  WorkspaceChangeSetUncertainPayload,
+} from "@koda/protocol";
+
 export type WorkspaceErrorCode =
   | "INVALID_PATH"
   | "PATH_OUTSIDE_WORKSPACE"
@@ -38,7 +46,13 @@ export type WorkspaceErrorCode =
   | "PATCH_MATCH_AMBIGUOUS"
   | "SYMLINK_WRITE_FORBIDDEN"
   | "WRITE_PATH_FORBIDDEN"
-  | "WORKSPACE_CHANGED";
+  | "WORKSPACE_CHANGED"
+  | "CHANGE_SET_LIMIT_EXCEEDED"
+  | "CHANGE_PATH_CONFLICT"
+  | "CHANGE_PREVIEW_TOO_LARGE"
+  | "MOVE_CROSS_DEVICE"
+  | "CHANGE_SET_APPLY_FAILED"
+  | "CHANGE_SET_OUTCOME_UNCERTAIN";
 
 export class WorkspaceError extends Error {
   public constructor(
@@ -120,11 +134,95 @@ export interface PreparedStructuredPatch {
   apply(signal: AbortSignal): Promise<StructuredPatchResult>;
 }
 
+export interface WorkspaceCreateChange {
+  operation: "create";
+  path: string;
+  content: string;
+}
+
+export interface WorkspaceUpdateChange {
+  operation: "update";
+  path: string;
+  edits: Array<{ oldText: string; newText: string }>;
+}
+
+export interface WorkspaceMoveChange {
+  operation: "move";
+  fromPath: string;
+  toPath: string;
+}
+
+export interface WorkspaceDeleteChange {
+  operation: "delete";
+  path: string;
+}
+
+export type WorkspaceChange =
+  | WorkspaceCreateChange
+  | WorkspaceUpdateChange
+  | WorkspaceMoveChange
+  | WorkspaceDeleteChange;
+
+export type WorkspaceChangeSetOperationalEvent =
+  | {
+      type: "workspace.change_set_prepared";
+      payload: WorkspaceChangeSetPreparedPayload;
+    }
+  | {
+      type: "workspace.change_set_committed";
+      payload: WorkspaceChangeSetCommittedPayload;
+    }
+  | {
+      type: "workspace.change_set_rolled_back";
+      payload: WorkspaceChangeSetRolledBackPayload;
+    }
+  | {
+      type: "workspace.change_set_uncertain";
+      payload: WorkspaceChangeSetUncertainPayload;
+    };
+
+export interface WorkspaceChangeSetFaultHooks {
+  afterStaging?(): Promise<void> | void;
+  beforeCommit?(inputIndex: number): Promise<void> | void;
+  afterCommit?(inputIndex: number): Promise<void> | void;
+  beforeRollback?(inputIndex: number): Promise<void> | void;
+}
+
+export interface WorkspaceChangeSetOptions {
+  changes: WorkspaceChange[];
+  faultHooks?: WorkspaceChangeSetFaultHooks;
+}
+
+export interface WorkspaceChangeSetResult {
+  status: "committed";
+  planSha256: string;
+  changes: WorkspaceChangeEvidence[];
+}
+
+export interface PreparedWorkspaceChangeSet {
+  summary: string;
+  preview: string;
+  planSha256: string;
+  changes: readonly WorkspaceChangeEvidence[];
+  apply(
+    signal: AbortSignal,
+    report: (event: WorkspaceChangeSetOperationalEvent) => Promise<void>,
+  ): Promise<WorkspaceChangeSetResult>;
+}
+
 const IGNORED_DIRECTORY_NAMES = new Set([".git", ".koda", "node_modules"]);
 const MAX_FILE_BYTES = 1_000_000;
 const DEFAULT_SEARCH_TIMEOUT_MS = 10_000;
 const DEFAULT_SEARCH_OUTPUT_BYTES = 128_000;
 const MAX_PATCH_FIELD_BYTES = 65_536;
+const MAX_CHANGE_SET_CHANGES = 16;
+const MAX_CHANGE_SET_EDITS = 32;
+const MAX_CHANGE_SET_TEXT_BYTES = 262_144;
+const MAX_CHANGE_SET_SNAPSHOT_BYTES = 8_000_000;
+const MAX_CHANGE_SET_PREVIEW_BYTES = 524_288;
+const MAX_CHANGE_SET_SUMMARY_BYTES = 16_384;
+const MAX_CHANGE_PATH_BYTES = 4_096;
+const MAX_DELETE_BYTES = 65_536;
 
 export class ReadOnlyWorkspace {
   private constructor(public readonly root: string) {}
@@ -422,6 +520,555 @@ export class ReadOnlyWorkspace {
     };
   }
 
+  public async prepareChangeSet(
+    options: WorkspaceChangeSetOptions,
+  ): Promise<PreparedWorkspaceChangeSet> {
+    if (
+      options.changes.length < 1 ||
+      options.changes.length > MAX_CHANGE_SET_CHANGES
+    ) {
+      throw new WorkspaceError(
+        "CHANGE_SET_LIMIT_EXCEEDED",
+        `A change set requires between 1 and ${MAX_CHANGE_SET_CHANGES} operations.`,
+      );
+    }
+
+    let editCount = 0;
+    let textBytes = 0;
+    let snapshotBytes = 0;
+    const endpoints = new Set<string>();
+    const preparedChanges: PreparedChange[] = [];
+
+    const reserveEndpoint = (absolutePath: string, requestedPath: string) => {
+      if (endpoints.has(absolutePath)) {
+        throw new WorkspaceError(
+          "CHANGE_PATH_CONFLICT",
+          `A change-set path is touched more than once: ${requestedPath}`,
+        );
+      }
+      endpoints.add(absolutePath);
+    };
+
+    for (const [index, change] of options.changes.entries()) {
+      if (change.operation === "create") {
+        assertChangePath(change.path);
+        assertPatchField(change.content, "content");
+        textBytes += Buffer.byteLength(change.content, "utf8");
+        assertChangeSetTotal(textBytes, MAX_CHANGE_SET_TEXT_BYTES, "text");
+        const target = this.resolveWriteTarget(change.path);
+        reserveEndpoint(target, change.path);
+        const parent = dirname(target);
+        await this.assertStablePatchParent(parent, change.path);
+        if (await pathExists(target)) {
+          throw new WorkspaceError(
+            "PATCH_TARGET_EXISTS",
+            `Cannot create an existing path: ${change.path}`,
+          );
+        }
+        const candidate = Buffer.from(change.content, "utf8");
+        assertCandidateSize(candidate, change.path);
+        const path = this.toWorkspaceRelative(target);
+        preparedChanges.push({
+          index,
+          operation: "create",
+          path,
+          target,
+          parent,
+          candidate,
+          mode: 0o644,
+          evidence: {
+            index,
+            operation: "create",
+            path,
+            beforeSha256: null,
+            afterSha256: hashBytes(candidate),
+            bytes: candidate.byteLength,
+          },
+          preview: renderCreatePreview(path, change.content),
+        });
+        continue;
+      }
+
+      if (change.operation === "update") {
+        assertChangePath(change.path);
+        if (change.edits.length < 1) {
+          throw new WorkspaceError(
+            "INVALID_PATCH",
+            `An update requires at least one exact edit: ${change.path}`,
+          );
+        }
+        editCount += change.edits.length;
+        if (editCount > MAX_CHANGE_SET_EDITS) {
+          throw new WorkspaceError(
+            "CHANGE_SET_LIMIT_EXCEEDED",
+            `A change set cannot exceed ${MAX_CHANGE_SET_EDITS} exact edits.`,
+          );
+        }
+        const target = this.resolveWriteTarget(change.path);
+        reserveEndpoint(target, change.path);
+        const parent = dirname(target);
+        await this.assertStablePatchParent(parent, change.path);
+        const snapshot = await this.readWritableSnapshot(target, change.path);
+        snapshotBytes += snapshot.bytes.byteLength;
+        assertChangeSetTotal(
+          snapshotBytes,
+          MAX_CHANGE_SET_SNAPSHOT_BYTES,
+          "snapshots",
+        );
+        let candidate = snapshot.content;
+        for (const edit of change.edits) {
+          assertPatchField(edit.oldText, "old_text");
+          assertPatchField(edit.newText, "new_text");
+          if (edit.oldText.length === 0) {
+            throw new WorkspaceError(
+              "INVALID_PATCH",
+              `An update edit requires non-empty old_text: ${change.path}`,
+            );
+          }
+          textBytes +=
+            Buffer.byteLength(edit.oldText, "utf8") +
+            Buffer.byteLength(edit.newText, "utf8");
+          assertChangeSetTotal(textBytes, MAX_CHANGE_SET_TEXT_BYTES, "text");
+          candidate = applyExactEdit(candidate, edit, change.path);
+        }
+        if (candidate === snapshot.content) {
+          throw new WorkspaceError(
+            "INVALID_PATCH",
+            `The proposed update would not change the file: ${change.path}`,
+          );
+        }
+        const candidateBytes = Buffer.from(candidate, "utf8");
+        assertCandidateSize(candidateBytes, change.path);
+        const path = this.toWorkspaceRelative(target);
+        preparedChanges.push({
+          index,
+          operation: "update",
+          path,
+          target,
+          parent,
+          before: snapshot,
+          candidate: candidateBytes,
+          mode: snapshot.mode,
+          evidence: {
+            index,
+            operation: "update",
+            path,
+            beforeSha256: snapshot.hash,
+            afterSha256: hashBytes(candidateBytes),
+            bytes: candidateBytes.byteLength,
+          },
+          preview: renderUpdatePreview(path, change.edits),
+        });
+        continue;
+      }
+
+      if (change.operation === "move") {
+        assertChangePath(change.fromPath);
+        assertChangePath(change.toPath);
+        const source = this.resolveWriteTarget(change.fromPath);
+        const destination = this.resolveWriteTarget(change.toPath);
+        reserveEndpoint(source, change.fromPath);
+        reserveEndpoint(destination, change.toPath);
+        const sourceParent = dirname(source);
+        const destinationParent = dirname(destination);
+        await this.assertStablePatchParent(sourceParent, change.fromPath);
+        await this.assertStablePatchParent(destinationParent, change.toPath);
+        const snapshot = await this.readWritableSnapshot(
+          source,
+          change.fromPath,
+        );
+        snapshotBytes += snapshot.bytes.byteLength;
+        assertChangeSetTotal(
+          snapshotBytes,
+          MAX_CHANGE_SET_SNAPSHOT_BYTES,
+          "snapshots",
+        );
+        if (await pathExists(destination)) {
+          throw new WorkspaceError(
+            "PATCH_TARGET_EXISTS",
+            `Cannot move onto an existing path: ${change.toPath}`,
+          );
+        }
+        const destinationParentStats = await stat(destinationParent);
+        if (snapshot.device !== destinationParentStats.dev) {
+          throw new WorkspaceError(
+            "MOVE_CROSS_DEVICE",
+            `Move source and destination must be on the same filesystem: ${change.fromPath} -> ${change.toPath}`,
+          );
+        }
+        const path = this.toWorkspaceRelative(source);
+        const destinationPath = this.toWorkspaceRelative(destination);
+        preparedChanges.push({
+          index,
+          operation: "move",
+          path,
+          target: source,
+          parent: sourceParent,
+          destination,
+          destinationPath,
+          destinationParent,
+          before: snapshot,
+          evidence: {
+            index,
+            operation: "move",
+            path,
+            destination: destinationPath,
+            beforeSha256: snapshot.hash,
+            afterSha256: snapshot.hash,
+            bytes: snapshot.bytes.byteLength,
+          },
+          preview: renderMovePreview(
+            path,
+            destinationPath,
+            snapshot.bytes.byteLength,
+            snapshot.hash,
+          ),
+        });
+        continue;
+      }
+
+      assertChangePath(change.path);
+      const target = this.resolveWriteTarget(change.path);
+      reserveEndpoint(target, change.path);
+      const parent = dirname(target);
+      await this.assertStablePatchParent(parent, change.path);
+      const snapshot = await this.readWritableSnapshot(target, change.path);
+      snapshotBytes += snapshot.bytes.byteLength;
+      assertChangeSetTotal(
+        snapshotBytes,
+        MAX_CHANGE_SET_SNAPSHOT_BYTES,
+        "snapshots",
+      );
+      if (snapshot.bytes.byteLength > MAX_DELETE_BYTES) {
+        throw new WorkspaceError(
+          "CHANGE_SET_LIMIT_EXCEEDED",
+          `Delete preview exceeds the ${MAX_DELETE_BYTES}-byte limit: ${change.path}`,
+        );
+      }
+      const path = this.toWorkspaceRelative(target);
+      preparedChanges.push({
+        index,
+        operation: "delete",
+        path,
+        target,
+        parent,
+        before: snapshot,
+        evidence: {
+          index,
+          operation: "delete",
+          path,
+          beforeSha256: snapshot.hash,
+          afterSha256: null,
+          bytes: snapshot.bytes.byteLength,
+        },
+        preview: renderDeletePreview(path, snapshot.content),
+      });
+    }
+
+    if (editCount > MAX_CHANGE_SET_EDITS) {
+      throw new WorkspaceError(
+        "CHANGE_SET_LIMIT_EXCEEDED",
+        `A change set cannot exceed ${MAX_CHANGE_SET_EDITS} exact edits.`,
+      );
+    }
+    if (textBytes > MAX_CHANGE_SET_TEXT_BYTES) {
+      throw new WorkspaceError(
+        "CHANGE_SET_LIMIT_EXCEEDED",
+        `Change-set text exceeds the ${MAX_CHANGE_SET_TEXT_BYTES}-byte limit.`,
+      );
+    }
+    if (snapshotBytes > MAX_CHANGE_SET_SNAPSHOT_BYTES) {
+      throw new WorkspaceError(
+        "CHANGE_SET_LIMIT_EXCEEDED",
+        `Change-set snapshots exceed the ${MAX_CHANGE_SET_SNAPSHOT_BYTES}-byte limit.`,
+      );
+    }
+
+    const preview = preparedChanges
+      .sort((left, right) => left.index - right.index)
+      .map((change) => change.preview)
+      .join("\n\n");
+    if (Buffer.byteLength(preview, "utf8") > MAX_CHANGE_SET_PREVIEW_BYTES) {
+      throw new WorkspaceError(
+        "CHANGE_PREVIEW_TOO_LARGE",
+        `Change-set approval exceeds the ${MAX_CHANGE_SET_PREVIEW_BYTES}-byte limit.`,
+      );
+    }
+    const evidence = preparedChanges.map((change) => change.evidence);
+    const planSha256 = digestChangePlan(preparedChanges);
+    const summary = renderChangeSetSummary(preparedChanges);
+    if (Buffer.byteLength(summary, "utf8") > MAX_CHANGE_SET_SUMMARY_BYTES) {
+      throw new WorkspaceError(
+        "CHANGE_PREVIEW_TOO_LARGE",
+        `Change-set summary exceeds the ${MAX_CHANGE_SET_SUMMARY_BYTES}-byte limit.`,
+      );
+    }
+    let applied = false;
+
+    return {
+      summary,
+      preview,
+      planSha256,
+      changes: evidence,
+      apply: async (signal, report) => {
+        if (applied) {
+          throw new WorkspaceError(
+            "INVALID_PATCH",
+            "A prepared change set can be applied only once.",
+          );
+        }
+        applied = true;
+        return this.applyPreparedChangeSet({
+          preparedChanges,
+          planSha256,
+          signal,
+          report,
+          ...(options.faultHooks === undefined
+            ? {}
+            : { faultHooks: options.faultHooks }),
+        });
+      },
+    };
+  }
+
+  private async applyPreparedChangeSet(
+    options: ApplyPreparedChangeSetOptions,
+  ): Promise<WorkspaceChangeSetResult> {
+    options.signal.throwIfAborted();
+    for (const change of options.preparedChanges) {
+      await this.revalidatePreparedChange(change, "before");
+    }
+
+    const staged = new Map<number, string>();
+    try {
+      for (const change of options.preparedChanges) {
+        if (change.operation === "create" || change.operation === "update") {
+          options.signal.throwIfAborted();
+          staged.set(
+            change.index,
+            await stageChangeCandidate(
+              change.target,
+              change.candidate,
+              change.mode,
+              options.signal,
+            ),
+          );
+        }
+      }
+      await options.faultHooks?.afterStaging?.();
+      options.signal.throwIfAborted();
+      await options.report({
+        type: "workspace.change_set_prepared",
+        payload: {
+          planSha256: options.planSha256,
+          changes: options.preparedChanges.map((change) => change.evidence),
+        },
+      });
+
+      const commitOrder = [...options.preparedChanges].sort((left, right) =>
+        left.path === right.path
+          ? left.index - right.index
+          : left.path.localeCompare(right.path),
+      );
+      const committed: PreparedChange[] = [];
+      try {
+        for (const change of commitOrder) {
+          options.signal.throwIfAborted();
+          await options.faultHooks?.beforeCommit?.(change.index);
+          await this.revalidatePreparedChange(change, "before");
+          try {
+            await commitPreparedChange(change, staged.get(change.index));
+            committed.push(change);
+          } catch (error) {
+            if (error instanceof PartiallyAppliedChangeError) {
+              committed.push(change);
+            }
+            throw error;
+          }
+          await options.faultHooks?.afterCommit?.(change.index);
+        }
+        await options.report({
+          type: "workspace.change_set_committed",
+          payload: {
+            planSha256: options.planSha256,
+            changeCount: committed.length,
+          },
+        });
+        return {
+          status: "committed",
+          planSha256: options.planSha256,
+          changes: options.preparedChanges.map((change) => change.evidence),
+        };
+      } catch (error) {
+        const restoredPaths: string[] = [];
+        const uncertainPaths: string[] = [];
+        for (const change of [...committed].reverse()) {
+          try {
+            await options.faultHooks?.beforeRollback?.(change.index);
+            await this.revalidatePreparedChange(change, "after");
+            await rollbackPreparedChange(change);
+            restoredPaths.push(change.path);
+          } catch {
+            uncertainPaths.push(change.path);
+          }
+        }
+        const errorCode = options.signal.aborted
+          ? "CANCELLED"
+          : boundedErrorCode(error);
+        if (uncertainPaths.length > 0) {
+          await options.report({
+            type: "workspace.change_set_uncertain",
+            payload: {
+              planSha256: options.planSha256,
+              appliedCount: committed.length,
+              uncertainPaths,
+              errorCode,
+            },
+          });
+          throw new WorkspaceError(
+            "CHANGE_SET_OUTCOME_UNCERTAIN",
+            `Change-set rollback could not verify: ${uncertainPaths.join(", ")}. Inspect these paths before another write.`,
+            { cause: error },
+          );
+        }
+        await options.report({
+          type: "workspace.change_set_rolled_back",
+          payload: {
+            planSha256: options.planSha256,
+            appliedCount: committed.length,
+            restoredPaths,
+            errorCode,
+          },
+        });
+        if (options.signal.aborted) {
+          throw error;
+        }
+        throw new WorkspaceError(
+          "CHANGE_SET_APPLY_FAILED",
+          `Change set failed and ${restoredPaths.length} applied operation(s) were rolled back: ${errorMessage(error)}`,
+          { cause: error },
+        );
+      }
+    } finally {
+      await Promise.all(
+        [...staged.values()].map((path) =>
+          rm(path, { force: true }).catch(() => undefined),
+        ),
+      );
+    }
+  }
+
+  private async revalidatePreparedChange(
+    change: PreparedChange,
+    expected: "before" | "after",
+  ): Promise<void> {
+    const matches = await this.preparedChangeMatches(change, expected).catch(
+      () => false,
+    );
+    if (!matches) {
+      throw new WorkspaceError(
+        "WORKSPACE_CHANGED",
+        `Change-set path no longer matches its ${expected} state: ${change.path}`,
+      );
+    }
+  }
+
+  private async preparedChangeMatches(
+    change: PreparedChange,
+    expected: "before" | "after",
+  ): Promise<boolean> {
+    if (
+      (await this.resolvePatchParent(change.parent, change.path)) !==
+      change.parent
+    ) {
+      return false;
+    }
+    if (change.operation === "create") {
+      if (expected === "before") {
+        return !(await pathExists(change.target));
+      }
+      return this.pathMatchesSnapshot(
+        change.target,
+        change.path,
+        change.evidence.afterSha256,
+        change.mode,
+      );
+    }
+    if (change.operation === "update") {
+      return this.pathMatchesSnapshot(
+        change.target,
+        change.path,
+        expected === "before"
+          ? change.evidence.beforeSha256
+          : change.evidence.afterSha256,
+        change.mode,
+      );
+    }
+    if (change.operation === "delete") {
+      if (expected === "after") {
+        return !(await pathExists(change.target));
+      }
+      return this.pathMatchesSnapshot(
+        change.target,
+        change.path,
+        change.evidence.beforeSha256,
+        change.before.mode,
+      );
+    }
+    if (
+      (await this.resolvePatchParent(
+        change.destinationParent,
+        change.destinationPath,
+      )) !== change.destinationParent
+    ) {
+      return false;
+    }
+    if (expected === "before") {
+      return (
+        (await this.pathMatchesSnapshot(
+          change.target,
+          change.path,
+          change.evidence.beforeSha256,
+          change.before.mode,
+        )) && !(await pathExists(change.destination))
+      );
+    }
+    return (
+      !(await pathExists(change.target)) &&
+      (await this.pathMatchesSnapshot(
+        change.destination,
+        change.destinationPath,
+        change.evidence.afterSha256,
+        change.before.mode,
+      ))
+    );
+  }
+
+  private async pathMatchesSnapshot(
+    target: string,
+    requestedPath: string,
+    expectedHash: string | null,
+    expectedMode: number,
+  ): Promise<boolean> {
+    if (expectedHash === null) {
+      return !(await pathExists(target));
+    }
+    const snapshot = await this.readWritableSnapshot(target, requestedPath);
+    return snapshot.hash === expectedHash && snapshot.mode === expectedMode;
+  }
+
+  private async assertStablePatchParent(
+    parent: string,
+    requestedPath: string,
+  ): Promise<void> {
+    if ((await this.resolvePatchParent(parent, requestedPath)) !== parent) {
+      throw new WorkspaceError(
+        "SYMLINK_WRITE_FORBIDDEN",
+        `Change paths cannot traverse symlinked directories: ${requestedPath}`,
+      );
+    }
+  }
+
   public async resolveExistingPath(relativePath: string): Promise<string> {
     if (relativePath.length === 0 || relativePath.includes("\0")) {
       throw new WorkspaceError(
@@ -507,7 +1154,7 @@ export class ReadOnlyWorkspace {
   private async readWritableSnapshot(
     target: string,
     requestedPath: string,
-  ): Promise<{ content: string; hash: string; mode: number }> {
+  ): Promise<WritableSnapshot> {
     let canonicalTarget: string;
     try {
       canonicalTarget = await realpath(target);
@@ -550,8 +1197,10 @@ export class ReadOnlyWorkspace {
     const bytes = await readFileFromDisk(target);
     return {
       content: decodeUtf8(bytes, requestedPath),
+      bytes,
       hash: hashBytes(bytes),
       mode: targetStats.mode & 0o777,
+      device: targetStats.dev,
     };
   }
 
@@ -574,6 +1223,391 @@ export class ReadOnlyWorkspace {
 
   private toWorkspaceRelative(absolutePath: string): string {
     return relative(this.root, absolutePath).split(sep).join("/");
+  }
+}
+
+interface WritableSnapshot {
+  content: string;
+  bytes: Buffer;
+  hash: string;
+  mode: number;
+  device: number;
+}
+
+interface PreparedChangeBase {
+  index: number;
+  path: string;
+  target: string;
+  parent: string;
+  evidence: WorkspaceChangeEvidence;
+  preview: string;
+}
+
+interface PreparedCreateChange extends PreparedChangeBase {
+  operation: "create";
+  candidate: Buffer;
+  mode: number;
+}
+
+interface PreparedUpdateChange extends PreparedChangeBase {
+  operation: "update";
+  before: WritableSnapshot;
+  candidate: Buffer;
+  mode: number;
+}
+
+interface PreparedMoveChange extends PreparedChangeBase {
+  operation: "move";
+  before: WritableSnapshot;
+  destination: string;
+  destinationPath: string;
+  destinationParent: string;
+}
+
+interface PreparedDeleteChange extends PreparedChangeBase {
+  operation: "delete";
+  before: WritableSnapshot;
+}
+
+type PreparedChange =
+  | PreparedCreateChange
+  | PreparedUpdateChange
+  | PreparedMoveChange
+  | PreparedDeleteChange;
+
+interface ApplyPreparedChangeSetOptions {
+  preparedChanges: PreparedChange[];
+  planSha256: string;
+  signal: AbortSignal;
+  report(event: WorkspaceChangeSetOperationalEvent): Promise<void>;
+  faultHooks?: WorkspaceChangeSetFaultHooks;
+}
+
+function assertChangePath(path: string): void {
+  if (Buffer.byteLength(path, "utf8") > MAX_CHANGE_PATH_BYTES) {
+    throw new WorkspaceError(
+      "CHANGE_SET_LIMIT_EXCEEDED",
+      `Change path exceeds the ${MAX_CHANGE_PATH_BYTES}-byte limit.`,
+    );
+  }
+}
+
+function assertCandidateSize(candidate: Buffer, path: string): void {
+  if (candidate.byteLength > MAX_FILE_BYTES) {
+    throw new WorkspaceError(
+      "FILE_TOO_LARGE",
+      `Changed file would exceed the ${MAX_FILE_BYTES}-byte limit: ${path}`,
+    );
+  }
+}
+
+function assertChangeSetTotal(
+  current: number,
+  maximum: number,
+  label: string,
+): void {
+  if (current > maximum) {
+    throw new WorkspaceError(
+      "CHANGE_SET_LIMIT_EXCEEDED",
+      `Change-set ${label} exceed the ${maximum}-byte limit.`,
+    );
+  }
+}
+
+function applyExactEdit(
+  content: string,
+  edit: { oldText: string; newText: string },
+  path: string,
+): string {
+  const matches = findOccurrences(content, edit.oldText);
+  if (matches.length === 0) {
+    throw new WorkspaceError(
+      "PATCH_MATCH_NOT_FOUND",
+      `old_text was not found in ${path}.`,
+    );
+  }
+  if (matches.length > 1) {
+    throw new WorkspaceError(
+      "PATCH_MATCH_AMBIGUOUS",
+      `old_text matched ${matches.length} locations in ${path}; provide more context.`,
+    );
+  }
+  const matchIndex = matches[0];
+  if (matchIndex === undefined) {
+    throw new WorkspaceError(
+      "PATCH_MATCH_NOT_FOUND",
+      `old_text was not found in ${path}.`,
+    );
+  }
+  return `${content.slice(0, matchIndex)}${edit.newText}${content.slice(matchIndex + edit.oldText.length)}`;
+}
+
+function renderCreatePreview(path: string, content: string): string {
+  return [`*** Create File: ${path}`, "@@", ...prefixLines(content, "+")].join(
+    "\n",
+  );
+}
+
+function renderUpdatePreview(
+  path: string,
+  edits: Array<{ oldText: string; newText: string }>,
+): string {
+  return [
+    `*** Update File: ${path}`,
+    ...edits.flatMap((edit, index) => [
+      `@@ Edit ${index + 1}`,
+      ...prefixLines(edit.oldText, "-"),
+      ...prefixLines(edit.newText, "+"),
+    ]),
+  ].join("\n");
+}
+
+function renderMovePreview(
+  path: string,
+  destination: string,
+  bytes: number,
+  sha256: string,
+): string {
+  return [
+    `*** Move File: ${path}`,
+    `*** To: ${destination}`,
+    `bytes: ${bytes}`,
+    `sha256: ${sha256}`,
+  ].join("\n");
+}
+
+function renderDeletePreview(path: string, content: string): string {
+  return [`*** Delete File: ${path}`, "@@", ...prefixLines(content, "-")].join(
+    "\n",
+  );
+}
+
+function renderChangeSetSummary(changes: readonly PreparedChange[]): string {
+  const counts = new Map<string, number>();
+  for (const change of changes) {
+    counts.set(change.operation, (counts.get(change.operation) ?? 0) + 1);
+  }
+  const operations = ["create", "update", "move", "delete"]
+    .flatMap((operation) => {
+      const count = counts.get(operation);
+      return count === undefined ? [] : [`${count} ${operation}`];
+    })
+    .join(", ");
+  return `Apply ${changes.length} coordinated change(s): ${operations}. Paths: ${changes
+    .map((change) =>
+      change.operation === "move"
+        ? `${change.path} -> ${change.destinationPath}`
+        : change.path,
+    )
+    .join(", ")}`;
+}
+
+function digestChangePlan(changes: readonly PreparedChange[]): string {
+  const canonical = [...changes]
+    .sort((left, right) => left.index - right.index)
+    .map((change) => ({
+      index: change.index,
+      operation: change.operation,
+      path: change.path,
+      destination: change.operation === "move" ? change.destinationPath : null,
+      beforeSha256: change.evidence.beforeSha256,
+      afterSha256: change.evidence.afterSha256,
+      mode:
+        change.operation === "create"
+          ? change.mode
+          : change.operation === "update"
+            ? change.mode
+            : change.before.mode,
+      bytes: change.evidence.bytes,
+    }));
+  return createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
+}
+
+async function stageChangeCandidate(
+  target: string,
+  content: Buffer,
+  mode: number,
+  signal: AbortSignal,
+): Promise<string> {
+  const path = join(
+    dirname(target),
+    `.${basename(target)}.koda-change-${randomUUID()}.tmp`,
+  );
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    signal.throwIfAborted();
+    handle = await open(path, "wx", mode);
+    await handle.chmod(mode);
+    await handle.writeFile(content);
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
+    signal.throwIfAborted();
+    return path;
+  } catch (error) {
+    await handle?.close().catch(() => undefined);
+    await rm(path, { force: true }).catch(() => undefined);
+    throw error;
+  }
+}
+
+async function commitPreparedChange(
+  change: PreparedChange,
+  stagedPath: string | undefined,
+): Promise<void> {
+  if (change.operation === "create") {
+    if (stagedPath === undefined) {
+      throw new WorkspaceError(
+        "CHANGE_SET_APPLY_FAILED",
+        `Create candidate was not staged: ${change.path}`,
+      );
+    }
+    try {
+      await link(stagedPath, change.target);
+      return;
+    } catch (error) {
+      if (isNodeError(error, "EEXIST")) {
+        throw new WorkspaceError(
+          "WORKSPACE_CHANGED",
+          `Create target appeared during commit: ${change.path}`,
+          { cause: error },
+        );
+      }
+      throw error;
+    }
+  }
+  if (change.operation === "update") {
+    if (stagedPath === undefined) {
+      throw new WorkspaceError(
+        "CHANGE_SET_APPLY_FAILED",
+        `Update candidate was not staged: ${change.path}`,
+      );
+    }
+    await rename(stagedPath, change.target);
+    return;
+  }
+  if (change.operation === "move") {
+    try {
+      await link(change.target, change.destination);
+    } catch (error) {
+      if (isNodeError(error, "EEXIST")) {
+        throw new WorkspaceError(
+          "WORKSPACE_CHANGED",
+          `Move destination appeared during commit: ${change.destinationPath}`,
+          { cause: error },
+        );
+      }
+      throw error;
+    }
+    try {
+      await rm(change.target);
+    } catch (error) {
+      throw new PartiallyAppliedChangeError(
+        `Move created '${change.destinationPath}' but could not remove '${change.path}'.`,
+        { cause: error },
+      );
+    }
+    return;
+  }
+  await rm(change.target);
+}
+
+async function rollbackPreparedChange(change: PreparedChange): Promise<void> {
+  const cleanupSignal = new AbortController().signal;
+  if (change.operation === "create") {
+    await rm(change.target);
+    return;
+  }
+  if (change.operation === "update") {
+    await writeAtomicPatch({
+      target: change.target,
+      content: change.before.bytes,
+      mode: change.before.mode,
+      createOnly: false,
+      signal: cleanupSignal,
+      revalidate: () =>
+        rawTargetMatches(
+          change.target,
+          change.evidence.afterSha256,
+          change.mode,
+        ),
+    });
+    return;
+  }
+  if (change.operation === "move") {
+    try {
+      await link(change.destination, change.target);
+    } catch (error) {
+      if (isNodeError(error, "EEXIST")) {
+        throw new WorkspaceError(
+          "WORKSPACE_CHANGED",
+          `Move source reappeared during rollback: ${change.path}`,
+          { cause: error },
+        );
+      }
+      throw error;
+    }
+    await rm(change.destination);
+    return;
+  }
+  await writeAtomicPatch({
+    target: change.target,
+    content: change.before.bytes,
+    mode: change.before.mode,
+    createOnly: true,
+    signal: cleanupSignal,
+    revalidate: async () => !(await pathExists(change.target)),
+  });
+}
+
+async function rawTargetMatches(
+  target: string,
+  expectedHash: string | null,
+  expectedMode: number,
+): Promise<boolean> {
+  if (expectedHash === null) {
+    return !(await pathExists(target));
+  }
+  try {
+    if ((await realpath(target)) !== target) {
+      return false;
+    }
+    const targetStats = await lstat(target);
+    if (!targetStats.isFile() || targetStats.isSymbolicLink()) {
+      return false;
+    }
+    const bytes = await readFileFromDisk(target);
+    return (
+      hashBytes(bytes) === expectedHash &&
+      (targetStats.mode & 0o777) === expectedMode
+    );
+  } catch {
+    return false;
+  }
+}
+
+function boundedErrorCode(error: unknown): string {
+  if (
+    error instanceof Error &&
+    "code" in error &&
+    typeof (error as { code?: unknown }).code === "string"
+  ) {
+    return (error as { code: string }).code.slice(0, 128) || "UNKNOWN";
+  }
+  if (error instanceof Error && error.name.length > 0) {
+    return error.name.slice(0, 128);
+  }
+  return "CHANGE_SET_APPLY_FAILED";
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+class PartiallyAppliedChangeError extends Error {
+  public constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "PartiallyAppliedChangeError";
   }
 }
 

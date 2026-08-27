@@ -68,7 +68,7 @@ export class EffectToolPolicy implements ToolPolicy {
     return this.approvalMode === "on-request"
       ? {
           decision: "ask",
-          reason: "This tool will modify a file in the workspace.",
+          reason: "This tool will modify one or more files in the workspace.",
         }
       : {
           decision: "deny",

@@ -26,12 +26,13 @@ import {
   threadSearchParamsSchema,
   threadSearchResultSchema,
   turnStartParamsSchema,
+  workspaceChangeSetPreparedPayloadSchema,
 } from "@koda/protocol";
 import { describe, expect, it } from "vitest";
 
 describe("app-server protocol", () => {
   it("accepts strict versioned requests and safe JSON-RPC IDs", () => {
-    expect(APP_SERVER_PROTOCOL_VERSION).toBe(7);
+    expect(APP_SERVER_PROTOCOL_VERSION).toBe(8);
     expect(
       jsonRpcRequestSchema.parse({
         jsonrpc: "2.0",
@@ -45,7 +46,7 @@ describe("app-server protocol", () => {
     ).toMatchObject({ id: 1, method: "initialize" });
     expect(() =>
       initializeParamsSchema.parse({
-        protocolVersion: 6,
+        protocolVersion: 7,
         client: { name: "legacy-client" },
       }),
     ).toThrow();
@@ -636,6 +637,66 @@ describe("app-server protocol", () => {
         activeItemTypes: [
           { type: "assistant_message", count: 1 },
           { type: "user_message", count: 1 },
+        ],
+      }),
+    ).toThrow();
+
+    const changeSet = {
+      planSha256: "b".repeat(64),
+      changes: [
+        {
+          index: 0,
+          operation: "move" as const,
+          path: "old.txt",
+          destination: "new.txt",
+          beforeSha256: "c".repeat(64),
+          afterSha256: "c".repeat(64),
+          bytes: 12,
+        },
+      ],
+    };
+    expect(workspaceChangeSetPreparedPayloadSchema.parse(changeSet)).toEqual(
+      changeSet,
+    );
+    expect(
+      agentEventSchema.parse({
+        schemaVersion: 1,
+        sequence: 4,
+        timestamp: "2026-08-27T00:00:00.000Z",
+        threadId: "context-thread",
+        turnId: "context-turn",
+        type: "workspace.change_set_prepared",
+        payload: {
+          callId: "change-set-call",
+          name: "apply_changes",
+          ...changeSet,
+        },
+      }),
+    ).toMatchObject({ type: "workspace.change_set_prepared" });
+    expect(() =>
+      workspaceChangeSetPreparedPayloadSchema.parse({
+        ...changeSet,
+        changes: [
+          {
+            ...changeSet.changes[0],
+            afterSha256: "d".repeat(64),
+          },
+        ],
+      }),
+    ).toThrow();
+    expect(() =>
+      workspaceChangeSetPreparedPayloadSchema.parse({
+        ...changeSet,
+        changes: [
+          changeSet.changes[0],
+          {
+            index: 1,
+            operation: "create",
+            path: "new.txt",
+            beforeSha256: null,
+            afterSha256: "e".repeat(64),
+            bytes: 1,
+          },
         ],
       }),
     ).toThrow();

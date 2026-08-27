@@ -497,6 +497,44 @@ export class AgentLoop {
                         ...event.payload,
                       },
                     });
+                  } else if (event.type === "workspace.change_set_prepared") {
+                    await recorder.record({
+                      type: event.type,
+                      payload: {
+                        callId: call.callId,
+                        name: call.name,
+                        ...event.payload,
+                      },
+                    });
+                  } else if (event.type === "workspace.change_set_committed") {
+                    await recorder.record({
+                      type: event.type,
+                      payload: {
+                        callId: call.callId,
+                        name: call.name,
+                        ...event.payload,
+                      },
+                    });
+                  } else if (
+                    event.type === "workspace.change_set_rolled_back"
+                  ) {
+                    await recorder.record({
+                      type: event.type,
+                      payload: {
+                        callId: call.callId,
+                        name: call.name,
+                        ...event.payload,
+                      },
+                    });
+                  } else if (event.type === "workspace.change_set_uncertain") {
+                    await recorder.record({
+                      type: event.type,
+                      payload: {
+                        callId: call.callId,
+                        name: call.name,
+                        ...event.payload,
+                      },
+                    });
                   } else {
                     await recorder.record({
                       type: event.type,

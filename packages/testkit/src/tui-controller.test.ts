@@ -327,7 +327,7 @@ describe("TuiController", () => {
       name: "apply_patch",
       title: "Patch README",
       summary: "Replace one line",
-      details: "old -> new",
+      details: "x".repeat(9_000),
       reason: "workspace write",
     });
 
@@ -338,6 +338,7 @@ describe("TuiController", () => {
       detailsVisible: true,
       resolving: false,
     });
+    expect(controller.getSnapshot().approval?.details).toHaveLength(9_000);
     await controller.resolveApproval("approved");
     expect(client.approvalRequests).toEqual([
       expect.objectContaining({
@@ -355,6 +356,60 @@ describe("TuiController", () => {
     expect(controller.getSnapshot().approval).toBeUndefined();
     expect(controller.getSnapshot().activeTurn?.tools[0]).toMatchObject({
       status: "approved",
+    });
+  });
+
+  it("projects change-set commit and uncertainty evidence into tool status", async () => {
+    const client = new FakeAppServerClient();
+    const controller = createController(client);
+    await controller.startPrompt("Apply coordinated changes");
+    const callId = toolCallIdSchema.parse("change-set-status-call");
+    client.emitEvent("tool.started", { callId, name: "apply_changes" });
+    client.emitEvent("tool.execution_started", {
+      callId,
+      name: "apply_changes",
+      effect: "write",
+    });
+    client.emitEvent("workspace.change_set_prepared", {
+      callId,
+      name: "apply_changes",
+      planSha256: "a".repeat(64),
+      changes: [
+        {
+          index: 0,
+          operation: "create",
+          path: "new.txt",
+          beforeSha256: null,
+          afterSha256: "b".repeat(64),
+          bytes: 4,
+        },
+      ],
+    });
+    expect(controller.getSnapshot().activeTurn?.tools[0]).toMatchObject({
+      status: "running",
+      detail: "1 changes prepared",
+    });
+    client.emitEvent("workspace.change_set_committed", {
+      callId,
+      name: "apply_changes",
+      planSha256: "a".repeat(64),
+      changeCount: 1,
+    });
+    expect(controller.getSnapshot().activeTurn?.tools[0]).toMatchObject({
+      status: "success",
+      detail: "1 changes committed",
+    });
+    client.emitEvent("workspace.change_set_uncertain", {
+      callId,
+      name: "apply_changes",
+      planSha256: "a".repeat(64),
+      appliedCount: 1,
+      uncertainPaths: ["new.txt"],
+      errorCode: "WORKSPACE_CHANGED",
+    });
+    expect(controller.getSnapshot().activeTurn?.tools[0]).toMatchObject({
+      status: "error",
+      detail: "uncertain: new.txt",
     });
   });
 
@@ -1339,6 +1394,7 @@ class FakeAppServerClient implements AppServerClientApi {
         runtimeSettings: true,
         artifactInspection: true,
         contextInspection: true,
+        multiFileChanges: true,
       },
       providers: [
         provider("openai", "OpenAI", "OPENAI_API_KEY", "gpt-5.6-terra"),
