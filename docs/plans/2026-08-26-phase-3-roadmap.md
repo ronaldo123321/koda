@@ -1,6 +1,6 @@
 # Koda Phase 3 Extensibility Roadmap
 
-- Status: In progress — Phase 3A through Phase 3D implemented (2026-08-26)
+- Status: In progress — Phase 3A through Phase 3D implemented; Phase 3E1 approved for implementation (2026-08-27)
 - Date: 2026-08-26
 - Depends on: Phase 2 reliability closure
 - Scope: stable client/tool/provider extension boundaries without weakening the local runtime's durable state and approval guarantees
@@ -63,6 +63,19 @@ Status: **Complete.**
 
 The complete component boundary, interaction contract, failure semantics, verification matrix, and deferred destinations are in the [Phase 3D Ink chat REPL design](2026-08-26-phase-3d-ink-chat-repl-design.md).
 
+## Phase 3E1: thread browser and history restore
+
+Status: **Approved for implementation.**
+
+- Upgrade the local app-server contract to protocol v3 and add typed, bounded, cursor-paginated `thread/events` reads over authoritative JSONL history.
+- Add idle-only recent-thread browsing and preview modes to the Ink client while preserving the normal terminal screen buffer.
+- Resume a selected thread only after refreshing its metadata and verifying canonical workspace and non-invalid status.
+- Adopt the resumed thread's persisted provider/model; let `/new` detach locally without deleting durable data.
+- Project recent durable conversation items into bounded terminal rows without replaying deltas, historical approvals, processes, or tool effects.
+- Preserve the active chat on every list, preview, or resume failure and keep runtime leases/recovery authoritative.
+
+The complete API contract, interaction model, consistency rules, verification matrix, and deferred boundaries are in the [Phase 3E1 thread browser and history restore design](2026-08-27-phase-3e1-thread-browser-history-design.md).
+
 ## Later Phase 3 slices
 
 ### Provider and context extensions after Phase 3C
@@ -76,7 +89,9 @@ The complete component boundary, interaction contract, failure semantics, verifi
 ### Interactive clients and client APIs
 
 - Maintain the completed Phase 3D Ink chat REPL on the Phase 3A application protocol.
-- In Phase 3E, add thread selection, history search, full-screen navigation, custom scrolling, runtime provider/model switching, and settings panels.
+- Implement the approved Phase 3E1 boundary for recent-thread selection, bounded history preview, and safe resume over app-server protocol v3.
+- In Phase 3E2, add older-history loading, infinite scrolling, full-text search, full-screen navigation, and custom scrolling.
+- In Phase 3E3, add an explicit provider/model settings panel and intentional runtime selection changes.
 - In Phase 3E or Phase 4, add Markdown/syntax rendering, diff and artifact viewers, range/download APIs, attachments, context-budget inspection, and instruction-change views.
 - Build IDE or desktop clients only after the local protocol client and TUI have validated the shared boundary.
 - Keep presentation state outside the agent runtime and keep approvals fail-closed on client loss.
