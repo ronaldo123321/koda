@@ -1,6 +1,6 @@
 # Koda Phase 3 Extensibility Roadmap
 
-- Status: In progress — Phase 3A through Phase 3F1 implemented and verified (2026-08-27)
+- Status: In progress — Phase 3A through Phase 3F1 implemented and verified; Phase 3F2 implementation in progress (2026-08-27)
 - Date: 2026-08-26
 - Depends on: Phase 2 reliability closure
 - Scope: stable client/tool/provider extension boundaries without weakening the local runtime's durable state and approval guarantees
@@ -144,6 +144,19 @@ Status: **Implemented and verified.**
 - Verify transaction limits, path confinement, exact edits, moves/deletes, races, fault-injected rollback, mutation leases, recovery classification, provider schemas, app-server/client behavior, Ink/CLI approvals, and real TTY interaction.
 
 The complete accepted tool grammar, safety invariants, transaction state machine, protocol, recovery model, failure semantics, verification matrix, and deliberate deferrals are in the [Phase 3F1 auditable multi-file change transactions design](2026-08-27-phase-3f1-multi-file-change-transactions-design.md).
+
+## Phase 3F2: strict native patch documents
+
+Status: **Accepted; implementation in progress.**
+
+- Add a separate `apply_patchset` tool with a bounded Codex-style Koda Patch v1 document grammar while preserving `apply_patch` and `apply_changes` schemas.
+- Parse the complete document without workspace mutation, compile line hunks to unique exact edits, and delegate all approval, serialization, revalidation, commit, rollback, and recovery behavior to Phase 3F1.
+- Support bounded create, ordered multi-hunk update, pure move, and delete sections without claiming Git unified-diff compatibility or fuzzy matching.
+- Preserve consistent LF or CRLF target line endings and update final-newline state; reject mixed or ambiguous text instead of normalizing it silently.
+- Upgrade the local protocol to v9 with `patchDocuments: true` while reusing existing approval and change-set event projections.
+- Verify grammar limits, exact matching, line endings, one-shot approval, transaction evidence, recovery, provider schemas, CLI/app-server clients, Ink fixtures, reliability scenarios, and real TTY behavior.
+
+The accepted grammar, compilation rules, transaction reuse, failure model, verification matrix, and deliberate deferrals are in the [Phase 3F2 strict native patch documents design](2026-08-27-phase-3f2-native-patch-documents-design.md).
 
 ## Later Phase 3 slices
 
