@@ -7,6 +7,7 @@ import {
   type AgentEvent,
   type ModelProviderId,
   type ProviderMetadata,
+  type ThreadMetadataMessage,
   type TokenUsage,
   type ToolCallId,
   type TurnId,
@@ -15,8 +16,11 @@ import {
 
 const MAXIMUM_INPUT_CHARACTERS = 32_768;
 const MAXIMUM_PRESENTATION_CHARACTERS = 8_192;
+const MAXIMUM_HISTORY_ROWS = 100;
+const THREAD_BROWSER_LIMIT = 100;
 
 export type TuiConnectionStatus = "ready" | "closing" | "closed" | "error";
+export type TuiMode = "chat" | "thread_list" | "thread_preview";
 export type TuiTurnStatus =
   "starting" | "running" | "cancelling" | "completed" | "cancelled" | "failed";
 export type TuiToolStatus =
@@ -82,8 +86,22 @@ export interface TuiActiveTurnState {
   cancelRequested: boolean;
 }
 
+export interface TuiThreadPreviewState {
+  thread: ThreadMetadataMessage;
+  entries: readonly TuiTranscriptEntry[];
+  hasEarlier: boolean;
+}
+
+export interface TuiThreadBrowserState {
+  threads: readonly ThreadMetadataMessage[];
+  selectedIndex: number;
+  loading: boolean;
+  preview?: TuiThreadPreviewState;
+}
+
 export interface TuiState {
   connection: TuiConnectionStatus;
+  mode: TuiMode;
   configuration: TuiConfiguration;
   providers: readonly ProviderMetadata[];
   threadId: string | undefined;
@@ -92,6 +110,7 @@ export interface TuiState {
   approval: TuiApprovalState | undefined;
   input: string;
   notice: string | undefined;
+  threadBrowser: TuiThreadBrowserState | undefined;
 }
 
 export type TuiSubmitResult = "handled" | "exit";
@@ -119,6 +138,7 @@ export class TuiController {
     }
     this.state = {
       connection: "ready",
+      mode: "chat",
       configuration: {
         cwd: configuration.cwd,
         provider,
@@ -135,6 +155,7 @@ export class TuiController {
       approval: undefined,
       input: "",
       notice: undefined,
+      threadBrowser: undefined,
     };
     this.unsubscribeNotification = client.onNotification((notification) => {
       this.receiveNotification(notification);
@@ -185,7 +206,10 @@ export class TuiController {
             "/help — show commands",
             "/status — show connection and session state",
             "/clear — clear displayed history only",
+            "/threads — browse threads in this workspace",
+            "/new — detach so the next prompt creates a thread",
             "/exit — shut down Koda",
+            "Ctrl+T — open the thread browser",
             "Esc — cancel active turn",
             "Ctrl+C — cancel while running, exit while idle",
           ].join("\n"),
@@ -196,6 +220,12 @@ export class TuiController {
         return "handled";
       case "/clear":
         this.update({ transcript: [], notice: "Display history cleared." });
+        return "handled";
+      case "/threads":
+        await this.openThreadBrowser();
+        return "handled";
+      case "/new":
+        this.detachThread();
         return "handled";
       case "/exit":
         return "exit";
@@ -279,6 +309,235 @@ export class TuiController {
         `Could not start turn: ${errorMessage(error)}`,
       );
     }
+  }
+
+  public async openThreadBrowser(): Promise<void> {
+    if (!this.canBrowseThreads()) {
+      this.update({ notice: "Thread browsing is available only while idle." });
+      return;
+    }
+    this.update({ notice: "Loading recent threads…" });
+    try {
+      const result = await this.client.listThreads({
+        workspace: this.state.configuration.cwd,
+        limit: THREAD_BROWSER_LIMIT,
+      });
+      if (!this.canBrowseThreads()) {
+        return;
+      }
+      this.update({
+        mode: "thread_list",
+        threadBrowser: {
+          threads: result.threads,
+          selectedIndex: 0,
+          loading: false,
+        },
+        notice:
+          result.diagnostics.length === 0
+            ? undefined
+            : `${result.diagnostics.length} thread index diagnostic(s) reported.`,
+      });
+    } catch (error) {
+      this.update({
+        mode: "chat",
+        threadBrowser: undefined,
+        notice: `Could not list threads: ${errorMessage(error)}`,
+      });
+    }
+  }
+
+  public selectThread(offset: -1 | 1): void {
+    const browser = this.state.threadBrowser;
+    if (
+      this.state.mode !== "thread_list" ||
+      browser === undefined ||
+      browser.loading ||
+      browser.threads.length === 0
+    ) {
+      return;
+    }
+    const selectedIndex = Math.min(
+      browser.threads.length - 1,
+      Math.max(0, browser.selectedIndex + offset),
+    );
+    this.update({
+      threadBrowser: { ...browser, selectedIndex },
+      notice: undefined,
+    });
+  }
+
+  public async previewSelectedThread(): Promise<void> {
+    const browser = this.state.threadBrowser;
+    if (
+      this.state.mode !== "thread_list" ||
+      browser === undefined ||
+      browser.loading
+    ) {
+      return;
+    }
+    const thread = browser.threads[browser.selectedIndex];
+    if (thread === undefined) {
+      this.update({ notice: "No thread is available to preview." });
+      return;
+    }
+    this.update({
+      threadBrowser: { ...browser, loading: true },
+      notice: `Loading thread ${thread.threadId}…`,
+    });
+    try {
+      const result = await this.client.readThreadEvents({
+        threadId: thread.threadId,
+        limit: 200,
+      });
+      if (this.state.mode !== "thread_list") {
+        return;
+      }
+      const currentBrowser = this.state.threadBrowser;
+      if (currentBrowser === undefined) {
+        return;
+      }
+      this.update({
+        mode: "thread_preview",
+        threadBrowser: {
+          ...currentBrowser,
+          loading: false,
+          preview: {
+            thread,
+            entries: projectThreadHistory(result.events).map((entry) =>
+              this.withTranscriptId(entry),
+            ),
+            hasEarlier: result.hasEarlier,
+          },
+        },
+        notice: undefined,
+      });
+    } catch (error) {
+      const currentBrowser = this.state.threadBrowser;
+      if (this.state.mode !== "thread_list" || currentBrowser === undefined) {
+        return;
+      }
+      this.update({
+        threadBrowser: { ...currentBrowser, loading: false },
+        notice: `Could not load thread history: ${errorMessage(error)}`,
+      });
+    }
+  }
+
+  public closeThreadBrowserLevel(): void {
+    const browser = this.state.threadBrowser;
+    if (this.state.mode === "thread_preview" && browser !== undefined) {
+      const { preview: _preview, ...listState } = browser;
+      this.update({
+        mode: "thread_list",
+        threadBrowser: { ...listState, loading: false },
+        notice: undefined,
+      });
+      return;
+    }
+    if (this.state.mode === "thread_list") {
+      this.update({
+        mode: "chat",
+        threadBrowser: undefined,
+        notice: undefined,
+      });
+    }
+  }
+
+  public async resumePreviewedThread(): Promise<void> {
+    const browser = this.state.threadBrowser;
+    const preview = browser?.preview;
+    if (
+      this.state.mode !== "thread_preview" ||
+      browser === undefined ||
+      preview === undefined ||
+      browser.loading
+    ) {
+      return;
+    }
+    if (preview.thread.status === "invalid") {
+      this.update({ notice: "Invalid threads cannot be resumed." });
+      return;
+    }
+    this.update({
+      threadBrowser: { ...browser, loading: true },
+      notice: `Checking thread ${preview.thread.threadId}…`,
+    });
+    try {
+      const result = await this.client.getThread({
+        threadId: preview.thread.threadId,
+      });
+      if (this.state.mode !== "thread_preview") {
+        return;
+      }
+      const thread = result.thread;
+      if (thread.status === "invalid") {
+        throw new Error("Invalid threads cannot be resumed.");
+      }
+      if (thread.workspaceRoot !== this.state.configuration.cwd) {
+        throw new Error(
+          `Thread workspace '${thread.workspaceRoot ?? "unknown"}' does not match '${this.state.configuration.cwd}'.`,
+        );
+      }
+      if (thread.provider === undefined || thread.model === undefined) {
+        throw new Error("Thread provider and model metadata are required.");
+      }
+      const provider = modelProviderIdSchema.parse(thread.provider);
+      if (
+        !this.state.providers.some((candidate) => candidate.id === provider)
+      ) {
+        throw new Error(
+          `Provider '${provider}' is not supported by app-server.`,
+        );
+      }
+      const historyEntries = preview.entries.map(({ kind, text }) =>
+        this.withTranscriptId({ kind, text }),
+      );
+      this.update({
+        mode: "chat",
+        configuration: {
+          ...this.state.configuration,
+          provider,
+          model: thread.model,
+          resumeThreadId: thread.threadId,
+        },
+        threadId: thread.threadId,
+        transcript: [
+          ...this.state.transcript,
+          this.withTranscriptId({
+            kind: "system",
+            text: `Resumed thread ${thread.threadId} (${provider}/${thread.model}).`,
+          }),
+          ...historyEntries,
+        ],
+        input: "",
+        threadBrowser: undefined,
+        notice: undefined,
+      });
+    } catch (error) {
+      const currentBrowser = this.state.threadBrowser;
+      if (
+        this.state.mode === "thread_preview" &&
+        currentBrowser !== undefined
+      ) {
+        this.update({
+          threadBrowser: { ...currentBrowser, loading: false },
+          notice: `Could not resume thread: ${errorMessage(error)}`,
+        });
+      }
+    }
+  }
+
+  private detachThread(): void {
+    const previous = this.state.threadId;
+    const { resumeThreadId: _resumeThreadId, ...configuration } =
+      this.state.configuration;
+    this.appendTranscript(
+      "system",
+      previous === undefined
+        ? "Already detached; the next prompt will create a new thread."
+        : `Detached from thread ${previous}; the next prompt will create a new thread.`,
+      { configuration, threadId: undefined, notice: undefined },
+    );
   }
 
   public toggleApprovalDetails(): void {
@@ -378,15 +637,19 @@ export class TuiController {
       await this.client.shutdown();
       this.update({
         connection: "closed",
+        mode: "chat",
         activeTurn: undefined,
         approval: undefined,
+        threadBrowser: undefined,
         notice: undefined,
       });
     } catch (error) {
       this.update({
         connection: "error",
+        mode: "chat",
         activeTurn: undefined,
         approval: undefined,
+        threadBrowser: undefined,
         notice: `Shutdown failed: ${errorMessage(error)}`,
       });
     }
@@ -612,8 +875,10 @@ export class TuiController {
         : activeTranscriptEntries(this.state.activeTurn);
     this.update({
       connection: "error",
+      mode: "chat",
       activeTurn: undefined,
       approval: undefined,
+      threadBrowser: undefined,
       transcript: [
         ...this.state.transcript,
         ...activeEntries.map((entry) => this.withTranscriptId(entry)),
@@ -633,6 +898,7 @@ export class TuiController {
       `workspace: ${this.state.configuration.cwd}`,
       `approval: ${this.state.configuration.approvalMode}`,
       `turn: ${this.state.activeTurn?.status ?? "idle"}`,
+      `view: ${this.state.mode}`,
       `diagnostics: ${diagnostics.length === 0 ? "none" : boundText(diagnostics, 2_000)}`,
     ].join("\n");
   }
@@ -640,6 +906,16 @@ export class TuiController {
   private canEditInput(): boolean {
     return (
       this.state.connection === "ready" &&
+      this.state.mode === "chat" &&
+      this.state.activeTurn === undefined &&
+      this.state.approval === undefined
+    );
+  }
+
+  private canBrowseThreads(): boolean {
+    return (
+      this.state.connection === "ready" &&
+      this.state.mode === "chat" &&
       this.state.activeTurn === undefined &&
       this.state.approval === undefined
     );
@@ -750,6 +1026,118 @@ function receiveItem(
   };
 }
 
+export function projectThreadHistory(
+  events: readonly AgentEvent[],
+): Array<Omit<TuiTranscriptEntry, "id">> {
+  const recordedToolResults = new Set(
+    events.flatMap((event) =>
+      event.type === "item.recorded" &&
+      event.payload.item.type === "tool_result"
+        ? [event.payload.item.callId]
+        : [],
+    ),
+  );
+  const entries: Array<Omit<TuiTranscriptEntry, "id">> = [];
+  for (const event of events) {
+    if (event.type === "item.recorded") {
+      const item = event.payload.item;
+      switch (item.type) {
+        case "user_message":
+          entries.push({ kind: "user", text: item.content });
+          break;
+        case "assistant_message":
+          entries.push({ kind: "assistant", text: item.content });
+          break;
+        case "tool_result":
+          entries.push({
+            kind: item.status === "error" ? "error" : "tool",
+            text:
+              item.status === "error"
+                ? `${item.name}: ${item.error?.code ?? "error"}${item.error?.message === undefined ? "" : ` — ${item.error.message}`}`
+                : `${item.name}: success${item.output === undefined ? "" : ` — ${jsonSummary(item.output)}`}`,
+          });
+          break;
+        case "compaction":
+          entries.push({
+            kind: "system",
+            text: `Context compacted: ${item.summary.objective || "summary recorded"}.`,
+          });
+          break;
+        case "recovery": {
+          const uncertain =
+            item.uncertainToolCalls.length === 0
+              ? ""
+              : ` Uncertain operations: ${item.uncertainToolCalls.map((call) => call.name).join(", ")}.`;
+          entries.push({
+            kind: item.uncertainToolCalls.length === 0 ? "system" : "error",
+            text: `Recovery (${item.previousStatus}): ${item.message}${uncertain}`,
+          });
+          break;
+        }
+        default:
+          break;
+      }
+      continue;
+    }
+    if (
+      event.type === "tool.completed" &&
+      event.payload.status === "error" &&
+      !recordedToolResults.has(event.payload.callId)
+    ) {
+      entries.push({
+        kind: "error",
+        text: `${event.payload.name}: tool execution failed.`,
+      });
+      continue;
+    }
+    if (
+      event.type === "process.termination_completed" &&
+      event.payload.outcome === "uncertain"
+    ) {
+      entries.push({
+        kind: "error",
+        text: `${event.payload.name}: process termination outcome is uncertain (pid ${event.payload.pid}).`,
+      });
+      continue;
+    }
+    if (event.type === "turn.completed") {
+      entries.push(
+        event.payload.usage === undefined
+          ? { kind: "system", text: "Turn completed." }
+          : { kind: "usage", text: formatUsage(event.payload.usage) },
+      );
+      continue;
+    }
+    if (event.type === "turn.cancelled") {
+      entries.push({
+        kind: "system",
+        text: `Turn cancelled: ${event.payload.reason}`,
+      });
+      continue;
+    }
+    if (event.type === "turn.failed") {
+      entries.push({
+        kind: "error",
+        text: `${event.payload.code}: ${event.payload.message}`,
+      });
+    }
+  }
+  const bounded = entries.map((entry) => ({
+    ...entry,
+    text: boundText(entry.text),
+  }));
+  if (bounded.length <= MAXIMUM_HISTORY_ROWS) {
+    return bounded;
+  }
+  return [
+    {
+      kind: "system",
+      text: `${bounded.length - (MAXIMUM_HISTORY_ROWS - 1)} older history row(s) omitted from this preview.`,
+    },
+    ...bounded.slice(-(MAXIMUM_HISTORY_ROWS - 1)),
+  ];
+}
+
 function addModelUsage(
   current: TurnUsage | undefined,
   usage: TokenUsage,
@@ -807,10 +1195,44 @@ function boundText(
   text: string,
   maximum = MAXIMUM_PRESENTATION_CHARACTERS,
 ): string {
-  const normalized = text.replace(/\r\n?/gu, "\n");
-  return normalized.length <= maximum
-    ? normalized
-    : `${normalized.slice(0, maximum - 3)}...`;
+  const normalized = text
+    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/gu, "")
+    .replace(/\r\n?/gu, "\n")
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/gu, "");
+  if (Buffer.byteLength(normalized, "utf8") <= maximum) {
+    return normalized;
+  }
+  const budget = Math.max(0, maximum - 3);
+  let low = 0;
+  let high = normalized.length;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (Buffer.byteLength(normalized.slice(0, middle), "utf8") <= budget) {
+      low = middle;
+    } else {
+      high = middle - 1;
+    }
+  }
+  let prefix = normalized.slice(0, low);
+  if (/\p{Surrogate}$/u.test(prefix)) {
+    prefix = prefix.slice(0, -1);
+  }
+  return `${prefix}...`;
+}
+
+export function boundPresentationText(
+  text: string,
+  maximum = MAXIMUM_PRESENTATION_CHARACTERS,
+): string {
+  return boundText(text, maximum);
+}
+
+function jsonSummary(value: unknown): string {
+  try {
+    return boundText(JSON.stringify(value));
+  } catch {
+    return "[unserializable output]";
+  }
 }
 
 function errorMessage(error: unknown): string {

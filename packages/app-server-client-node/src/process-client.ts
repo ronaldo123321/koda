@@ -8,6 +8,8 @@ import {
   initializeResultSchema,
   jsonValueSchema,
   shutdownResultSchema,
+  threadEventsParamsSchema,
+  threadEventsResultSchema,
   threadGetParamsSchema,
   threadGetResultSchema,
   threadListParamsSchema,
@@ -21,6 +23,8 @@ import {
   type InitializeResult,
   type ThreadGetParams,
   type ThreadGetResult,
+  type ThreadEventsParams,
+  type ThreadEventsResult,
   type ThreadListParams,
   type ThreadListResult,
   type TurnCancelParams,
@@ -55,6 +59,7 @@ export interface AppServerClientApi {
   readonly initialization: InitializeResult;
   listThreads(params?: ThreadListParams): Promise<ThreadListResult>;
   getThread(params: ThreadGetParams): Promise<ThreadGetResult>;
+  readThreadEvents(params: ThreadEventsParams): Promise<ThreadEventsResult>;
   startTurn(params: TurnStartParams): Promise<TurnStartResult>;
   cancelTurn(params: TurnCancelParams): Promise<TurnCancelResult>;
   resolveApproval(
@@ -184,6 +189,16 @@ export class NodeAppServerClient implements AppServerClientApi {
       "thread/get",
       jsonValueSchema.parse(threadGetParamsSchema.parse(params)),
       threadGetResultSchema,
+    );
+  }
+
+  public readThreadEvents(
+    params: ThreadEventsParams,
+  ): Promise<ThreadEventsResult> {
+    return this.connection.request(
+      "thread/events",
+      jsonValueSchema.parse(threadEventsParamsSchema.parse(params)),
+      threadEventsResultSchema,
     );
   }
 

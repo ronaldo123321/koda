@@ -6,7 +6,11 @@ import { jsonValueSchema } from "./json.js";
 import { tokenUsageSchema } from "./usage.js";
 import { modelProviderIdSchema, providerMetadataSchema } from "./providers.js";
 
-export const APP_SERVER_PROTOCOL_VERSION = 2 as const;
+export const APP_SERVER_PROTOCOL_VERSION = 3 as const;
+
+export const THREAD_EVENTS_DEFAULT_LIMIT = 200;
+export const THREAD_EVENTS_MAXIMUM_LIMIT = 200;
+export const THREAD_EVENTS_RESULT_BUDGET_BYTES = 768 * 1_024;
 
 export const APP_SERVER_RPC_ERROR_CODE = {
   PARSE: -32700,
@@ -105,6 +109,7 @@ export const initializeResultSchema = z
         turnCancellation: z.literal(true),
         interactiveApproval: z.literal(true),
         durableEventNotifications: z.literal(true),
+        threadEvents: z.literal(true),
       })
       .strict(),
     providers: z.array(providerMetadataSchema).min(1),
@@ -190,6 +195,70 @@ export const threadGetResultSchema = z
   })
   .strict();
 
+export const threadEventsParamsSchema = z
+  .object({
+    threadId: z
+      .string()
+      .regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u)
+      .transform((value) => threadIdSchema.parse(value)),
+    beforeSequence: z.number().int().safe().nonnegative().optional(),
+    limit: z
+      .number()
+      .int()
+      .safe()
+      .min(1)
+      .max(THREAD_EVENTS_MAXIMUM_LIMIT)
+      .optional(),
+  })
+  .strict();
+
+export const threadEventsResultSchema = z
+  .object({
+    events: z.array(agentEventSchema).max(THREAD_EVENTS_MAXIMUM_LIMIT),
+    hasEarlier: z.boolean(),
+    nextBeforeSequence: z.number().int().safe().nonnegative().optional(),
+  })
+  .strict()
+  .superRefine((result, context) => {
+    if (result.events.length > 1) {
+      for (let index = 1; index < result.events.length; index += 1) {
+        const previous = result.events[index - 1];
+        const current = result.events[index];
+        if (
+          previous !== undefined &&
+          current !== undefined &&
+          current.sequence !== previous.sequence + 1
+        ) {
+          context.addIssue({
+            code: "custom",
+            message: "Thread event pages must be chronological and contiguous.",
+            path: ["events", index, "sequence"],
+          });
+          break;
+        }
+      }
+    }
+    if (result.hasEarlier) {
+      if (
+        result.events.length === 0 ||
+        result.nextBeforeSequence !== result.events[0]?.sequence
+      ) {
+        context.addIssue({
+          code: "custom",
+          message:
+            "A page with earlier events must provide its first sequence as the next cursor.",
+          path: ["nextBeforeSequence"],
+        });
+      }
+    } else if (result.nextBeforeSequence !== undefined) {
+      context.addIssue({
+        code: "custom",
+        message: "A final page cannot provide a next cursor.",
+        path: ["nextBeforeSequence"],
+      });
+    }
+  });
+
 export const turnStartParamsSchema = z
   .object({
     prompt: z.string().min(1),
@@ -265,6 +334,8 @@ export type ThreadListParams = z.infer<typeof threadListParamsSchema>;
 export type ThreadListResult = z.infer<typeof threadListResultSchema>;
 export type ThreadGetParams = z.infer<typeof threadGetParamsSchema>;
 export type ThreadGetResult = z.infer<typeof threadGetResultSchema>;
+export type ThreadEventsParams = z.infer<typeof threadEventsParamsSchema>;
+export type ThreadEventsResult = z.infer<typeof threadEventsResultSchema>;
 export type ThreadMetadataMessage = z.infer<typeof threadMetadataSchema>;
 export type TurnStartParams = z.infer<typeof turnStartParamsSchema>;
 export type TurnStartResult = z.infer<typeof turnStartResultSchema>;

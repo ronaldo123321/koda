@@ -6,7 +6,7 @@ The project is building the control plane around a coding model: typed conversat
 
 ## Current status
 
-Phase 3D is implemented. It adds an Ink chat REPL and reusable Node app-server client on top of the Phase 3C five-provider runtime, Phase 3B local MCP client, Phase 3A transport-neutral application layer, and the completed Phase 0 through Phase 2 runtime:
+Phase 3E1 is implemented. It adds workspace-scoped thread browsing, bounded durable-history preview, and safe interactive resume to the Phase 3D Ink client, on top of the Phase 3C five-provider runtime, Phase 3B local MCP client, Phase 3A transport-neutral application layer, and the completed Phase 0 through Phase 2 runtime:
 
 - Versioned Thread, Turn, Item, and Agent Event schemas.
 - A provider-neutral streaming model interface.
@@ -51,17 +51,19 @@ Phase 3D is implemented. It adds an Ink chat REPL and reusable Node app-server c
 - A shared `KodaApplication` workflow used by both CLI and protocol clients.
 - A strict, versioned, newline-delimited JSON-RPC 2.0 app-server over local stdio.
 - Durable-before-notify event streaming, one-shot interactive approvals, active-turn cancellation, and graceful shutdown/EOF cleanup.
-- Credential-free app-server thread list/get operations and different-thread concurrency guarded by existing per-thread leases.
+- Credential-free app-server thread list/get operations, bounded cursor-paginated JSONL event history, and different-thread concurrency guarded by existing per-thread leases.
 - A reusable Node app-server client with strict NDJSON framing, typed JSON-RPC correlation, bounded stderr diagnostics, request timeouts, and owned child-process cleanup.
-- An Ink `koda-chat` REPL that uses app-server v2 exclusively for sequential multi-turn chat, streamed answers, tool state, one-shot approvals, cancellation, usage, errors, and thread resume.
-- Static completed transcript output plus one bounded live region, normal terminal scrollback, `/help`, `/status`, `/clear`, `/exit`, `Esc` cancellation, and context-sensitive `Ctrl+C`.
+- An Ink `koda-chat` REPL that uses app-server v3 exclusively for sequential multi-turn chat, streamed answers, tool state, one-shot approvals, cancellation, usage, errors, thread browsing, and resume.
+- Typed `thread/events` pages over authoritative JSONL with exclusive sequence cursors, a 200-event cap, a 768 KiB result budget, and explicit corruption/oversize errors.
+- Idle-only `/threads` and `Ctrl+T` browsing across the current canonical workspace, bounded history projection, metadata recheck before resume, and persisted provider/model adoption.
+- Static completed transcript output plus one bounded live region, normal terminal scrollback, `/help`, `/status`, `/clear`, `/new`, `/exit`, `Esc` cancellation/navigation, and context-sensitive `Ctrl+C`.
 - Official MCP v2 client integration for explicitly configured local stdio servers, with one isolated session per turn.
 - Frozen, validated MCP tool catalogs exposed as stable `mcp__<server>__<tool>` aliases without importing MCP into `agent-core`.
 - Fail-closed MCP effects: external tools require approval by default, and only explicitly reviewed `read` tools bypass approval.
 - MCP call timeouts, turn cancellation, reverse-order child cleanup, bounded binary/result normalization, artifact-backed large output, and conservative interrupted-call recovery.
 - Offline provider, runtime, CLI, and deterministic agent-loop tests.
 
-Provider-assisted semantic compaction, exact provider tokenizers and pricing, custom endpoints/profiles, automatic routing/fallback, cross-provider resume, additional providers, thread/settings panels, rich Markdown/diff/artifact views, richer patch operations, interactive process UX, and the non-Tool MCP capability surface remain later Phase 3 slices. Remote MCP/HTTP/OAuth, shared or remote artifact stores, remote app-server transports, strong sandboxing, Windows Job Objects, crash-surviving supervision, the Rust executor, and any high-risk shell-string support remain Phase 4 work. Parent/child thread lineage and multi-agent scenario matrices remain Phase 5 work. Workspace writes, process execution, and MCP tools not explicitly classified as read require approval by default.
+Provider-assisted semantic compaction, exact provider tokenizers and pricing, custom endpoints/profiles, automatic routing/fallback, cross-provider resume, additional providers, older-history loading/search, full-screen navigation, provider/model settings, rich Markdown/diff/artifact views, richer patch operations, interactive process UX, and the non-Tool MCP capability surface remain later Phase 3 slices. Remote MCP/HTTP/OAuth, shared or remote artifact stores, remote app-server transports, strong sandboxing, Windows Job Objects, crash-surviving supervision, the Rust executor, and any high-risk shell-string support remain Phase 4 work. Parent/child thread lineage and multi-agent scenario matrices remain Phase 5 work. Workspace writes, process execution, and MCP tools not explicitly classified as read require approval by default.
 
 ## Run the CLI
 
@@ -126,7 +128,7 @@ node apps/tui/dist/main.js --cwd . --provider deepseek --model deepseek-v4-pro
 node apps/tui/dist/main.js --cwd . --provider openai --resume <thread-id>
 ```
 
-Workspace, provider, model, resume thread, and approval mode are fixed at startup. Ordinary input starts a turn. `/help`, `/status`, `/clear`, and `/exit` are local commands; `/clear` resets the client transcript without deleting the durable thread. Press `y` or `n` for a pending approval, `d` to toggle details, and `Esc` to cancel the active turn. `Ctrl+C` cancels while a turn is active and exits while idle. The client requires a TTY; scripts should continue to use `koda run` or the stdio app-server.
+Workspace and approval mode are fixed at startup. The startup provider/model are the default for a new thread; resuming from the thread browser adopts that thread's persisted provider/model. Ordinary input starts a turn. `/threads` or `Ctrl+T` opens the latest 100 threads in the current canonical workspace; arrows select, Enter previews the latest durable history, `r` resumes, and `Esc` returns. `/new` detaches locally so the next prompt creates a new thread without deleting history. `/help`, `/status`, `/clear`, and `/exit` retain their existing behavior. Press `y` or `n` for a pending approval, `d` to toggle details, and `Esc` to cancel an active turn. `Ctrl+C` cancels while a turn is active and exits while idle. The client requires a TTY; scripts should continue to use `koda run` or the stdio app-server.
 
 ## Run the local app-server
 
@@ -140,11 +142,12 @@ OPENAI_API_KEY=... node apps/app-server/dist/main.js
 The process accepts one JSON-RPC 2.0 object per UTF-8 line. `initialize` must be the first request:
 
 ```json
-{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":2,"client":{"name":"my-koda-client","version":"0.1.0"}}}
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":3,"client":{"name":"my-koda-client","version":"0.1.0"}}}
 {"jsonrpc":"2.0","id":2,"method":"turn/start","params":{"prompt":"explain this repository","cwd":".","provider":"openai"}}
+{"jsonrpc":"2.0","id":3,"method":"thread/events","params":{"threadId":"<thread-id>","limit":200}}
 ```
 
-The v2 initialize result advertises the supported providers, credential environment-variable names, and default models. Responses and `turn/event` / `turn/finished` notifications use stdout exclusively; diagnostics use stderr. Clients answer an `approval.requested` event with `approval/resolve`, may stop a live turn with `turn/cancel`, and should finish with `shutdown`. Provider credentials are server configuration and are never protocol fields.
+The v3 initialize result advertises `threadEvents: true` plus the supported providers, credential environment-variable names, and default models. `thread/events` returns validated events in chronological order; `beforeSequence` is an exclusive cursor and `limit` is 1–200. Responses and `turn/event` / `turn/finished` notifications use stdout exclusively; diagnostics use stderr. Clients answer an `approval.requested` event with `approval/resolve`, may stop a live turn with `turn/cancel`, and should finish with `shutdown`. Provider credentials are server configuration and are never protocol fields.
 
 ## Configure local MCP tools
 
@@ -222,7 +225,7 @@ pnpm eval:scenarios
 - `@koda/providers`: OpenAI Responses, Anthropic Messages, named OpenAI-compatible profiles, normalized provider errors, and deterministic scripted providers.
 - `@koda/runtime-node`: JSONL, artifact, and rebuildable SQLite metadata persistence plus constrained workspace, patch, and process tools.
 - `@koda/mcp-client-node`: strict local MCP configuration, official stdio client lifecycle, tool adaptation, policy metadata, and bounded result conversion.
-- `@koda/app`: transport-neutral turn orchestration and credential-free thread use cases.
+- `@koda/app`: transport-neutral turn orchestration and credential-free thread metadata/history use cases.
 - `@koda/cli`: line-oriented command parsing, terminal approval, and console projection over `@koda/app`.
 - `@koda/app-server`: local stdio JSON-RPC transport, active-turn coordination, and interactive approval routing.
 - `@koda/app-server-client-node`: typed local JSON-RPC client, NDJSON framing, request lifecycle, diagnostics, and owned app-server process cleanup.
@@ -249,5 +252,6 @@ pnpm eval:scenarios
 - [Phase 3B local MCP client design](docs/plans/2026-08-26-phase-3b-mcp-client-design.md)
 - [Phase 3C multi-provider runtime design](docs/plans/2026-08-26-phase-3c-multi-provider-design.md)
 - [Phase 3D Ink chat REPL design](docs/plans/2026-08-26-phase-3d-ink-chat-repl-design.md)
+- [Phase 3E1 thread browser and history restore design](docs/plans/2026-08-27-phase-3e1-thread-browser-history-design.md)
 
 The model can propose actions, but the Koda runtime owns validation, policy, approval, and execution. User interfaces consume typed events and do not own agent state.

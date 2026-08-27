@@ -3,6 +3,7 @@ import { Box, Static, Text, useApp, useInput, type Key } from "ink";
 
 import {
   TuiController,
+  boundPresentationText,
   type TuiState,
   type TuiTranscriptEntry,
 } from "./controller.js";
@@ -46,6 +47,11 @@ export interface TuiInputController {
   cancelActiveTurn(): Promise<void>;
   resolveApproval(decision: "approved" | "rejected"): Promise<void>;
   toggleApprovalDetails(): void;
+  openThreadBrowser(): Promise<void>;
+  selectThread(offset: -1 | 1): void;
+  previewSelectedThread(): Promise<void>;
+  closeThreadBrowserLevel(): void;
+  resumePreviewedThread(): Promise<void>;
 }
 
 export function KodaView({ state }: KodaViewProps) {
@@ -60,36 +66,43 @@ export function KodaView({ state }: KodaViewProps) {
           Koda
         </Text>
         <Text dimColor>
-          {` · ${state.configuration.provider}/${state.configuration.model} · ${state.threadId ?? "new thread"}`}
+          {` · ${state.configuration.provider}/${boundPresentationText(state.configuration.model, 256)} · ${state.threadId ?? "new thread"}`}
         </Text>
       </Box>
 
-      {state.activeTurn === undefined ? null : (
-        <ActiveTurn state={state.activeTurn} />
-      )}
+      {state.mode === "thread_list" ? <ThreadList state={state} /> : null}
+      {state.mode === "thread_preview" ? <ThreadPreview state={state} /> : null}
 
-      {state.approval === undefined ? null : (
-        <Box
-          flexDirection="column"
-          borderStyle="round"
-          borderColor="yellow"
-          paddingX={1}
-        >
-          <Text bold color="yellow">
-            Approval required · {state.approval.title}
-          </Text>
-          <Text>{state.approval.summary}</Text>
-          <Text dimColor>reason: {state.approval.reason}</Text>
-          {state.approval.detailsVisible ? (
-            <Text>{state.approval.details}</Text>
-          ) : null}
-          <Text dimColor>
-            {state.approval.resolving
-              ? "Resolving approval…"
-              : "y approve · n reject · d details · Esc cancel turn"}
-          </Text>
-        </Box>
-      )}
+      {state.mode === "chat" ? (
+        <>
+          {state.activeTurn === undefined ? null : (
+            <ActiveTurn state={state.activeTurn} />
+          )}
+
+          {state.approval === undefined ? null : (
+            <Box
+              flexDirection="column"
+              borderStyle="round"
+              borderColor="yellow"
+              paddingX={1}
+            >
+              <Text bold color="yellow">
+                Approval required · {state.approval.title}
+              </Text>
+              <Text>{state.approval.summary}</Text>
+              <Text dimColor>reason: {state.approval.reason}</Text>
+              {state.approval.detailsVisible ? (
+                <Text>{state.approval.details}</Text>
+              ) : null}
+              <Text dimColor>
+                {state.approval.resolving
+                  ? "Resolving approval…"
+                  : "y approve · n reject · d details · Esc cancel turn"}
+              </Text>
+            </Box>
+          )}
+        </>
+      ) : null}
 
       {state.notice === undefined ? null : (
         <Text color={state.connection === "error" ? "red" : "yellow"}>
@@ -97,8 +110,12 @@ export function KodaView({ state }: KodaViewProps) {
         </Text>
       )}
 
-      <StatusLine state={state} />
-      <Prompt state={state} />
+      {state.mode === "chat" ? (
+        <>
+          <StatusLine state={state} />
+          <Prompt state={state} />
+        </>
+      ) : null}
     </Box>
   );
 }
@@ -110,11 +127,41 @@ export function routeTuiInput(
   key: Key,
   requestExit: () => void,
 ): void {
+  if (
+    key.ctrl &&
+    input.toLowerCase() === "t" &&
+    state.mode === "chat" &&
+    state.activeTurn === undefined &&
+    state.connection === "ready"
+  ) {
+    void controller.openThreadBrowser();
+    return;
+  }
   if (key.ctrl && input.toLowerCase() === "c") {
     if (state.activeTurn === undefined) {
       requestExit();
     } else {
       void controller.cancelActiveTurn();
+    }
+    return;
+  }
+  if (state.mode === "thread_list") {
+    if (key.escape) {
+      controller.closeThreadBrowserLevel();
+    } else if (key.upArrow) {
+      controller.selectThread(-1);
+    } else if (key.downArrow) {
+      controller.selectThread(1);
+    } else if (key.return) {
+      void controller.previewSelectedThread();
+    }
+    return;
+  }
+  if (state.mode === "thread_preview") {
+    if (key.escape) {
+      controller.closeThreadBrowserLevel();
+    } else if (input.toLowerCase() === "r") {
+      void controller.resumePreviewedThread();
     }
     return;
   }
@@ -170,6 +217,72 @@ export function routeTuiInput(
   if (printable.length > 0) {
     controller.setInput(state.input + printable);
   }
+}
+
+function ThreadList({ state }: { state: TuiState }) {
+  const browser = state.threadBrowser;
+  if (browser === undefined) {
+    return <Text color="red">Thread browser state is unavailable.</Text>;
+  }
+  return (
+    <Box flexDirection="column" borderStyle="round" paddingX={1}>
+      <Text bold>
+        Recent threads · {boundPresentationText(state.configuration.cwd, 512)}
+      </Text>
+      {browser.threads.length === 0 ? (
+        <Text dimColor>No threads found in this workspace.</Text>
+      ) : (
+        browser.threads.map((thread, index) => (
+          <Text
+            key={thread.threadId}
+            bold={index === browser.selectedIndex}
+            {...(index === browser.selectedIndex ? { color: "cyan" } : {})}
+          >
+            {`${index === browser.selectedIndex ? ">" : " "} ${thread.threadId} · ${thread.status} · ${thread.provider ?? "unknown"}/${boundPresentationText(thread.model ?? "unknown", 256)} · ${thread.turnCount} turns · ${thread.usage.tokens.totalTokens} tokens · ${thread.updatedAt}`}
+          </Text>
+        ))
+      )}
+      <Text dimColor>
+        {browser.loading
+          ? "Loading preview…"
+          : "↑/↓ select · Enter preview · Esc back"}
+      </Text>
+    </Box>
+  );
+}
+
+function ThreadPreview({ state }: { state: TuiState }) {
+  const preview = state.threadBrowser?.preview;
+  if (preview === undefined) {
+    return <Text color="red">Thread preview state is unavailable.</Text>;
+  }
+  return (
+    <Box flexDirection="column" borderStyle="round" paddingX={1}>
+      <Text bold>
+        {`${preview.thread.threadId} · ${preview.thread.status} · ${preview.thread.provider ?? "unknown"}/${boundPresentationText(preview.thread.model ?? "unknown", 256)}`}
+      </Text>
+      <Text dimColor>
+        {`${preview.thread.updatedAt} · ${preview.thread.turnCount} turns · ${preview.thread.usage.tokens.totalTokens} tokens`}
+      </Text>
+      {preview.hasEarlier ? (
+        <Text dimColor>Earlier durable events are available.</Text>
+      ) : null}
+      {preview.entries.length === 0 ? (
+        <Text dimColor>No displayable history in the latest event page.</Text>
+      ) : (
+        preview.entries.map((entry) => (
+          <TranscriptRow key={entry.id} entry={entry} />
+        ))
+      )}
+      <Text dimColor>
+        {state.threadBrowser?.loading
+          ? "Checking thread… · Esc back"
+          : preview.thread.status === "invalid"
+            ? "Invalid thread · Esc back"
+            : "r resume · Esc back"}
+      </Text>
+    </Box>
+  );
 }
 
 function TranscriptRow({ entry }: { entry: TuiTranscriptEntry }) {

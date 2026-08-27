@@ -3,9 +3,11 @@ import type {
   AppServerNotification,
 } from "@koda/app-server-client-node";
 import {
+  APP_SERVER_PROTOCOL_VERSION,
   agentEventSchema,
   initializeResultSchema,
   threadIdSchema,
+  threadMetadataSchema,
   toolCallIdSchema,
   turnFinishedNotificationParamsSchema,
   turnIdSchema,
@@ -14,6 +16,8 @@ import {
   type InitializeResult,
   type ThreadGetParams,
   type ThreadGetResult,
+  type ThreadEventsParams,
+  type ThreadEventsResult,
   type ThreadListParams,
   type ThreadListResult,
   type TurnCancelParams,
@@ -21,7 +25,7 @@ import {
   type TurnStartParams,
   type TurnStartResult,
 } from "@koda/protocol";
-import { TuiController } from "@koda/tui";
+import { TuiController, projectThreadHistory } from "@koda/tui";
 import { describe, expect, it } from "vitest";
 
 describe("TuiController", () => {
@@ -221,12 +225,251 @@ describe("TuiController", () => {
     );
     expect(client.approvalRequests).toEqual([]);
   });
+
+  it("browses, previews, and resumes a thread with refreshed provider metadata", async () => {
+    const client = new FakeAppServerClient();
+    const first = threadMetadata(
+      "first-thread",
+      "completed",
+      "openai",
+      "gpt-5.6-terra",
+    );
+    const selected = threadMetadata(
+      "selected-thread",
+      "interrupted",
+      "deepseek",
+      "deepseek-v4-pro",
+    );
+    client.threadListResult = {
+      threads: [first, selected],
+      diagnostics: [],
+    };
+    client.threadEventsResult = {
+      events: [
+        recordedItemEvent(0, "selected-thread", {
+          type: "user_message",
+          id: "history-user",
+          content: "Earlier question",
+        }),
+        recordedItemEvent(1, "selected-thread", {
+          type: "assistant_message",
+          id: "history-assistant",
+          content: "Earlier answer",
+        }),
+      ],
+      hasEarlier: false,
+    };
+    client.threadGetResult = { thread: selected, diagnostics: [] };
+    const controller = createController(client);
+
+    await controller.openThreadBrowser();
+    expect(controller.getSnapshot()).toMatchObject({
+      mode: "thread_list",
+      threadBrowser: { selectedIndex: 0 },
+    });
+    controller.selectThread(1);
+    await controller.previewSelectedThread();
+    expect(controller.getSnapshot()).toMatchObject({
+      mode: "thread_preview",
+      threadBrowser: {
+        preview: { thread: { threadId: "selected-thread" } },
+      },
+    });
+    expect(client.threadEventRequests).toEqual([
+      { threadId: "selected-thread", limit: 200 },
+    ]);
+
+    await controller.resumePreviewedThread();
+    expect(controller.getSnapshot()).toMatchObject({
+      mode: "chat",
+      threadId: "selected-thread",
+      configuration: {
+        provider: "deepseek",
+        model: "deepseek-v4-pro",
+      },
+      threadBrowser: undefined,
+    });
+    expect(client.threadGetRequests).toEqual([{ threadId: "selected-thread" }]);
+    expect(
+      controller.getSnapshot().transcript.map((entry) => entry.text),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("Resumed thread selected-thread"),
+        "Earlier question",
+        "Earlier answer",
+      ]),
+    );
+  });
+
+  it("keeps the active thread when browsing or resume validation fails", async () => {
+    const client = new FakeAppServerClient();
+    const invalid = threadMetadata(
+      "invalid-thread",
+      "invalid",
+      "openai",
+      "gpt-5.6-terra",
+    );
+    client.threadListResult = { threads: [invalid], diagnostics: [] };
+    client.threadEventsResult = { events: [], hasEarlier: false };
+    const controller = createController(client);
+    await controller.startPrompt("Create current thread");
+    client.finish("completed");
+
+    await controller.openThreadBrowser();
+    await controller.previewSelectedThread();
+    await controller.resumePreviewedThread();
+    expect(controller.getSnapshot()).toMatchObject({
+      mode: "thread_preview",
+      threadId: "tui-thread",
+      notice: "Invalid threads cannot be resumed.",
+    });
+    expect(client.threadGetRequests).toEqual([]);
+
+    controller.closeThreadBrowserLevel();
+    controller.closeThreadBrowserLevel();
+    controller.setInput("/new");
+    await controller.submitInput();
+    expect(controller.getSnapshot()).toMatchObject({
+      mode: "chat",
+      threadId: undefined,
+      configuration: { provider: "openai", model: "gpt-5.6-terra" },
+    });
+  });
+
+  it("preserves chat state across list, preview, and workspace validation failures", async () => {
+    const client = new FakeAppServerClient();
+    const selected = threadMetadata(
+      "failure-thread",
+      "completed",
+      "openai",
+      "gpt-5.6-terra",
+    );
+    const controller = createController(client);
+    await controller.startPrompt("Keep this thread");
+    client.finish("completed");
+
+    client.threadListError = new Error("list unavailable");
+    await controller.openThreadBrowser();
+    expect(controller.getSnapshot()).toMatchObject({
+      mode: "chat",
+      threadId: "tui-thread",
+      notice: expect.stringContaining("list unavailable"),
+    });
+
+    client.threadListError = undefined;
+    client.threadListResult = { threads: [selected], diagnostics: [] };
+    await controller.openThreadBrowser();
+    client.threadEventsError = new Error("history unavailable");
+    await controller.previewSelectedThread();
+    expect(controller.getSnapshot()).toMatchObject({
+      mode: "thread_list",
+      threadId: "tui-thread",
+      notice: expect.stringContaining("history unavailable"),
+    });
+
+    client.threadEventsError = undefined;
+    await controller.previewSelectedThread();
+    client.threadGetResult = {
+      thread: { ...selected, workspaceRoot: "/different-workspace" },
+      diagnostics: [],
+    };
+    await controller.resumePreviewedThread();
+    expect(controller.getSnapshot()).toMatchObject({
+      mode: "thread_preview",
+      threadId: "tui-thread",
+      configuration: { provider: "openai", model: "gpt-5.6-terra" },
+      notice: expect.stringContaining("does not match"),
+    });
+  });
+
+  it("does not browse while a turn is active", async () => {
+    const client = new FakeAppServerClient();
+    const controller = createController(client);
+    await controller.startPrompt("Still running");
+
+    await controller.openThreadBrowser();
+
+    expect(client.threadListRequests).toEqual([]);
+    expect(controller.getSnapshot()).toMatchObject({
+      mode: "chat",
+      activeTurn: { status: "running" },
+      notice: "Thread browsing is available only while idle.",
+    });
+  });
+
+  it("projects durable items without replaying assistant deltas or approvals", () => {
+    const events = [
+      agentEventSchema.parse({
+        schemaVersion: 1,
+        sequence: 0,
+        timestamp: "2026-08-27T00:00:00.000Z",
+        threadId: "history-thread",
+        turnId: "history-turn",
+        type: "assistant.delta",
+        payload: { text: "duplicate" },
+      }),
+      recordedItemEvent(1, "history-thread", {
+        type: "assistant_message",
+        id: "history-message",
+        content: "Complete answer",
+      }),
+      agentEventSchema.parse({
+        schemaVersion: 1,
+        sequence: 2,
+        timestamp: "2026-08-27T00:00:02.000Z",
+        threadId: "history-thread",
+        turnId: "history-turn",
+        type: "approval.requested",
+        payload: {
+          callId: "history-call",
+          name: "apply_patch",
+          title: "Patch",
+          summary: "summary",
+          details: "details",
+          reason: "write",
+        },
+      }),
+    ];
+
+    expect(projectThreadHistory(events)).toEqual([
+      { kind: "assistant", text: "Complete answer" },
+    ]);
+  });
+
+  it("bounds restored history by row count and UTF-8 bytes", () => {
+    const events = Array.from({ length: 101 }, (_, sequence) =>
+      recordedItemEvent(sequence, "bounded-history", {
+        type: "assistant_message",
+        id: `bounded-message-${sequence}`,
+        content: `\u001b[31m\u009b${"界".repeat(4_000)}`,
+      }),
+    );
+
+    const projected = projectThreadHistory(events);
+
+    expect(projected).toHaveLength(100);
+    expect(projected[0]).toEqual({
+      kind: "system",
+      text: "2 older history row(s) omitted from this preview.",
+    });
+    expect(
+      projected.every(
+        (entry) => Buffer.byteLength(entry.text, "utf8") <= 8_192,
+      ),
+    ).toBe(true);
+    expect(projected.some((entry) => entry.text.includes("\u001b"))).toBe(
+      false,
+    );
+    expect(projected.some((entry) => entry.text.includes("\u009b"))).toBe(
+      false,
+    );
+  });
 });
 
 class FakeAppServerClient implements AppServerClientApi {
   public readonly initialization: InitializeResult =
     initializeResultSchema.parse({
-      protocolVersion: 2,
+      protocolVersion: APP_SERVER_PROTOCOL_VERSION,
       server: { name: "koda-app-server", version: "test" },
       capabilities: {
         threadQueries: true,
@@ -235,6 +478,7 @@ class FakeAppServerClient implements AppServerClientApi {
         turnCancellation: true,
         interactiveApproval: true,
         durableEventNotifications: true,
+        threadEvents: true,
       },
       providers: [
         provider("openai", "OpenAI", "OPENAI_API_KEY", "gpt-5.6-terra"),
@@ -252,6 +496,17 @@ class FakeAppServerClient implements AppServerClientApi {
   public readonly startRequests: TurnStartParams[] = [];
   public readonly cancelRequests: TurnCancelParams[] = [];
   public readonly approvalRequests: ApprovalResolveParams[] = [];
+  public readonly threadListRequests: ThreadListParams[] = [];
+  public readonly threadGetRequests: ThreadGetParams[] = [];
+  public readonly threadEventRequests: ThreadEventsParams[] = [];
+  public threadListResult: ThreadListResult = { threads: [], diagnostics: [] };
+  public threadGetResult: ThreadGetResult | undefined;
+  public threadEventsResult: ThreadEventsResult = {
+    events: [],
+    hasEarlier: false,
+  };
+  public threadListError: Error | undefined;
+  public threadEventsError: Error | undefined;
   public diagnosticText = "";
   public beforeStartResult: (() => void) | undefined;
   public startImplementation:
@@ -262,12 +517,30 @@ class FakeAppServerClient implements AppServerClientApi {
   private readonly disconnectListeners = new Set<(error?: Error) => void>();
   private currentTurnId = turnIdSchema.parse("tui-turn-1");
 
-  public listThreads(_params?: ThreadListParams): Promise<ThreadListResult> {
-    return Promise.resolve({ threads: [], diagnostics: [] });
+  public listThreads(params: ThreadListParams = {}): Promise<ThreadListResult> {
+    this.threadListRequests.push(params);
+    if (this.threadListError !== undefined) {
+      return Promise.reject(this.threadListError);
+    }
+    return Promise.resolve(this.threadListResult);
   }
 
-  public getThread(_params: ThreadGetParams): Promise<ThreadGetResult> {
-    throw new Error("Not implemented in fixture.");
+  public getThread(params: ThreadGetParams): Promise<ThreadGetResult> {
+    this.threadGetRequests.push(params);
+    if (this.threadGetResult === undefined) {
+      return Promise.reject(new Error("Thread fixture is unavailable."));
+    }
+    return Promise.resolve(this.threadGetResult);
+  }
+
+  public readThreadEvents(
+    params: ThreadEventsParams,
+  ): Promise<ThreadEventsResult> {
+    this.threadEventRequests.push(params);
+    if (this.threadEventsError !== undefined) {
+      return Promise.reject(this.threadEventsError);
+    }
+    return Promise.resolve(this.threadEventsResult);
   }
 
   public startTurn(params: TurnStartParams): Promise<TurnStartResult> {
@@ -361,6 +634,55 @@ class FakeAppServerClient implements AppServerClientApi {
       listener(notification);
     }
   }
+}
+
+function threadMetadata(
+  threadId: string,
+  status: "completed" | "interrupted" | "invalid",
+  providerId: "openai" | "deepseek",
+  model: string,
+) {
+  return threadMetadataSchema.parse({
+    threadId,
+    logFile: `/state/threads/${threadId}.jsonl`,
+    status,
+    createdAt: "2026-08-27T00:00:00.000Z",
+    updatedAt: "2026-08-27T00:01:00.000Z",
+    provider: providerId,
+    model,
+    workspaceRoot: "/workspace",
+    approvalMode: "on-request",
+    turnCount: 1,
+    eventCount: 2,
+    lastSequence: 1,
+    usage: {
+      modelRequests: 1,
+      reportedRequests: 1,
+      tokens: {
+        inputTokens: 10,
+        cachedInputTokens: 0,
+        cacheWriteInputTokens: 0,
+        outputTokens: 5,
+        reasoningOutputTokens: 0,
+        totalTokens: 15,
+      },
+    },
+    sourceBytes: 200,
+    indexedBytes: 200,
+    sourceMtimeMs: 1,
+  });
+}
+
+function recordedItemEvent(sequence: number, threadId: string, item: unknown) {
+  return agentEventSchema.parse({
+    schemaVersion: 1,
+    sequence,
+    timestamp: "2026-08-27T00:00:00.000Z",
+    threadId,
+    turnId: "history-turn",
+    type: "item.recorded",
+    payload: { item },
+  });
 }
 
 function createController(

@@ -10,12 +10,23 @@ export interface JsonlEventReadResult extends EventReadResult {
 }
 
 export class EventLogCorruptionError extends Error {
+  public readonly code = "THREAD_EVENT_LOG_CORRUPT";
+
   public constructor(
     message: string,
     public readonly line: number,
   ) {
     super(message);
     this.name = "EventLogCorruptionError";
+  }
+}
+
+export class EventLogNotFoundError extends Error {
+  public readonly code = "THREAD_EVENT_LOG_NOT_FOUND";
+
+  public constructor(public readonly filePath: string) {
+    super(`Thread event log '${filePath}' was not found.`);
+    this.name = "EventLogNotFoundError";
   }
 }
 
@@ -36,12 +47,25 @@ export class JsonlEventStore implements EventSink, EventReader {
   }
 
   public async readAll(): Promise<JsonlEventReadResult> {
+    return this.readAllInternal(true);
+  }
+
+  public async readAllRequired(): Promise<JsonlEventReadResult> {
+    return this.readAllInternal(false);
+  }
+
+  private async readAllInternal(
+    allowMissing: boolean,
+  ): Promise<JsonlEventReadResult> {
     await this.writeChain;
     let bytes: Buffer;
     try {
       bytes = await readFile(this.filePath);
     } catch (error) {
       if (isNodeError(error) && error.code === "ENOENT") {
+        if (!allowMissing) {
+          throw new EventLogNotFoundError(this.filePath);
+        }
         return {
           events: [],
           diagnostics: [],

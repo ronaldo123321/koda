@@ -53,7 +53,7 @@ describe("KodaAppServer", () => {
     await server.handleLine("not-json");
     await request(server, 1, "thread/list", {});
     await request(server, 2, "initialize", {
-      protocolVersion: 99,
+      protocolVersion: 2,
       client: { name: "wrong-version" },
     });
     await initialize(server, 3);
@@ -69,7 +69,10 @@ describe("KodaAppServer", () => {
     expect(errorDataCode(writer, 2)).toBe("PROTOCOL_VERSION_MISMATCH");
     expect(responseResult(writer, 3)).toMatchObject({
       protocolVersion: APP_SERVER_PROTOCOL_VERSION,
-      capabilities: { durableEventNotifications: true },
+      capabilities: {
+        durableEventNotifications: true,
+        threadEvents: true,
+      },
       providers: [
         { id: "openai", defaultModel: "gpt-5.6-terra" },
         { id: "anthropic", defaultModel: "claude-sonnet-5" },
@@ -191,8 +194,21 @@ describe("KodaAppServer", () => {
     expect(responseResult(writer, 5)).toMatchObject({
       thread: { threadId: "server-patch-thread", status: "completed" },
     });
-    await request(server, 6, "shutdown", {});
-    expect(responseResult(writer, 6)).toEqual({});
+    await request(server, 6, "thread/events", {
+      threadId: "server-patch-thread",
+      limit: 3,
+    });
+    expect(responseResult(writer, 6)).toMatchObject({
+      events: [
+        { sequence: expect.any(Number) },
+        { sequence: expect.any(Number) },
+        { sequence: expect.any(Number), type: "turn.completed" },
+      ],
+      hasEarlier: true,
+      nextBeforeSequence: expect.any(Number),
+    });
+    await request(server, 7, "shutdown", {});
+    expect(responseResult(writer, 7)).toEqual({});
     expect(server.shouldClose).toBe(true);
   });
 

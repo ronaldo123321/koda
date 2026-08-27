@@ -1,6 +1,6 @@
 # Koda Phase 3 Extensibility Roadmap
 
-- Status: In progress — Phase 3A through Phase 3D implemented; Phase 3E1 approved for implementation (2026-08-27)
+- Status: In progress — Phase 3A through Phase 3E1 implemented (2026-08-27)
 - Date: 2026-08-26
 - Depends on: Phase 2 reliability closure
 - Scope: stable client/tool/provider extension boundaries without weakening the local runtime's durable state and approval guarantees
@@ -65,14 +65,15 @@ The complete component boundary, interaction contract, failure semantics, verifi
 
 ## Phase 3E1: thread browser and history restore
 
-Status: **Approved for implementation.**
+Status: **Complete.**
 
-- Upgrade the local app-server contract to protocol v3 and add typed, bounded, cursor-paginated `thread/events` reads over authoritative JSONL history.
-- Add idle-only recent-thread browsing and preview modes to the Ink client while preserving the normal terminal screen buffer.
-- Resume a selected thread only after refreshing its metadata and verifying canonical workspace and non-invalid status.
-- Adopt the resumed thread's persisted provider/model; let `/new` detach locally without deleting durable data.
-- Project recent durable conversation items into bounded terminal rows without replaying deltas, historical approvals, processes, or tool effects.
-- Preserve the active chat on every list, preview, or resume failure and keep runtime leases/recovery authoritative.
+- Upgrade the local app-server contract to protocol v3 and add typed, bounded, cursor-paginated `thread/events` reads over authoritative JSONL history. **Completed with exclusive sequence cursors, a 200-event cap, and a 768 KiB result budget.**
+- Add idle-only recent-thread browsing and preview modes to the Ink client while preserving the normal terminal screen buffer. **Completed with `/threads`, `Ctrl+T`, arrow selection, Enter preview, and Escape navigation.**
+- Resume a selected thread only after refreshing its metadata and verifying canonical workspace and non-invalid status. **Completed with a mandatory `thread/get` recheck.**
+- Adopt the resumed thread's persisted provider/model; let `/new` detach locally without deleting durable data. **Completed without cross-provider migration or storage deletion.**
+- Project recent durable conversation items into bounded terminal rows without replaying deltas, historical approvals, processes, or tool effects. **Completed with 100 rows and 8 KiB per UTF-8 row.**
+- Preserve the active chat on every list, preview, or resume failure and keep runtime leases/recovery authoritative. **Completed with explicit controller failure-state coverage.**
+- Verify the v3 protocol, application history reader, Node client, controller, Ink rendering, subprocess path, and reliability gates without live credentials. **Completed with 225/225 offline tests, 6/6 reliability scenarios, and a real TTY browser/new/shutdown smoke test.**
 
 The complete API contract, interaction model, consistency rules, verification matrix, and deferred boundaries are in the [Phase 3E1 thread browser and history restore design](2026-08-27-phase-3e1-thread-browser-history-design.md).
 
@@ -89,7 +90,7 @@ The complete API contract, interaction model, consistency rules, verification ma
 ### Interactive clients and client APIs
 
 - Maintain the completed Phase 3D Ink chat REPL on the Phase 3A application protocol.
-- Implement the approved Phase 3E1 boundary for recent-thread selection, bounded history preview, and safe resume over app-server protocol v3.
+- Maintain the completed Phase 3E1 boundary for recent-thread selection, bounded history preview, and safe resume over app-server protocol v3.
 - In Phase 3E2, add older-history loading, infinite scrolling, full-text search, full-screen navigation, and custom scrolling.
 - In Phase 3E3, add an explicit provider/model settings panel and intentional runtime selection changes.
 - In Phase 3E or Phase 4, add Markdown/syntax rendering, diff and artifact viewers, range/download APIs, attachments, context-budget inspection, and instruction-change views.

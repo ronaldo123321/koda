@@ -14,6 +14,8 @@ import {
   jsonValueSchema,
   shutdownParamsSchema,
   shutdownResultSchema,
+  threadEventsParamsSchema,
+  threadEventsResultSchema,
   threadGetParamsSchema,
   threadGetResultSchema,
   threadListParamsSchema,
@@ -166,6 +168,8 @@ export class KodaAppServer {
         return this.listThreads(request.params);
       case "thread/get":
         return this.getThread(request.params);
+      case "thread/events":
+        return this.readThreadEvents(request.params);
       case "turn/start":
         return this.startTurn(request.params);
       case "turn/cancel":
@@ -216,6 +220,7 @@ export class KodaAppServer {
           turnCancellation: true,
           interactiveApproval: true,
           durableEventNotifications: true,
+          threadEvents: true,
         },
         providers: this.application.listProviders(),
       }),
@@ -254,6 +259,28 @@ export class KodaAppServer {
         ...(result.recovery === undefined ? {} : { recovery: result.recovery }),
       }),
     );
+  }
+
+  private async readThreadEvents(
+    params: JsonValue | undefined,
+  ): Promise<JsonValue> {
+    const input = parseParams(threadEventsParamsSchema, params);
+    try {
+      const result = await this.application.readThreadEvents({
+        threadId: input.threadId,
+        ...(input.beforeSequence === undefined
+          ? {}
+          : { beforeSequence: input.beforeSequence }),
+        ...(input.limit === undefined ? {} : { limit: input.limit }),
+      });
+      return jsonValueSchema.parse(threadEventsResultSchema.parse(result));
+    } catch (error) {
+      throw rpcError(
+        APP_SERVER_RPC_ERROR_CODE.APPLICATION,
+        errorMessage(error),
+        applicationErrorCode(error),
+      );
+    }
   }
 
   private startTurn(params: JsonValue | undefined): JsonValue {

@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -8,7 +8,14 @@ import {
   type TurnClient,
 } from "@koda/app";
 import type { ModelProvider } from "@koda/agent-core";
-import { threadIdSchema, turnIdSchema, type AgentEvent } from "@koda/protocol";
+import {
+  THREAD_EVENTS_RESULT_BUDGET_BYTES,
+  agentEventSchema,
+  threadIdSchema,
+  turnIdSchema,
+  type AgentEvent,
+  type ThreadId,
+} from "@koda/protocol";
 import { ScriptedModelProvider } from "@koda/providers";
 import { JsonlEventStore, ReadOnlyWorkspace } from "@koda/runtime-node";
 import { afterEach, describe, expect, it } from "vitest";
@@ -139,6 +146,129 @@ describe("KodaApplication", () => {
     await expect(queryApplication.getThread(threadId)).resolves.toMatchObject({
       value: { threadId, status: "completed" },
     });
+  });
+
+  it("reads authoritative thread history with stable exclusive cursors", async () => {
+    const fixture = await createFixture();
+    const threadId = threadIdSchema.parse("history-page-thread");
+    const path = join(fixture.kodaHome, "threads", `${threadId}.jsonl`);
+    const store = new JsonlEventStore(path);
+    for (let sequence = 0; sequence < 5; sequence += 1) {
+      await store.append(historyEvent(threadId, sequence));
+    }
+    const application = new KodaApplication({
+      environment: { KODA_HOME: fixture.kodaHome },
+      processDirectory: fixture.root,
+    });
+
+    const latest = await application.readThreadEvents({
+      threadId,
+      limit: 2,
+    });
+    expect(latest.events.map((event) => event.sequence)).toEqual([3, 4]);
+    expect(latest).toMatchObject({
+      hasEarlier: true,
+      nextBeforeSequence: 3,
+    });
+    if (latest.nextBeforeSequence === undefined) {
+      throw new Error("Latest history page did not provide a cursor.");
+    }
+
+    await store.append(historyEvent(threadId, 5));
+    const earlier = await application.readThreadEvents({
+      threadId,
+      beforeSequence: latest.nextBeforeSequence,
+      limit: 2,
+    });
+    expect(earlier.events.map((event) => event.sequence)).toEqual([1, 2]);
+    expect(earlier.nextBeforeSequence).toBe(1);
+    if (earlier.nextBeforeSequence === undefined) {
+      throw new Error("Earlier history page did not provide a cursor.");
+    }
+
+    const oldest = await application.readThreadEvents({
+      threadId,
+      beforeSequence: earlier.nextBeforeSequence,
+    });
+    expect(oldest.events.map((event) => event.sequence)).toEqual([0]);
+    expect(oldest.hasEarlier).toBe(false);
+    expect(oldest.nextBeforeSequence).toBeUndefined();
+  });
+
+  it("bounds history pages without truncating durable events", async () => {
+    const fixture = await createFixture();
+    const threadId = threadIdSchema.parse("history-budget-thread");
+    const store = new JsonlEventStore(
+      join(fixture.kodaHome, "threads", `${threadId}.jsonl`),
+    );
+    const payload = "x".repeat(
+      Math.floor(THREAD_EVENTS_RESULT_BUDGET_BYTES / 2),
+    );
+    await store.append(historyEvent(threadId, 0, payload));
+    await store.append(historyEvent(threadId, 1, payload));
+    const application = new KodaApplication({
+      environment: { KODA_HOME: fixture.kodaHome },
+      processDirectory: fixture.root,
+    });
+
+    const page = await application.readThreadEvents({ threadId });
+    expect(page.events.map((event) => event.sequence)).toEqual([1]);
+    expect(page).toMatchObject({ hasEarlier: true, nextBeforeSequence: 1 });
+
+    const oversizedThreadId = threadIdSchema.parse("oversized-history-thread");
+    await new JsonlEventStore(
+      join(fixture.kodaHome, "threads", `${oversizedThreadId}.jsonl`),
+    ).append(
+      historyEvent(
+        oversizedThreadId,
+        0,
+        "x".repeat(THREAD_EVENTS_RESULT_BUDGET_BYTES),
+      ),
+    );
+    await expect(
+      application.readThreadEvents({ threadId: oversizedThreadId }),
+    ).rejects.toMatchObject({ code: "THREAD_EVENT_TOO_LARGE" });
+  });
+
+  it("fails explicitly for missing, partial, and non-contiguous history logs", async () => {
+    const fixture = await createFixture();
+    const application = new KodaApplication({
+      environment: { KODA_HOME: fixture.kodaHome },
+      processDirectory: fixture.root,
+    });
+    await expect(
+      application.readThreadEvents({ threadId: "missing-history" }),
+    ).rejects.toMatchObject({ code: "THREAD_EVENT_LOG_NOT_FOUND" });
+
+    const partialThread = threadIdSchema.parse("partial-history");
+    const partialPath = join(
+      fixture.kodaHome,
+      "threads",
+      `${partialThread}.jsonl`,
+    );
+    await new JsonlEventStore(partialPath).append(
+      historyEvent(partialThread, 0),
+    );
+    await appendFile(partialPath, '{"schemaVersion":1', "utf8");
+    await expect(
+      application.readThreadEvents({ threadId: partialThread }),
+    ).rejects.toMatchObject({ code: "THREAD_EVENT_LOG_CORRUPT" });
+
+    const corruptThread = threadIdSchema.parse("sequence-history");
+    const corruptPath = join(
+      fixture.kodaHome,
+      "threads",
+      `${corruptThread}.jsonl`,
+    );
+    await mkdir(join(fixture.kodaHome, "threads"), { recursive: true });
+    await writeFile(
+      corruptPath,
+      `${JSON.stringify(historyEvent(corruptThread, 0))}\n${JSON.stringify(historyEvent(corruptThread, 2))}\n`,
+      "utf8",
+    );
+    await expect(
+      application.readThreadEvents({ threadId: corruptThread }),
+    ).rejects.toMatchObject({ code: "THREAD_EVENT_LOG_CORRUPT" });
   });
 
   it("cancels a live provider and records a terminal event", async () => {
@@ -388,6 +518,22 @@ describe("KodaApplication", () => {
     ]);
   });
 });
+
+function historyEvent(
+  threadId: ThreadId,
+  sequence: number,
+  text = `event ${sequence}`,
+): AgentEvent {
+  return agentEventSchema.parse({
+    schemaVersion: 1,
+    sequence,
+    timestamp: "2026-08-27T00:00:00.000Z",
+    threadId,
+    turnId: "history-turn",
+    type: "assistant.delta",
+    payload: { text },
+  });
+}
 
 async function createFixture(): Promise<{
   root: string;

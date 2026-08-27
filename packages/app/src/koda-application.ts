@@ -19,6 +19,9 @@ import {
   collectArtifactReferences,
   itemIdSchema,
   recoveryItemSchema,
+  THREAD_EVENTS_DEFAULT_LIMIT,
+  THREAD_EVENTS_MAXIMUM_LIMIT,
+  THREAD_EVENTS_RESULT_BUDGET_BYTES,
   threadIdSchema,
   turnContextSnapshotSchema,
   turnIdSchema,
@@ -26,6 +29,7 @@ import {
   type ItemId,
   type ModelProviderId,
   type ProviderMetadata,
+  type AgentEvent,
   type ThreadId,
   type TurnId,
 } from "@koda/protocol";
@@ -107,6 +111,29 @@ export interface TurnHandle {
 export interface ThreadListInput {
   limit?: number;
   workspace?: string;
+}
+
+export interface ThreadEventsInput {
+  threadId: string;
+  beforeSequence?: number;
+  limit?: number;
+}
+
+export interface ThreadEventsPage {
+  events: AgentEvent[];
+  hasEarlier: boolean;
+  nextBeforeSequence?: number;
+}
+
+export class ThreadHistoryError extends Error {
+  public constructor(
+    public readonly code: string,
+    message: string,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = "ThreadHistoryError";
+  }
 }
 
 export interface ThreadQueryResult<T> {
@@ -239,6 +266,104 @@ export class KodaApplication {
         diagnostics: refresh.diagnostics,
       };
     });
+  }
+
+  public async readThreadEvents(
+    input: ThreadEventsInput,
+  ): Promise<ThreadEventsPage> {
+    const threadId = parseLocalThreadId(input.threadId);
+    const beforeSequence = input.beforeSequence;
+    if (
+      beforeSequence !== undefined &&
+      (!Number.isSafeInteger(beforeSequence) || beforeSequence < 0)
+    ) {
+      throw new ThreadHistoryError(
+        "INVALID_THREAD_EVENT_CURSOR",
+        "Thread event cursor must be a non-negative safe integer.",
+      );
+    }
+    const limit = input.limit ?? THREAD_EVENTS_DEFAULT_LIMIT;
+    if (
+      !Number.isSafeInteger(limit) ||
+      limit < 1 ||
+      limit > THREAD_EVENTS_MAXIMUM_LIMIT
+    ) {
+      throw new ThreadHistoryError(
+        "INVALID_THREAD_EVENT_LIMIT",
+        `Thread event limit must be between 1 and ${THREAD_EVENTS_MAXIMUM_LIMIT}.`,
+      );
+    }
+    const eventLogPath = join(
+      resolveKodaHome(this.environment),
+      "threads",
+      `${threadId}.jsonl`,
+    );
+    let readResult;
+    try {
+      readResult = await new JsonlEventStore(eventLogPath).readAllRequired();
+    } catch (error) {
+      const code = applicationErrorCode(error);
+      throw new ThreadHistoryError(code, errorMessage(error), {
+        cause: error,
+      });
+    }
+    if (readResult.diagnostics.length > 0) {
+      throw new ThreadHistoryError(
+        "THREAD_EVENT_LOG_CORRUPT",
+        `Thread '${threadId}' has an incomplete trailing event and cannot be browsed safely.`,
+      );
+    }
+    if (readResult.events.some((event) => event.threadId !== threadId)) {
+      throw new ThreadHistoryError(
+        "THREAD_EVENT_LOG_CORRUPT",
+        `Thread '${threadId}' event log contains an event for another thread.`,
+      );
+    }
+
+    const endIndex = findEventPageEnd(readResult.events, beforeSequence);
+    const selected: AgentEvent[] = [];
+    let startIndex = endIndex;
+    while (startIndex > 0 && selected.length < limit) {
+      const event = readResult.events[startIndex - 1];
+      if (event === undefined) {
+        break;
+      }
+      const candidate = [event, ...selected];
+      const hasEarlier = startIndex - 1 > 0;
+      const page: ThreadEventsPage = {
+        events: candidate,
+        hasEarlier,
+        ...(hasEarlier ? { nextBeforeSequence: event.sequence } : {}),
+      };
+      if (serializedBytes(page) > THREAD_EVENTS_RESULT_BUDGET_BYTES) {
+        if (selected.length === 0) {
+          throw new ThreadHistoryError(
+            "THREAD_EVENT_TOO_LARGE",
+            `Thread event ${event.sequence} exceeds the ${THREAD_EVENTS_RESULT_BUDGET_BYTES}-byte history response budget.`,
+          );
+        }
+        break;
+      }
+      selected.unshift(event);
+      startIndex -= 1;
+    }
+
+    const hasEarlier = startIndex > 0;
+    if (!hasEarlier) {
+      return { events: selected, hasEarlier: false };
+    }
+    const first = selected[0];
+    if (first === undefined) {
+      throw new ThreadHistoryError(
+        "THREAD_EVENT_READ_FAILED",
+        `Thread '${threadId}' history pagination produced an empty continuation page.`,
+      );
+    }
+    return {
+      events: selected,
+      hasEarlier: true,
+      nextBeforeSequence: first.sequence,
+    };
   }
 
   private async executeTurn(
@@ -560,6 +685,29 @@ function applicationError(error: unknown): { code: string; message: string } {
       ? error.code
       : "APPLICATION_ERROR";
   return { code, message: errorMessage(error) };
+}
+
+function applicationErrorCode(error: unknown): string {
+  return error instanceof Error &&
+    "code" in error &&
+    typeof (error as { code?: unknown }).code === "string"
+    ? (error as { code: string }).code
+    : "THREAD_EVENT_READ_FAILED";
+}
+
+function findEventPageEnd(
+  events: readonly AgentEvent[],
+  beforeSequence: number | undefined,
+): number {
+  if (beforeSequence === undefined) {
+    return events.length;
+  }
+  const index = events.findIndex((event) => event.sequence >= beforeSequence);
+  return index === -1 ? events.length : index;
+}
+
+function serializedBytes(page: ThreadEventsPage): number {
+  return Buffer.byteLength(JSON.stringify(page), "utf8");
 }
 
 function assertResumeProvider(

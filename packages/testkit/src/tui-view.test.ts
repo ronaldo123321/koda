@@ -1,8 +1,10 @@
 import { PassThrough } from "node:stream";
 
 import {
+  APP_SERVER_PROTOCOL_VERSION,
   initializeResultSchema,
   modelProviderIdSchema,
+  threadIdSchema,
   toolCallIdSchema,
 } from "@koda/protocol";
 import {
@@ -122,6 +124,72 @@ describe("Koda Ink view", () => {
     routeTuiInput(controller, state, "c", key({ ctrl: true }), requestExit);
     expect(requestExit).toHaveBeenCalledOnce();
   });
+
+  it("renders and routes thread list and preview modes", () => {
+    const controller = fakeInputController();
+    const state = baseState();
+    routeTuiInput(controller, state, "t", key({ ctrl: true }), vi.fn());
+    expect(controller.openThreadBrowser).toHaveBeenCalledOnce();
+    const thread = {
+      threadId: threadIdSchema.parse("view-thread"),
+      logFile: "/state/view-thread.jsonl",
+      status: "completed" as const,
+      createdAt: "2026-08-27T00:00:00.000Z",
+      updatedAt: "2026-08-27T00:01:00.000Z",
+      provider: modelProviderIdSchema.parse("openai"),
+      model: "gpt-5.6-terra",
+      workspaceRoot: "/workspace",
+      approvalMode: "on-request",
+      turnCount: 2,
+      eventCount: 4,
+      lastSequence: 3,
+      usage: {
+        modelRequests: 2,
+        reportedRequests: 2,
+        tokens: {
+          inputTokens: 10,
+          cachedInputTokens: 0,
+          cacheWriteInputTokens: 0,
+          outputTokens: 5,
+          reasoningOutputTokens: 0,
+          totalTokens: 15,
+        },
+      },
+      sourceBytes: 100,
+      indexedBytes: 100,
+      sourceMtimeMs: 1,
+    };
+    state.mode = "thread_list";
+    state.threadBrowser = {
+      threads: [thread],
+      selectedIndex: 0,
+      loading: false,
+    };
+    let frame = renderToString(createElement(KodaView, { state }));
+    expect(frame).toContain("Recent threads");
+    expect(frame).toContain("> view-thread");
+    routeTuiInput(controller, state, "", key({ downArrow: true }), vi.fn());
+    routeTuiInput(controller, state, "", key({ return: true }), vi.fn());
+    routeTuiInput(controller, state, "", key({ escape: true }), vi.fn());
+    expect(controller.selectThread).toHaveBeenCalledWith(1);
+    expect(controller.previewSelectedThread).toHaveBeenCalledOnce();
+    expect(controller.closeThreadBrowserLevel).toHaveBeenCalledOnce();
+
+    state.mode = "thread_preview";
+    state.threadBrowser = {
+      ...state.threadBrowser,
+      preview: {
+        thread,
+        entries: [{ id: "history", kind: "assistant", text: "Remembered" }],
+        hasEarlier: true,
+      },
+    };
+    frame = renderToString(createElement(KodaView, { state }));
+    expect(frame).toContain("Remembered");
+    expect(frame).toContain("Earlier durable events are available");
+    routeTuiInput(controller, state, "r", key(), vi.fn());
+    expect(controller.resumePreviewedThread).toHaveBeenCalledOnce();
+  });
 });
 
 describe("koda-chat program", () => {
@@ -153,7 +221,7 @@ describe("koda-chat program", () => {
 
 function baseState(): TuiState {
   const initialization = initializeResultSchema.parse({
-    protocolVersion: 2,
+    protocolVersion: APP_SERVER_PROTOCOL_VERSION,
     server: { name: "koda-app-server", version: "test" },
     capabilities: {
       threadQueries: true,
@@ -162,6 +230,7 @@ function baseState(): TuiState {
       turnCancellation: true,
       interactiveApproval: true,
       durableEventNotifications: true,
+      threadEvents: true,
     },
     providers: [
       {
@@ -174,6 +243,7 @@ function baseState(): TuiState {
   });
   return {
     connection: "ready",
+    mode: "chat",
     configuration: {
       cwd: "/workspace",
       provider: modelProviderIdSchema.parse("openai"),
@@ -187,6 +257,7 @@ function baseState(): TuiState {
     approval: undefined,
     input: "",
     notice: undefined,
+    threadBrowser: undefined,
   };
 }
 
@@ -197,6 +268,11 @@ function fakeInputController() {
     cancelActiveTurn: vi.fn(() => Promise.resolve()),
     resolveApproval: vi.fn(() => Promise.resolve()),
     toggleApprovalDetails: vi.fn(),
+    openThreadBrowser: vi.fn(() => Promise.resolve()),
+    selectThread: vi.fn(),
+    previewSelectedThread: vi.fn(() => Promise.resolve()),
+    closeThreadBrowserLevel: vi.fn(),
+    resumePreviewedThread: vi.fn(() => Promise.resolve()),
   } satisfies TuiInputController;
 }
 

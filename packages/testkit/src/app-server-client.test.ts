@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -131,11 +131,27 @@ describe("NodeAppServerClient", () => {
   it("initializes the real app-server and performs credential-free queries", async () => {
     const root = await mkdtemp(join(tmpdir(), "koda-app-client-smoke-"));
     temporaryDirectories.push(root);
+    const stateRoot = join(root, "state");
+    const eventLogDirectory = join(stateRoot, "threads");
+    await mkdir(eventLogDirectory, { recursive: true });
+    await writeFile(
+      join(eventLogDirectory, "client-history.jsonl"),
+      `${JSON.stringify({
+        schemaVersion: 1,
+        sequence: 0,
+        timestamp: "2026-08-27T00:00:00.000Z",
+        threadId: "client-history",
+        turnId: "client-history-turn",
+        type: "turn.started",
+        payload: {},
+      })}\n`,
+      "utf8",
+    );
     const client = await NodeAppServerClient.connect({
       cwd: root,
       environment: {
         ...process.env,
-        KODA_HOME: join(root, "state"),
+        KODA_HOME: stateRoot,
         OPENAI_API_KEY: "",
       },
       clientName: "app-server-client-test",
@@ -143,7 +159,7 @@ describe("NodeAppServerClient", () => {
 
     expect(client.initialization).toMatchObject({
       protocolVersion: APP_SERVER_PROTOCOL_VERSION,
-      capabilities: { interactiveApproval: true },
+      capabilities: { interactiveApproval: true, threadEvents: true },
       providers: [
         { id: "openai" },
         { id: "anthropic" },
@@ -152,7 +168,25 @@ describe("NodeAppServerClient", () => {
         { id: "glm" },
       ],
     });
-    await expect(client.listThreads()).resolves.toMatchObject({ threads: [] });
+    await expect(client.listThreads()).resolves.toMatchObject({
+      threads: [{ threadId: "client-history" }],
+    });
+    await expect(
+      client.readThreadEvents({
+        threadId: threadIdSchema.parse("client-history"),
+      }),
+    ).resolves.toMatchObject({
+      events: [{ sequence: 0, type: "turn.started" }],
+      hasEarlier: false,
+    });
+    await expect(
+      client.readThreadEvents({
+        threadId: threadIdSchema.parse("missing-history"),
+      }),
+    ).rejects.toMatchObject({
+      name: "AppServerRpcError",
+      dataCode: "THREAD_EVENT_LOG_NOT_FOUND",
+    });
     expect(client.diagnostics()).toBe("");
     await expect(client.shutdown()).resolves.toBeUndefined();
     await expect(client.shutdown()).resolves.toBeUndefined();
@@ -241,6 +275,7 @@ function fixtureServerScript(options: {
       turnCancellation: true,
       interactiveApproval: true,
       durableEventNotifications: true,
+      threadEvents: true,
     },
     providers: [
       {

@@ -1,6 +1,6 @@
 # Koda Phase 3E1: Thread Browser and History Restore
 
-- Status: Approved for implementation (2026-08-27)
+- Status: Implemented and verified (2026-08-27)
 - Date: 2026-08-27
 - Depends on: Phase 3D Ink chat REPL and Phase 3C durable multi-provider thread metadata
 - Scope: browse recent threads in the current workspace, inspect bounded durable history, and resume a selected thread without weakening runtime ownership, recovery, or approval guarantees
@@ -149,6 +149,8 @@ The implementation is accepted when:
 4. malformed or oversized history fails explicitly without mutating the active chat;
 5. the TUI communicates only through app-server protocol v3;
 6. formatting, typechecking, all offline tests, the six reliability scenarios, and a real TTY smoke test pass.
+
+Implementation verification completed with 225/225 offline tests, 6/6 deterministic reliability scenarios, and a real TTY smoke covering `/threads`, Escape navigation, `/new`, and graceful `/exit`. The shipped boundary remains within the deferred destinations below.
 
 ## 10. Deferred destinations
 
