@@ -16,7 +16,7 @@ import { jsonValueSchema } from "./json.js";
 import { tokenUsageSchema } from "./usage.js";
 import { modelProviderIdSchema, providerMetadataSchema } from "./providers.js";
 
-export const APP_SERVER_PROTOCOL_VERSION = 8 as const;
+export const APP_SERVER_PROTOCOL_VERSION = 9 as const;
 
 export const THREAD_EVENTS_DEFAULT_LIMIT = 200;
 export const THREAD_EVENTS_MAXIMUM_LIMIT = 200;
@@ -161,6 +161,7 @@ export const initializeResultSchema = z
         artifactInspection: z.literal(true),
         contextInspection: z.literal(true),
         multiFileChanges: z.literal(true),
+        patchDocuments: z.literal(true),
       })
       .strict(),
     providers: z.array(runtimeProviderMetadataSchema).min(1),

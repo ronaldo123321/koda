@@ -335,7 +335,6 @@ describe("Phase 1A CLI", () => {
     };
     const stdout = new MemoryWriter();
     const stderr = new MemoryWriter();
-
     const exitCode = await runCommand(
       {
         prompt: "Describe the README.",
@@ -622,6 +621,113 @@ describe("Phase 1A CLI", () => {
     await expect(
       readFile(join(workspaceRoot, "remove.txt"), "utf8"),
     ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("applies one approved patch document end to end", async () => {
+    const root = await mkdtemp(join(tmpdir(), "koda-patchset-cli-"));
+    temporaryDirectories.push(root);
+    const workspaceRoot = join(root, "repo");
+    const kodaHome = join(root, "state");
+    await mkdir(workspaceRoot);
+    await writeFile(join(workspaceRoot, "first.txt"), "Before\n");
+    let approvalCalls = 0;
+
+    const provider = new ScriptedModelProvider([
+      {
+        assertRequest: (request) => {
+          const definition = request.tools.find(
+            (tool) => tool.name === "apply_patchset",
+          );
+          expect(definition).toMatchObject({
+            inputJsonSchema: {
+              required: ["patch"],
+              additionalProperties: false,
+            },
+          });
+        },
+        events: [
+          {
+            type: "tool_call",
+            callId: toolCallIdSchema.parse("cli-patchset-call"),
+            name: "apply_patchset",
+            arguments: {
+              patch: `*** Begin Patch
+*** Update File: first.txt
+@@
+-Before
++After
+*** Add File: created.txt
++Created
+*** End Patch`,
+            },
+          },
+          { type: "completed", finishReason: "tool_calls" },
+        ],
+      },
+      {
+        assertRequest: (request) => {
+          expect(request.items.at(-1)).toMatchObject({
+            type: "tool_result",
+            status: "success",
+            output: { status: "committed" },
+          });
+        },
+        events: [
+          { type: "assistant_delta", text: "Applied the patch document." },
+          { type: "completed", finishReason: "stop" },
+        ],
+      },
+    ]);
+    const dependencies: RunCommandDependencies = {
+      openWorkspace: (path) => ReadOnlyWorkspace.open(path),
+      createProvider: (_configuration, instructions) => {
+        expect(instructions).toContain("Koda Patch v1");
+        return provider;
+      },
+      createApprovalBroker: () => ({
+        request: async (request) => {
+          approvalCalls += 1;
+          expect(request.name).toBe("apply_patchset");
+          expect(request.details).toContain("*** Update File: first.txt");
+          expect(request.details).toContain("*** Create File: created.txt");
+          return { decision: "approved" };
+        },
+      }),
+      createIds: () => ({
+        threadId: threadIdSchema.parse("patchset-cli-thread"),
+        turnId: turnIdSchema.parse("patchset-cli-turn"),
+        itemIds: new DeterministicItemIdFactory("patchset-cli-item"),
+      }),
+    };
+
+    const patchsetStdout = new MemoryWriter();
+    const patchsetStderr = new MemoryWriter();
+    const exitCode = await runCommand(
+      {
+        prompt: "Apply the patch document.",
+        cwd: workspaceRoot,
+        signal: new AbortController().signal,
+      },
+      {
+        environment: {
+          OPENAI_API_KEY: "offline-test-key",
+          KODA_HOME: kodaHome,
+        },
+        processDirectory: root,
+        stdout: patchsetStdout,
+        stderr: patchsetStderr,
+      },
+      dependencies,
+    );
+
+    expect(exitCode, patchsetStderr.value).toBe(0);
+    expect(approvalCalls).toBe(1);
+    expect(await readFile(join(workspaceRoot, "first.txt"), "utf8")).toBe(
+      "After\n",
+    );
+    expect(await readFile(join(workspaceRoot, "created.txt"), "utf8")).toBe(
+      "Created\n",
+    );
   });
 
   it("runs an approved structured command end to end", async () => {

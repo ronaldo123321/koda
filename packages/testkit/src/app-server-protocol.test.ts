@@ -32,7 +32,7 @@ import { describe, expect, it } from "vitest";
 
 describe("app-server protocol", () => {
   it("accepts strict versioned requests and safe JSON-RPC IDs", () => {
-    expect(APP_SERVER_PROTOCOL_VERSION).toBe(8);
+    expect(APP_SERVER_PROTOCOL_VERSION).toBe(9);
     expect(
       jsonRpcRequestSchema.parse({
         jsonrpc: "2.0",
@@ -46,7 +46,7 @@ describe("app-server protocol", () => {
     ).toMatchObject({ id: 1, method: "initialize" });
     expect(() =>
       initializeParamsSchema.parse({
-        protocolVersion: 7,
+        protocolVersion: 8,
         client: { name: "legacy-client" },
       }),
     ).toThrow();

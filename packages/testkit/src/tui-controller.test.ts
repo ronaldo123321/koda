@@ -1395,6 +1395,7 @@ class FakeAppServerClient implements AppServerClientApi {
         artifactInspection: true,
         contextInspection: true,
         multiFileChanges: true,
+        patchDocuments: true,
       },
       providers: [
         provider("openai", "OpenAI", "OPENAI_API_KEY", "gpt-5.6-terra"),

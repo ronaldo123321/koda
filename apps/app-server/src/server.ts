@@ -266,6 +266,7 @@ export class KodaAppServer {
           artifactInspection: true,
           contextInspection: true,
           multiFileChanges: true,
+          patchDocuments: true,
         },
         providers: this.application.listProviders(),
       }),

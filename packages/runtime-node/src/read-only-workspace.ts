@@ -44,6 +44,9 @@ export type WorkspaceErrorCode =
   | "PATCH_PARENT_MISSING"
   | "PATCH_MATCH_NOT_FOUND"
   | "PATCH_MATCH_AMBIGUOUS"
+  | "PATCH_DOCUMENT_INVALID"
+  | "PATCH_DOCUMENT_LIMIT_EXCEEDED"
+  | "PATCH_LINE_ENDINGS_UNSUPPORTED"
   | "SYMLINK_WRITE_FORBIDDEN"
   | "WRITE_PATH_FORBIDDEN"
   | "WORKSPACE_CHANGED"
@@ -143,7 +146,17 @@ export interface WorkspaceCreateChange {
 export interface WorkspaceUpdateChange {
   operation: "update";
   path: string;
-  edits: Array<{ oldText: string; newText: string }>;
+  edits: Array<WorkspaceExactEdit | WorkspaceLineEdit>;
+}
+
+export interface WorkspaceExactEdit {
+  oldText: string;
+  newText: string;
+}
+
+export interface WorkspaceLineEdit {
+  oldLines: string[];
+  newLines: string[];
 }
 
 export interface WorkspaceMoveChange {
@@ -616,20 +629,26 @@ export class ReadOnlyWorkspace {
           "snapshots",
         );
         let candidate = snapshot.content;
+        const resolvedEdits: WorkspaceExactEdit[] = [];
         for (const edit of change.edits) {
-          assertPatchField(edit.oldText, "old_text");
-          assertPatchField(edit.newText, "new_text");
-          if (edit.oldText.length === 0) {
+          const resolvedEdit =
+            "oldText" in edit
+              ? edit
+              : resolveLineEdit(candidate, edit, change.path);
+          assertPatchField(resolvedEdit.oldText, "old_text");
+          assertPatchField(resolvedEdit.newText, "new_text");
+          if (resolvedEdit.oldText.length === 0) {
             throw new WorkspaceError(
               "INVALID_PATCH",
               `An update edit requires non-empty old_text: ${change.path}`,
             );
           }
           textBytes +=
-            Buffer.byteLength(edit.oldText, "utf8") +
-            Buffer.byteLength(edit.newText, "utf8");
+            Buffer.byteLength(resolvedEdit.oldText, "utf8") +
+            Buffer.byteLength(resolvedEdit.newText, "utf8");
           assertChangeSetTotal(textBytes, MAX_CHANGE_SET_TEXT_BYTES, "text");
-          candidate = applyExactEdit(candidate, edit, change.path);
+          candidate = applyExactEdit(candidate, resolvedEdit, change.path);
+          resolvedEdits.push(resolvedEdit);
         }
         if (candidate === snapshot.content) {
           throw new WorkspaceError(
@@ -657,7 +676,7 @@ export class ReadOnlyWorkspace {
             afterSha256: hashBytes(candidateBytes),
             bytes: candidateBytes.byteLength,
           },
-          preview: renderUpdatePreview(path, change.edits),
+          preview: renderUpdatePreview(path, resolvedEdits),
         });
         continue;
       }
@@ -1340,6 +1359,151 @@ function applyExactEdit(
     );
   }
   return `${content.slice(0, matchIndex)}${edit.newText}${content.slice(matchIndex + edit.oldText.length)}`;
+}
+
+function resolveLineEdit(
+  content: string,
+  edit: WorkspaceLineEdit,
+  path: string,
+): WorkspaceExactEdit {
+  if (edit.oldLines.length === 0) {
+    throw new WorkspaceError(
+      "INVALID_PATCH",
+      `A line update requires at least one context or removed line: ${path}`,
+    );
+  }
+  for (const line of [...edit.oldLines, ...edit.newLines]) {
+    if (line.includes("\n") || line.includes("\r") || line.includes("\0")) {
+      throw new WorkspaceError(
+        "INVALID_PATCH",
+        `Line updates cannot contain embedded line terminators or null bytes: ${path}`,
+      );
+    }
+  }
+
+  const lineEnding = detectConsistentLineEnding(content, path);
+  const lines = splitLogicalLines(content, lineEnding);
+  const matches: number[] = [];
+  for (
+    let start = 0;
+    start <= lines.length - edit.oldLines.length;
+    start += 1
+  ) {
+    const matchesAtStart = edit.oldLines.every(
+      (oldLine, offset) => lines[start + offset]?.text === oldLine,
+    );
+    if (matchesAtStart) {
+      matches.push(start);
+      if (matches.length > 1) {
+        break;
+      }
+    }
+  }
+  if (matches.length === 0) {
+    throw new WorkspaceError(
+      "PATCH_MATCH_NOT_FOUND",
+      `Patch hunk lines were not found in ${path}.`,
+    );
+  }
+  if (matches.length > 1) {
+    throw new WorkspaceError(
+      "PATCH_MATCH_AMBIGUOUS",
+      `Patch hunk lines matched more than one location in ${path}; provide more context.`,
+    );
+  }
+
+  const startLine = matches[0];
+  if (startLine === undefined) {
+    throw new WorkspaceError(
+      "PATCH_MATCH_NOT_FOUND",
+      `Patch hunk lines were not found in ${path}.`,
+    );
+  }
+  const first = lines[startLine];
+  const last = lines[startLine + edit.oldLines.length - 1];
+  if (first === undefined || last === undefined) {
+    throw new WorkspaceError(
+      "PATCH_MATCH_NOT_FOUND",
+      `Patch hunk lines were not found in ${path}.`,
+    );
+  }
+  const oldText = content.slice(first.start, last.end);
+  const newText =
+    edit.newLines.length === 0
+      ? ""
+      : `${edit.newLines.join(lineEnding)}${last.hasTerminator ? lineEnding : ""}`;
+  return { oldText, newText };
+}
+
+function detectConsistentLineEnding(
+  content: string,
+  path: string,
+): "\n" | "\r\n" {
+  let hasLf = false;
+  let hasCrLf = false;
+  for (let index = 0; index < content.length; index += 1) {
+    const character = content[index];
+    if (character === "\r") {
+      if (content[index + 1] !== "\n") {
+        throw new WorkspaceError(
+          "PATCH_LINE_ENDINGS_UNSUPPORTED",
+          `Patch target contains a lone carriage return: ${path}`,
+        );
+      }
+      hasCrLf = true;
+      index += 1;
+      continue;
+    }
+    if (character === "\n") {
+      hasLf = true;
+    }
+  }
+  if (hasLf && hasCrLf) {
+    throw new WorkspaceError(
+      "PATCH_LINE_ENDINGS_UNSUPPORTED",
+      `Patch target mixes LF and CRLF line endings: ${path}`,
+    );
+  }
+  return hasCrLf ? "\r\n" : "\n";
+}
+
+function splitLogicalLines(
+  content: string,
+  lineEnding: "\n" | "\r\n",
+): LogicalLine[] {
+  if (content.length === 0) {
+    return [];
+  }
+  const lines: LogicalLine[] = [];
+  let start = 0;
+  while (start < content.length) {
+    const terminator = content.indexOf(lineEnding, start);
+    if (terminator < 0) {
+      lines.push({
+        text: content.slice(start),
+        start,
+        end: content.length,
+        hasTerminator: false,
+      });
+      break;
+    }
+    const end = terminator + lineEnding.length;
+    lines.push({
+      text: content.slice(start, terminator),
+      start,
+      end,
+      hasTerminator: true,
+    });
+    start = end;
+  }
+  return lines;
+}
+
+interface LogicalLine {
+  text: string;
+  start: number;
+  end: number;
+  hasTerminator: boolean;
 }
 
 function renderCreatePreview(path: string, content: string): string {

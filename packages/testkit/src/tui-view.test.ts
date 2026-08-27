@@ -657,6 +657,7 @@ function baseState(): TuiState {
       artifactInspection: true,
       contextInspection: true,
       multiFileChanges: true,
+      patchDocuments: true,
     },
     providers: [
       {

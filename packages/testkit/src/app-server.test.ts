@@ -90,6 +90,7 @@ describe("KodaAppServer", () => {
         artifactInspection: true,
         contextInspection: true,
         multiFileChanges: true,
+        patchDocuments: true,
       },
       providers: [
         { id: "openai", defaultModel: "gpt-5.6-terra", configured: true },

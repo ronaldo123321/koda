@@ -1,6 +1,6 @@
 # Koda Phase 3 Extensibility Roadmap
 
-- Status: In progress — Phase 3A through Phase 3F1 implemented and verified; Phase 3F2 implementation in progress (2026-08-27)
+- Status: In progress — Phase 3A through Phase 3F2 implemented and verified (2026-08-27)
 - Date: 2026-08-26
 - Depends on: Phase 2 reliability closure
 - Scope: stable client/tool/provider extension boundaries without weakening the local runtime's durable state and approval guarantees
@@ -147,7 +147,7 @@ The complete accepted tool grammar, safety invariants, transaction state machine
 
 ## Phase 3F2: strict native patch documents
 
-Status: **Accepted; implementation in progress.**
+Status: **Implemented and verified.**
 
 - Add a separate `apply_patchset` tool with a bounded Codex-style Koda Patch v1 document grammar while preserving `apply_patch` and `apply_changes` schemas.
 - Parse the complete document without workspace mutation, compile line hunks to unique exact edits, and delegate all approval, serialization, revalidation, commit, rollback, and recovery behavior to Phase 3F1.
@@ -171,8 +171,8 @@ The accepted grammar, compilation rules, transaction reuse, failure model, verif
 ### Interactive clients and client APIs
 
 - Maintain the completed Phase 3D Ink chat REPL on the Phase 3A application protocol.
-- Maintain the completed Phase 3E1 semantics for recent-thread selection, bounded history preview, and safe resume through the current protocol v8 transport.
-- Maintain the completed Phase 3E2 boundary as bounded bidirectional history navigation and workspace-scoped substring search over app-server protocol v8; retain the normal terminal buffer and a disposable SQLite projection.
+- Maintain the completed Phase 3E1 semantics for recent-thread selection, bounded history preview, and safe resume through the current protocol v9 transport.
+- Maintain the completed Phase 3E2 boundary as bounded bidirectional history navigation and workspace-scoped substring search over app-server protocol v9; retain the normal terminal buffer and a disposable SQLite projection.
 - Maintain the completed Phase 3E3 boundary for explicit provider/model preferences that affect only new threads.
 - Maintain the completed Phase 3E4 boundary for thread-scoped discovery and bounded UTF-8 artifact reads.
 - Maintain the completed Phase 3E5 boundary for durable per-request context telemetry and bounded current-instruction inspection.
@@ -184,7 +184,7 @@ The accepted grammar, compilation rules, transaction reuse, failure model, verif
 ### Richer local workflows
 
 - Maintain the completed Phase 3F1 boundary for bounded multi-file transactions, moves, deletion, mutation serialization, and explicit rollback evidence.
-- Evaluate richer or native patch languages only after Phase 3F1's exact structured transaction boundary is verified.
+- Maintain the completed Phase 3F2 Koda Patch v1 boundary as a strict line-oriented input representation compiled into Phase 3F1; do not imply Git unified-diff or fuzzy matching support.
 - Add PTYs and managed background-process UX without weakening process ownership and termination records.
 - Add approval caching or trusted command-prefix UX only with inspectable scope, expiry, and revocation.
 - Evaluate automatic commits as an explicit product workflow, not an implicit consequence of file edits.

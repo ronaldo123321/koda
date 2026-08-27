@@ -257,6 +257,7 @@ describe("NodeAppServerClient", () => {
         artifactInspection: true,
         contextInspection: true,
         multiFileChanges: true,
+        patchDocuments: true,
       },
       providers: [
         { id: "openai", configured: true },
@@ -482,6 +483,7 @@ function fixtureServerScript(options: {
       artifactInspection: true,
       contextInspection: true,
       multiFileChanges: true,
+      patchDocuments: true,
     },
     providers: [
       {

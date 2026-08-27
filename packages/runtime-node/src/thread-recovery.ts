@@ -609,6 +609,8 @@ interface WorkspaceChangeSetState {
   >;
 }
 
+const CHANGE_SET_TOOL_NAMES = new Set(["apply_changes", "apply_patchset"]);
+
 function findWorkspaceChangeSets(
   events: readonly AgentEvent[],
 ): WorkspaceChangeSetRecovery[] {
@@ -626,11 +628,11 @@ function findWorkspaceChangeSets(
     }
     if (event.type === "workspace.change_set_prepared") {
       if (
-        event.payload.name !== "apply_changes" ||
+        !CHANGE_SET_TOOL_NAMES.has(event.payload.name) ||
         executions.get(event.payload.callId) !== event.payload.name
       ) {
         throw invalidLog(
-          `Change set '${event.payload.callId}' has no matching apply_changes execution boundary.`,
+          `Change set '${event.payload.callId}' has no matching change-set execution boundary.`,
         );
       }
       if (

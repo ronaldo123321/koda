@@ -1,6 +1,6 @@
 # Koda Phase 3F2: Strict Native Patch Documents
 
-- Status: Accepted; implementation in progress
+- Status: Implemented and verified
 - Date: 2026-08-27
 - Depends on: Phase 1B structured patching and Phase 3F1 auditable multi-file change transactions
 - Scope: a bounded Codex-style patch document grammar compiled into the existing transactional workspace mutation engine
@@ -132,3 +132,9 @@ Phase 3F2 does not include full Git unified diff compatibility, line-number or w
 3. Register `apply_patchset` over the shared transaction engine and mutation coordinator.
 4. Upgrade protocol initialization to v9 with `patchDocuments: true`, update instructions and client fixtures, and add CLI/integration coverage.
 5. Update README and roadmap, run all automated gates plus real TTY smoke, then mark this document implemented and verified.
+
+## 11. Implementation verification
+
+Phase 3F2 is implemented on `main` with protocol v9. `apply_patchset` exposes the accepted strict Koda Patch v1 grammar, compiles add/update/move/delete sections into the Phase 3F1 transaction engine, preserves consistent LF or CRLF update endings and final-newline state, shares the workspace mutation coordinator, and emits the same durable prepared/committed/rolled-back/uncertain evidence. Recovery explicitly accepts both structured and patch-document change-set tool identities without replaying interrupted writes.
+
+The parser and runtime suites cover valid mixed documents, CRLF patch syntax, explicit create final-newline control, ordered evolving-candidate hunks, LF/CRLF target preservation, missing and ambiguous matches, mixed endings, malformed envelopes and markers, forbidden controls, exact section/hunk/line/document limits, one approval, provider-visible schema, instructions, protocol v9 negotiation, CLI execution, app-server/client fixtures, TUI capability fixtures, and recovery. Final verification completed with formatting, build/typecheck, 38/38 offline test files and 304/304 tests, all 6 deterministic reliability scenarios, and a real TTY smoke covering protocol v9 startup, `/help`, `/status`, graceful shutdown, and normal terminal restoration.
