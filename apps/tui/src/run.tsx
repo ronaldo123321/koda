@@ -4,8 +4,11 @@ import { resolve } from "node:path";
 import { NodeAppServerClient } from "@koda/app-server-client-node";
 import {
   modelProviderIdSchema,
+  runtimeSettingsModelSchema,
   threadIdSchema,
   type ModelProviderId,
+  type RuntimePreference,
+  type RuntimeProviderMetadata,
 } from "@koda/protocol";
 import { render } from "ink";
 
@@ -45,8 +48,6 @@ export async function runTui(
       options.cwd ?? runtime.processDirectory,
       runtime.processDirectory,
     );
-    const provider = selectedProvider(options, runtime.environment);
-    const model = options.model ?? runtime.environment.KODA_MODEL;
     const resumeThreadId =
       options.resume === undefined
         ? undefined
@@ -58,14 +59,25 @@ export async function runTui(
       clientName: "koda-chat",
       clientVersion: "0.1.0",
     });
-    if (!client.initialization.providers.some((item) => item.id === provider)) {
-      throw new Error(`Provider '${provider}' is not supported by app-server.`);
-    }
+    const settings = await loadRuntimeSettings(client, workspace);
+    const selection = resolveTuiRuntimeSelection(
+      options,
+      runtime.environment,
+      settings.preference,
+      client.initialization.providers,
+    );
     controller = new TuiController(client, {
       cwd: workspace,
-      provider,
+      provider: selection.provider,
+      model: selection.model,
       approvalMode,
-      ...(model === undefined ? {} : { model }),
+      settingsRevision: settings.revision,
+      ...(settings.preference === undefined
+        ? {}
+        : { settingsPreference: settings.preference }),
+      ...(settings.notice === undefined
+        ? {}
+        : { initialNotice: settings.notice }),
       ...(resumeThreadId === undefined ? {} : { resumeThreadId }),
     });
     const instance = render(<KodaTui controller={controller} />, {
@@ -102,13 +114,58 @@ async function canonicalWorkspace(
   return path;
 }
 
-function selectedProvider(
+export function resolveTuiRuntimeSelection(
   options: RunTuiOptions,
   environment: NodeJS.ProcessEnv,
-): ModelProviderId {
-  return modelProviderIdSchema.parse(
-    options.provider ?? environment.KODA_PROVIDER ?? "openai",
+  preference: RuntimePreference | undefined,
+  providers: readonly RuntimeProviderMetadata[],
+): { provider: ModelProviderId; model: string } {
+  const provider = modelProviderIdSchema.parse(
+    options.provider?.trim() ||
+      environment.KODA_PROVIDER?.trim() ||
+      preference?.provider ||
+      "openai",
   );
+  const metadata = providers.find((candidate) => candidate.id === provider);
+  if (metadata === undefined) {
+    throw new Error(`Provider '${provider}' is not supported by app-server.`);
+  }
+  const model = runtimeSettingsModelSchema.parse(
+    options.model?.trim() ||
+      environment.KODA_MODEL?.trim() ||
+      (preference?.provider === provider ? preference.model : undefined) ||
+      metadata.defaultModel,
+  );
+  return { provider, model };
+}
+
+async function loadRuntimeSettings(
+  client: NodeAppServerClient,
+  workspace: string,
+): Promise<{
+  revision: number;
+  preference?: RuntimePreference;
+  notice?: string;
+}> {
+  try {
+    const result = await client.getRuntimeSettings({ workspace });
+    const notice =
+      result.recovery === undefined
+        ? result.diagnostics[0]?.message
+        : `Recovered invalid settings to ${result.recovery.preferenceBackup}.`;
+    return {
+      revision: result.revision,
+      ...(result.preference === undefined
+        ? {}
+        : { preference: result.preference }),
+      ...(notice === undefined ? {} : { notice }),
+    };
+  } catch (error) {
+    return {
+      revision: 0,
+      notice: `Could not load workspace settings; using startup defaults: ${errorMessage(error)}`,
+    };
+  }
 }
 
 function selectedApprovalMode(

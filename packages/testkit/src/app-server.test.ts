@@ -1,5 +1,12 @@
 import { PassThrough, Writable } from "node:stream";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -53,7 +60,7 @@ describe("KodaAppServer", () => {
     await server.handleLine("not-json");
     await request(server, 1, "thread/list", {});
     await request(server, 2, "initialize", {
-      protocolVersion: 3,
+      protocolVersion: 4,
       client: { name: "wrong-version" },
     });
     await initialize(server, 3);
@@ -74,18 +81,68 @@ describe("KodaAppServer", () => {
         threadEvents: true,
         threadSearch: true,
         bidirectionalThreadEvents: true,
+        runtimeSettings: true,
       },
       providers: [
-        { id: "openai", defaultModel: "gpt-5.6-terra" },
-        { id: "anthropic", defaultModel: "claude-sonnet-5" },
-        { id: "deepseek", defaultModel: "deepseek-v4-pro" },
-        { id: "kimi", defaultModel: "kimi-k2.6" },
-        { id: "glm", defaultModel: "glm-5.2" },
+        { id: "openai", defaultModel: "gpt-5.6-terra", configured: true },
+        {
+          id: "anthropic",
+          defaultModel: "claude-sonnet-5",
+          configured: false,
+        },
+        {
+          id: "deepseek",
+          defaultModel: "deepseek-v4-pro",
+          configured: false,
+        },
+        { id: "kimi", defaultModel: "kimi-k2.6", configured: false },
+        { id: "glm", defaultModel: "glm-5.2", configured: false },
       ],
     });
     expect(errorDataCode(writer, 4)).toBe("SERVER_ALREADY_INITIALIZED");
     expect(errorDataCode(writer, 5)).toBe("METHOD_NOT_FOUND");
     expect(errorDataCode(writer, 6)).toBe("INVALID_PARAMS");
+  });
+
+  it("serves revision-checked workspace runtime settings without credentials", async () => {
+    const fixture = await createFixture();
+    const writer = new MemoryProtocolWriter();
+    const server = createServer(fixture, writer);
+    const canonicalWorkspace = await realpath(fixture.workspaceRoot);
+    await initialize(server, 1);
+
+    await request(server, 2, "settings/get", {
+      workspace: fixture.workspaceRoot,
+    });
+    expect(responseResult(writer, 2)).toMatchObject({
+      workspace: canonicalWorkspace,
+      revision: 0,
+      diagnostics: [],
+    });
+    await request(server, 3, "settings/update", {
+      workspace: fixture.workspaceRoot,
+      provider: "openai",
+      model: "gpt-settings-test",
+      expectedRevision: 0,
+    });
+    expect(responseResult(writer, 3)).toMatchObject({
+      revision: 1,
+      preference: { provider: "openai", model: "gpt-settings-test" },
+    });
+    await request(server, 4, "settings/get", {
+      workspace: fixture.workspaceRoot,
+    });
+    expect(responseResult(writer, 4)).toMatchObject({
+      revision: 1,
+      preference: { provider: "openai", model: "gpt-settings-test" },
+    });
+    await request(server, 5, "settings/update", {
+      workspace: fixture.workspaceRoot,
+      provider: "deepseek",
+      model: "deepseek-chat",
+      expectedRevision: 1,
+    });
+    expect(errorDataCode(writer, 5)).toBe("PROVIDER_CREDENTIAL_MISSING");
   });
 
   it("maps synchronous application failures to structured server errors", async () => {

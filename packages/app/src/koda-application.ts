@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { realpath } from "node:fs/promises";
+import { realpath, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 import {
@@ -27,13 +27,18 @@ import {
   THREAD_SEARCH_MAXIMUM_TERMS,
   THREAD_SEARCH_QUERY_BUDGET_BYTES,
   THREAD_SEARCH_RESULT_BUDGET_BYTES,
+  modelProviderIdSchema,
+  runtimeSettingsModelSchema,
   threadIdSchema,
   turnContextSnapshotSchema,
   turnIdSchema,
   type ConversationItem,
   type ItemId,
   type ModelProviderId,
-  type ProviderMetadata,
+  type RuntimeProviderMetadata,
+  type SettingsGetResult,
+  type SettingsUpdateParams,
+  type SettingsUpdateResult,
   type AgentEvent,
   type ThreadId,
   type ThreadSearchCursor,
@@ -55,6 +60,8 @@ import {
   normalizeThreadSearchText,
   ThreadRecoveryError,
   WorkspaceCommandRunner,
+  WorkspacePreferenceStore,
+  WorkspacePreferenceStoreError,
   assertResumeWorkspace,
   diffRepositoryInstructionSnapshots,
   loadRepositoryInstructions,
@@ -161,6 +168,20 @@ export class ThreadHistoryError extends Error {
   }
 }
 
+export class RuntimeSettingsError extends Error {
+  public constructor(
+    public readonly code:
+      | "INVALID_RUNTIME_SETTINGS"
+      | "PROVIDER_CREDENTIAL_MISSING"
+      | "SETTINGS_CORRUPT",
+    message: string,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = "RuntimeSettingsError";
+  }
+}
+
 export interface ThreadQueryResult<T> {
   value: T;
   diagnostics: ThreadIndexDiagnostic[];
@@ -255,8 +276,83 @@ export class KodaApplication {
     };
   }
 
-  public listProviders(): readonly ProviderMetadata[] {
-    return BUILT_IN_PROVIDER_METADATA;
+  public listProviders(): readonly RuntimeProviderMetadata[] {
+    return BUILT_IN_PROVIDER_METADATA.map((provider) => ({
+      ...provider,
+      configured:
+        (this.environment[provider.credentialEnvironmentVariable]?.trim()
+          .length ?? 0) > 0,
+    }));
+  }
+
+  public async getRuntimeSettings(
+    workspaceInput: string,
+  ): Promise<SettingsGetResult> {
+    const workspace = await this.canonicalSettingsWorkspace(workspaceInput);
+    try {
+      const store = await WorkspacePreferenceStore.open(
+        resolveKodaHome(this.environment),
+      );
+      return await store.get(workspace);
+    } catch (error) {
+      if (error instanceof WorkspacePreferenceStoreError) {
+        throw error;
+      }
+      throw new RuntimeSettingsError(
+        "SETTINGS_CORRUPT",
+        "Could not read workspace runtime settings.",
+        { cause: error },
+      );
+    }
+  }
+
+  public async updateRuntimeSettings(
+    input: SettingsUpdateParams,
+  ): Promise<SettingsUpdateResult> {
+    const parsedProvider = modelProviderIdSchema.safeParse(input.provider);
+    const parsedModel = runtimeSettingsModelSchema.safeParse(input.model);
+    if (!parsedProvider.success || !parsedModel.success) {
+      throw new RuntimeSettingsError(
+        "INVALID_RUNTIME_SETTINGS",
+        "Runtime provider or model settings are invalid.",
+      );
+    }
+    const metadata = this.listProviders().find(
+      (provider) => provider.id === parsedProvider.data,
+    );
+    if (metadata === undefined) {
+      throw new RuntimeSettingsError(
+        "INVALID_RUNTIME_SETTINGS",
+        `Provider '${parsedProvider.data}' is not supported.`,
+      );
+    }
+    if (!metadata.configured) {
+      throw new RuntimeSettingsError(
+        "PROVIDER_CREDENTIAL_MISSING",
+        `${metadata.credentialEnvironmentVariable} is required for provider '${metadata.id}'.`,
+      );
+    }
+    const workspace = await this.canonicalSettingsWorkspace(input.workspace);
+    try {
+      const store = await WorkspacePreferenceStore.open(
+        resolveKodaHome(this.environment),
+      );
+      return await store.update({
+        workspace,
+        provider: parsedProvider.data,
+        model: parsedModel.data,
+        expectedRevision: input.expectedRevision,
+      });
+    } catch (error) {
+      if (error instanceof WorkspacePreferenceStoreError) {
+        throw error;
+      }
+      throw new RuntimeSettingsError(
+        "SETTINGS_CORRUPT",
+        "Could not update workspace runtime settings.",
+        { cause: error },
+      );
+    }
   }
 
   public async listThreads(
@@ -711,6 +807,26 @@ export class KodaApplication {
       };
     } finally {
       index?.close();
+    }
+  }
+
+  private async canonicalSettingsWorkspace(
+    workspaceInput: string,
+  ): Promise<string> {
+    try {
+      const workspace = await realpath(
+        resolve(this.processDirectory, workspaceInput),
+      );
+      if (!(await stat(workspace)).isDirectory()) {
+        throw new Error("Workspace is not a directory.");
+      }
+      return workspace;
+    } catch (error) {
+      throw new RuntimeSettingsError(
+        "INVALID_RUNTIME_SETTINGS",
+        `Workspace '${workspaceInput}' could not be resolved to an existing path.`,
+        { cause: error },
+      );
     }
   }
 }

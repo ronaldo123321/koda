@@ -6,7 +6,7 @@ import { jsonValueSchema } from "./json.js";
 import { tokenUsageSchema } from "./usage.js";
 import { modelProviderIdSchema, providerMetadataSchema } from "./providers.js";
 
-export const APP_SERVER_PROTOCOL_VERSION = 4 as const;
+export const APP_SERVER_PROTOCOL_VERSION = 5 as const;
 
 export const THREAD_EVENTS_DEFAULT_LIMIT = 200;
 export const THREAD_EVENTS_MAXIMUM_LIMIT = 200;
@@ -17,6 +17,10 @@ export const THREAD_SEARCH_QUERY_BUDGET_BYTES = 256;
 export const THREAD_SEARCH_MAXIMUM_TERMS = 8;
 export const THREAD_SEARCH_SNIPPET_BUDGET_BYTES = 512;
 export const THREAD_SEARCH_RESULT_BUDGET_BYTES = 256 * 1_024;
+export const RUNTIME_SETTINGS_WORKSPACE_BUDGET_BYTES = 4_096;
+export const RUNTIME_SETTINGS_MODEL_BUDGET_BYTES = 256;
+export const RUNTIME_SETTINGS_RESULT_BUDGET_BYTES = 64 * 1_024;
+export const RUNTIME_SETTINGS_DIAGNOSTIC_BUDGET_BYTES = 1_024;
 
 export const APP_SERVER_RPC_ERROR_CODE = {
   PARSE: -32700,
@@ -98,6 +102,13 @@ export const initializeParamsSchema = z
   })
   .strict();
 
+export const runtimeProviderMetadataSchema = z
+  .object({
+    ...providerMetadataSchema.shape,
+    configured: z.boolean(),
+  })
+  .strict();
+
 export const initializeResultSchema = z
   .object({
     protocolVersion: z.literal(APP_SERVER_PROTOCOL_VERSION),
@@ -118,9 +129,110 @@ export const initializeResultSchema = z
         threadEvents: z.literal(true),
         threadSearch: z.literal(true),
         bidirectionalThreadEvents: z.literal(true),
+        runtimeSettings: z.literal(true),
       })
       .strict(),
-    providers: z.array(providerMetadataSchema).min(1),
+    providers: z.array(runtimeProviderMetadataSchema).min(1),
+  })
+  .strict();
+
+const runtimeSettingsWorkspaceSchema = z
+  .string()
+  .min(1)
+  .refine(
+    (value) =>
+      new TextEncoder().encode(value).byteLength <=
+      RUNTIME_SETTINGS_WORKSPACE_BUDGET_BYTES,
+    `Workspace must not exceed ${RUNTIME_SETTINGS_WORKSPACE_BUDGET_BYTES} UTF-8 bytes.`,
+  );
+
+export const runtimeSettingsModelSchema = z
+  .string()
+  .min(1)
+  .refine(
+    (value) => value === value.trim(),
+    "Model ID must not contain leading or trailing whitespace.",
+  )
+  .refine(
+    (value) => !/[\u0000-\u001f\u007f-\u009f]/u.test(value),
+    "Model ID must not contain control characters.",
+  )
+  .refine(
+    (value) =>
+      new TextEncoder().encode(value).byteLength <=
+      RUNTIME_SETTINGS_MODEL_BUDGET_BYTES,
+    `Model ID must not exceed ${RUNTIME_SETTINGS_MODEL_BUDGET_BYTES} UTF-8 bytes.`,
+  );
+
+export const runtimePreferenceSchema = z
+  .object({
+    provider: modelProviderIdSchema,
+    model: runtimeSettingsModelSchema,
+    updatedAt: z.string().datetime({ offset: true }),
+  })
+  .strict();
+
+export const runtimeSettingsDiagnosticSchema = z
+  .object({
+    code: z.string().min(1).max(128),
+    message: z
+      .string()
+      .refine(
+        (value) =>
+          new TextEncoder().encode(value).byteLength <=
+          RUNTIME_SETTINGS_DIAGNOSTIC_BUDGET_BYTES,
+        `Settings diagnostic must not exceed ${RUNTIME_SETTINGS_DIAGNOSTIC_BUDGET_BYTES} UTF-8 bytes.`,
+      ),
+  })
+  .strict();
+
+export const runtimeSettingsRecoverySchema = z
+  .object({ preferenceBackup: z.string().min(1) })
+  .strict();
+
+export const settingsGetParamsSchema = z
+  .object({ workspace: runtimeSettingsWorkspaceSchema })
+  .strict();
+
+export const settingsGetResultSchema = z
+  .object({
+    workspace: runtimeSettingsWorkspaceSchema,
+    revision: z.number().int().safe().nonnegative(),
+    preference: runtimePreferenceSchema.optional(),
+    diagnostics: z.array(runtimeSettingsDiagnosticSchema),
+    recovery: runtimeSettingsRecoverySchema.optional(),
+  })
+  .strict()
+  .superRefine((result, context) => {
+    if (
+      (result.preference === undefined && result.revision !== 0) ||
+      (result.preference !== undefined && result.revision === 0)
+    ) {
+      context.addIssue({
+        code: "custom",
+        message:
+          "Settings revision must be zero exactly when no preference exists.",
+        path: ["revision"],
+      });
+    }
+  });
+
+export const settingsUpdateParamsSchema = z
+  .object({
+    workspace: runtimeSettingsWorkspaceSchema,
+    provider: modelProviderIdSchema,
+    model: runtimeSettingsModelSchema,
+    expectedRevision: z.number().int().safe().nonnegative(),
+  })
+  .strict();
+
+export const settingsUpdateResultSchema = z
+  .object({
+    workspace: runtimeSettingsWorkspaceSchema,
+    revision: z.number().int().safe().positive(),
+    preference: runtimePreferenceSchema,
+    diagnostics: z.array(runtimeSettingsDiagnosticSchema),
+    recovery: runtimeSettingsRecoverySchema.optional(),
   })
   .strict();
 
@@ -478,6 +590,20 @@ export type JsonRpcNotification = z.infer<typeof jsonRpcNotificationSchema>;
 export type JsonRpcResponse = z.infer<typeof jsonRpcResponseSchema>;
 export type InitializeParams = z.infer<typeof initializeParamsSchema>;
 export type InitializeResult = z.infer<typeof initializeResultSchema>;
+export type RuntimeProviderMetadata = z.infer<
+  typeof runtimeProviderMetadataSchema
+>;
+export type RuntimePreference = z.infer<typeof runtimePreferenceSchema>;
+export type RuntimeSettingsDiagnostic = z.infer<
+  typeof runtimeSettingsDiagnosticSchema
+>;
+export type RuntimeSettingsRecovery = z.infer<
+  typeof runtimeSettingsRecoverySchema
+>;
+export type SettingsGetParams = z.infer<typeof settingsGetParamsSchema>;
+export type SettingsGetResult = z.infer<typeof settingsGetResultSchema>;
+export type SettingsUpdateParams = z.infer<typeof settingsUpdateParamsSchema>;
+export type SettingsUpdateResult = z.infer<typeof settingsUpdateResultSchema>;
 export type ThreadListParams = z.infer<typeof threadListParamsSchema>;
 export type ThreadListResult = z.infer<typeof threadListResultSchema>;
 export type ThreadGetParams = z.infer<typeof threadGetParamsSchema>;

@@ -197,7 +197,7 @@ describe("NodeAppServerClient", () => {
       environment: {
         ...process.env,
         KODA_HOME: stateRoot,
-        OPENAI_API_KEY: "",
+        OPENAI_API_KEY: "offline-settings-key",
       },
       clientName: "app-server-client-test",
     });
@@ -209,17 +209,32 @@ describe("NodeAppServerClient", () => {
         threadEvents: true,
         threadSearch: true,
         bidirectionalThreadEvents: true,
+        runtimeSettings: true,
       },
       providers: [
-        { id: "openai" },
-        { id: "anthropic" },
-        { id: "deepseek" },
-        { id: "kimi" },
-        { id: "glm" },
+        { id: "openai", configured: true },
+        { id: "anthropic", configured: false },
+        { id: "deepseek", configured: false },
+        { id: "kimi", configured: false },
+        { id: "glm", configured: false },
       ],
     });
     await expect(client.listThreads()).resolves.toMatchObject({
       threads: [{ threadId: "client-history" }],
+    });
+    await expect(
+      client.getRuntimeSettings({ workspace: canonicalRoot }),
+    ).resolves.toMatchObject({ revision: 0, diagnostics: [] });
+    await expect(
+      client.updateRuntimeSettings({
+        workspace: canonicalRoot,
+        provider: "openai",
+        model: "gpt-client-settings",
+        expectedRevision: 0,
+      }),
+    ).resolves.toMatchObject({
+      revision: 1,
+      preference: { provider: "openai", model: "gpt-client-settings" },
     });
     await expect(
       client.readThreadEvents({
@@ -350,6 +365,7 @@ function fixtureServerScript(options: {
       threadEvents: true,
       threadSearch: true,
       bidirectionalThreadEvents: true,
+      runtimeSettings: true,
     },
     providers: [
       {
@@ -357,6 +373,7 @@ function fixtureServerScript(options: {
         displayName: "OpenAI",
         credentialEnvironmentVariable: "OPENAI_API_KEY",
         defaultModel: "fixture-model",
+        configured: true,
       },
     ],
   };

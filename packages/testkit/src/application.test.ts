@@ -1,4 +1,11 @@
-import { appendFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import {
+  appendFile,
+  mkdir,
+  mkdtemp,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -33,6 +40,69 @@ afterEach(async () => {
 });
 
 describe("KodaApplication", () => {
+  it("persists canonical workspace runtime settings and reports credential availability", async () => {
+    const fixture = await createFixture();
+    const application = new KodaApplication({
+      environment: {
+        KODA_HOME: fixture.kodaHome,
+        OPENAI_API_KEY: "offline-test-key",
+      },
+      processDirectory: fixture.root,
+    });
+    const canonicalWorkspace = await realpath(fixture.workspaceRoot);
+
+    expect(application.listProviders()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "openai", configured: true }),
+        expect.objectContaining({ id: "deepseek", configured: false }),
+      ]),
+    );
+    await expect(
+      application.getRuntimeSettings(fixture.workspaceRoot),
+    ).resolves.toEqual({
+      workspace: canonicalWorkspace,
+      revision: 0,
+      diagnostics: [],
+    });
+    await expect(
+      application.updateRuntimeSettings({
+        workspace: fixture.workspaceRoot,
+        provider: "openai",
+        model: "gpt-workspace",
+        expectedRevision: 0,
+      }),
+    ).resolves.toMatchObject({
+      workspace: canonicalWorkspace,
+      revision: 1,
+      preference: { provider: "openai", model: "gpt-workspace" },
+    });
+    await expect(
+      application.getRuntimeSettings(fixture.workspaceRoot),
+    ).resolves.toMatchObject({
+      revision: 1,
+      preference: { provider: "openai", model: "gpt-workspace" },
+    });
+    await expect(
+      application.updateRuntimeSettings({
+        workspace: fixture.workspaceRoot,
+        provider: "deepseek",
+        model: "deepseek-chat",
+        expectedRevision: 1,
+      }),
+    ).rejects.toMatchObject({ code: "PROVIDER_CREDENTIAL_MISSING" });
+    await expect(
+      application.updateRuntimeSettings({
+        workspace: fixture.workspaceRoot,
+        provider: "openai",
+        model: "gpt-stale",
+        expectedRevision: 0,
+      }),
+    ).rejects.toMatchObject({ code: "SETTINGS_CHANGED" });
+    await expect(
+      application.getRuntimeSettings(join(fixture.workspaceRoot, "missing")),
+    ).rejects.toMatchObject({ code: "INVALID_RUNTIME_SETTINGS" });
+  });
+
   it("runs and resumes through one transport-neutral workflow", async () => {
     const fixture = await createFixture();
     const threadId = threadIdSchema.parse("application-thread");

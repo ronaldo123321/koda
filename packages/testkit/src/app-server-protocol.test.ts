@@ -6,6 +6,9 @@ import {
   initializeParamsSchema,
   jsonRpcErrorResponseSchema,
   jsonRpcRequestSchema,
+  settingsGetResultSchema,
+  settingsUpdateParamsSchema,
+  settingsUpdateResultSchema,
   threadEventsParamsSchema,
   threadEventsResultSchema,
   threadGetParamsSchema,
@@ -230,6 +233,74 @@ describe("app-server protocol", () => {
         diagnostics: [],
       }),
     ).toThrow();
+  });
+
+  it("validates strict revision-checked runtime settings without secrets", () => {
+    expect(
+      settingsUpdateParamsSchema.parse({
+        workspace: "/workspace",
+        provider: "deepseek",
+        model: "deepseek-chat",
+        expectedRevision: 2,
+      }),
+    ).toEqual({
+      workspace: "/workspace",
+      provider: "deepseek",
+      model: "deepseek-chat",
+      expectedRevision: 2,
+    });
+    expect(() =>
+      settingsUpdateParamsSchema.parse({
+        workspace: "/workspace",
+        provider: "openai",
+        model: "bad\nmodel",
+        expectedRevision: 0,
+      }),
+    ).toThrow();
+    expect(() =>
+      settingsUpdateParamsSchema.parse({
+        workspace: "/workspace",
+        provider: "openai",
+        model: "x".repeat(257),
+        expectedRevision: 0,
+      }),
+    ).toThrow();
+    expect(() =>
+      settingsUpdateParamsSchema.parse({
+        workspace: "/workspace",
+        provider: "openai",
+        model: "gpt-test",
+        expectedRevision: 0,
+        apiKey: "must-not-cross-protocol",
+      }),
+    ).toThrow();
+
+    expect(
+      settingsGetResultSchema.parse({
+        workspace: "/workspace",
+        revision: 0,
+        diagnostics: [],
+      }),
+    ).toMatchObject({ revision: 0 });
+    expect(() =>
+      settingsGetResultSchema.parse({
+        workspace: "/workspace",
+        revision: 1,
+        diagnostics: [],
+      }),
+    ).toThrow();
+    expect(
+      settingsUpdateResultSchema.parse({
+        workspace: "/workspace",
+        revision: 3,
+        preference: {
+          provider: "deepseek",
+          model: "deepseek-chat",
+          updatedAt: "2026-08-27T08:00:00.000Z",
+        },
+        diagnostics: [],
+      }),
+    ).toMatchObject({ revision: 3 });
   });
 });
 

@@ -6,6 +6,7 @@ import {
 import {
   APP_SERVER_PROTOCOL_VERSION,
   APP_SERVER_RPC_ERROR_CODE,
+  RUNTIME_SETTINGS_RESULT_BUDGET_BYTES,
   THREAD_SEARCH_RESULT_BUDGET_BYTES,
   approvalResolveParamsSchema,
   approvalResolveResultSchema,
@@ -13,6 +14,10 @@ import {
   initializeResultSchema,
   jsonRpcRequestSchema,
   jsonValueSchema,
+  settingsGetParamsSchema,
+  settingsGetResultSchema,
+  settingsUpdateParamsSchema,
+  settingsUpdateResultSchema,
   shutdownParamsSchema,
   shutdownResultSchema,
   threadEventsParamsSchema,
@@ -175,6 +180,10 @@ export class KodaAppServer {
         return this.readThreadEvents(request.params);
       case "thread/search":
         return this.searchThreads(request.params);
+      case "settings/get":
+        return this.getRuntimeSettings(request.params);
+      case "settings/update":
+        return this.updateRuntimeSettings(request.params);
       case "turn/start":
         return this.startTurn(request.params);
       case "turn/cancel":
@@ -228,6 +237,7 @@ export class KodaAppServer {
           threadEvents: true,
           threadSearch: true,
           bidirectionalThreadEvents: true,
+          runtimeSettings: true,
         },
         providers: this.application.listProviders(),
       }),
@@ -322,6 +332,48 @@ export class KodaAppServer {
           `Thread search result exceeds the ${THREAD_SEARCH_RESULT_BUDGET_BYTES}-byte response budget.`,
         );
       }
+      return response;
+    } catch (error) {
+      throw rpcError(
+        APP_SERVER_RPC_ERROR_CODE.APPLICATION,
+        errorMessage(error),
+        applicationErrorCode(error),
+      );
+    }
+  }
+
+  private async getRuntimeSettings(
+    params: JsonValue | undefined,
+  ): Promise<JsonValue> {
+    const input = parseParams(settingsGetParamsSchema, params);
+    try {
+      const response = jsonValueSchema.parse(
+        settingsGetResultSchema.parse(
+          await this.application.getRuntimeSettings(input.workspace),
+        ),
+      );
+      assertSettingsResultBudget(response);
+      return response;
+    } catch (error) {
+      throw rpcError(
+        APP_SERVER_RPC_ERROR_CODE.APPLICATION,
+        errorMessage(error),
+        applicationErrorCode(error),
+      );
+    }
+  }
+
+  private async updateRuntimeSettings(
+    params: JsonValue | undefined,
+  ): Promise<JsonValue> {
+    const input = parseParams(settingsUpdateParamsSchema, params);
+    try {
+      const response = jsonValueSchema.parse(
+        settingsUpdateResultSchema.parse(
+          await this.application.updateRuntimeSettings(input),
+        ),
+      );
+      assertSettingsResultBudget(response);
       return response;
     } catch (error) {
       throw rpcError(
@@ -595,4 +647,16 @@ function applicationErrorCode(error: unknown): string {
     typeof (error as { code?: unknown }).code === "string"
     ? (error as { code: string }).code
     : "APPLICATION_ERROR";
+}
+
+function assertSettingsResultBudget(response: JsonValue): void {
+  if (
+    Buffer.byteLength(JSON.stringify(response), "utf8") >
+    RUNTIME_SETTINGS_RESULT_BUDGET_BYTES
+  ) {
+    throw new AppServerResultError(
+      "RUNTIME_SETTINGS_RESULT_TOO_LARGE",
+      `Runtime settings result exceeds the ${RUNTIME_SETTINGS_RESULT_BUDGET_BYTES}-byte response budget.`,
+    );
+  }
 }

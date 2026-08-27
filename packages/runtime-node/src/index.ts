@@ -12,3 +12,4 @@ export * from "./thread-lease.js";
 export * from "./thread-metadata-index.js";
 export * from "./thread-recovery.js";
 export * from "./workspace-command-runner.js";
+export * from "./workspace-preference-store.js";

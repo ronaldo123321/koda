@@ -1,6 +1,6 @@
 # Koda Phase 3E3: Workspace Runtime Settings
 
-- Status: Approved; implementation pending
+- Status: Implemented and verified
 - Date: 2026-08-27
 - Depends on: Phase 3C provider registry, Phase 3D Ink client, and Phase 3E1/3E2 safe thread switching
 - Scope: explicit workspace-scoped provider/model preferences for new threads without credential persistence or cross-provider thread migration
@@ -145,6 +145,8 @@ Application, app-server, and Node client tests cover `realpath`, provider suppor
 Controller and Ink tests cover startup precedence, provider selection, availability labels, model editing, default restoration, Apply, layered Escape, idle-only guards, draft preservation, stale response rejection, current-versus-next status, no-thread immediate adoption, `/new` adoption, resume isolation, and local prompt blocking for unavailable providers.
 
 A real app-server subprocess test performs credential-safe settings get/update against an isolated `KODA_HOME`. A real TTY smoke exercises `/settings`, provider selection, model edit and Apply, `/status`, `/new`, layered Escape, and graceful shutdown. Acceptance requires formatting, build, workspace typechecks, test TypeScript checks, all offline tests, all six deterministic reliability scenarios, and the real TTY smoke to pass.
+
+Implementation verification completed on 2026-08-27 with 247/247 offline tests, 6/6 deterministic reliability scenarios, formatting, build, workspace typechecks, test TypeScript checks, and a real TTY smoke covering provider availability, model editing and Apply, `/status`, `/new`, layered Escape, and graceful shutdown. The shipped behavior remains within the deferred destinations below.
 
 ## 9. Deferred destinations
 

@@ -3,10 +3,13 @@ import type {
   AppServerNotification,
 } from "@koda/app-server-client-node";
 import {
+  RUNTIME_SETTINGS_MODEL_BUDGET_BYTES,
   modelProviderIdSchema,
+  runtimeSettingsModelSchema,
   type AgentEvent,
   type ModelProviderId,
-  type ProviderMetadata,
+  type RuntimePreference,
+  type RuntimeProviderMetadata,
   type ThreadMetadataMessage,
   type ThreadSearchCursor,
   type ThreadSearchMatch,
@@ -30,6 +33,8 @@ const MAXIMUM_VIEWPORT_HEIGHT = 30;
 export type TuiConnectionStatus = "ready" | "closing" | "closed" | "error";
 export type TuiMode =
   | "chat"
+  | "settings_provider"
+  | "settings_model"
   | "thread_list"
   | "thread_search_input"
   | "thread_search_results"
@@ -52,6 +57,9 @@ export interface TuiConfigurationInput {
   model?: string;
   resumeThreadId?: string;
   approvalMode?: "on-request" | "never";
+  settingsRevision?: number;
+  settingsPreference?: RuntimePreference;
+  initialNotice?: string;
 }
 
 export interface TuiConfiguration {
@@ -60,6 +68,21 @@ export interface TuiConfiguration {
   model: string;
   resumeThreadId?: string;
   approvalMode: "on-request" | "never";
+}
+
+export interface TuiNewThreadConfiguration {
+  provider: ModelProviderId;
+  model: string;
+}
+
+export interface TuiRuntimeSettingsState {
+  revision: number;
+  selectedIndex: number;
+  draftProvider?: ModelProviderId;
+  modelInput: string;
+  draftModels: Partial<Record<ModelProviderId, string>>;
+  persistedPreference?: RuntimePreference;
+  loading: boolean;
 }
 
 export interface TuiTranscriptEntry {
@@ -142,7 +165,8 @@ export interface TuiState {
   connection: TuiConnectionStatus;
   mode: TuiMode;
   configuration: TuiConfiguration;
-  providers: readonly ProviderMetadata[];
+  nextThreadConfiguration: TuiNewThreadConfiguration;
+  providers: readonly RuntimeProviderMetadata[];
   threadId: string | undefined;
   transcript: readonly TuiTranscriptEntry[];
   activeTurn: TuiActiveTurnState | undefined;
@@ -150,6 +174,7 @@ export interface TuiState {
   input: string;
   notice: string | undefined;
   threadBrowser: TuiThreadBrowserState | undefined;
+  runtimeSettings: TuiRuntimeSettingsState | undefined;
 }
 
 export type TuiSubmitResult = "handled" | "exit";
@@ -163,6 +188,8 @@ export class TuiController {
   private nextLocalTurnId = 1;
   private navigationGeneration = 0;
   private navigationBusy = false;
+  private preferenceRevision: number;
+  private persistedPreference: RuntimePreference | undefined;
   private cancelPromise: Promise<void> | undefined;
   private shutdownPromise: Promise<void> | undefined;
 
@@ -177,26 +204,33 @@ export class TuiController {
     if (metadata === undefined) {
       throw new Error(`Provider '${provider}' is not supported by app-server.`);
     }
+    const model = runtimeSettingsModelSchema.parse(
+      configuration.model ?? metadata.defaultModel,
+    );
+    this.preferenceRevision = configuration.settingsRevision ?? 0;
+    this.persistedPreference = configuration.settingsPreference;
     this.state = {
       connection: "ready",
       mode: "chat",
       configuration: {
         cwd: configuration.cwd,
         provider,
-        model: configuration.model ?? metadata.defaultModel,
+        model,
         approvalMode: configuration.approvalMode ?? "on-request",
         ...(configuration.resumeThreadId === undefined
           ? {}
           : { resumeThreadId: configuration.resumeThreadId }),
       },
+      nextThreadConfiguration: { provider, model },
       providers: client.initialization.providers,
       threadId: configuration.resumeThreadId,
       transcript: [],
       activeTurn: undefined,
       approval: undefined,
       input: "",
-      notice: undefined,
+      notice: configuration.initialNotice,
       threadBrowser: undefined,
+      runtimeSettings: undefined,
     };
     this.unsubscribeNotification = client.onNotification((notification) => {
       this.receiveNotification(notification);
@@ -253,6 +287,7 @@ export class TuiController {
             "/clear — clear displayed history only",
             "/threads — browse threads in this workspace",
             "/search <query> — search durable history in this workspace",
+            "/settings — choose provider/model for the next new thread",
             "/new — detach so the next prompt creates a thread",
             "/exit — shut down Koda",
             "Ctrl+T — open the thread browser",
@@ -269,6 +304,9 @@ export class TuiController {
         return "handled";
       case "/threads":
         await this.openThreadBrowser();
+        return "handled";
+      case "/settings":
+        await this.openRuntimeSettings();
         return "handled";
       case "/new":
         this.detachThread();
@@ -287,6 +325,18 @@ export class TuiController {
   public async startPrompt(prompt: string): Promise<void> {
     if (!this.canEditInput()) {
       this.update({ notice: "A turn is already active." });
+      return;
+    }
+    const provider = this.state.providers.find(
+      (candidate) => candidate.id === this.state.configuration.provider,
+    );
+    if (provider === undefined || !provider.configured) {
+      this.update({
+        notice:
+          provider === undefined
+            ? `Provider '${this.state.configuration.provider}' is unavailable.`
+            : `${provider.credentialEnvironmentVariable} is required for provider '${provider.id}'. Use /settings to choose a configured provider.`,
+      });
       return;
     }
     const localId = this.nextLocalTurnId;
@@ -354,6 +404,380 @@ export class TuiController {
         "error",
         `Could not start turn: ${errorMessage(error)}`,
       );
+    }
+  }
+
+  public async openRuntimeSettings(): Promise<void> {
+    if (!this.canEditInput() || this.navigationBusy) {
+      this.update({ notice: "Settings are available only while idle." });
+      return;
+    }
+    const selectedIndex = Math.max(
+      0,
+      this.state.providers.findIndex(
+        (provider) =>
+          provider.id === this.state.nextThreadConfiguration.provider,
+      ),
+    );
+    const draftModels: Partial<Record<ModelProviderId, string>> = {
+      [this.state.nextThreadConfiguration.provider]:
+        this.state.nextThreadConfiguration.model,
+    };
+    if (this.persistedPreference !== undefined) {
+      draftModels[this.persistedPreference.provider] ??=
+        this.persistedPreference.model;
+    }
+    const generation = this.beginNavigation();
+    this.navigationBusy = true;
+    this.update({
+      mode: "settings_provider",
+      runtimeSettings: {
+        revision: this.preferenceRevision,
+        selectedIndex,
+        modelInput: "",
+        draftModels,
+        ...(this.persistedPreference === undefined
+          ? {}
+          : { persistedPreference: this.persistedPreference }),
+        loading: true,
+      },
+      notice: "Loading workspace settings…",
+    });
+    try {
+      const result = await this.client.getRuntimeSettings({
+        workspace: this.state.configuration.cwd,
+      });
+      if (
+        !this.isCurrentNavigation(generation) ||
+        this.state.mode !== "settings_provider"
+      ) {
+        return;
+      }
+      const current = this.state.runtimeSettings;
+      if (current === undefined) {
+        return;
+      }
+      this.preferenceRevision = result.revision;
+      this.persistedPreference = result.preference;
+      const models = { ...current.draftModels };
+      const {
+        persistedPreference: _previousPreference,
+        ...settingsWithoutPreference
+      } = current;
+      if (result.preference !== undefined) {
+        models[result.preference.provider] ??= result.preference.model;
+      }
+      this.update({
+        runtimeSettings: {
+          ...settingsWithoutPreference,
+          revision: result.revision,
+          draftModels: models,
+          loading: false,
+          ...(result.preference === undefined
+            ? {}
+            : { persistedPreference: result.preference }),
+        },
+        notice: runtimeSettingsResultNotice(result),
+      });
+    } catch (error) {
+      if (!this.isCurrentNavigation(generation)) {
+        return;
+      }
+      this.update({
+        mode: "chat",
+        runtimeSettings: undefined,
+        notice: `Could not load runtime settings: ${errorMessage(error)}`,
+      });
+    } finally {
+      if (this.isCurrentNavigation(generation)) {
+        this.navigationBusy = false;
+      }
+    }
+  }
+
+  public selectRuntimeSettingsProvider(offset: -1 | 1): void {
+    const settings = this.state.runtimeSettings;
+    if (
+      this.state.mode !== "settings_provider" ||
+      settings === undefined ||
+      settings.loading ||
+      this.state.providers.length === 0
+    ) {
+      return;
+    }
+    this.update({
+      runtimeSettings: {
+        ...settings,
+        selectedIndex: Math.min(
+          this.state.providers.length - 1,
+          Math.max(0, settings.selectedIndex + offset),
+        ),
+      },
+      notice: undefined,
+    });
+  }
+
+  public enterRuntimeSettingsModel(): void {
+    const settings = this.state.runtimeSettings;
+    const provider =
+      settings === undefined
+        ? undefined
+        : this.state.providers[settings.selectedIndex];
+    if (
+      this.state.mode !== "settings_provider" ||
+      settings === undefined ||
+      settings.loading ||
+      provider === undefined
+    ) {
+      return;
+    }
+    if (!provider.configured) {
+      this.update({
+        notice: `${provider.credentialEnvironmentVariable} is required for provider '${provider.id}'.`,
+      });
+      return;
+    }
+    const modelInput =
+      settings.draftModels[provider.id] ??
+      (settings.persistedPreference?.provider === provider.id
+        ? settings.persistedPreference.model
+        : provider.defaultModel);
+    this.update({
+      mode: "settings_model",
+      runtimeSettings: {
+        ...settings,
+        draftProvider: provider.id,
+        modelInput,
+        draftModels: {
+          ...settings.draftModels,
+          [provider.id]: modelInput,
+        },
+      },
+      notice: undefined,
+    });
+  }
+
+  public setRuntimeSettingsModelInput(input: string): void {
+    const settings = this.state.runtimeSettings;
+    if (
+      this.state.mode !== "settings_model" ||
+      settings === undefined ||
+      settings.loading ||
+      settings.draftProvider === undefined
+    ) {
+      return;
+    }
+    const modelInput = boundModelInput(input);
+    this.update({
+      runtimeSettings: {
+        ...settings,
+        modelInput,
+        draftModels: {
+          ...settings.draftModels,
+          [settings.draftProvider]: modelInput,
+        },
+      },
+      notice: undefined,
+    });
+  }
+
+  public resetRuntimeSettingsModel(): void {
+    const settings = this.state.runtimeSettings;
+    if (
+      this.state.mode !== "settings_model" ||
+      settings === undefined ||
+      settings.loading ||
+      settings.draftProvider === undefined
+    ) {
+      return;
+    }
+    const provider = this.state.providers.find(
+      (candidate) => candidate.id === settings.draftProvider,
+    );
+    if (provider !== undefined) {
+      this.setRuntimeSettingsModelInput(provider.defaultModel);
+    }
+  }
+
+  public async applyRuntimeSettings(): Promise<void> {
+    const settings = this.state.runtimeSettings;
+    if (
+      this.state.mode !== "settings_model" ||
+      settings === undefined ||
+      settings.loading ||
+      settings.draftProvider === undefined ||
+      this.navigationBusy
+    ) {
+      return;
+    }
+    const parsedModel = runtimeSettingsModelSchema.safeParse(
+      settings.modelInput.trim(),
+    );
+    if (!parsedModel.success) {
+      this.update({
+        notice: `Model ID is invalid or exceeds ${RUNTIME_SETTINGS_MODEL_BUDGET_BYTES} UTF-8 bytes.`,
+      });
+      return;
+    }
+    const provider = this.state.providers.find(
+      (candidate) => candidate.id === settings.draftProvider,
+    );
+    if (provider === undefined || !provider.configured) {
+      this.update({
+        notice:
+          provider === undefined
+            ? "The selected provider is unavailable."
+            : `${provider.credentialEnvironmentVariable} is required for provider '${provider.id}'.`,
+      });
+      return;
+    }
+    const generation = this.beginNavigation();
+    this.navigationBusy = true;
+    this.update({
+      runtimeSettings: { ...settings, loading: true },
+      notice: "Saving workspace settings…",
+    });
+    try {
+      const result = await this.client.updateRuntimeSettings({
+        workspace: this.state.configuration.cwd,
+        provider: provider.id,
+        model: parsedModel.data,
+        expectedRevision: settings.revision,
+      });
+      if (
+        !this.isCurrentNavigation(generation) ||
+        this.state.mode !== "settings_model"
+      ) {
+        return;
+      }
+      this.preferenceRevision = result.revision;
+      this.persistedPreference = result.preference;
+      const nextThreadConfiguration = {
+        provider: result.preference.provider,
+        model: result.preference.model,
+      };
+      const immediatelyActive = this.state.threadId === undefined;
+      this.update({
+        mode: "chat",
+        configuration: immediatelyActive
+          ? {
+              ...this.state.configuration,
+              provider: nextThreadConfiguration.provider,
+              model: nextThreadConfiguration.model,
+            }
+          : this.state.configuration,
+        nextThreadConfiguration,
+        runtimeSettings: undefined,
+        notice:
+          runtimeSettingsResultNotice(result) ??
+          (immediatelyActive
+            ? `Using ${result.preference.provider}/${result.preference.model} for the next prompt.`
+            : `Saved ${result.preference.provider}/${result.preference.model}; run /new to use it.`),
+      });
+    } catch (error) {
+      if (!this.isCurrentNavigation(generation)) {
+        return;
+      }
+      const current = this.state.runtimeSettings;
+      if (current !== undefined) {
+        const code = structuredErrorCode(error);
+        this.update({
+          runtimeSettings: { ...current, loading: false },
+          notice:
+            code === "SETTINGS_CHANGED"
+              ? "Settings changed in another client. Your draft is preserved; press Ctrl+L to reload the revision."
+              : `Could not save runtime settings: ${errorMessage(error)}`,
+        });
+      }
+    } finally {
+      if (this.isCurrentNavigation(generation)) {
+        this.navigationBusy = false;
+      }
+    }
+  }
+
+  public async reloadRuntimeSettings(): Promise<void> {
+    const settings = this.state.runtimeSettings;
+    if (
+      (this.state.mode !== "settings_provider" &&
+        this.state.mode !== "settings_model") ||
+      settings === undefined ||
+      settings.loading ||
+      this.navigationBusy
+    ) {
+      return;
+    }
+    const generation = this.beginNavigation();
+    this.navigationBusy = true;
+    this.update({
+      runtimeSettings: { ...settings, loading: true },
+      notice: "Reloading workspace settings…",
+    });
+    try {
+      const result = await this.client.getRuntimeSettings({
+        workspace: this.state.configuration.cwd,
+      });
+      if (!this.isCurrentNavigation(generation)) {
+        return;
+      }
+      const current = this.state.runtimeSettings;
+      if (current === undefined) {
+        return;
+      }
+      this.preferenceRevision = result.revision;
+      this.persistedPreference = result.preference;
+      const {
+        persistedPreference: _previousPreference,
+        ...settingsWithoutPreference
+      } = current;
+      this.update({
+        runtimeSettings: {
+          ...settingsWithoutPreference,
+          revision: result.revision,
+          loading: false,
+          ...(result.preference === undefined
+            ? {}
+            : { persistedPreference: result.preference }),
+        },
+        notice:
+          runtimeSettingsResultNotice(result) ??
+          "Reloaded the settings revision; your draft is unchanged.",
+      });
+    } catch (error) {
+      if (!this.isCurrentNavigation(generation)) {
+        return;
+      }
+      const current = this.state.runtimeSettings;
+      if (current !== undefined) {
+        this.update({
+          runtimeSettings: { ...current, loading: false },
+          notice: `Could not reload runtime settings: ${errorMessage(error)}`,
+        });
+      }
+    } finally {
+      if (this.isCurrentNavigation(generation)) {
+        this.navigationBusy = false;
+      }
+    }
+  }
+
+  public closeRuntimeSettingsLevel(): void {
+    this.cancelNavigation();
+    const settings = this.state.runtimeSettings;
+    if (this.state.mode === "settings_model" && settings !== undefined) {
+      this.update({
+        mode: "settings_provider",
+        runtimeSettings: { ...settings, loading: false },
+        notice: undefined,
+      });
+      return;
+    }
+    if (this.state.mode === "settings_provider") {
+      this.update({
+        mode: "chat",
+        runtimeSettings: undefined,
+        notice: undefined,
+      });
     }
   }
 
@@ -1604,12 +2028,21 @@ export class TuiController {
     const previous = this.state.threadId;
     const { resumeThreadId: _resumeThreadId, ...configuration } =
       this.state.configuration;
+    const nextConfiguration = {
+      ...configuration,
+      provider: this.state.nextThreadConfiguration.provider,
+      model: this.state.nextThreadConfiguration.model,
+    };
     this.appendTranscript(
       "system",
       previous === undefined
-        ? "Already detached; the next prompt will create a new thread."
-        : `Detached from thread ${previous}; the next prompt will create a new thread.`,
-      { configuration, threadId: undefined, notice: undefined },
+        ? `Ready for a new thread with ${nextConfiguration.provider}/${nextConfiguration.model}.`
+        : `Detached from thread ${previous}; the next prompt will create a thread with ${nextConfiguration.provider}/${nextConfiguration.model}.`,
+      {
+        configuration: nextConfiguration,
+        threadId: undefined,
+        notice: undefined,
+      },
     );
   }
 
@@ -1715,6 +2148,7 @@ export class TuiController {
         activeTurn: undefined,
         approval: undefined,
         threadBrowser: undefined,
+        runtimeSettings: undefined,
         notice: undefined,
       });
     } catch (error) {
@@ -1724,6 +2158,7 @@ export class TuiController {
         activeTurn: undefined,
         approval: undefined,
         threadBrowser: undefined,
+        runtimeSettings: undefined,
         notice: `Shutdown failed: ${errorMessage(error)}`,
       });
     }
@@ -1954,6 +2389,7 @@ export class TuiController {
       activeTurn: undefined,
       approval: undefined,
       threadBrowser: undefined,
+      runtimeSettings: undefined,
       transcript: [
         ...this.state.transcript,
         ...activeEntries.map((entry) => this.withTranscriptId(entry)),
@@ -1965,11 +2401,16 @@ export class TuiController {
 
   private statusText(): string {
     const diagnostics = this.client.diagnostics().trim();
+    const next = this.state.nextThreadConfiguration;
+    const nextDiffers =
+      next.provider !== this.state.configuration.provider ||
+      next.model !== this.state.configuration.model;
     return [
       `connection: ${this.state.connection}`,
       `thread: ${this.state.threadId ?? "new"}`,
       `provider: ${this.state.configuration.provider}`,
       `model: ${this.state.configuration.model}`,
+      ...(nextDiffers ? [`next: ${next.provider}/${next.model}`] : []),
       `workspace: ${this.state.configuration.cwd}`,
       `approval: ${this.state.configuration.approvalMode}`,
       `turn: ${this.state.activeTurn?.status ?? "idle"}`,
@@ -2045,6 +2486,46 @@ export class TuiController {
       listener();
     }
   }
+}
+
+function runtimeSettingsResultNotice(result: {
+  diagnostics: readonly { message: string }[];
+  recovery?: { preferenceBackup: string } | undefined;
+}): string | undefined {
+  if (result.recovery !== undefined) {
+    return `Recovered invalid settings to ${boundText(result.recovery.preferenceBackup, 1_024)}.`;
+  }
+  if (result.diagnostics.length > 0) {
+    return boundText(result.diagnostics[0]?.message ?? "Settings diagnostic.");
+  }
+  return undefined;
+}
+
+function boundModelInput(input: string): string {
+  const sanitized = input.replace(/[\u0000-\u001f\u007f-\u009f]/gu, "");
+  if (
+    Buffer.byteLength(sanitized, "utf8") <= RUNTIME_SETTINGS_MODEL_BUDGET_BYTES
+  ) {
+    return sanitized;
+  }
+  let low = 0;
+  let high = sanitized.length;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (
+      Buffer.byteLength(sanitized.slice(0, middle), "utf8") <=
+      RUNTIME_SETTINGS_MODEL_BUDGET_BYTES
+    ) {
+      low = middle;
+    } else {
+      high = middle - 1;
+    }
+  }
+  let prefix = sanitized.slice(0, low);
+  if (/\p{Surrogate}$/u.test(prefix)) {
+    prefix = prefix.slice(0, -1);
+  }
+  return prefix;
 }
 
 function updateTool(

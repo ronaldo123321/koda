@@ -10,6 +10,7 @@ import {
 import {
   KodaView,
   createTuiProgram,
+  resolveTuiRuntimeSelection,
   routeTuiInput,
   type TuiInputController,
   type TuiState,
@@ -262,9 +263,114 @@ describe("Koda Ink view", () => {
     expect(controller.pageSearchResults).toHaveBeenCalledWith(1);
     expect(controller.previewSelectedSearchResult).toHaveBeenCalledOnce();
   });
+
+  it("renders and routes provider and model settings modes", () => {
+    const controller = fakeInputController();
+    const state = baseState();
+    state.providers = [
+      ...state.providers,
+      {
+        id: "deepseek",
+        displayName: "DeepSeek",
+        credentialEnvironmentVariable: "DEEPSEEK_API_KEY",
+        defaultModel: "deepseek-v4-pro",
+        configured: false,
+      },
+    ];
+    state.mode = "settings_provider";
+    state.runtimeSettings = {
+      revision: 1,
+      selectedIndex: 1,
+      modelInput: "",
+      draftModels: {},
+      loading: false,
+    };
+
+    let frame = renderToString(createElement(KodaView, { state }));
+    expect(frame).toContain("Runtime settings · choose provider");
+    expect(frame).toContain("missing DEEPSEEK_API_KEY");
+    routeTuiInput(controller, state, "", key({ upArrow: true }), vi.fn());
+    routeTuiInput(controller, state, "", key({ return: true }), vi.fn());
+    routeTuiInput(controller, state, "l", key({ ctrl: true }), vi.fn());
+    expect(controller.selectRuntimeSettingsProvider).toHaveBeenCalledWith(-1);
+    expect(controller.enterRuntimeSettingsModel).toHaveBeenCalledOnce();
+    expect(controller.reloadRuntimeSettings).toHaveBeenCalledOnce();
+
+    state.mode = "settings_model";
+    state.runtimeSettings = {
+      ...state.runtimeSettings,
+      draftProvider: "openai",
+      modelInput: "gpt-draft",
+    };
+    frame = renderToString(createElement(KodaView, { state }));
+    expect(frame).toContain("model: gpt-draft");
+    routeTuiInput(controller, state, "x", key(), vi.fn());
+    routeTuiInput(controller, state, "r", key({ ctrl: true }), vi.fn());
+    routeTuiInput(controller, state, "", key({ return: true }), vi.fn());
+    routeTuiInput(controller, state, "", key({ escape: true }), vi.fn());
+    expect(controller.setRuntimeSettingsModelInput).toHaveBeenCalledWith(
+      "gpt-draftx",
+    );
+    expect(controller.resetRuntimeSettingsModel).toHaveBeenCalledOnce();
+    expect(controller.applyRuntimeSettings).toHaveBeenCalledOnce();
+    expect(controller.closeRuntimeSettingsLevel).toHaveBeenCalledOnce();
+  });
 });
 
 describe("koda-chat program", () => {
+  it("resolves CLI, environment, workspace, and registry settings in order", () => {
+    const providers = [
+      {
+        id: "openai" as const,
+        displayName: "OpenAI",
+        credentialEnvironmentVariable: "OPENAI_API_KEY",
+        defaultModel: "gpt-default",
+        configured: true,
+      },
+      {
+        id: "deepseek" as const,
+        displayName: "DeepSeek",
+        credentialEnvironmentVariable: "DEEPSEEK_API_KEY",
+        defaultModel: "deepseek-default",
+        configured: true,
+      },
+    ];
+    const preference = {
+      provider: "deepseek" as const,
+      model: "deepseek-workspace",
+      updatedAt: "2026-08-27T08:00:00.000Z",
+    };
+
+    expect(resolveTuiRuntimeSelection({}, {}, preference, providers)).toEqual({
+      provider: "deepseek",
+      model: "deepseek-workspace",
+    });
+    expect(
+      resolveTuiRuntimeSelection(
+        {},
+        { KODA_PROVIDER: "openai" },
+        preference,
+        providers,
+      ),
+    ).toEqual({ provider: "openai", model: "gpt-default" });
+    expect(
+      resolveTuiRuntimeSelection(
+        { provider: "deepseek" },
+        { KODA_PROVIDER: "openai", KODA_MODEL: "environment-model" },
+        preference,
+        providers,
+      ),
+    ).toEqual({ provider: "deepseek", model: "environment-model" });
+    expect(
+      resolveTuiRuntimeSelection(
+        { provider: "openai", model: "cli-model" },
+        { KODA_PROVIDER: "deepseek", KODA_MODEL: "environment-model" },
+        preference,
+        providers,
+      ),
+    ).toEqual({ provider: "openai", model: "cli-model" });
+  });
+
   it("rejects non-TTY automation before starting app-server", async () => {
     const stdin = new PassThrough() as unknown as NodeJS.ReadStream;
     const stdout = new PassThrough() as unknown as NodeJS.WriteStream;
@@ -305,6 +411,7 @@ function baseState(): TuiState {
       threadEvents: true,
       threadSearch: true,
       bidirectionalThreadEvents: true,
+      runtimeSettings: true,
     },
     providers: [
       {
@@ -312,6 +419,7 @@ function baseState(): TuiState {
         displayName: "OpenAI",
         credentialEnvironmentVariable: "OPENAI_API_KEY",
         defaultModel: "gpt-5.6-terra",
+        configured: true,
       },
     ],
   });
@@ -324,6 +432,10 @@ function baseState(): TuiState {
       model: "gpt-5.6-terra",
       approvalMode: "on-request",
     },
+    nextThreadConfiguration: {
+      provider: modelProviderIdSchema.parse("openai"),
+      model: "gpt-5.6-terra",
+    },
     providers: initialization.providers,
     threadId: undefined,
     transcript: [],
@@ -332,6 +444,7 @@ function baseState(): TuiState {
     input: "",
     notice: undefined,
     threadBrowser: undefined,
+    runtimeSettings: undefined,
   };
 }
 
@@ -356,6 +469,14 @@ function fakeInputController() {
     closeThreadBrowserLevel: vi.fn(),
     resumePreviewedThread: vi.fn(() => Promise.resolve()),
     setViewportHeight: vi.fn(),
+    openRuntimeSettings: vi.fn(() => Promise.resolve()),
+    selectRuntimeSettingsProvider: vi.fn(),
+    enterRuntimeSettingsModel: vi.fn(),
+    setRuntimeSettingsModelInput: vi.fn(),
+    resetRuntimeSettingsModel: vi.fn(),
+    applyRuntimeSettings: vi.fn(() => Promise.resolve()),
+    reloadRuntimeSettings: vi.fn(() => Promise.resolve()),
+    closeRuntimeSettingsLevel: vi.fn(),
   } satisfies TuiInputController;
 }
 

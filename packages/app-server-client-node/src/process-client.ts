@@ -7,6 +7,10 @@ import {
   approvalResolveResultSchema,
   initializeResultSchema,
   jsonValueSchema,
+  settingsGetParamsSchema,
+  settingsGetResultSchema,
+  settingsUpdateParamsSchema,
+  settingsUpdateResultSchema,
   shutdownResultSchema,
   threadEventsParamsSchema,
   threadEventsResultSchema,
@@ -23,6 +27,10 @@ import {
   type ApprovalResolveParams,
   type ApprovalResolveResult,
   type InitializeResult,
+  type SettingsGetParams,
+  type SettingsGetResult,
+  type SettingsUpdateParams,
+  type SettingsUpdateResult,
   type ThreadGetParams,
   type ThreadGetResult,
   type ThreadEventsParams,
@@ -65,6 +73,10 @@ export interface AppServerClientApi {
   getThread(params: ThreadGetParams): Promise<ThreadGetResult>;
   readThreadEvents(params: ThreadEventsParams): Promise<ThreadEventsResult>;
   searchThreads(params: ThreadSearchParams): Promise<ThreadSearchResult>;
+  getRuntimeSettings(params: SettingsGetParams): Promise<SettingsGetResult>;
+  updateRuntimeSettings(
+    params: SettingsUpdateParams,
+  ): Promise<SettingsUpdateResult>;
   startTurn(params: TurnStartParams): Promise<TurnStartResult>;
   cancelTurn(params: TurnCancelParams): Promise<TurnCancelResult>;
   resolveApproval(
@@ -214,6 +226,26 @@ export class NodeAppServerClient implements AppServerClientApi {
       "thread/search",
       jsonValueSchema.parse(threadSearchParamsSchema.parse(params)),
       threadSearchResultSchema,
+    );
+  }
+
+  public getRuntimeSettings(
+    params: SettingsGetParams,
+  ): Promise<SettingsGetResult> {
+    return this.connection.request(
+      "settings/get",
+      jsonValueSchema.parse(settingsGetParamsSchema.parse(params)),
+      settingsGetResultSchema,
+    );
+  }
+
+  public updateRuntimeSettings(
+    params: SettingsUpdateParams,
+  ): Promise<SettingsUpdateResult> {
+    return this.connection.request(
+      "settings/update",
+      jsonValueSchema.parse(settingsUpdateParamsSchema.parse(params)),
+      settingsUpdateResultSchema,
     );
   }
 

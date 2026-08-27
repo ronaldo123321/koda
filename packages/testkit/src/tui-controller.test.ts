@@ -14,6 +14,10 @@ import {
   type ApprovalResolveParams,
   type ApprovalResolveResult,
   type InitializeResult,
+  type SettingsGetParams,
+  type SettingsGetResult,
+  type SettingsUpdateParams,
+  type SettingsUpdateResult,
   type ThreadGetParams,
   type ThreadGetResult,
   type ThreadEventsParams,
@@ -31,6 +35,179 @@ import { TuiController, projectThreadHistory } from "@koda/tui";
 import { describe, expect, it } from "vitest";
 
 describe("TuiController", () => {
+  it("edits and applies workspace runtime settings for a new thread", async () => {
+    const client = new FakeAppServerClient();
+    const controller = createController(client);
+
+    controller.setInput("/settings");
+    await controller.submitInput();
+    expect(controller.getSnapshot()).toMatchObject({
+      mode: "settings_provider",
+      runtimeSettings: { revision: 0, selectedIndex: 0, loading: false },
+    });
+    controller.selectRuntimeSettingsProvider(1);
+    controller.selectRuntimeSettingsProvider(1);
+    controller.enterRuntimeSettingsModel();
+    expect(controller.getSnapshot()).toMatchObject({
+      mode: "settings_model",
+      runtimeSettings: {
+        draftProvider: "deepseek",
+        modelInput: "deepseek-v4-pro",
+      },
+    });
+    controller.setRuntimeSettingsModelInput("deepseek-chat");
+    await controller.applyRuntimeSettings();
+
+    expect(client.settingsUpdateRequests).toEqual([
+      {
+        workspace: "/workspace",
+        provider: "deepseek",
+        model: "deepseek-chat",
+        expectedRevision: 0,
+      },
+    ]);
+    expect(controller.getSnapshot()).toMatchObject({
+      mode: "chat",
+      configuration: { provider: "deepseek", model: "deepseek-chat" },
+      nextThreadConfiguration: {
+        provider: "deepseek",
+        model: "deepseek-chat",
+      },
+      runtimeSettings: undefined,
+    });
+  });
+
+  it("keeps the current thread configuration until /new adopts saved settings", async () => {
+    const client = new FakeAppServerClient();
+    const controller = createController(client);
+    await controller.startPrompt("Create the current thread");
+    client.finish("completed");
+
+    controller.setInput("/settings");
+    await controller.submitInput();
+    controller.selectRuntimeSettingsProvider(1);
+    controller.selectRuntimeSettingsProvider(1);
+    controller.enterRuntimeSettingsModel();
+    controller.setRuntimeSettingsModelInput("deepseek-next");
+    await controller.applyRuntimeSettings();
+    expect(controller.getSnapshot()).toMatchObject({
+      threadId: "tui-thread",
+      configuration: { provider: "openai", model: "gpt-5.6-terra" },
+      nextThreadConfiguration: {
+        provider: "deepseek",
+        model: "deepseek-next",
+      },
+    });
+    expect(controller.getSnapshot().notice).toContain("run /new");
+
+    controller.setInput("/new");
+    await controller.submitInput();
+    expect(controller.getSnapshot()).toMatchObject({
+      threadId: undefined,
+      configuration: { provider: "deepseek", model: "deepseek-next" },
+    });
+  });
+
+  it("blocks unavailable providers and preserves a conflicting settings draft", async () => {
+    const client = new FakeAppServerClient();
+    const deepseek = client.initialization.providers.find(
+      (provider) => provider.id === "deepseek",
+    );
+    if (deepseek === undefined) {
+      throw new Error("DeepSeek fixture metadata is unavailable.");
+    }
+    deepseek.configured = false;
+    const unavailableController = createController(client, {
+      provider: "deepseek",
+    });
+    await unavailableController.startPrompt("Must stay local");
+    expect(client.startRequests).toEqual([]);
+    expect(unavailableController.getSnapshot().notice).toContain(
+      "DEEPSEEK_API_KEY",
+    );
+    const controller = createController(client);
+    await controller.openRuntimeSettings();
+    controller.selectRuntimeSettingsProvider(1);
+    controller.selectRuntimeSettingsProvider(1);
+    controller.enterRuntimeSettingsModel();
+    expect(controller.getSnapshot().mode).toBe("settings_provider");
+    expect(controller.getSnapshot().notice).toContain("DEEPSEEK_API_KEY");
+
+    controller.selectRuntimeSettingsProvider(-1);
+    controller.selectRuntimeSettingsProvider(-1);
+    controller.enterRuntimeSettingsModel();
+    controller.setRuntimeSettingsModelInput("gpt-draft");
+    client.settingsUpdateImplementation = () =>
+      Promise.reject(
+        Object.assign(new Error("revision conflict"), {
+          dataCode: "SETTINGS_CHANGED",
+        }),
+      );
+    await controller.applyRuntimeSettings();
+    expect(controller.getSnapshot()).toMatchObject({
+      mode: "settings_model",
+      runtimeSettings: { modelInput: "gpt-draft", loading: false },
+    });
+    expect(controller.getSnapshot().notice).toContain("Ctrl+L");
+
+    client.settingsGetResult = {
+      workspace: "/workspace",
+      revision: 2,
+      preference: {
+        provider: "openai",
+        model: "gpt-other-client",
+        updatedAt: "2026-08-27T08:01:00.000Z",
+      },
+      diagnostics: [],
+    };
+    await controller.reloadRuntimeSettings();
+    expect(controller.getSnapshot().runtimeSettings).toMatchObject({
+      revision: 2,
+      modelInput: "gpt-draft",
+    });
+    controller.closeRuntimeSettingsLevel();
+    expect(controller.getSnapshot().mode).toBe("settings_provider");
+    controller.closeRuntimeSettingsLevel();
+    expect(controller.getSnapshot().mode).toBe("chat");
+  });
+
+  it("ignores a late settings response after Escape closes the panel", async () => {
+    const client = new FakeAppServerClient();
+    let release: ((result: SettingsGetResult) => void) | undefined;
+    client.settingsGetImplementation = () =>
+      new Promise<SettingsGetResult>((resolve) => {
+        release = resolve;
+      });
+    const controller = createController(client);
+
+    const opening = controller.openRuntimeSettings();
+    expect(controller.getSnapshot().mode).toBe("settings_provider");
+    controller.closeRuntimeSettingsLevel();
+    expect(controller.getSnapshot()).toMatchObject({
+      mode: "chat",
+      runtimeSettings: undefined,
+    });
+    release?.({
+      workspace: "/workspace",
+      revision: 4,
+      preference: {
+        provider: "openai",
+        model: "late-model",
+        updatedAt: "2026-08-27T08:00:00.000Z",
+      },
+      diagnostics: [],
+    });
+    await opening;
+    expect(controller.getSnapshot()).toMatchObject({
+      mode: "chat",
+      runtimeSettings: undefined,
+      nextThreadConfiguration: {
+        provider: "openai",
+        model: "gpt-5.6-terra",
+      },
+    });
+  });
+
   it("uses provider metadata and handles local commands without server mutation", async () => {
     const client = new FakeAppServerClient();
     client.diagnosticText = "fixture diagnostic";
@@ -289,6 +466,10 @@ describe("TuiController", () => {
       configuration: {
         provider: "deepseek",
         model: "deepseek-v4-pro",
+      },
+      nextThreadConfiguration: {
+        provider: "openai",
+        model: "gpt-5.6-terra",
       },
       threadBrowser: undefined,
     });
@@ -759,6 +940,7 @@ class FakeAppServerClient implements AppServerClientApi {
         threadEvents: true,
         threadSearch: true,
         bidirectionalThreadEvents: true,
+        runtimeSettings: true,
       },
       providers: [
         provider("openai", "OpenAI", "OPENAI_API_KEY", "gpt-5.6-terra"),
@@ -780,6 +962,8 @@ class FakeAppServerClient implements AppServerClientApi {
   public readonly threadGetRequests: ThreadGetParams[] = [];
   public readonly threadEventRequests: ThreadEventsParams[] = [];
   public readonly threadSearchRequests: ThreadSearchParams[] = [];
+  public readonly settingsGetRequests: SettingsGetParams[] = [];
+  public readonly settingsUpdateRequests: SettingsUpdateParams[] = [];
   public threadListResult: ThreadListResult = { threads: [], diagnostics: [] };
   public threadGetResult: ThreadGetResult | undefined;
   public threadEventsResult: ThreadEventsResult = {
@@ -793,6 +977,12 @@ class FakeAppServerClient implements AppServerClientApi {
     hasMore: false,
     diagnostics: [],
   };
+  public settingsGetResult: SettingsGetResult = {
+    workspace: "/workspace",
+    revision: 0,
+    diagnostics: [],
+  };
+  public settingsUpdateResult: SettingsUpdateResult | undefined;
   public threadListError: Error | undefined;
   public threadEventsError: Error | undefined;
   public threadSearchError: Error | undefined;
@@ -800,6 +990,11 @@ class FakeAppServerClient implements AppServerClientApi {
     ((params: ThreadEventsParams) => Promise<ThreadEventsResult>) | undefined;
   public threadSearchImplementation:
     ((params: ThreadSearchParams) => Promise<ThreadSearchResult>) | undefined;
+  public settingsGetImplementation:
+    ((params: SettingsGetParams) => Promise<SettingsGetResult>) | undefined;
+  public settingsUpdateImplementation:
+    | ((params: SettingsUpdateParams) => Promise<SettingsUpdateResult>)
+    | undefined;
   public diagnosticText = "";
   public beforeStartResult: (() => void) | undefined;
   public startImplementation:
@@ -850,6 +1045,37 @@ class FakeAppServerClient implements AppServerClientApi {
       return Promise.reject(this.threadSearchError);
     }
     return Promise.resolve(this.threadSearchResult);
+  }
+
+  public getRuntimeSettings(
+    params: SettingsGetParams,
+  ): Promise<SettingsGetResult> {
+    this.settingsGetRequests.push(params);
+    return (
+      this.settingsGetImplementation?.(params) ??
+      Promise.resolve(this.settingsGetResult)
+    );
+  }
+
+  public updateRuntimeSettings(
+    params: SettingsUpdateParams,
+  ): Promise<SettingsUpdateResult> {
+    this.settingsUpdateRequests.push(params);
+    if (this.settingsUpdateImplementation !== undefined) {
+      return this.settingsUpdateImplementation(params);
+    }
+    return Promise.resolve(
+      this.settingsUpdateResult ?? {
+        workspace: params.workspace,
+        revision: params.expectedRevision + 1,
+        preference: {
+          provider: params.provider,
+          model: params.model,
+          updatedAt: "2026-08-27T08:00:00.000Z",
+        },
+        diagnostics: [],
+      },
+    );
   }
 
   public startTurn(params: TurnStartParams): Promise<TurnStartResult> {
@@ -1038,5 +1264,11 @@ function provider(
   credentialEnvironmentVariable: string,
   defaultModel: string,
 ) {
-  return { id, displayName, credentialEnvironmentVariable, defaultModel };
+  return {
+    id,
+    displayName,
+    credentialEnvironmentVariable,
+    defaultModel,
+    configured: true,
+  };
 }

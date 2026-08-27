@@ -75,6 +75,14 @@ export interface TuiInputController {
   closeThreadBrowserLevel(): void;
   resumePreviewedThread(): Promise<void>;
   setViewportHeight(height: number): void;
+  openRuntimeSettings(): Promise<void>;
+  selectRuntimeSettingsProvider(offset: -1 | 1): void;
+  enterRuntimeSettingsModel(): void;
+  setRuntimeSettingsModelInput(input: string): void;
+  resetRuntimeSettingsModel(): void;
+  applyRuntimeSettings(): Promise<void>;
+  reloadRuntimeSettings(): Promise<void>;
+  closeRuntimeSettingsLevel(): void;
 }
 
 export function KodaView({ state }: KodaViewProps) {
@@ -101,6 +109,12 @@ export function KodaView({ state }: KodaViewProps) {
         <ThreadSearchResults state={state} />
       ) : null}
       {state.mode === "thread_preview" ? <ThreadPreview state={state} /> : null}
+      {state.mode === "settings_provider" ? (
+        <RuntimeSettingsProvider state={state} />
+      ) : null}
+      {state.mode === "settings_model" ? (
+        <RuntimeSettingsModel state={state} />
+      ) : null}
 
       {state.mode === "chat" ? (
         <>
@@ -171,6 +185,52 @@ export function routeTuiInput(
       requestExit();
     } else {
       void controller.cancelActiveTurn();
+    }
+    return;
+  }
+  if (state.mode === "settings_provider") {
+    if (key.escape) {
+      controller.closeRuntimeSettingsLevel();
+    } else if (key.ctrl && input.toLowerCase() === "l") {
+      void controller.reloadRuntimeSettings();
+    } else if (key.upArrow) {
+      controller.selectRuntimeSettingsProvider(-1);
+    } else if (key.downArrow) {
+      controller.selectRuntimeSettingsProvider(1);
+    } else if (key.return) {
+      controller.enterRuntimeSettingsModel();
+    }
+    return;
+  }
+  if (state.mode === "settings_model") {
+    const modelInput = state.runtimeSettings?.modelInput ?? "";
+    if (key.escape) {
+      controller.closeRuntimeSettingsLevel();
+    } else if (key.ctrl && input.toLowerCase() === "r") {
+      controller.resetRuntimeSettingsModel();
+    } else if (key.ctrl && input.toLowerCase() === "l") {
+      void controller.reloadRuntimeSettings();
+    } else if (key.return) {
+      void controller.applyRuntimeSettings();
+    } else if (key.backspace || key.delete) {
+      controller.setRuntimeSettingsModelInput(modelInput.slice(0, -1));
+    } else if (
+      !key.ctrl &&
+      !key.meta &&
+      !key.upArrow &&
+      !key.downArrow &&
+      !key.leftArrow &&
+      !key.rightArrow &&
+      !key.pageDown &&
+      !key.pageUp &&
+      !key.home &&
+      !key.end &&
+      !key.tab
+    ) {
+      const printable = input.replace(/[\u0000-\u001f\u007f-\u009f]/gu, "");
+      if (printable.length > 0) {
+        controller.setRuntimeSettingsModelInput(modelInput + printable);
+      }
     }
     return;
   }
@@ -351,6 +411,62 @@ function ThreadList({ state }: { state: TuiState }) {
   );
 }
 
+function RuntimeSettingsProvider({ state }: { state: TuiState }) {
+  const settings = state.runtimeSettings;
+  if (settings === undefined) {
+    return <Text color="red">Runtime settings state is unavailable.</Text>;
+  }
+  return (
+    <Box flexDirection="column" borderStyle="round" paddingX={1}>
+      <Text bold>Runtime settings · choose provider</Text>
+      {state.providers.map((provider, index) => (
+        <Text
+          key={provider.id}
+          bold={index === settings.selectedIndex}
+          {...(index === settings.selectedIndex ? { color: "cyan" } : {})}
+        >
+          {`${index === settings.selectedIndex ? ">" : " "} ${provider.displayName} (${provider.id}) · ${provider.configured ? "configured" : `missing ${provider.credentialEnvironmentVariable}`} · default ${boundPresentationText(provider.defaultModel, 256)}`}
+        </Text>
+      ))}
+      <Text dimColor>
+        {settings.loading
+          ? "Loading settings… · Esc back"
+          : "↑/↓ select · Enter model · Ctrl+L reload · Esc discard"}
+      </Text>
+    </Box>
+  );
+}
+
+function RuntimeSettingsModel({ state }: { state: TuiState }) {
+  const settings = state.runtimeSettings;
+  const provider = state.providers.find(
+    (candidate) => candidate.id === settings?.draftProvider,
+  );
+  if (settings === undefined || provider === undefined) {
+    return <Text color="red">Runtime model settings are unavailable.</Text>;
+  }
+  return (
+    <Box flexDirection="column" borderStyle="round" paddingX={1}>
+      <Text bold>{`Runtime settings · ${provider.displayName}`}</Text>
+      <Text
+        dimColor
+      >{`default: ${boundPresentationText(provider.defaultModel, 256)}`}</Text>
+      <Box>
+        <Text bold color="cyan">
+          {"model: "}
+        </Text>
+        <Text>{settings.modelInput}</Text>
+        <Text inverse> </Text>
+      </Box>
+      <Text dimColor>
+        {settings.loading
+          ? "Saving settings… · Esc back"
+          : "Enter Apply · Ctrl+R default · Ctrl+L reload revision · Esc back"}
+      </Text>
+    </Box>
+  );
+}
+
 function ThreadSearchInput({ state }: { state: TuiState }) {
   const search = state.threadBrowser?.search;
   if (search === undefined) {
@@ -513,9 +629,15 @@ function ActiveTurn({ state }: { state: NonNullable<TuiState["activeTurn"]> }) {
 function StatusLine({ state }: { state: TuiState }) {
   const active = state.activeTurn?.status ?? "idle";
   const usage = state.activeTurn?.usage;
+  const next = state.nextThreadConfiguration;
+  const nextLabel =
+    next.provider === state.configuration.provider &&
+    next.model === state.configuration.model
+      ? ""
+      : ` · next ${next.provider}/${boundPresentationText(next.model, 256)}`;
   return (
     <Text dimColor>
-      {`${state.connection} · ${active} · approval ${state.configuration.approvalMode}`}
+      {`${state.connection} · ${active} · approval ${state.configuration.approvalMode}${nextLabel}`}
       {usage === undefined ? "" : ` · ${usage.tokens.totalTokens} tokens`}
     </Text>
   );
