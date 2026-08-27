@@ -1,6 +1,6 @@
 # Koda Phase 3 Extensibility Roadmap
 
-- Status: In progress — Phase 3A through Phase 3E3 implemented and verified; Phase 3E4 design approved (2026-08-27)
+- Status: In progress — Phase 3A through Phase 3E4 implemented and verified; Phase 3E5 design approved (2026-08-27)
 - Date: 2026-08-26
 - Depends on: Phase 2 reliability closure
 - Scope: stable client/tool/provider extension boundaries without weakening the local runtime's durable state and approval guarantees
@@ -117,6 +117,20 @@ Status: **Complete.**
 
 The accepted authorization, protocol, UTF-8 pagination, interaction, failure, and verification contract is in the [Phase 3E4 thread-scoped artifact inspection design](2026-08-27-phase-3e4-artifact-inspection-design.md).
 
+## Phase 3E5: auditable context and instruction inspection
+
+Status: **Design approved; implementation pending.**
+
+- Add a durable, bounded `context.prepared` event immediately before every provider request so context selection, estimates, calibration, Item identity, tool identity, and Compaction state remain auditable after restart.
+- Upgrade the local app-server contract to protocol v7 with thread-scoped request discovery, exact snapshot detail, and opaque-source bounded instruction reads.
+- Reconstruct active Items from authoritative JSONL and fail closed when recorded request summaries do not match durable history; never start MCP or a Provider for inspection.
+- Compare current repository instructions with the selected request's `turn.context` and expose unchanged, modified, missing, and added status without persisting historical file bodies.
+- Add `/context`, preview `c`, newest-first request history, budget and Compaction detail, current effective-instruction viewing, layered Escape, and generation-based stale-response rejection to Ink.
+- Preserve all credential, response-budget, path-confinement, UTF-8, normal-terminal-buffer, and source-view-on-failure boundaries established by earlier Phase 3 slices.
+- Verify event ordering, deterministic summaries, legacy logs, authorization, instruction races, typed app-server/client paths, TUI navigation, real TTY interaction, and every existing reliability gate.
+
+The accepted telemetry, reconstruction, protocol, instruction, interaction, failure, and verification contract is in the [Phase 3E5 auditable context and instruction inspection design](2026-08-27-phase-3e5-context-inspection-design.md).
+
 ## Later Phase 3 slices
 
 ### Provider and context extensions after Phase 3C
@@ -134,8 +148,9 @@ The accepted authorization, protocol, UTF-8 pagination, interaction, failure, an
 - Maintain the completed Phase 3E2 boundary as bounded bidirectional history navigation and workspace-scoped substring search over app-server protocol v6; retain the normal terminal buffer and a disposable SQLite projection.
 - Maintain the completed Phase 3E3 boundary for explicit provider/model preferences that affect only new threads.
 - Maintain the completed Phase 3E4 boundary for thread-scoped discovery and bounded UTF-8 artifact reads.
+- Implement and then maintain the accepted Phase 3E5 boundary for durable per-request context telemetry and bounded current-instruction inspection.
 - Defer FTS5, fuzzy/relevance ranking, live search, cross-workspace search, alternate-screen navigation, and real-time subscriptions beyond Phase 3E2.
-- In Phase 3E or Phase 4, add Markdown/syntax rendering, dedicated diff views, artifact download/export, attachments, context-budget inspection, and instruction-change views.
+- In Phase 3E or Phase 4, add Markdown/syntax rendering, dedicated diff views, artifact download/export, attachments, and richer prompt-diff or context-export views beyond Phase 3E5.
 - Build IDE or desktop clients only after the local protocol client and TUI have validated the shared boundary.
 - Keep presentation state outside the agent runtime and keep approvals fail-closed on client loss.
 
