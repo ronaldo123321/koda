@@ -5,6 +5,12 @@ import {
   APP_SERVER_PROTOCOL_VERSION,
   approvalResolveParamsSchema,
   approvalResolveResultSchema,
+  approvalGrantsListParamsSchema,
+  approvalGrantsListResultSchema,
+  approvalGrantsRevokeAllParamsSchema,
+  approvalGrantsRevokeAllResultSchema,
+  approvalGrantsRevokeParamsSchema,
+  approvalGrantsRevokeResultSchema,
   artifactReadParamsSchema,
   artifactReadResultSchema,
   contextInstructionReadParamsSchema,
@@ -36,6 +42,12 @@ import {
   turnStartResultSchema,
   type ApprovalResolveParams,
   type ApprovalResolveResult,
+  type ApprovalGrantsListParams,
+  type ApprovalGrantsListResult,
+  type ApprovalGrantsRevokeAllParams,
+  type ApprovalGrantsRevokeAllResult,
+  type ApprovalGrantsRevokeParams,
+  type ApprovalGrantsRevokeResult,
   type ArtifactReadParams,
   type ArtifactReadResult,
   type ContextInstructionReadParams,
@@ -111,6 +123,15 @@ export interface AppServerClientApi {
   resolveApproval(
     params: ApprovalResolveParams,
   ): Promise<ApprovalResolveResult>;
+  listApprovalGrants(
+    params: ApprovalGrantsListParams,
+  ): Promise<ApprovalGrantsListResult>;
+  revokeApprovalGrant(
+    params: ApprovalGrantsRevokeParams,
+  ): Promise<ApprovalGrantsRevokeResult>;
+  revokeAllApprovalGrants(
+    params: ApprovalGrantsRevokeAllParams,
+  ): Promise<ApprovalGrantsRevokeAllResult>;
   onNotification(
     listener: (notification: AppServerNotification) => void,
   ): () => void;
@@ -347,6 +368,36 @@ export class NodeAppServerClient implements AppServerClientApi {
       "approval/resolve",
       jsonValueSchema.parse(approvalResolveParamsSchema.parse(params)),
       approvalResolveResultSchema,
+    );
+  }
+
+  public listApprovalGrants(
+    params: ApprovalGrantsListParams,
+  ): Promise<ApprovalGrantsListResult> {
+    return this.connection.request(
+      "approval/grants/list",
+      jsonValueSchema.parse(approvalGrantsListParamsSchema.parse(params)),
+      approvalGrantsListResultSchema,
+    );
+  }
+
+  public revokeApprovalGrant(
+    params: ApprovalGrantsRevokeParams,
+  ): Promise<ApprovalGrantsRevokeResult> {
+    return this.connection.request(
+      "approval/grants/revoke",
+      jsonValueSchema.parse(approvalGrantsRevokeParamsSchema.parse(params)),
+      approvalGrantsRevokeResultSchema,
+    );
+  }
+
+  public revokeAllApprovalGrants(
+    params: ApprovalGrantsRevokeAllParams,
+  ): Promise<ApprovalGrantsRevokeAllResult> {
+    return this.connection.request(
+      "approval/grants/revokeAll",
+      jsonValueSchema.parse(approvalGrantsRevokeAllParamsSchema.parse(params)),
+      approvalGrantsRevokeAllResultSchema,
     );
   }
 

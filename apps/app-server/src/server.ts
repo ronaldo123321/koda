@@ -6,6 +6,7 @@ import {
 import {
   APP_SERVER_PROTOCOL_VERSION,
   APP_SERVER_RPC_ERROR_CODE,
+  APPROVAL_GRANTS_RESULT_BUDGET_BYTES,
   ARTIFACT_READ_RESULT_BUDGET_BYTES,
   CONTEXT_DETAIL_RESULT_BUDGET_BYTES,
   CONTEXT_INSTRUCTION_READ_RESULT_BUDGET_BYTES,
@@ -15,6 +16,12 @@ import {
   THREAD_SEARCH_RESULT_BUDGET_BYTES,
   approvalResolveParamsSchema,
   approvalResolveResultSchema,
+  approvalGrantsListParamsSchema,
+  approvalGrantsListResultSchema,
+  approvalGrantsRevokeAllParamsSchema,
+  approvalGrantsRevokeAllResultSchema,
+  approvalGrantsRevokeParamsSchema,
+  approvalGrantsRevokeResultSchema,
   artifactReadParamsSchema,
   artifactReadResultSchema,
   contextInstructionReadParamsSchema,
@@ -215,6 +222,12 @@ export class KodaAppServer {
         return this.cancelTurn(request.params);
       case "approval/resolve":
         return this.resolveApproval(request.params);
+      case "approval/grants/list":
+        return this.listApprovalGrants(request.params);
+      case "approval/grants/revoke":
+        return this.revokeApprovalGrant(request.params);
+      case "approval/grants/revokeAll":
+        return this.revokeAllApprovalGrants(request.params);
       default:
         throw rpcError(
           APP_SERVER_RPC_ERROR_CODE.METHOD_NOT_FOUND,
@@ -267,6 +280,7 @@ export class KodaAppServer {
           contextInspection: true,
           multiFileChanges: true,
           patchDocuments: true,
+          approvalGrants: true,
         },
         providers: this.application.listProviders(),
       }),
@@ -628,6 +642,7 @@ export class KodaAppServer {
     const resolution = this.approvals.resolve(input.turnId, input.callId, {
       decision: input.decision,
       ...(input.reason === undefined ? {} : { reason: input.reason }),
+      ...(input.grant === undefined ? {} : { grant: input.grant }),
     });
     if (resolution === "not_found") {
       throw rpcError(
@@ -646,6 +661,75 @@ export class KodaAppServer {
     return jsonValueSchema.parse(
       approvalResolveResultSchema.parse({ accepted: true }),
     );
+  }
+
+  private async listApprovalGrants(
+    params: JsonValue | undefined,
+  ): Promise<JsonValue> {
+    const input = parseParams(approvalGrantsListParamsSchema, params);
+    try {
+      const response = jsonValueSchema.parse(
+        approvalGrantsListResultSchema.parse(
+          await this.application.listApprovalGrants(input.workspace),
+        ),
+      );
+      assertResultBudget(
+        response,
+        APPROVAL_GRANTS_RESULT_BUDGET_BYTES,
+        "APPROVAL_GRANTS_RESULT_TOO_LARGE",
+        "Approval grant list",
+      );
+      return response;
+    } catch (error) {
+      throw rpcError(
+        APP_SERVER_RPC_ERROR_CODE.APPLICATION,
+        errorMessage(error),
+        applicationErrorCode(error),
+      );
+    }
+  }
+
+  private async revokeApprovalGrant(
+    params: JsonValue | undefined,
+  ): Promise<JsonValue> {
+    const input = parseParams(approvalGrantsRevokeParamsSchema, params);
+    try {
+      return jsonValueSchema.parse(
+        approvalGrantsRevokeResultSchema.parse({
+          revoked: await this.application.revokeApprovalGrant(
+            input.workspace,
+            input.grantId,
+          ),
+        }),
+      );
+    } catch (error) {
+      throw rpcError(
+        APP_SERVER_RPC_ERROR_CODE.APPLICATION,
+        errorMessage(error),
+        applicationErrorCode(error),
+      );
+    }
+  }
+
+  private async revokeAllApprovalGrants(
+    params: JsonValue | undefined,
+  ): Promise<JsonValue> {
+    const input = parseParams(approvalGrantsRevokeAllParamsSchema, params);
+    try {
+      return jsonValueSchema.parse(
+        approvalGrantsRevokeAllResultSchema.parse({
+          revokedCount: await this.application.revokeAllApprovalGrants(
+            input.workspace,
+          ),
+        }),
+      );
+    } catch (error) {
+      throw rpcError(
+        APP_SERVER_RPC_ERROR_CODE.APPLICATION,
+        errorMessage(error),
+        applicationErrorCode(error),
+      );
+    }
   }
 
   private async monitorTurn(handle: TurnHandle): Promise<void> {

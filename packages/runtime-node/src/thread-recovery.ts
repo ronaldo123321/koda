@@ -95,6 +95,7 @@ export function recoverThread(
   }
 
   const groups = groupTurns(events);
+  validateApprovalGrantAudit(groups);
   const previous = groups.at(-1);
   if (previous === undefined) {
     throw invalidLog("Thread log does not contain a turn.");
@@ -151,6 +152,110 @@ export function recoverThread(
     partialTrailingEventDiscarded,
     message,
   };
+}
+
+function validateApprovalGrantAudit(groups: readonly TurnGroup[]): void {
+  const createdGrantIds = new Set<string>();
+  for (const group of groups) {
+    const started = new Map<ToolCallId, string>();
+    const requested = new Set<ToolCallId>();
+    const resolved = new Map<
+      ToolCallId,
+      Extract<AgentEvent, { type: "approval.resolved" }>
+    >();
+    const created = new Set<ToolCallId>();
+    const used = new Set<ToolCallId>();
+    const executionStarted = new Set<ToolCallId>();
+    const context = group.events.find((event) => event.type === "turn.context");
+
+    for (const event of group.events) {
+      if (event.type === "tool.started") {
+        started.set(event.payload.callId, event.payload.name);
+        continue;
+      }
+      if (event.type === "approval.requested") {
+        if (
+          started.get(event.payload.callId) !== event.payload.name ||
+          requested.has(event.payload.callId)
+        ) {
+          throw invalidLog(
+            `Approval '${event.payload.callId}' has no unique matching tool start.`,
+          );
+        }
+        requested.add(event.payload.callId);
+        continue;
+      }
+      if (event.type === "approval.resolved") {
+        if (
+          !requested.has(event.payload.callId) ||
+          resolved.has(event.payload.callId) ||
+          (event.payload.grantId !== undefined &&
+            event.payload.decision !== "approved")
+        ) {
+          throw invalidLog(
+            `Approval resolution '${event.payload.callId}' has no unique request.`,
+          );
+        }
+        resolved.set(event.payload.callId, event);
+        continue;
+      }
+      if (event.type === "approval.grant_created") {
+        const resolution = resolved.get(event.payload.callId);
+        const grant = event.payload.grant;
+        if (
+          started.get(event.payload.callId) !== grant.toolName ||
+          resolution?.payload.decision !== "approved" ||
+          resolution.payload.grantId !== grant.id ||
+          created.has(event.payload.callId) ||
+          used.has(event.payload.callId) ||
+          createdGrantIds.has(grant.id) ||
+          grant.uses !== 0 ||
+          context?.type !== "turn.context" ||
+          context.payload.workspaceRoot !== grant.workspaceRoot ||
+          Date.parse(grant.createdAt) > Date.parse(event.timestamp) ||
+          Date.parse(grant.expiresAt) <= Date.parse(event.timestamp)
+        ) {
+          throw invalidLog(
+            `Approval grant '${grant.id}' has invalid creation evidence.`,
+          );
+        }
+        created.add(event.payload.callId);
+        createdGrantIds.add(grant.id);
+        continue;
+      }
+      if (event.type === "approval.grant_used") {
+        if (
+          started.get(event.payload.callId) !== event.payload.name ||
+          requested.has(event.payload.callId) ||
+          resolved.has(event.payload.callId) ||
+          created.has(event.payload.callId) ||
+          used.has(event.payload.callId) ||
+          executionStarted.has(event.payload.callId) ||
+          Date.parse(event.payload.expiresAt) <= Date.parse(event.timestamp)
+        ) {
+          throw invalidLog(
+            `Approval grant use '${event.payload.callId}' has invalid audit evidence.`,
+          );
+        }
+        used.add(event.payload.callId);
+        continue;
+      }
+      if (event.type === "tool.execution_started") {
+        const resolution = resolved.get(event.payload.callId);
+        if (
+          (resolution?.payload.grantId !== undefined &&
+            !created.has(event.payload.callId)) ||
+          (used.has(event.payload.callId) &&
+            event.payload.name !== "exec_command")
+        ) {
+          throw invalidLog(
+            `Tool execution '${event.payload.callId}' is missing approval grant audit evidence.`,
+          );
+        }
+        executionStarted.add(event.payload.callId);
+      }
+    }
+  }
 }
 
 export function assertResumeWorkspace(

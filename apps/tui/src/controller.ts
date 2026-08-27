@@ -7,10 +7,12 @@ import {
   CONTEXT_INSTRUCTION_READ_DEFAULT_BYTES,
   RUNTIME_SETTINGS_MODEL_BUDGET_BYTES,
   artifactIdSchema,
+  approvalGrantIdSchema,
   modelProviderIdSchema,
   runtimeSettingsModelSchema,
   threadIdSchema,
   type AgentEvent,
+  type ApprovalGrantCandidate,
   type ArtifactId,
   type ArtifactReadResult,
   type ContextInstructionReadResult,
@@ -187,6 +189,7 @@ export interface TuiApprovalState {
   reason: string;
   detailsVisible: boolean;
   resolving: boolean;
+  grantCandidate?: ApprovalGrantCandidate;
 }
 
 export interface TuiActiveTurnState {
@@ -365,6 +368,10 @@ export class TuiController {
       await this.openDirectArtifact(input.slice("/artifact".length));
       return "handled";
     }
+    if (input === "/approvals" || input.startsWith("/approvals ")) {
+      await this.handleApprovalsCommand(input);
+      return "handled";
+    }
     switch (input) {
       case "/help":
         this.appendTranscript(
@@ -379,6 +386,9 @@ export class TuiController {
             "/artifacts — browse artifacts referenced by this thread",
             "/artifact <id> — open a referenced text artifact",
             "/context — inspect prepared model context and instructions",
+            "/approvals — list session command approval grants",
+            "/approvals revoke <id> — revoke one session grant",
+            "/approvals clear — revoke all workspace session grants",
             "/new — detach so the next prompt creates a thread",
             "/exit — shut down Koda",
             "Ctrl+T — open the thread browser",
@@ -3366,6 +3376,7 @@ export class TuiController {
 
   public async resolveApproval(
     decision: "approved" | "rejected",
+    createGrant = false,
   ): Promise<void> {
     const approval = this.state.approval;
     const turnId = this.state.activeTurn?.turnId;
@@ -3382,6 +3393,14 @@ export class TuiController {
           decision === "approved"
             ? "Approved by the TUI user."
             : "Rejected by the TUI user.",
+        ...(createGrant && approval.grantCandidate !== undefined
+          ? {
+              grant: {
+                expiresInSeconds:
+                  approval.grantCandidate.defaultExpiresInSeconds,
+              },
+            }
+          : {}),
       });
     } catch (error) {
       if (this.state.approval?.callId === approval.callId) {
@@ -3390,6 +3409,69 @@ export class TuiController {
           notice: `Approval was not resolved: ${errorMessage(error)}`,
         });
       }
+    }
+  }
+
+  private async handleApprovalsCommand(input: string): Promise<void> {
+    const argument = input.slice("/approvals".length).trim();
+    try {
+      if (argument.length === 0) {
+        const result = await this.client.listApprovalGrants({
+          workspace: this.state.configuration.cwd,
+        });
+        this.appendTranscript(
+          "system",
+          result.grants.length === 0
+            ? "No active session command approval grants."
+            : [
+                `Active session command approval grants (${result.grants.length}):`,
+                ...result.grants.map(
+                  (grant) =>
+                    `${grant.id} · expires ${grant.expiresAt} · uses ${grant.uses}\n${boundText(grant.summary, 1_024)}`,
+                ),
+              ].join("\n"),
+        );
+        return;
+      }
+      if (argument === "clear") {
+        const result = await this.client.revokeAllApprovalGrants({
+          workspace: this.state.configuration.cwd,
+        });
+        this.appendTranscript(
+          "system",
+          `Revoked ${result.revokedCount} session command approval grant${result.revokedCount === 1 ? "" : "s"}.`,
+        );
+        return;
+      }
+      if (argument.startsWith("revoke ")) {
+        const parsedId = approvalGrantIdSchema.safeParse(
+          argument.slice("revoke ".length).trim(),
+        );
+        if (!parsedId.success) {
+          this.appendTranscript("error", "Invalid approval grant ID.");
+          return;
+        }
+        const result = await this.client.revokeApprovalGrant({
+          workspace: this.state.configuration.cwd,
+          grantId: parsedId.data,
+        });
+        this.appendTranscript(
+          result.revoked ? "system" : "error",
+          result.revoked
+            ? `Revoked session command approval grant ${parsedId.data}.`
+            : `Session command approval grant ${parsedId.data} was not found in this workspace.`,
+        );
+        return;
+      }
+      this.appendTranscript(
+        "error",
+        "Usage: /approvals, /approvals revoke <id>, or /approvals clear.",
+      );
+    } catch (error) {
+      this.appendTranscript(
+        "error",
+        `Approval grant operation failed: ${errorMessage(error)}`,
+      );
     }
   }
 
@@ -3544,6 +3626,9 @@ export class TuiController {
           reason: boundText(event.payload.reason),
           detailsVisible: false,
           resolving: false,
+          ...(event.payload.grantCandidate === undefined
+            ? {}
+            : { grantCandidate: event.payload.grantCandidate }),
         };
         break;
       case "approval.resolved":
@@ -3557,6 +3642,18 @@ export class TuiController {
         if (approval?.callId === event.payload.callId) {
           approval = undefined;
         }
+        break;
+      case "approval.grant_created":
+        next = updateTool(next, event.payload.callId, undefined, {
+          status: "approved",
+          detail: `session grant ${event.payload.grant.id}`,
+        });
+        break;
+      case "approval.grant_used":
+        next = updateTool(next, event.payload.callId, event.payload.name, {
+          status: "approved",
+          detail: `reused session grant ${event.payload.grantId}`,
+        });
         break;
       case "tool.execution_started":
         next = updateTool(next, event.payload.callId, event.payload.name, {

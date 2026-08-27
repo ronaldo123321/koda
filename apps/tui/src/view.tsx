@@ -60,7 +60,10 @@ export interface TuiInputController {
   setInput(input: string): void;
   submitInput(): Promise<"handled" | "exit">;
   cancelActiveTurn(): Promise<void>;
-  resolveApproval(decision: "approved" | "rejected"): Promise<void>;
+  resolveApproval(
+    decision: "approved" | "rejected",
+    createGrant?: boolean,
+  ): Promise<void>;
   toggleApprovalDetails(): void;
   openThreadBrowser(): Promise<void>;
   selectThread(offset: -1 | 1): void;
@@ -168,7 +171,9 @@ export function KodaView({ state }: KodaViewProps) {
               <Text dimColor>
                 {state.approval.resolving
                   ? "Resolving approval…"
-                  : "y approve · n reject · d details · Esc cancel turn"}
+                  : state.approval.grantCandidate === undefined
+                    ? "y approve · n reject · d details · Esc cancel turn"
+                    : "y approve once · a approve for 15m · n reject · d details · Esc cancel turn"}
               </Text>
             </Box>
           )}
@@ -449,6 +454,11 @@ export function routeTuiInput(
     const decision = input.toLowerCase();
     if (decision === "y") {
       void controller.resolveApproval("approved");
+    } else if (
+      decision === "a" &&
+      state.approval.grantCandidate !== undefined
+    ) {
+      void controller.resolveApproval("approved", true);
     } else if (decision === "n") {
       void controller.resolveApproval("rejected");
     } else if (decision === "d") {

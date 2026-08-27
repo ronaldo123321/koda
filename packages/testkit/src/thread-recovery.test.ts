@@ -733,6 +733,104 @@ describe("recoverThread", () => {
       expect.objectContaining({ code: "THREAD_LOG_INVALID" }),
     );
   });
+
+  it("validates durable grant creation evidence without restoring session grants", () => {
+    const callId = toolCallIdSchema.parse("recovery-grant-call");
+    const grantId = "grant:recovery";
+    const events = [
+      event(0, "turn.started", {}),
+      contextEvent(1),
+      event(2, "tool.started", {
+        callId,
+        name: "exec_command",
+        executionBoundary: true,
+      }),
+      event(3, "approval.requested", {
+        callId,
+        name: "exec_command",
+        title: "Run command",
+        summary: "Run exact command",
+        details: 'argv: ["pnpm","test"]',
+        reason: "process execution",
+        grantCandidate: {
+          kind: "exact_command",
+          key: "a".repeat(64),
+          summary: 'argv: ["pnpm","test"]',
+          defaultExpiresInSeconds: 900,
+          maximumExpiresInSeconds: 3600,
+        },
+      }),
+      event(4, "approval.resolved", {
+        callId,
+        decision: "approved",
+        grantId,
+      }),
+      event(5, "approval.grant_created", {
+        callId,
+        grant: {
+          id: grantId,
+          kind: "exact_command",
+          toolName: "exec_command",
+          workspaceRoot: "/workspace",
+          key: "a".repeat(64),
+          summary: 'argv: ["pnpm","test"]',
+          createdAt: "2026-08-25T23:59:59.000Z",
+          expiresAt: "2026-08-26T00:15:00.000Z",
+          uses: 0,
+        },
+      }),
+      event(6, "tool.execution_started", {
+        callId,
+        name: "exec_command",
+        effect: "execute",
+      }),
+      event(7, "tool.completed", {
+        callId,
+        name: "exec_command",
+        status: "success",
+      }),
+      event(8, "turn.completed", { steps: 1 }),
+    ];
+
+    const recovered = recoverThread(readResult(events), threadId);
+    expect(recovered.previousStatus).toBe("completed");
+    expect(recovered).not.toHaveProperty("approvalGrants");
+  });
+
+  it("rejects execution when a grant-bearing resolution lacks creation audit", () => {
+    const callId = toolCallIdSchema.parse("missing-grant-audit-call");
+    const events = [
+      event(0, "turn.started", {}),
+      contextEvent(1),
+      event(2, "tool.started", {
+        callId,
+        name: "exec_command",
+        executionBoundary: true,
+      }),
+      event(3, "approval.requested", {
+        callId,
+        name: "exec_command",
+        title: "Run command",
+        summary: "Run exact command",
+        details: 'argv: ["pnpm","test"]',
+        reason: "process execution",
+      }),
+      event(4, "approval.resolved", {
+        callId,
+        decision: "approved",
+        grantId: "grant:missing",
+      }),
+      event(5, "tool.execution_started", {
+        callId,
+        name: "exec_command",
+        effect: "execute",
+      }),
+    ];
+
+    expect(() => recoverThread(readResult(events), threadId)).toThrowError(
+      expect.objectContaining({ code: "THREAD_LOG_INVALID" }),
+    );
+  });
 });
 
 function compactionSummary() {

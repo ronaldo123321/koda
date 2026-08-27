@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { artifactIdSchema } from "./artifacts.js";
+import { approvalGrantIdSchema } from "./approval-grants.js";
 import { workspaceChangeSetRecoverySchema } from "./change-sets.js";
 import { itemIdSchema, toolCallIdSchema, turnIdSchema } from "./ids.js";
 import { jsonObjectSchema, jsonValueSchema } from "./json.js";
@@ -74,13 +75,24 @@ export const toolResultItemSchema = z.object({
     .optional(),
 });
 
-export const approvalItemSchema = z.object({
-  type: z.literal("approval"),
-  id: itemIdSchema,
-  callId: toolCallIdSchema,
-  decision: z.enum(["approved", "rejected"]),
-  reason: z.string().optional(),
-});
+export const approvalItemSchema = z
+  .object({
+    type: z.literal("approval"),
+    id: itemIdSchema,
+    callId: toolCallIdSchema,
+    decision: z.enum(["approved", "rejected"]),
+    reason: z.string().optional(),
+    grantId: approvalGrantIdSchema.optional(),
+  })
+  .superRefine((item, context) => {
+    if (item.grantId !== undefined && item.decision !== "approved") {
+      context.addIssue({
+        code: "custom",
+        message: "Only an approved request can reference a grant.",
+        path: ["grantId"],
+      });
+    }
+  });
 
 export const compactionItemSchema = z.object({
   type: z.literal("compaction"),

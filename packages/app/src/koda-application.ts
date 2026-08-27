@@ -42,6 +42,8 @@ import {
   turnContextSnapshotSchema,
   turnIdSchema,
   type ConversationItem,
+  type ApprovalGrantId,
+  type ApprovalGrantRecord,
   type ContextInstructionReadParams,
   type ContextInstructionReadResult,
   type ContextInstructionSource,
@@ -104,6 +106,8 @@ import {
   type ThreadIndexRecovery,
   type ThreadMetadata,
 } from "@koda/runtime-node";
+
+import { ApprovalGrantRegistry } from "./approval-grant-registry.js";
 
 import {
   ConfigurationError,
@@ -233,6 +237,17 @@ export class ContextInspectionError extends Error {
   }
 }
 
+export class ApprovalGrantError extends Error {
+  public constructor(
+    public readonly code: "INVALID_APPROVAL_GRANT_WORKSPACE",
+    message: string,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = "ApprovalGrantError";
+  }
+}
+
 export interface ThreadQueryResult<T> {
   value: T;
   diagnostics: ThreadIndexDiagnostic[];
@@ -243,6 +258,7 @@ export interface KodaApplicationOptions {
   environment: NodeJS.ProcessEnv;
   processDirectory: string;
   dependencies?: KodaApplicationDependencies;
+  approvalGrantRegistry?: ApprovalGrantRegistry;
 }
 
 export interface KodaApplicationDependencies {
@@ -279,11 +295,14 @@ export class KodaApplication {
   private readonly environment: NodeJS.ProcessEnv;
   private readonly processDirectory: string;
   private readonly dependencies: KodaApplicationDependencies;
+  private readonly approvalGrantRegistry: ApprovalGrantRegistry;
 
   public constructor(options: KodaApplicationOptions) {
     this.environment = options.environment;
     this.processDirectory = options.processDirectory;
     this.dependencies = options.dependencies ?? productionDependencies;
+    this.approvalGrantRegistry =
+      options.approvalGrantRegistry ?? new ApprovalGrantRegistry();
   }
 
   public startTurn(input: StartTurnInput, client: TurnClient): TurnHandle {
@@ -334,6 +353,35 @@ export class KodaApplication {
         (this.environment[provider.credentialEnvironmentVariable]?.trim()
           .length ?? 0) > 0,
     }));
+  }
+
+  public async listApprovalGrants(workspaceInput: string): Promise<{
+    workspace: string;
+    grants: ApprovalGrantRecord[];
+  }> {
+    const workspace =
+      await this.canonicalApprovalGrantWorkspace(workspaceInput);
+    return {
+      workspace,
+      grants: this.approvalGrantRegistry.list(workspace),
+    };
+  }
+
+  public async revokeApprovalGrant(
+    workspaceInput: string,
+    grantId: ApprovalGrantId,
+  ): Promise<boolean> {
+    const workspace =
+      await this.canonicalApprovalGrantWorkspace(workspaceInput);
+    return this.approvalGrantRegistry.revoke(workspace, grantId);
+  }
+
+  public async revokeAllApprovalGrants(
+    workspaceInput: string,
+  ): Promise<number> {
+    const workspace =
+      await this.canonicalApprovalGrantWorkspace(workspaceInput);
+    return this.approvalGrantRegistry.revokeAll(workspace);
   }
 
   public async getRuntimeSettings(
@@ -1023,6 +1071,7 @@ export class KodaApplication {
         ids: ids.itemIds,
         policy: new EffectToolPolicy(configuration.approvalMode),
         approvals: client.approvals,
+        approvalGrants: this.approvalGrantRegistry.forWorkspace(workspace.root),
         contextEngine,
       });
 
@@ -1320,6 +1369,26 @@ export class KodaApplication {
       throw new RuntimeSettingsError(
         "INVALID_RUNTIME_SETTINGS",
         `Workspace '${workspaceInput}' could not be resolved to an existing path.`,
+        { cause: error },
+      );
+    }
+  }
+
+  private async canonicalApprovalGrantWorkspace(
+    workspaceInput: string,
+  ): Promise<string> {
+    try {
+      const workspace = await realpath(
+        resolve(this.processDirectory, workspaceInput),
+      );
+      if (!(await stat(workspace)).isDirectory()) {
+        throw new Error("Workspace is not a directory.");
+      }
+      return workspace;
+    } catch (error) {
+      throw new ApprovalGrantError(
+        "INVALID_APPROVAL_GRANT_WORKSPACE",
+        `Workspace '${workspaceInput}' could not be resolved to an existing directory.`,
         { cause: error },
       );
     }

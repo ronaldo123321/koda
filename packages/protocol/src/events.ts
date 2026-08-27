@@ -9,6 +9,13 @@ import {
 import { conversationItemSchema } from "./items.js";
 import { artifactReferenceSchema } from "./artifacts.js";
 import {
+  approvalGrantCandidateSchema,
+  approvalGrantIdSchema,
+  approvalGrantKeySchema,
+  approvalGrantKindSchema,
+  approvalGrantRecordSchema,
+} from "./approval-grants.js";
+import {
   workspaceChangeSetCommittedPayloadSchema,
   workspaceChangeSetPreparedPayloadSchema,
   workspaceChangeSetRolledBackPayloadSchema,
@@ -37,6 +44,23 @@ function utf8BoundedString(maximumBytes: number) {
       `Text must not exceed ${maximumBytes} UTF-8 bytes.`,
     );
 }
+
+const approvalResolvedPayloadSchema = z
+  .object({
+    callId: toolCallIdSchema,
+    decision: z.enum(["approved", "rejected"]),
+    reason: z.string().optional(),
+    grantId: approvalGrantIdSchema.optional(),
+  })
+  .superRefine((payload, context) => {
+    if (payload.grantId !== undefined && payload.decision !== "approved") {
+      context.addIssue({
+        code: "custom",
+        message: "Only an approved request can reference a grant.",
+        path: ["grantId"],
+      });
+    }
+  });
 
 export const toolEffectSchema = z.enum(["read", "write", "execute"]);
 export const processOwnershipSchema = z.enum([
@@ -214,15 +238,32 @@ export const agentEventSchema = z.discriminatedUnion("type", [
       summary: utf8BoundedString(16_384),
       details: utf8BoundedString(524_288),
       reason: utf8BoundedString(4_096),
+      grantCandidate: approvalGrantCandidateSchema.optional(),
     }),
   }),
   z.object({
     ...metadataShape,
     type: z.literal("approval.resolved"),
+    payload: approvalResolvedPayloadSchema,
+  }),
+  z.object({
+    ...metadataShape,
+    type: z.literal("approval.grant_created"),
     payload: z.object({
       callId: toolCallIdSchema,
-      decision: z.enum(["approved", "rejected"]),
-      reason: z.string().optional(),
+      grant: approvalGrantRecordSchema,
+    }),
+  }),
+  z.object({
+    ...metadataShape,
+    type: z.literal("approval.grant_used"),
+    payload: z.object({
+      callId: toolCallIdSchema,
+      grantId: approvalGrantIdSchema,
+      kind: approvalGrantKindSchema,
+      name: z.literal("exec_command"),
+      key: approvalGrantKeySchema,
+      expiresAt: z.string().datetime({ offset: true }),
     }),
   }),
   z.object({

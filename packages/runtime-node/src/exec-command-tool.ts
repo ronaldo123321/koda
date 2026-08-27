@@ -1,5 +1,11 @@
+import { createHash } from "node:crypto";
+
 import type { ToolRegistry } from "@koda/agent-core";
-import type { JsonValue } from "@koda/protocol";
+import {
+  APPROVAL_GRANT_DEFAULT_TTL_SECONDS,
+  APPROVAL_GRANT_MAXIMUM_TTL_SECONDS,
+  type JsonValue,
+} from "@koda/protocol";
 import { z } from "zod";
 
 import { WorkspaceCommandRunner } from "./workspace-command-runner.js";
@@ -109,6 +115,24 @@ export function registerExecCommandTool(
           title: command.title,
           summary: command.summary,
           details: command.preview,
+          grantCandidate: {
+            kind: "exact_command",
+            key: createHash("sha256")
+              .update(
+                JSON.stringify({
+                  version: 1,
+                  toolName: "exec_command",
+                  workspaceRoot: runner.root,
+                  cwd: command.cwd,
+                  argv: command.argv,
+                  timeoutMs: command.timeoutMs,
+                }),
+              )
+              .digest("hex"),
+            summary: boundedUtf8(command.preview, 1_024),
+            defaultExpiresInSeconds: APPROVAL_GRANT_DEFAULT_TTL_SECONDS,
+            maximumExpiresInSeconds: APPROVAL_GRANT_MAXIMUM_TTL_SECONDS,
+          },
         },
         execute: async (): Promise<JsonValue> => ({
           ...(await command.execute(context.signal, context.report)),
@@ -116,4 +140,15 @@ export function registerExecCommandTool(
       };
     },
   });
+}
+
+function boundedUtf8(value: string, maximumBytes: number): string {
+  const bytes = Buffer.from(value, "utf8");
+  if (bytes.byteLength <= maximumBytes) {
+    return value;
+  }
+  return `${bytes
+    .subarray(0, maximumBytes - 3)
+    .toString("utf8")
+    .replace(/\uFFFD$/u, "")}...`;
 }

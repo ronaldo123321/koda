@@ -14,6 +14,12 @@ import {
   turnIdSchema,
   type ApprovalResolveParams,
   type ApprovalResolveResult,
+  type ApprovalGrantsListParams,
+  type ApprovalGrantsListResult,
+  type ApprovalGrantsRevokeAllParams,
+  type ApprovalGrantsRevokeAllResult,
+  type ApprovalGrantsRevokeParams,
+  type ApprovalGrantsRevokeResult,
   type ArtifactReadParams,
   type ArtifactReadResult,
   type ContextInstructionReadParams,
@@ -357,6 +363,62 @@ describe("TuiController", () => {
     expect(controller.getSnapshot().activeTurn?.tools[0]).toMatchObject({
       status: "approved",
     });
+  });
+
+  it("creates a default 15-minute exact-command grant and manages grants", async () => {
+    const client = new FakeAppServerClient();
+    const controller = createController(client);
+    await controller.startPrompt("Run tests");
+    const callId = toolCallIdSchema.parse("approval-grant-call");
+    client.emitEvent("tool.started", { callId, name: "exec_command" });
+    client.emitEvent("approval.requested", {
+      callId,
+      name: "exec_command",
+      title: 'Run "pnpm"',
+      summary: "Run tests",
+      details: 'argv: ["pnpm","test"]',
+      reason: "process execution",
+      grantCandidate: {
+        kind: "exact_command",
+        key: "a".repeat(64),
+        summary: 'argv: ["pnpm","test"]',
+        defaultExpiresInSeconds: 900,
+        maximumExpiresInSeconds: 3600,
+      },
+    });
+
+    await controller.resolveApproval("approved", true);
+    expect(client.approvalRequests).toEqual([
+      expect.objectContaining({
+        callId: "approval-grant-call",
+        decision: "approved",
+        grant: { expiresInSeconds: 900 },
+      }),
+    ]);
+
+    const idleClient = new FakeAppServerClient();
+    const idleController = createController(idleClient);
+    idleController.setInput("/approvals");
+    await idleController.submitInput();
+    idleController.setInput("/approvals revoke grant:test-1");
+    await idleController.submitInput();
+    idleController.setInput("/approvals clear");
+    await idleController.submitInput();
+    expect(idleClient.approvalGrantListRequests).toEqual([
+      { workspace: "/workspace" },
+    ]);
+    expect(idleClient.approvalGrantRevokeRequests).toEqual([
+      { workspace: "/workspace", grantId: "grant:test-1" },
+    ]);
+    expect(idleClient.approvalGrantRevokeAllRequests).toEqual([
+      { workspace: "/workspace" },
+    ]);
+    expect(
+      idleController
+        .getSnapshot()
+        .transcript.map((entry) => entry.text)
+        .join("\n"),
+    ).toContain("No active session command approval grants.");
   });
 
   it("projects change-set commit and uncertainty evidence into tool status", async () => {
@@ -1396,6 +1458,7 @@ class FakeAppServerClient implements AppServerClientApi {
         contextInspection: true,
         multiFileChanges: true,
         patchDocuments: true,
+        approvalGrants: true,
       },
       providers: [
         provider("openai", "OpenAI", "OPENAI_API_KEY", "gpt-5.6-terra"),
@@ -1413,6 +1476,11 @@ class FakeAppServerClient implements AppServerClientApi {
   public readonly startRequests: TurnStartParams[] = [];
   public readonly cancelRequests: TurnCancelParams[] = [];
   public readonly approvalRequests: ApprovalResolveParams[] = [];
+  public readonly approvalGrantListRequests: ApprovalGrantsListParams[] = [];
+  public readonly approvalGrantRevokeRequests: ApprovalGrantsRevokeParams[] =
+    [];
+  public readonly approvalGrantRevokeAllRequests: ApprovalGrantsRevokeAllParams[] =
+    [];
   public readonly threadListRequests: ThreadListParams[] = [];
   public readonly threadGetRequests: ThreadGetParams[] = [];
   public readonly threadEventRequests: ThreadEventsParams[] = [];
@@ -1637,6 +1705,27 @@ class FakeAppServerClient implements AppServerClientApi {
   ): Promise<ApprovalResolveResult> {
     this.approvalRequests.push(params);
     return Promise.resolve({ accepted: true });
+  }
+
+  public listApprovalGrants(
+    params: ApprovalGrantsListParams,
+  ): Promise<ApprovalGrantsListResult> {
+    this.approvalGrantListRequests.push(params);
+    return Promise.resolve({ workspace: params.workspace, grants: [] });
+  }
+
+  public revokeApprovalGrant(
+    params: ApprovalGrantsRevokeParams,
+  ): Promise<ApprovalGrantsRevokeResult> {
+    this.approvalGrantRevokeRequests.push(params);
+    return Promise.resolve({ revoked: true });
+  }
+
+  public revokeAllApprovalGrants(
+    params: ApprovalGrantsRevokeAllParams,
+  ): Promise<ApprovalGrantsRevokeAllResult> {
+    this.approvalGrantRevokeAllRequests.push(params);
+    return Promise.resolve({ revokedCount: 0 });
   }
 
   public onNotification(

@@ -10,6 +10,7 @@ import {
   toolResultItemSchema,
   userMessageItemSchema,
   type AssistantMessageItem,
+  type ApprovalGrantRecord,
   type ConversationItem,
   type ItemId,
   type ProviderState,
@@ -38,6 +39,8 @@ import {
   denySideEffectsPolicy,
   rejectApprovalsBroker,
   type ApprovalBroker,
+  type ApprovalGrantManager,
+  type PreparedApprovalGrant,
   type ToolPolicy,
 } from "./policy.js";
 import {
@@ -58,6 +61,7 @@ export interface AgentLoopOptions {
   ids: ItemIdFactory;
   policy?: ToolPolicy;
   approvals?: ApprovalBroker;
+  approvalGrants?: ApprovalGrantManager;
   clock?: Clock;
   maxSteps?: number;
   maxModelOutputBytes?: number;
@@ -108,6 +112,7 @@ export class AgentLoop {
   private readonly ids: ItemIdFactory;
   private readonly policy: ToolPolicy;
   private readonly approvals: ApprovalBroker;
+  private readonly approvalGrants: ApprovalGrantManager | undefined;
   private readonly clock: Clock;
   private readonly maxSteps: number;
   private readonly maxModelOutputBytes: number;
@@ -120,6 +125,7 @@ export class AgentLoop {
     this.ids = options.ids;
     this.policy = options.policy ?? denySideEffectsPolicy;
     this.approvals = options.approvals ?? rejectApprovalsBroker;
+    this.approvalGrants = options.approvalGrants;
     this.clock = options.clock ?? systemClock;
     this.maxSteps = options.maxSteps ?? DEFAULT_MAX_STEPS;
     this.maxModelOutputBytes =
@@ -705,6 +711,24 @@ export class AgentLoop {
       };
     }
 
+    const candidate = prepared.approval.grantCandidate;
+    if (candidate !== undefined && this.approvalGrants !== undefined) {
+      const grant = this.approvalGrants.match(call.name, candidate);
+      if (grant !== undefined) {
+        await this.recordGrantUse(recorder, call, grant);
+        if (!this.approvalGrants.markUsed(grant.id)) {
+          return {
+            status: "error",
+            error: {
+              code: "APPROVAL_GRANT_UNAVAILABLE",
+              message: `Approval grant '${grant.id}' is no longer active.`,
+            },
+          };
+        }
+        return this.executePrepared(recorder, call, prepared);
+      }
+    }
+
     const request = {
       callId: call.callId,
       name: call.name,
@@ -733,26 +757,90 @@ export class AgentLoop {
       };
     }
 
+    let pendingGrant: PreparedApprovalGrant | undefined;
+    let grantError: { code: string; message: string } | undefined;
+    if (decision.decision === "approved" && decision.grant !== undefined) {
+      if (candidate === undefined || this.approvalGrants === undefined) {
+        grantError = {
+          code: "APPROVAL_GRANT_UNAVAILABLE",
+          message: "This approval request cannot create a reusable grant.",
+        };
+      } else {
+        try {
+          pendingGrant = this.approvalGrants.prepare(
+            call.name,
+            candidate,
+            decision.grant,
+          );
+        } catch (error) {
+          grantError = approvalGrantError(error);
+        }
+      }
+    }
+
     const approvalItem = approvalItemSchema.parse({
       type: "approval",
       id: this.ids.next(),
       callId: call.callId,
       decision: decision.decision,
       ...(decision.reason === undefined ? {} : { reason: decision.reason }),
+      ...(pendingGrant === undefined
+        ? {}
+        : { grantId: pendingGrant.record.id }),
     });
-    items.push(approvalItem);
-    await recorder.record({
-      type: "item.recorded",
-      payload: { item: approvalItem },
-    });
-    await recorder.record({
-      type: "approval.resolved",
-      payload: {
-        callId: call.callId,
-        decision: decision.decision,
-        ...(decision.reason === undefined ? {} : { reason: decision.reason }),
-      },
-    });
+    try {
+      items.push(approvalItem);
+      await recorder.record({
+        type: "item.recorded",
+        payload: { item: approvalItem },
+      });
+      await recorder.record({
+        type: "approval.resolved",
+        payload: {
+          callId: call.callId,
+          decision: decision.decision,
+          ...(decision.reason === undefined ? {} : { reason: decision.reason }),
+          ...(pendingGrant === undefined
+            ? {}
+            : { grantId: pendingGrant.record.id }),
+        },
+      });
+    } catch (error) {
+      pendingGrant?.cancel();
+      throw new ToolOperationalEventError(
+        `Could not persist approval resolution for '${call.name}'.`,
+        { cause: error },
+      );
+    }
+
+    if (grantError !== undefined) {
+      return {
+        status: "error",
+        error: {
+          code: grantError.code,
+          message: grantError.message,
+        },
+      };
+    }
+
+    if (pendingGrant !== undefined) {
+      try {
+        await recorder.record({
+          type: "approval.grant_created",
+          payload: {
+            callId: call.callId,
+            grant: pendingGrant.record,
+          },
+        });
+        pendingGrant.activate();
+      } catch (error) {
+        pendingGrant.cancel();
+        throw new ToolOperationalEventError(
+          `Could not persist approval.grant_created for '${call.name}'.`,
+          { cause: error },
+        );
+      }
+    }
 
     return decision.decision === "approved"
       ? this.executePrepared(recorder, call, prepared)
@@ -763,6 +851,31 @@ export class AgentLoop {
             message: decision.reason ?? "The user rejected this tool call.",
           },
         };
+  }
+
+  private async recordGrantUse(
+    recorder: TurnEventRecorder,
+    call: Extract<ModelEvent, { type: "tool_call" }>,
+    grant: ApprovalGrantRecord,
+  ): Promise<void> {
+    try {
+      await recorder.record({
+        type: "approval.grant_used",
+        payload: {
+          callId: call.callId,
+          grantId: grant.id,
+          kind: grant.kind,
+          name: grant.toolName,
+          key: grant.key,
+          expiresAt: grant.expiresAt,
+        },
+      });
+    } catch (error) {
+      throw new ToolOperationalEventError(
+        `Could not persist approval.grant_used for '${call.name}'.`,
+        { cause: error },
+      );
+    }
   }
 
   private async executePrepared(
@@ -848,6 +961,25 @@ export class AgentLoop {
       usage: copyTurnUsage(usage),
     };
   }
+}
+
+function approvalGrantError(error: unknown): { code: string; message: string } {
+  const code =
+    error !== null &&
+    typeof error === "object" &&
+    "code" in error &&
+    typeof error.code === "string" &&
+    [
+      "APPROVAL_GRANT_INVALID",
+      "APPROVAL_GRANT_UNAVAILABLE",
+      "APPROVAL_GRANT_LIMIT_EXCEEDED",
+    ].includes(error.code)
+      ? error.code
+      : "APPROVAL_GRANT_INVALID";
+  return {
+    code,
+    message: error instanceof Error ? error.message : String(error),
+  };
 }
 
 function providerErrorCode(error: unknown): string {

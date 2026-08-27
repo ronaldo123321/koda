@@ -1,4 +1,11 @@
-import type { JsonObject, ToolCallId } from "@koda/protocol";
+import type {
+  ApprovalGrantCandidate,
+  ApprovalGrantId,
+  ApprovalGrantRecord,
+  ApprovalGrantSelection,
+  JsonObject,
+  ToolCallId,
+} from "@koda/protocol";
 
 export type ToolEffect = "read" | "write" | "execute";
 
@@ -22,6 +29,7 @@ export interface ToolApprovalPreview {
   title: string;
   summary: string;
   details: string;
+  grantCandidate?: ApprovalGrantCandidate;
 }
 
 export interface ApprovalRequest extends ToolApprovalPreview {
@@ -31,8 +39,31 @@ export interface ApprovalRequest extends ToolApprovalPreview {
 }
 
 export type ApprovalDecision =
-  | { decision: "approved"; reason?: string }
+  | {
+      decision: "approved";
+      reason?: string;
+      grant?: ApprovalGrantSelection;
+    }
   | { decision: "rejected"; reason?: string };
+
+export interface PreparedApprovalGrant {
+  record: ApprovalGrantRecord;
+  activate(): void;
+  cancel(): void;
+}
+
+export interface ApprovalGrantManager {
+  match(
+    toolName: string,
+    candidate: ApprovalGrantCandidate,
+  ): ApprovalGrantRecord | undefined;
+  prepare(
+    toolName: string,
+    candidate: ApprovalGrantCandidate,
+    selection: ApprovalGrantSelection,
+  ): PreparedApprovalGrant;
+  markUsed(grantId: ApprovalGrantId): boolean;
+}
 
 export interface ApprovalBroker {
   request(

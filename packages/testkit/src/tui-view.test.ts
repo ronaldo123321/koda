@@ -109,6 +109,22 @@ describe("Koda Ink view", () => {
     expect(controller.resolveApproval).toHaveBeenCalledWith("approved");
     expect(controller.toggleApprovalDetails).toHaveBeenCalledOnce();
 
+    state.approval = {
+      ...state.approval,
+      grantCandidate: {
+        kind: "exact_command",
+        key: "a".repeat(64),
+        summary: "exact command",
+        defaultExpiresInSeconds: 900,
+        maximumExpiresInSeconds: 3600,
+      },
+    };
+    routeTuiInput(controller, state, "a", key(), vi.fn());
+    expect(controller.resolveApproval).toHaveBeenLastCalledWith(
+      "approved",
+      true,
+    );
+
     state.approval = undefined;
     state.activeTurn = {
       localId: 1,
@@ -658,6 +674,7 @@ function baseState(): TuiState {
       contextInspection: true,
       multiFileChanges: true,
       patchDocuments: true,
+      approvalGrants: true,
     },
     providers: [
       {

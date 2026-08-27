@@ -6,6 +6,11 @@ import {
   artifactSha256Schema,
 } from "./artifacts.js";
 import {
+  approvalGrantIdSchema,
+  approvalGrantRecordSchema,
+  approvalGrantSelectionSchema,
+} from "./approval-grants.js";
+import {
   contextPreparedPayloadSchema,
   turnContextSnapshotSchema,
 } from "./context.js";
@@ -16,7 +21,7 @@ import { jsonValueSchema } from "./json.js";
 import { tokenUsageSchema } from "./usage.js";
 import { modelProviderIdSchema, providerMetadataSchema } from "./providers.js";
 
-export const APP_SERVER_PROTOCOL_VERSION = 9 as const;
+export const APP_SERVER_PROTOCOL_VERSION = 10 as const;
 
 export const THREAD_EVENTS_DEFAULT_LIMIT = 200;
 export const THREAD_EVENTS_MAXIMUM_LIMIT = 200;
@@ -49,6 +54,7 @@ export const CONTEXT_INSTRUCTION_READ_MINIMUM_BYTES = 4;
 export const CONTEXT_INSTRUCTION_READ_MAXIMUM_BYTES = 64 * 1_024;
 export const CONTEXT_INSTRUCTION_READ_RESULT_BUDGET_BYTES = 80 * 1_024;
 export const CONTEXT_WORKSPACE_BUDGET_BYTES = 4_096;
+export const APPROVAL_GRANTS_RESULT_BUDGET_BYTES = 128 * 1_024;
 
 export const APP_SERVER_RPC_ERROR_CODE = {
   PARSE: -32700,
@@ -162,6 +168,7 @@ export const initializeResultSchema = z
         contextInspection: z.literal(true),
         multiFileChanges: z.literal(true),
         patchDocuments: z.literal(true),
+        approvalGrants: z.literal(true),
       })
       .strict(),
     providers: z.array(runtimeProviderMetadataSchema).min(1),
@@ -1062,11 +1069,61 @@ export const approvalResolveParamsSchema = z
     callId: toolCallIdSchema,
     decision: z.enum(["approved", "rejected"]),
     reason: z.string().max(1_000).optional(),
+    grant: approvalGrantSelectionSchema.optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((input, context) => {
+    if (input.grant !== undefined && input.decision !== "approved") {
+      context.addIssue({
+        code: "custom",
+        message: "Only an approved request can create a grant.",
+        path: ["grant"],
+      });
+    }
+  });
 
 export const approvalResolveResultSchema = z
   .object({ accepted: z.literal(true) })
+  .strict();
+
+const approvalGrantWorkspaceSchema = z
+  .string()
+  .min(1)
+  .refine(
+    (value) =>
+      new TextEncoder().encode(value).byteLength <=
+      RUNTIME_SETTINGS_WORKSPACE_BUDGET_BYTES,
+    `Workspace must not exceed ${RUNTIME_SETTINGS_WORKSPACE_BUDGET_BYTES} UTF-8 bytes.`,
+  );
+
+export const approvalGrantsListParamsSchema = z
+  .object({ workspace: approvalGrantWorkspaceSchema })
+  .strict();
+
+export const approvalGrantsListResultSchema = z
+  .object({
+    workspace: approvalGrantWorkspaceSchema,
+    grants: z.array(approvalGrantRecordSchema).max(64),
+  })
+  .strict();
+
+export const approvalGrantsRevokeParamsSchema = z
+  .object({
+    workspace: approvalGrantWorkspaceSchema,
+    grantId: approvalGrantIdSchema,
+  })
+  .strict();
+
+export const approvalGrantsRevokeResultSchema = z
+  .object({ revoked: z.boolean() })
+  .strict();
+
+export const approvalGrantsRevokeAllParamsSchema = z
+  .object({ workspace: approvalGrantWorkspaceSchema })
+  .strict();
+
+export const approvalGrantsRevokeAllResultSchema = z
+  .object({ revokedCount: z.number().int().safe().nonnegative().max(64) })
   .strict();
 
 export const shutdownParamsSchema = z.object({}).strict();
@@ -1158,6 +1215,24 @@ export type TurnCancelParams = z.infer<typeof turnCancelParamsSchema>;
 export type TurnCancelResult = z.infer<typeof turnCancelResultSchema>;
 export type ApprovalResolveParams = z.infer<typeof approvalResolveParamsSchema>;
 export type ApprovalResolveResult = z.infer<typeof approvalResolveResultSchema>;
+export type ApprovalGrantsListParams = z.infer<
+  typeof approvalGrantsListParamsSchema
+>;
+export type ApprovalGrantsListResult = z.infer<
+  typeof approvalGrantsListResultSchema
+>;
+export type ApprovalGrantsRevokeParams = z.infer<
+  typeof approvalGrantsRevokeParamsSchema
+>;
+export type ApprovalGrantsRevokeResult = z.infer<
+  typeof approvalGrantsRevokeResultSchema
+>;
+export type ApprovalGrantsRevokeAllParams = z.infer<
+  typeof approvalGrantsRevokeAllParamsSchema
+>;
+export type ApprovalGrantsRevokeAllResult = z.infer<
+  typeof approvalGrantsRevokeAllResultSchema
+>;
 export type ShutdownResult = z.infer<typeof shutdownResultSchema>;
 export type TurnEventNotificationParams = z.infer<
   typeof turnEventNotificationParamsSchema

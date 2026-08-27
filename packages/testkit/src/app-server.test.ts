@@ -91,6 +91,7 @@ describe("KodaAppServer", () => {
         contextInspection: true,
         multiFileChanges: true,
         patchDocuments: true,
+        approvalGrants: true,
       },
       providers: [
         { id: "openai", defaultModel: "gpt-5.6-terra", configured: true },
@@ -478,6 +479,210 @@ describe("KodaAppServer", () => {
     expect(server.shouldClose).toBe(true);
   });
 
+  it("creates, lists, and revokes a session-scoped exact command grant", async () => {
+    const fixture = await createFixture();
+    const provider = new ScriptedModelProvider([
+      {
+        events: [
+          {
+            type: "tool_call",
+            callId: toolCallIdSchema.parse("server-grant-call"),
+            name: "exec_command",
+            arguments: {
+              argv: [process.execPath, "-e", "process.stdout.write('ok')"],
+            },
+          },
+          { type: "completed", finishReason: "tool_calls" },
+        ],
+      },
+      {
+        events: [
+          { type: "assistant_delta", text: "Command completed." },
+          { type: "completed", finishReason: "stop" },
+        ],
+      },
+    ]);
+    const writer = new MemoryProtocolWriter();
+    const server = createServer(fixture, writer, provider, "server-grant");
+    await initialize(server, 1);
+    await request(server, 2, "turn/start", {
+      prompt: "Run a local command.",
+      cwd: fixture.workspaceRoot,
+      approvalMode: "on-request",
+    });
+    const start = responseResult(writer, 2) as { turnId: string };
+    const requested = await waitForMessage(
+      writer,
+      (message) =>
+        notificationMethod(message) === "turn/event" &&
+        eventType(message) === "approval.requested",
+    );
+    expect(requested).toMatchObject({
+      params: {
+        event: {
+          payload: {
+            grantCandidate: {
+              kind: "exact_command",
+              defaultExpiresInSeconds: 900,
+              maximumExpiresInSeconds: 3600,
+            },
+          },
+        },
+      },
+    });
+    await request(server, 3, "approval/resolve", {
+      turnId: start.turnId,
+      callId: "server-grant-call",
+      decision: "approved",
+      grant: { expiresInSeconds: 900 },
+    });
+    await waitForMessage(
+      writer,
+      (message) => notificationMethod(message) === "turn/finished",
+    );
+    expect(
+      writer.messages.some(
+        (message) =>
+          notificationMethod(message) === "turn/event" &&
+          eventType(message) === "approval.grant_created",
+      ),
+    ).toBe(true);
+
+    await request(server, 4, "approval/grants/list", {
+      workspace: fixture.workspaceRoot,
+    });
+    const listed = responseResult(writer, 4) as {
+      grants: Array<{ id: string; uses: number }>;
+    };
+    expect(listed.grants).toHaveLength(1);
+    expect(listed.grants[0]).toMatchObject({ uses: 0 });
+    const grantId = listed.grants[0]?.id;
+    if (grantId === undefined) {
+      throw new Error("Grant fixture was not returned.");
+    }
+    await request(server, 5, "approval/grants/revoke", {
+      workspace: fixture.workspaceRoot,
+      grantId,
+    });
+    expect(responseResult(writer, 5)).toEqual({ revoked: true });
+    await request(server, 6, "approval/grants/revokeAll", {
+      workspace: fixture.workspaceRoot,
+    });
+    expect(responseResult(writer, 6)).toEqual({ revokedCount: 0 });
+  });
+
+  it("reuses an exact command grant across app-server turns", async () => {
+    const fixture = await createFixture();
+    const argv = [process.execPath, "-e", "process.stdout.write('reuse')"];
+    const provider = new ScriptedModelProvider([
+      {
+        events: [
+          {
+            type: "tool_call",
+            callId: toolCallIdSchema.parse("server-reuse-create-call"),
+            name: "exec_command",
+            arguments: { argv },
+          },
+          { type: "completed", finishReason: "tool_calls" },
+        ],
+      },
+      { events: [{ type: "completed", finishReason: "stop" }] },
+      {
+        events: [
+          {
+            type: "tool_call",
+            callId: toolCallIdSchema.parse("server-reuse-use-call"),
+            name: "exec_command",
+            arguments: { argv },
+          },
+          { type: "completed", finishReason: "tool_calls" },
+        ],
+      },
+      { events: [{ type: "completed", finishReason: "stop" }] },
+    ]);
+    let idCursor = 0;
+    const application = new KodaApplication({
+      environment: {
+        OPENAI_API_KEY: "offline-test-key",
+        KODA_HOME: fixture.kodaHome,
+      },
+      processDirectory: fixture.root,
+      dependencies: {
+        openWorkspace: (root) => ReadOnlyWorkspace.open(root),
+        createProvider: () => provider,
+        createIds: () => {
+          idCursor += 1;
+          return {
+            threadId: threadIdSchema.parse(`server-reuse-thread-${idCursor}`),
+            turnId: turnIdSchema.parse(`server-reuse-turn-${idCursor}`),
+            itemIds: new DeterministicItemIdFactory(
+              `server-reuse-${idCursor}-item`,
+            ),
+          };
+        },
+      },
+    });
+    const writer = new MemoryProtocolWriter();
+    const server = new KodaAppServer({
+      application,
+      writer,
+      serverVersion: "test",
+    });
+    await initialize(server, 1);
+    await request(server, 2, "turn/start", {
+      prompt: "Run once and remember.",
+      cwd: fixture.workspaceRoot,
+      approvalMode: "on-request",
+    });
+    const first = responseResult(writer, 2) as { turnId: string };
+    await waitForMessage(
+      writer,
+      (message) =>
+        eventType(message) === "approval.requested" &&
+        eventCallId(message) === "server-reuse-create-call",
+    );
+    await request(server, 3, "approval/resolve", {
+      turnId: first.turnId,
+      callId: "server-reuse-create-call",
+      decision: "approved",
+      grant: { expiresInSeconds: 900 },
+    });
+    await waitForMessage(
+      writer,
+      (message) => finishedTurnId(message) === first.turnId,
+    );
+
+    await request(server, 4, "turn/start", {
+      prompt: "Run the same command again.",
+      cwd: fixture.workspaceRoot,
+      approvalMode: "on-request",
+    });
+    const second = responseResult(writer, 4) as { turnId: string };
+    await waitForMessage(
+      writer,
+      (message) =>
+        eventType(message) === "approval.grant_used" &&
+        eventCallId(message) === "server-reuse-use-call",
+    );
+    await waitForMessage(
+      writer,
+      (message) => finishedTurnId(message) === second.turnId,
+    );
+    expect(
+      writer.messages.some(
+        (message) =>
+          eventType(message) === "approval.requested" &&
+          eventCallId(message) === "server-reuse-use-call",
+      ),
+    ).toBe(false);
+    await request(server, 5, "approval/grants/list", {
+      workspace: fixture.workspaceRoot,
+    });
+    expect(responseResult(writer, 5)).toMatchObject({
+      grants: [{ uses: 1 }],
+    });
+  });
+
   it("cancels an active turn and emits a finished notification", async () => {
     const fixture = await createFixture();
     let started: (() => void) | undefined;
@@ -843,6 +1048,25 @@ function eventType(message: JsonValue): string | undefined {
     isObject(params.event) &&
     typeof params.event.type === "string"
     ? params.event.type
+    : undefined;
+}
+
+function eventCallId(message: JsonValue): string | undefined {
+  const params = notificationParams(message);
+  return isObject(params) &&
+    isObject(params.event) &&
+    isObject(params.event.payload) &&
+    typeof params.event.payload.callId === "string"
+    ? params.event.payload.callId
+    : undefined;
+}
+
+function finishedTurnId(message: JsonValue): string | undefined {
+  const params = notificationParams(message);
+  return notificationMethod(message) === "turn/finished" &&
+    isObject(params) &&
+    typeof params.turnId === "string"
+    ? params.turnId
     : undefined;
 }
 

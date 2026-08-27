@@ -1,6 +1,6 @@
 # Koda Phase 3F3: Session-Scoped Exact-Command Approval Grants
 
-- Status: Accepted; implementation in progress
+- Status: Implemented and verified
 - Date: 2026-08-28
 - Depends on: Phase 1C structured command execution, Phase 2 durable execution boundaries, Phase 3A app-server, and Phase 3D Ink approvals
 - Scope: bounded, inspectable, expiring, revocable in-memory grants for repeating one exact normalized `exec_command` within one canonical workspace
@@ -25,7 +25,7 @@ Automatic Git commits are also deferred. They are repository workflows, not appr
 
 ## 3. Exact authorization identity
 
-`exec_command` continues to accept structured `argv`, optional workspace-relative `cwd`, and optional `timeout_ms`. During read-only preparation, the command runner already resolves the executable, canonical working directory, and effective timeout. The tool adds one optional approval grant candidate:
+`exec_command` continues to accept structured `argv`, optional workspace-relative `cwd`, and optional `timeout_ms`. During read-only preparation, the command runner validates the executable token and arguments, resolves the canonical working directory, and applies the effective timeout. The tool adds one optional approval grant candidate:
 
 ```ts
 interface ApprovalGrantCandidate {
@@ -132,7 +132,7 @@ Offline tests must cover:
 - durable created/used/execution ordering, persistence failure before activation/use, and recovery that audits but never reconstructs grants;
 - protocol v10 strict schemas, capability negotiation, list/revoke/revoke-all authorization and response budgets;
 - Node client methods, app-server multi-turn reuse, CLI compatibility, TUI `a` handling, `/approvals` commands, status rendering, and stale/disconnected failures;
-- all existing format, build/typecheck, offline tests, deterministic reliability scenarios, and a real TTY flow that creates, lists, uses, revokes, and clears a grant without a live provider request.
+- all existing format, build/typecheck, offline tests, deterministic reliability scenarios, app-server grant create/reuse/revoke integration, and a real TTY flow that lists and clears grants, reports status, shuts down cleanly, and restores the terminal without a live provider request.
 
 ## 10. Deliberate deferrals
 
@@ -145,3 +145,11 @@ Phase 3F3 does not include command-prefix, executable-only, directory-wide, prov
 3. Integrate AgentLoop match/create/use ordering and recovery validation.
 4. Add app-server/client list and revocation paths plus Ink approval and command UX.
 5. Add focused and end-to-end tests, update README/roadmap, run all gates and real TTY smoke, then mark the slice verified.
+
+## 12. Implementation result
+
+Phase 3F3 is implemented on `main` with protocol v10. The built-in `exec_command` emits a SHA-256 candidate over the canonical workspace, normalized working directory, complete argument vector, and effective timeout. One `KodaApplication` owns the bounded in-memory registry; duplicate exact identities are replaced only after new creation evidence is durable, expiry and revocation are rechecked before use, and `never` remains authoritative.
+
+AgentLoop records `approval.grant_created` before activation and `approval.grant_used` before the execution boundary. Recovery validates creation/use ordering and workspace identity but exposes no capability-restoration path. App-server and the Node client implement strict, bounded list/revoke/revoke-all RPCs. Ink supports `a`, `/approvals`, `/approvals revoke <id>`, and `/approvals clear`; the CLI remains one-shot.
+
+Verification completed with formatting, build/typecheck, 40/40 offline test files and 316/316 tests, all 6 deterministic reliability scenarios, app-server multi-turn reuse without a second approval request, and a real TTY smoke covering protocol v10 startup, empty grant listing, revoke-all, `/status`, graceful shutdown, and normal terminal restoration.

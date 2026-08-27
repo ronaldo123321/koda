@@ -3,6 +3,12 @@ import {
   APP_SERVER_RPC_ERROR_CODE,
   agentEventSchema,
   approvalResolveParamsSchema,
+  approvalGrantCandidateSchema,
+  approvalGrantRecordSchema,
+  approvalGrantsListParamsSchema,
+  approvalGrantsListResultSchema,
+  approvalGrantsRevokeAllParamsSchema,
+  approvalGrantsRevokeParamsSchema,
   artifactReadParamsSchema,
   artifactReadResultSchema,
   contextInstructionReadParamsSchema,
@@ -32,7 +38,7 @@ import { describe, expect, it } from "vitest";
 
 describe("app-server protocol", () => {
   it("accepts strict versioned requests and safe JSON-RPC IDs", () => {
-    expect(APP_SERVER_PROTOCOL_VERSION).toBe(9);
+    expect(APP_SERVER_PROTOCOL_VERSION).toBe(10);
     expect(
       jsonRpcRequestSchema.parse({
         jsonrpc: "2.0",
@@ -121,6 +127,73 @@ describe("app-server protocol", () => {
       id: "request-1",
       error: { data: { code: "SERVER_NOT_INITIALIZED" } },
     });
+  });
+
+  it("validates exact-command grant candidates, decisions, records, and RPCs", () => {
+    const candidate = approvalGrantCandidateSchema.parse({
+      kind: "exact_command",
+      key: "a".repeat(64),
+      summary: 'argv: ["pnpm","test"]',
+      defaultExpiresInSeconds: 900,
+      maximumExpiresInSeconds: 3600,
+    });
+    const record = approvalGrantRecordSchema.parse({
+      id: "grant:protocol",
+      kind: candidate.kind,
+      toolName: "exec_command",
+      workspaceRoot: "/workspace",
+      key: candidate.key,
+      summary: candidate.summary,
+      createdAt: "2026-08-28T00:00:00.000Z",
+      expiresAt: "2026-08-28T00:15:00.000Z",
+      uses: 0,
+    });
+
+    expect(
+      approvalResolveParamsSchema.parse({
+        turnId: "turn",
+        callId: "call",
+        decision: "approved",
+        grant: { expiresInSeconds: 900 },
+      }),
+    ).toHaveProperty("grant.expiresInSeconds", 900);
+    expect(() =>
+      approvalResolveParamsSchema.parse({
+        turnId: "turn",
+        callId: "call",
+        decision: "rejected",
+        grant: { expiresInSeconds: 900 },
+      }),
+    ).toThrow();
+    expect(() =>
+      approvalResolveParamsSchema.parse({
+        turnId: "turn",
+        callId: "call",
+        decision: "approved",
+        grant: { expiresInSeconds: 59 },
+      }),
+    ).toThrow();
+    expect(
+      approvalGrantsListResultSchema.parse({
+        workspace: "/workspace",
+        grants: [record],
+      }),
+    ).toMatchObject({ grants: [{ id: "grant:protocol" }] });
+    expect(
+      approvalGrantsListParamsSchema.parse({ workspace: "/workspace" }),
+    ).toEqual({ workspace: "/workspace" });
+    expect(
+      approvalGrantsRevokeParamsSchema.parse({
+        workspace: "/workspace",
+        grantId: "grant:protocol",
+      }),
+    ).toHaveProperty("grantId", "grant:protocol");
+    expect(
+      approvalGrantsRevokeAllParamsSchema.parse({ workspace: "/workspace" }),
+    ).toEqual({ workspace: "/workspace" });
+    expect(() =>
+      approvalGrantRecordSchema.parse({ ...record, uses: -1 }),
+    ).toThrow();
   });
 
   it("validates strict chronological thread event pages", () => {

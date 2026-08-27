@@ -258,6 +258,7 @@ describe("NodeAppServerClient", () => {
         contextInspection: true,
         multiFileChanges: true,
         patchDocuments: true,
+        approvalGrants: true,
       },
       providers: [
         { id: "openai", configured: true },
@@ -273,6 +274,18 @@ describe("NodeAppServerClient", () => {
     await expect(
       client.getRuntimeSettings({ workspace: canonicalRoot }),
     ).resolves.toMatchObject({ revision: 0, diagnostics: [] });
+    await expect(
+      client.listApprovalGrants({ workspace: canonicalRoot }),
+    ).resolves.toEqual({ workspace: canonicalRoot, grants: [] });
+    await expect(
+      client.revokeApprovalGrant({
+        workspace: canonicalRoot,
+        grantId: "grant:not-present",
+      }),
+    ).resolves.toEqual({ revoked: false });
+    await expect(
+      client.revokeAllApprovalGrants({ workspace: canonicalRoot }),
+    ).resolves.toEqual({ revokedCount: 0 });
     await expect(
       client.updateRuntimeSettings({
         workspace: canonicalRoot,
@@ -484,6 +497,7 @@ function fixtureServerScript(options: {
       contextInspection: true,
       multiFileChanges: true,
       patchDocuments: true,
+      approvalGrants: true,
     },
     providers: [
       {
