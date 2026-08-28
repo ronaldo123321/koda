@@ -23,6 +23,13 @@ import {
 } from "./change-sets.js";
 import { tokenUsageSchema, turnUsageSchema } from "./usage.js";
 import {
+  planAcceptanceRequestedPayloadSchema,
+  planAcceptanceResolvedPayloadSchema,
+  planCheckpointedPayloadSchema,
+  planUpdatedPayloadSchema,
+  turnPausedPayloadSchema,
+} from "./plans.js";
+import {
   contextPreparedPayloadSchema,
   turnContextSnapshotSchema,
 } from "./context.js";
@@ -277,12 +284,37 @@ export const agentEventSchema = z.discriminatedUnion("type", [
   }),
   z.object({
     ...metadataShape,
+    type: z.literal("plan.updated"),
+    payload: planUpdatedPayloadSchema,
+  }),
+  z.object({
+    ...metadataShape,
+    type: z.literal("plan.checkpointed"),
+    payload: planCheckpointedPayloadSchema,
+  }),
+  z.object({
+    ...metadataShape,
+    type: z.literal("plan.acceptance_requested"),
+    payload: planAcceptanceRequestedPayloadSchema,
+  }),
+  z.object({
+    ...metadataShape,
+    type: z.literal("plan.acceptance_resolved"),
+    payload: planAcceptanceResolvedPayloadSchema,
+  }),
+  z.object({
+    ...metadataShape,
     type: z.literal("turn.completed"),
     payload: z.object({
       finalMessageId: itemIdSchema.optional(),
       steps: z.number().int().positive(),
       usage: turnUsageSchema.optional(),
     }),
+  }),
+  z.object({
+    ...metadataShape,
+    type: z.literal("turn.paused"),
+    payload: turnPausedPayloadSchema,
   }),
   z.object({
     ...metadataShape,

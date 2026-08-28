@@ -2,5 +2,6 @@ export * from "./agent-loop.js";
 export * from "./context-engine.js";
 export * from "./events.js";
 export * from "./model.js";
+export * from "./plan-reducer.js";
 export * from "./policy.js";
 export * from "./tools.js";

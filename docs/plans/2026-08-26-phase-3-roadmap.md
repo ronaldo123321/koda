@@ -1,6 +1,6 @@
 # Koda Phase 3 Extensibility Roadmap
 
-- Status: In progress — Phase 3A through Phase 3F3 complete; Phase 3G accepted and pending implementation; Phase 3H queued (2026-08-28)
+- Status: In progress — Phase 3A through Phase 3F3 and Phase 3G1 complete; Phase 3G2 next; Phase 3H queued (2026-08-28)
 - Date: 2026-08-26
 - Depends on: Phase 2 reliability closure
 - Scope: stable client/tool/provider extension boundaries without weakening the local runtime's durable state and approval guarantees
@@ -173,7 +173,7 @@ The accepted authorization identity, lifecycle, audit, protocol, interaction, fa
 
 ## Phase 3G: durable planning and Harness checkpoints
 
-Status: **Accepted design — implementation pending.**
+Status: **Implementation in progress — Phase 3G1 implemented and verified; Phase 3G2 next.**
 
 - Add a thread-scoped Plan/Stage/Todo state machine maintained explicitly through a built-in `update_plan` control tool.
 - Keep JSONL authoritative, pin the latest Plan across context compaction, and reconstruct it without parsing model prose.

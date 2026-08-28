@@ -1,6 +1,6 @@
 # Koda Phase 3G: Durable Planning and Harness Checkpoints
 
-- Status: Accepted design — implementation pending
+- Status: Implementation in progress — Phase 3G1 implemented and verified
 - Date: 2026-08-28
 - Depends on: Phase 2 durable resume and compaction, Phase 3A app-server, Phase 3D Ink interaction, Phase 3E context inspection, and Phase 3F durable execution boundaries
 - Scope: thread-scoped Plan/Todo state, explicit model updates, safe long-task checkpoints, resumable paused turns, and human stage acceptance
@@ -64,11 +64,7 @@ interface PlanStage {
   id: string;
   title: string;
   status:
-    | "pending"
-    | "active"
-    | "awaiting_acceptance"
-    | "completed"
-    | "accepted";
+    "pending" | "active" | "awaiting_acceptance" | "completed" | "accepted";
   requiresAcceptance: boolean;
   acceptanceCriteria: string[];
   summary?: string;
@@ -335,9 +331,13 @@ No live provider credentials are required for the Phase 3G acceptance suite.
 
 ### Phase 3G1: protocol and reducer
 
+Status: **Implemented and verified (2026-08-28).**
+
 - Add Plan, checkpoint, acceptance, and paused-turn schemas and exports.
 - Implement a pure revision/state reducer with budgets and stable failures.
 - Add exhaustive offline state-machine tests.
+
+Implemented with first-class protocol schemas and Agent Event variants, a pure `@koda/agent-core` revision/acceptance reducer, stable validation failures, and 21 focused state-machine tests. The full repository typecheck, format gate, 337-test offline suite, and six reliability scenarios pass. Runtime tool registration, event emission, checkpoint execution, and recovery consumption remain Phase 3G2.
 
 ### Phase 3G2: Harness, tool, checkpoint, and recovery
 
