@@ -45,11 +45,16 @@ Implementation status:
 
 ### Phase 4B: supervised native execution boundary
 
+Status: Accepted — Phase 4B1 protocol and foreground supervision next
+
 - Define a versioned local executor protocol independent of providers and clients.
 - Add the Rust `koda-exec` sidecar for durable process ownership and bounded shutdown.
 - Implement POSIX process-group and Windows Job Object ownership behind one contract.
 - Support PTY-backed foreground work, managed background jobs, attach/detach, and crash-surviving status.
 - Keep shell strings disabled while the isolation boundary is incomplete.
+
+The accepted architecture, crash semantics, protocol, delivery slices, and
+acceptance criteria are in [Phase 4B supervised native execution](2026-08-28-phase-4b-supervised-native-execution-design.md).
 
 ### Phase 4C: sandbox, network, and secret policy
 
