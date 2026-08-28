@@ -1,6 +1,6 @@
 # Koda Phase 4A: Crash-Safe Filesystem Mutation Recovery
 
-- Status: Approved for implementation
+- Status: Phase 4A1 recovery core implemented and verified; Phase 4A2 conflict-resolution clients pending
 - Date: 2026-08-28
 - Depends on: Phase 2 durable recovery, Phase 3F1 change transactions, and the workspace mutation coordinator
 - Scope: durable local journals, bounded backups, orphan reconciliation, safe automatic rollback, conflict quarantine, and thread-audit reconciliation
@@ -30,8 +30,8 @@ Journals live outside the workspace:
 ```text
 KODA_HOME/workspace-mutations/
   <sha256(canonical-workspace-root)>/
-    <thread-id>/
-      <call-id>/
+    <sha256(thread-id)>/
+      <sha256(call-id)>/
         manifest.json
         state.json
         backups/
@@ -45,6 +45,7 @@ Directories use mode `0700`; journal files and backups use `0600`. The immutable
 - `planSha256` and creation timestamp;
 - every ordered operation, normalized source/destination paths, before/after SHA-256 values, byte count, and before mode;
 - the relative backup path for update, move, and delete operations.
+- the exact workspace-relative staged-candidate path for create and update operations.
 
 Create has no backup because its before state is absence. Move still receives a byte backup so recovery does not depend on a surviving hard link. Journal identity uses thread and call IDs rather than `planSha256` alone because the same approved plan can legitimately appear in different calls.
 
@@ -165,3 +166,13 @@ Automated tests cover at least:
 - Remote audit/storage reconciliation and distributed mutation leases: Phase 4D.
 - Directory, symlink, binary, ownership, ACL, extended-attribute, and cross-filesystem transaction support: separate explicit filesystem designs.
 - Child-agent and worktree mutation isolation: Phase 5.
+
+## 13. Phase 4A1 implementation verification
+
+The recovery core is implemented on `main` without a protocol-version bump. `apply_changes` and `apply_patchset` now publish a private journal after staging and before their existing durable `workspace.change_set_prepared` event. Normal terminal paths remove staged candidates before acknowledging and deleting the journal. A crash therefore leaves the target state, staged-candidate identity, bounded original bytes, modes, hashes, and originating thread identity available to the next process.
+
+Every application turn performs an orphan-recovery pass under the workspace mutation lease before it acquires the new turn's thread lease. Safe partial states roll back, complete after states remain committed, all-before states remain unchanged, and divergent targets or staging files are quarantined. The reconciler acquires the originating thread lease, reuses the existing committed/rolled-back/uncertain events, refuses conflicting or terminal audit histories, and retains a receipt until reconciliation succeeds. Reads continue after a recovery warning; all later Koda workspace writes call the same fail-closed recovery preflight.
+
+Credential-free coverage includes secure backup publication, all-before cleanup, four-operation partial rollback, all-after recognition, move intermediate recovery, corrupt backups, divergent external edits, symlinked parents, staged-candidate cleanup, retained receipt acknowledgement, repeated recovery, coordinator write blocking, idempotent audit events, missing/conflicting audits, production tool integration, and an application-level restart that repairs files and appends the originating terminal event before a new turn.
+
+Phase 4A is not marked fully complete because the supported client surfaces cannot yet inspect and explicitly resolve a quarantined conflict. That bounded Phase 4A2 workflow remains the next delivery slice.

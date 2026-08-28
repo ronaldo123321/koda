@@ -13,6 +13,7 @@ import { ScriptedModelProvider } from "@koda/providers";
 import {
   ReadOnlyWorkspace,
   WorkspaceMutationCoordinator,
+  WorkspaceMutationJournalStore,
   registerChangeSetTool,
 } from "@koda/runtime-node";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -45,7 +46,11 @@ describe("apply_changes tool", () => {
       temporaryRoot,
       workspace.root,
     );
-    registerChangeSetTool(tools, workspace, coordinator);
+    const journal = await WorkspaceMutationJournalStore.open(
+      temporaryRoot,
+      workspace.root,
+    );
+    registerChangeSetTool(tools, workspace, coordinator, journal);
     const events = new MemoryEventStore();
     const provider = new ScriptedModelProvider([
       {
@@ -121,6 +126,7 @@ describe("apply_changes tool", () => {
     expect(await readFile(join(workspaceRoot, "second.txt"), "utf8")).toBe(
       "created\n",
     );
+    expect(await journal.recoverPending()).toEqual([]);
     const types = events.events.map((event) => event.type);
     expect(types.indexOf("approval.resolved")).toBeLessThan(
       types.indexOf("tool.execution_started"),

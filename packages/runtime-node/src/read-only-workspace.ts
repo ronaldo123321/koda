@@ -29,6 +29,13 @@ import type {
   WorkspaceChangeSetUncertainPayload,
 } from "@koda/protocol";
 
+import type {
+  WorkspaceMutationJournalIdentity,
+  WorkspaceMutationJournalChange,
+  WorkspaceMutationJournalStore,
+  WorkspaceMutationJournalTransaction,
+} from "./workspace-mutation-journal.js";
+
 export type WorkspaceErrorCode =
   | "INVALID_PATH"
   | "PATH_OUTSIDE_WORKSPACE"
@@ -220,7 +227,13 @@ export interface PreparedWorkspaceChangeSet {
   apply(
     signal: AbortSignal,
     report: (event: WorkspaceChangeSetOperationalEvent) => Promise<void>,
+    journal?: WorkspaceChangeSetJournalContext,
   ): Promise<WorkspaceChangeSetResult>;
+}
+
+export interface WorkspaceChangeSetJournalContext {
+  store: WorkspaceMutationJournalStore;
+  identity: WorkspaceMutationJournalIdentity;
 }
 
 const IGNORED_DIRECTORY_NAMES = new Set([".git", ".koda", "node_modules"]);
@@ -829,7 +842,7 @@ export class ReadOnlyWorkspace {
       preview,
       planSha256,
       changes: evidence,
-      apply: async (signal, report) => {
+      apply: async (signal, report, journal) => {
         if (applied) {
           throw new WorkspaceError(
             "INVALID_PATCH",
@@ -842,6 +855,7 @@ export class ReadOnlyWorkspace {
           planSha256,
           signal,
           report,
+          ...(journal === undefined ? {} : { journal }),
           ...(options.faultHooks === undefined
             ? {}
             : { faultHooks: options.faultHooks }),
@@ -859,6 +873,10 @@ export class ReadOnlyWorkspace {
     }
 
     const staged = new Map<number, string>();
+    let journal: WorkspaceMutationJournalTransaction | undefined;
+    let journalDisposition:
+      "discard" | "committed" | "rolled_back" | "conflicted" | undefined;
+    let journalConflictPaths: string[] = [];
     try {
       for (const change of options.preparedChanges) {
         if (change.operation === "create" || change.operation === "update") {
@@ -876,13 +894,32 @@ export class ReadOnlyWorkspace {
       }
       await options.faultHooks?.afterStaging?.();
       options.signal.throwIfAborted();
-      await options.report({
-        type: "workspace.change_set_prepared",
-        payload: {
+      if (options.journal !== undefined) {
+        journal = await options.journal.store.begin({
+          identity: options.journal.identity,
           planSha256: options.planSha256,
-          changes: options.preparedChanges.map((change) => change.evidence),
-        },
-      });
+          changes: options.preparedChanges.map((change) =>
+            toJournalChange(
+              change,
+              staged.has(change.index)
+                ? this.toWorkspaceRelative(staged.get(change.index)!)
+                : undefined,
+            ),
+          ),
+        });
+      }
+      try {
+        await options.report({
+          type: "workspace.change_set_prepared",
+          payload: {
+            planSha256: options.planSha256,
+            changes: options.preparedChanges.map((change) => change.evidence),
+          },
+        });
+      } catch (error) {
+        journalDisposition = "discard";
+        throw error;
+      }
 
       const commitOrder = [...options.preparedChanges].sort((left, right) =>
         left.path === right.path
@@ -913,6 +950,7 @@ export class ReadOnlyWorkspace {
             changeCount: committed.length,
           },
         });
+        journalDisposition = "committed";
         return {
           status: "committed",
           planSha256: options.planSha256,
@@ -944,6 +982,8 @@ export class ReadOnlyWorkspace {
               errorCode,
             },
           });
+          journalDisposition = "conflicted";
+          journalConflictPaths = uncertainPaths;
           throw new WorkspaceError(
             "CHANGE_SET_OUTCOME_UNCERTAIN",
             `Change-set rollback could not verify: ${uncertainPaths.join(", ")}. Inspect these paths before another write.`,
@@ -959,6 +999,7 @@ export class ReadOnlyWorkspace {
             errorCode,
           },
         });
+        journalDisposition = "rolled_back";
         if (options.signal.aborted) {
           throw error;
         }
@@ -969,11 +1010,29 @@ export class ReadOnlyWorkspace {
         );
       }
     } finally {
-      await Promise.all(
-        [...staged.values()].map((path) =>
-          rm(path, { force: true }).catch(() => undefined),
-        ),
-      );
+      let stagedCleanupSucceeded = true;
+      for (const path of staged.values()) {
+        try {
+          await rm(path, { force: true });
+        } catch {
+          stagedCleanupSucceeded = false;
+        }
+      }
+      if (journal !== undefined) {
+        if (journalDisposition === "conflicted") {
+          await journal
+            .retainConflict(journalConflictPaths)
+            .catch(() => undefined);
+        } else if (stagedCleanupSucceeded) {
+          if (journalDisposition === "committed") {
+            await journal.complete("committed").catch(() => undefined);
+          } else if (journalDisposition === "rolled_back") {
+            await journal.complete("rolled_back").catch(() => undefined);
+          } else if (journalDisposition === "discard") {
+            await journal.discardBeforeMutation().catch(() => undefined);
+          }
+        }
+      }
     }
   }
 
@@ -1299,7 +1358,56 @@ interface ApplyPreparedChangeSetOptions {
   planSha256: string;
   signal: AbortSignal;
   report(event: WorkspaceChangeSetOperationalEvent): Promise<void>;
+  journal?: WorkspaceChangeSetJournalContext;
   faultHooks?: WorkspaceChangeSetFaultHooks;
+}
+
+function toJournalChange(
+  change: PreparedChange,
+  stagedPath: string | undefined,
+): WorkspaceMutationJournalChange {
+  const evidence = {
+    index: change.evidence.index,
+    operation: change.evidence.operation,
+    path: change.evidence.path,
+    ...(change.evidence.destination === undefined
+      ? {}
+      : { destination: change.evidence.destination }),
+    beforeSha256: change.evidence.beforeSha256,
+    afterSha256: change.evidence.afterSha256,
+    bytes: change.evidence.bytes,
+  };
+  if (change.operation === "create") {
+    return {
+      ...evidence,
+      beforeMode: null,
+      afterMode: change.mode,
+      ...(stagedPath === undefined ? {} : { stagedPath }),
+    };
+  }
+  if (change.operation === "update") {
+    return {
+      ...evidence,
+      beforeMode: change.before.mode,
+      afterMode: change.mode,
+      beforeBytes: change.before.bytes,
+      ...(stagedPath === undefined ? {} : { stagedPath }),
+    };
+  }
+  if (change.operation === "move") {
+    return {
+      ...evidence,
+      beforeMode: change.before.mode,
+      afterMode: change.before.mode,
+      beforeBytes: change.before.bytes,
+    };
+  }
+  return {
+    ...evidence,
+    beforeMode: change.before.mode,
+    afterMode: null,
+    beforeBytes: change.before.bytes,
+  };
 }
 
 function assertChangePath(path: string): void {

@@ -422,7 +422,7 @@ Status: **Complete; Phase 3A through Phase 3I are implemented and verified.**
 
 ### Phase 4: hardening
 
-Status: **In progress; Phase 4A crash-safe filesystem mutation recovery is approved for implementation.**
+Status: **In progress; the Phase 4A1 crash-safe filesystem recovery core is implemented and verified, with Phase 4A2 conflict-resolution clients next.**
 
 - Rust execution sidecar.
 - OS-specific sandboxing and network policy.

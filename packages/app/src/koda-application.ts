@@ -113,6 +113,7 @@ import {
   ThreadRecoveryError,
   WorkspaceCommandRunner,
   WorkspaceMutationCoordinator,
+  WorkspaceMutationJournalStore,
   WorkspacePreferenceStore,
   WorkspacePreferenceStoreError,
   assertResumeWorkspace,
@@ -124,6 +125,7 @@ import {
   loadProjectCommandTemplates,
   loadProjectSkills,
   loadRepositoryInstructions,
+  reconcileWorkspaceMutationAudit,
   recoverThread,
   registerArtifactTools,
   registerChangeSetTool,
@@ -1182,6 +1184,53 @@ export class KodaApplication {
         configuration.cwd,
       );
       controller.signal.throwIfAborted();
+      const mutationJournal = await WorkspaceMutationJournalStore.open(
+        configuration.kodaHome,
+        workspace.root,
+      );
+      try {
+        const recoveryCoordinator = await WorkspaceMutationCoordinator.open(
+          configuration.kodaHome,
+          workspace.root,
+        );
+        const recoveries = await recoveryCoordinator.runExclusive(
+          controller.signal,
+          () => mutationJournal.recoverPending({ retainRecovered: true }),
+        );
+        for (const recovery of recoveries) {
+          const reconciliation = await reconcileWorkspaceMutationAudit(
+            configuration.kodaHome,
+            recovery,
+          );
+          if (
+            recovery.status !== "conflicted" &&
+            reconciliation.status !== "deferred"
+          ) {
+            await mutationJournal.acknowledgeRecovery(recovery);
+          }
+          await emitDiagnostic(client, {
+            level: "warning",
+            code:
+              recovery.status === "conflicted"
+                ? "WORKSPACE_MUTATION_RECOVERY_CONFLICT"
+                : reconciliation.status === "deferred"
+                  ? "WORKSPACE_MUTATION_AUDIT_DEFERRED"
+                  : "WORKSPACE_MUTATION_RECOVERED",
+            message:
+              recovery.status === "conflicted"
+                ? `Interrupted workspace changes conflict with current files: ${recovery.paths.join(", ")}. Writes remain blocked until the retained recovery journal is explicitly resolved.`
+                : reconciliation.status === "deferred"
+                  ? `Recovered interrupted workspace changes as '${recovery.status}', but audit reconciliation was deferred: ${reconciliation.message ?? "unknown audit state"}`
+                  : `Recovered interrupted workspace changes as '${recovery.status}' and reconciled their originating thread audit.`,
+          });
+        }
+      } catch (error) {
+        await emitDiagnostic(client, {
+          level: "warning",
+          code: "WORKSPACE_MUTATION_RECOVERY_FAILED",
+          message: `Workspace mutation recovery could not complete; reads remain available and later writes will fail closed: ${errorMessage(error)}`,
+        });
+      }
       const repositoryInstructions = await loadRepositoryInstructions(
         workspace.root,
       );
@@ -1359,10 +1408,27 @@ export class KodaApplication {
       const mutationCoordinator = await WorkspaceMutationCoordinator.open(
         configuration.kodaHome,
         workspace.root,
+        {
+          beforeAction: async () => {
+            await mutationJournal.recoverBeforeWrite({
+              retainRecovered: true,
+            });
+          },
+        },
       );
       registerStructuredPatchTool(tools, workspace, mutationCoordinator);
-      registerChangeSetTool(tools, workspace, mutationCoordinator);
-      registerPatchSetTool(tools, workspace, mutationCoordinator);
+      registerChangeSetTool(
+        tools,
+        workspace,
+        mutationCoordinator,
+        mutationJournal,
+      );
+      registerPatchSetTool(
+        tools,
+        workspace,
+        mutationCoordinator,
+        mutationJournal,
+      );
       const commandRunner = await WorkspaceCommandRunner.open(workspace.root, {
         environment: this.environment,
         artifactStore,

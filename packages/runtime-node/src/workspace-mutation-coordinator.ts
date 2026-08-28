@@ -30,6 +30,7 @@ export interface WorkspaceMutationCoordinatorOptions {
   isProcessAlive?: (pid: number) => boolean;
   waitTimeoutMs?: number;
   pollIntervalMs?: number;
+  beforeAction?: (signal: AbortSignal) => Promise<void>;
 }
 
 export class WorkspaceMutationCoordinator {
@@ -63,6 +64,7 @@ export class WorkspaceMutationCoordinator {
         isProcessAlive: options.isProcessAlive ?? isProcessAlive,
         waitTimeoutMs: options.waitTimeoutMs ?? 5_000,
         pollIntervalMs: options.pollIntervalMs ?? 50,
+        beforeAction: options.beforeAction ?? (() => Promise.resolve()),
       },
       leaseDirectory,
     );
@@ -74,6 +76,8 @@ export class WorkspaceMutationCoordinator {
   ): Promise<T> {
     const release = await this.acquire(signal);
     try {
+      signal.throwIfAborted();
+      await this.options.beforeAction(signal);
       signal.throwIfAborted();
       return await action();
     } finally {

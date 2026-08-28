@@ -7,6 +7,7 @@ import {
   type WorkspaceChange,
 } from "./read-only-workspace.js";
 import { WorkspaceMutationCoordinator } from "./workspace-mutation-coordinator.js";
+import type { WorkspaceMutationJournalStore } from "./workspace-mutation-journal.js";
 
 const MAX_CHANGE_TEXT_CHARACTERS = 65_536;
 const MAX_CHANGES = 16;
@@ -87,6 +88,7 @@ export function registerChangeSetTool(
   registry: ToolRegistry,
   workspace: ReadOnlyWorkspace,
   coordinator: WorkspaceMutationCoordinator,
+  journal?: WorkspaceMutationJournalStore,
 ): void {
   registry.register({
     spec: {
@@ -195,7 +197,21 @@ export function registerChangeSetTool(
           }
           return jsonValueSchema.parse(
             await coordinator.runExclusive(context.signal, () =>
-              prepared.apply(context.signal, report),
+              prepared.apply(
+                context.signal,
+                report,
+                journal === undefined
+                  ? undefined
+                  : {
+                      store: journal,
+                      identity: {
+                        threadId: context.threadId,
+                        turnId: context.turnId,
+                        callId: context.callId,
+                        toolName: "apply_changes",
+                      },
+                    },
+              ),
             ),
           );
         },

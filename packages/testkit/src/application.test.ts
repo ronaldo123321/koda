@@ -1,7 +1,9 @@
+import { createHash } from "node:crypto";
 import {
   appendFile,
   mkdir,
   mkdtemp,
+  readFile,
   realpath,
   rm,
   writeFile,
@@ -30,6 +32,7 @@ import {
   ArtifactStore,
   JsonlEventStore,
   ReadOnlyWorkspace,
+  WorkspaceMutationJournalStore,
   loadProjectSkills,
 } from "@koda/runtime-node";
 import { afterEach, describe, expect, it } from "vitest";
@@ -243,6 +246,162 @@ describe("KodaApplication", () => {
         threadId,
       }),
     ).not.toHaveProperty("plan");
+  });
+
+  it("repairs an interrupted workspace transaction and reconciles its originating audit before a new turn", async () => {
+    const fixture = await createFixture();
+    const originThreadId = threadIdSchema.parse("mutation-origin-thread");
+    const originTurnId = turnIdSchema.parse("mutation-origin-turn");
+    const callId = toolCallIdSchema.parse("mutation-origin-call");
+    const planSha256 = sha256("mutation-origin-plan");
+    const before = Buffer.from("before\n");
+    const after = Buffer.from("after\n");
+    await writeFile(join(fixture.workspaceRoot, "tracked.txt"), before);
+    const originEvents = new JsonlEventStore(
+      join(fixture.kodaHome, "threads", `${originThreadId}.jsonl`),
+    );
+    await originEvents.append(
+      agentEventSchema.parse({
+        schemaVersion: 1,
+        sequence: 0,
+        timestamp: "2026-08-28T00:00:00.000Z",
+        threadId: originThreadId,
+        turnId: originTurnId,
+        type: "turn.started",
+        payload: {},
+      }),
+    );
+    await originEvents.append(
+      agentEventSchema.parse({
+        schemaVersion: 1,
+        sequence: 1,
+        timestamp: "2026-08-28T00:00:01.000Z",
+        threadId: originThreadId,
+        turnId: originTurnId,
+        type: "tool.execution_started",
+        payload: { callId, name: "apply_changes", effect: "write" },
+      }),
+    );
+    await originEvents.append(
+      agentEventSchema.parse({
+        schemaVersion: 1,
+        sequence: 2,
+        timestamp: "2026-08-28T00:00:02.000Z",
+        threadId: originThreadId,
+        turnId: originTurnId,
+        type: "workspace.change_set_prepared",
+        payload: {
+          callId,
+          name: "apply_changes",
+          planSha256,
+          changes: [
+            {
+              index: 0,
+              operation: "update",
+              path: "tracked.txt",
+              beforeSha256: sha256(before),
+              afterSha256: sha256(after),
+              bytes: after.byteLength,
+            },
+            {
+              index: 1,
+              operation: "create",
+              path: "not-created.txt",
+              beforeSha256: null,
+              afterSha256: sha256("not created\n"),
+              bytes: Buffer.byteLength("not created\n"),
+            },
+          ],
+        },
+      }),
+    );
+    const journal = await WorkspaceMutationJournalStore.open(
+      fixture.kodaHome,
+      fixture.workspaceRoot,
+    );
+    await journal.begin({
+      identity: {
+        threadId: originThreadId,
+        turnId: originTurnId,
+        callId,
+        toolName: "apply_changes",
+      },
+      planSha256,
+      changes: [
+        {
+          index: 0,
+          operation: "update",
+          path: "tracked.txt",
+          beforeSha256: sha256(before),
+          afterSha256: sha256(after),
+          bytes: after.byteLength,
+          beforeMode: 0o644,
+          afterMode: 0o644,
+          beforeBytes: before,
+          stagedPath:
+            ".tracked.txt.koda-change-00000000-0000-4000-8000-000000000000.tmp",
+        },
+        {
+          index: 1,
+          operation: "create",
+          path: "not-created.txt",
+          beforeSha256: null,
+          afterSha256: sha256("not created\n"),
+          bytes: Buffer.byteLength("not created\n"),
+          beforeMode: null,
+          afterMode: 0o644,
+          stagedPath:
+            ".not-created.txt.koda-change-00000000-0000-4000-8000-000000000001.tmp",
+        },
+      ],
+    });
+    await writeFile(join(fixture.workspaceRoot, "tracked.txt"), after);
+
+    const diagnostics: string[] = [];
+    const application = new KodaApplication({
+      environment: {
+        OPENAI_API_KEY: "offline-test-key",
+        KODA_HOME: fixture.kodaHome,
+      },
+      processDirectory: fixture.root,
+      dependencies: dependencies(
+        new ScriptedModelProvider([
+          {
+            events: [
+              { type: "assistant_delta", text: "Recovery observed." },
+              { type: "completed", finishReason: "stop" },
+            ],
+          },
+        ]),
+        "mutation-recovery",
+      ),
+    });
+    const handle = application.startTurn(
+      { prompt: "Continue safely.", cwd: fixture.workspaceRoot },
+      {
+        events: { append: async () => undefined },
+        approvals: rejectApprovals(),
+        diagnostic: (diagnostic) => diagnostics.push(diagnostic.code),
+      },
+    );
+
+    await expect(handle.completion).resolves.toMatchObject({
+      status: "completed",
+    });
+    await expect(
+      readFile(join(fixture.workspaceRoot, "tracked.txt"), "utf8"),
+    ).resolves.toBe("before\n");
+    expect(diagnostics).toContain("WORKSPACE_MUTATION_RECOVERED");
+    expect((await originEvents.readAllRequired()).events.at(-1)).toMatchObject({
+      type: "workspace.change_set_rolled_back",
+      payload: {
+        callId,
+        planSha256,
+        appliedCount: 1,
+        restoredPaths: ["tracked.txt"],
+      },
+    });
+    await expect(journal.recoverPending()).resolves.toEqual([]);
   });
 
   it("freezes project Skills, exposes read_skill, and persists activation evidence", async () => {
@@ -1533,6 +1692,10 @@ function rejectApprovals() {
   return {
     request: async () => ({ decision: "rejected" as const }),
   };
+}
+
+function sha256(value: Buffer | string): string {
+  return createHash("sha256").update(value).digest("hex");
 }
 
 async function waitForAbort(signal: AbortSignal): Promise<void> {

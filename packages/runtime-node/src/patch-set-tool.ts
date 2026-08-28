@@ -8,6 +8,7 @@ import {
 } from "./patch-document.js";
 import { ReadOnlyWorkspace } from "./read-only-workspace.js";
 import { WorkspaceMutationCoordinator } from "./workspace-mutation-coordinator.js";
+import type { WorkspaceMutationJournalStore } from "./workspace-mutation-journal.js";
 
 const patchSetInputSchema = z
   .object({
@@ -19,6 +20,7 @@ export function registerPatchSetTool(
   registry: ToolRegistry,
   workspace: ReadOnlyWorkspace,
   coordinator: WorkspaceMutationCoordinator,
+  journal?: WorkspaceMutationJournalStore,
 ): void {
   registry.register({
     spec: {
@@ -62,7 +64,21 @@ export function registerPatchSetTool(
           }
           return jsonValueSchema.parse(
             await coordinator.runExclusive(context.signal, () =>
-              prepared.apply(context.signal, report),
+              prepared.apply(
+                context.signal,
+                report,
+                journal === undefined
+                  ? undefined
+                  : {
+                      store: journal,
+                      identity: {
+                        threadId: context.threadId,
+                        turnId: context.turnId,
+                        callId: context.callId,
+                        toolName: "apply_patchset",
+                      },
+                    },
+              ),
             ),
           );
         },
