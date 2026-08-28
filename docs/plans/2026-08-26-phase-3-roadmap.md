@@ -1,6 +1,6 @@
 # Koda Phase 3 Extensibility Roadmap
 
-- Status: In progress — Phase 3A through Phase 3G and Phase 3H1–3H4 complete; Phase 3H5 next (2026-08-28)
+- Status: Complete — Phase 3A through Phase 3H implemented and verified (2026-08-28)
 - Date: 2026-08-26
 - Depends on: Phase 2 reliability closure
 - Scope: stable client/tool/provider extension boundaries without weakening the local runtime's durable state and approval guarantees
@@ -190,7 +190,7 @@ Unattended background continuation, durable scheduling, reconnectable remote job
 
 ## Phase 3H: Skills and extension system
 
-Status: **Implementation in progress — Phase 3H1–3H4 implemented and verified; Phase 3H5 next.**
+Status: **Complete — Phase 3H1–3H5 implemented and verified.**
 
 - Add project Skills with explicit discovery, precedence, scope, budgets, and instruction trust boundaries.
 - Add reviewed command templates without turning repository text into implicit execution authority.
@@ -199,9 +199,9 @@ Status: **Implementation in progress — Phase 3H1–3H4 implemented and verifie
 
 The accepted trust hierarchy, scoped discovery rules, immutable catalog model, refresh boundaries, isolated plugin lifecycle, verification matrix, and five implementation slices are in the [Phase 3H Skills and extension system design](2026-08-28-phase-3h-skills-extension-system-design.md).
 
-Phase 3H1 provides strict scoped project Skill discovery, bounded frontmatter and content, deterministic precedence, immutable per-Turn catalogs, the built-in `read_skill` tool, durable Skill snapshots and resume diffs, plus Phase 3E current-source inspection. Phase 3H2 adds strict scoped Markdown command templates, bounded string parameters, deterministic one-pass expansion, explicit shared CLI/Ink invocation, durable activation and resume evidence, and current-source inspection without repository-defined executable handlers. Phase 3H3 adds atomic MCP namespace generations, safe-boundary `tools/list` refresh, generation-bound prepared calls, durable diffs, strict recovery chains, and aggregate resume evidence. Phase 3H4 adds user-owned strict plugin manifests, transactional required/optional startup, an isolated NDJSON process protocol, capability allowlists, qualified validated contributions, conservative tool policy, bounded diagnostics, durable plugin snapshots/resume diffs, and reverse process-tree shutdown. Protocol/client/real-TTY closure remains Phase 3H5.
+Phase 3H1 provides strict scoped project Skill discovery, bounded frontmatter and content, deterministic precedence, immutable per-Turn catalogs, the built-in `read_skill` tool, durable Skill snapshots and resume diffs, plus Phase 3E current-source inspection. Phase 3H2 adds strict scoped Markdown command templates, bounded string parameters, deterministic one-pass expansion, explicit shared CLI/Ink invocation, durable activation and resume evidence, and current-source inspection without repository-defined executable handlers. Phase 3H3 adds atomic MCP namespace generations, safe-boundary `tools/list` refresh, generation-bound prepared calls, durable diffs, strict recovery chains, and aggregate resume evidence. Phase 3H4 adds user-owned strict plugin manifests, transactional required/optional startup, an isolated NDJSON process protocol, capability allowlists, qualified validated contributions, conservative tool policy, bounded diagnostics, durable plugin snapshots/resume diffs, and reverse process-tree shutdown. Phase 3H5 closes the system with app-server protocol v12, current and historical extension inspection, a strict Node client, credential-free CLI list/read commands, idle-only Ink `/extensions`, no-spawn subprocess proof, provider-neutral projection, and a real-TTY navigation/shutdown gate. The completed Phase 3 baseline passes 57 offline test files, 444 tests, and six deterministic reliability scenarios.
 
-## Other later Phase 3 slices
+## Deferred follow-on slices after the Phase 3 baseline
 
 ### Provider and context extensions after Phase 3C
 
@@ -214,8 +214,8 @@ Phase 3H1 provides strict scoped project Skill discovery, bounded frontmatter an
 ### Interactive clients and client APIs
 
 - Maintain the completed Phase 3D Ink chat REPL on the Phase 3A application protocol.
-- Maintain the completed Phase 3E1 semantics for recent-thread selection, bounded history preview, and safe resume through the current protocol v11 transport.
-- Maintain the completed Phase 3E2 boundary as bounded bidirectional history navigation and workspace-scoped substring search over app-server protocol v11; retain the normal terminal buffer and a disposable SQLite projection.
+- Maintain the completed Phase 3E1 semantics for recent-thread selection, bounded history preview, and safe resume through the current protocol v12 transport.
+- Maintain the completed Phase 3E2 boundary as bounded bidirectional history navigation and workspace-scoped substring search over app-server protocol v12; retain the normal terminal buffer and a disposable SQLite projection.
 - Maintain the completed Phase 3E3 boundary for explicit provider/model preferences that affect only new threads.
 - Maintain the completed Phase 3E4 boundary for thread-scoped discovery and bounded UTF-8 artifact reads.
 - Maintain the completed Phase 3E5 boundary for durable per-request context telemetry and bounded current-instruction inspection.

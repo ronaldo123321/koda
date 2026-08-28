@@ -220,6 +220,39 @@ describe("Koda Ink view", () => {
     expect(controller.closePlan).toHaveBeenCalledOnce();
   });
 
+  it("renders and routes the bounded extension catalog view", () => {
+    const controller = fakeInputController();
+    const state = baseState();
+    state.mode = "extensions_view";
+    state.extensionNavigation = {
+      rows: [
+        "Current workspace: /workspace",
+        "Configured plugins (1)",
+        "Thread snapshot: tui-thread · event #8",
+      ],
+      scrollOffset: 1,
+      loading: false,
+      viewportHeight: 1,
+      viewportWidth: 80,
+    };
+
+    const frame = renderToString(createElement(KodaView, { state }));
+    expect(frame).toContain("Extension catalogs");
+    expect(frame).toContain("Configured plugins (1)");
+    expect(frame).not.toContain("Thread snapshot: tui-thread");
+    expect(frame).toContain("2–2 / 3 rows");
+    routeTuiInput(controller, state, "", key({ downArrow: true }), vi.fn());
+    routeTuiInput(controller, state, "", key({ pageDown: true }), vi.fn());
+    routeTuiInput(controller, state, "", key({ home: true }), vi.fn());
+    routeTuiInput(controller, state, "", key({ escape: true }), vi.fn());
+    expect(controller.scrollExtensions.mock.calls).toEqual([
+      ["down"],
+      ["page_down"],
+      ["home"],
+    ]);
+    expect(controller.closeExtensions).toHaveBeenCalledOnce();
+  });
+
   it("routes prompt, approval, cancellation, and exit keys", async () => {
     const controller = fakeInputController();
     const state = baseState();
@@ -819,6 +852,11 @@ function baseState(): TuiState {
       planning: true,
       planCheckpoints: true,
       stageAcceptance: true,
+      extensionInspection: true,
+      skills: true,
+      commandTemplates: true,
+      dynamicToolCatalog: true,
+      plugins: true,
     },
     providers: [
       {
@@ -859,6 +897,7 @@ function baseState(): TuiState {
     artifactNavigation: undefined,
     contextNavigation: undefined,
     planNavigation: undefined,
+    extensionNavigation: undefined,
   };
 }
 
@@ -908,6 +947,9 @@ function fakeInputController() {
     openCurrentPlan: vi.fn(() => Promise.resolve()),
     scrollPlan: vi.fn(),
     closePlan: vi.fn(),
+    openCurrentExtensions: vi.fn(() => Promise.resolve()),
+    scrollExtensions: vi.fn(),
+    closeExtensions: vi.fn(),
     enterPlanAcceptanceFeedback: vi.fn(),
     setPlanAcceptanceFeedback: vi.fn(),
     cancelPlanAcceptanceFeedback: vi.fn(),

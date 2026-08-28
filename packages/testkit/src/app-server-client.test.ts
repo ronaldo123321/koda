@@ -140,6 +140,12 @@ describe("NodeAppServerClient", () => {
     const artifactStore = await ArtifactStore.open(
       join(stateRoot, "artifacts"),
     );
+    const skillDirectory = join(root, ".koda", "skills", "client-review");
+    await mkdir(skillDirectory, { recursive: true });
+    await writeFile(
+      join(skillDirectory, "SKILL.md"),
+      "---\nname: client-review\ndescription: Review through protocol v12.\n---\nReview the current client request.\n",
+    );
     const materialized = await artifactStore.materializeText(
       "client artifact 中文 content",
       { inlineBytes: 4 },
@@ -263,6 +269,11 @@ describe("NodeAppServerClient", () => {
         planning: true,
         planCheckpoints: true,
         stageAcceptance: true,
+        extensionInspection: true,
+        skills: true,
+        commandTemplates: true,
+        dynamicToolCatalog: true,
+        plugins: true,
       },
       providers: [
         { id: "openai", configured: true },
@@ -330,6 +341,37 @@ describe("NodeAppServerClient", () => {
         needsRevalidation: false,
         uncertainToolCalls: [],
       },
+    });
+    const extensionCatalog = await client.inspectExtensionCatalog({
+      workspace: canonicalRoot,
+    });
+    expect(extensionCatalog).toMatchObject({
+      workspace: canonicalRoot,
+      skills: [{ name: "client-review" }],
+      commandTemplates: [],
+      configuredPlugins: [],
+    });
+    await expect(
+      client.readExtensionSource({
+        workspace: canonicalRoot,
+        kind: "skill",
+        sourceId: extensionCatalog.skills[0]!.skillId,
+      }),
+    ).resolves.toMatchObject({
+      path: ".koda/skills/client-review/SKILL.md",
+      content: expect.stringContaining("Review the current client request."),
+    });
+    await expect(
+      client.inspectThreadExtensions({
+        workspace: canonicalRoot,
+        threadId: threadIdSchema.parse("client-history"),
+      }),
+    ).resolves.toMatchObject({
+      anchorSequence: 1,
+      turnId: "client-history-turn",
+      skills: [],
+      commandTemplates: [],
+      plugins: [],
     });
     await expect(
       client.searchThreads({
@@ -553,6 +595,11 @@ function fixtureServerScript(options: {
       planning: true,
       planCheckpoints: true,
       stageAcceptance: true,
+      extensionInspection: true,
+      skills: true,
+      commandTemplates: true,
+      dynamicToolCatalog: true,
+      plugins: true,
     },
     providers: [
       {

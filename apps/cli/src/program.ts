@@ -2,6 +2,10 @@ import { Command, Option } from "commander";
 
 import { runArtifactGarbageCollectionCommand } from "./artifact-command.js";
 import type { TextWriter } from "./console-event-sink.js";
+import {
+  runExtensionListCommand,
+  runExtensionReadCommand,
+} from "./extension-command.js";
 import { runCommand, type RunCommandInput } from "./run-command.js";
 import {
   runThreadListCommand,
@@ -124,6 +128,53 @@ export function createProgram(runtime: ProgramRuntime): Command {
         }),
       );
     });
+
+  const extension = program
+    .command("extension")
+    .description("Inspect current Koda extensions without starting a turn");
+  extension
+    .command("list")
+    .description("List current project Skills, templates, and plugin manifests")
+    .option("--workspace <directory>", "workspace directory", ".")
+    .action(async (options: { workspace?: string }) => {
+      runtime.setExitCode(
+        await runExtensionListCommand(options, {
+          environment: runtime.environment,
+          processDirectory: runtime.processDirectory,
+          stdout: runtime.stdout,
+          stderr: runtime.stderr,
+        }),
+      );
+    });
+  extension
+    .command("read")
+    .description("Read one validated current extension source")
+    .argument("<kind>", "skill or command-template")
+    .argument("<source-id>", "stable extension source ID")
+    .option("--workspace <directory>", "workspace directory", ".")
+    .action(
+      async (
+        kind: string,
+        sourceId: string,
+        options: { workspace?: string },
+      ) => {
+        if (kind !== "skill" && kind !== "command-template") {
+          runtime.stderr.write(
+            "error: extension kind must be 'skill' or 'command-template'\n",
+          );
+          runtime.setExitCode(2);
+          return;
+        }
+        runtime.setExitCode(
+          await runExtensionReadCommand(kind, sourceId, options, {
+            environment: runtime.environment,
+            processDirectory: runtime.processDirectory,
+            stdout: runtime.stdout,
+            stderr: runtime.stderr,
+          }),
+        );
+      },
+    );
   thread
     .command("show")
     .description("Show one local Koda thread")

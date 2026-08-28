@@ -1,6 +1,6 @@
 # Koda Phase 3H5: Extension Protocol and Client Closure
 
-- Status: Accepted for implementation
+- Status: Implemented and verified
 - Date: 2026-08-28
 - Depends on: Phase 3H1 project Skills, Phase 3H2 command templates, Phase 3H3 dynamic tool generations, and Phase 3H4 isolated plugins
 - Scope: app-server protocol v12, authoritative extension inspection, CLI and Ink presentation, and Phase 3H closure gates
@@ -39,7 +39,7 @@ The API is credential-free, but it is not a general filesystem read. Only files 
 
 ## 5. Protocol v12
 
-Protocol v12 replaces the pre-release v11 surface and adds four literal capabilities:
+Protocol v12 replaces the pre-release v11 surface and adds five literal capabilities:
 
 ```ts
 {
@@ -106,3 +106,9 @@ Phase 3H and Phase 3 are marked complete only after formatting, build/typecheck,
 - Historical extension source-body retention or export: a separate storage and privacy design.
 - Ink source-body browsing and template-form generation: later client UX slices after the catalog contract is stable.
 - Child-agent extension delegation and cross-agent plugin coordination: Phase 5.
+
+## 11. Implementation verification
+
+Phase 3H5 is implemented on `main` with app-server protocol v12. The application, app-server, strict Node client, direct CLI, and Ink client share the accepted current-versus-historical catalog boundary. Current inspection proves it does not spawn configured plugins or MCP servers, and runtime-only contributions remain durable historical metadata rather than being reconstructed by inspection.
+
+The final gate covers strict protocol and result validation, deterministic discovery/digests, safe plugin-manifest projection, exact source identity, corrupt and mismatched Thread history, client correlation, CLI behavior, idle-only Ink navigation, all five Provider projections, app-server subprocess startup/shutdown, and a real TTY moving through Plan and extension views before normal terminal restoration. Formatting, build/typecheck, 57 offline test files with 444 tests, and six deterministic reliability scenarios pass without live credentials or network access.

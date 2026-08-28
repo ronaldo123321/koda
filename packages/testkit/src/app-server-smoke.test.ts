@@ -1,5 +1,12 @@
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import {
+  access,
+  mkdir,
+  mkdtemp,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -28,12 +35,32 @@ describe("app-server subprocess", () => {
   it("keeps stdout protocol-only and serves credential-free queries", async () => {
     const root = await mkdtemp(join(tmpdir(), "koda-app-server-smoke-"));
     temporaryDirectories.push(root);
+    const state = join(root, "state");
+    const pluginMarker = join(root, "plugin-started.txt");
+    await mkdir(state, { recursive: true });
+    await writeFile(
+      join(state, "plugins.json"),
+      JSON.stringify({
+        version: 1,
+        plugins: {
+          smoke: {
+            command: process.execPath,
+            args: [
+              "-e",
+              `require('node:fs').writeFileSync(${JSON.stringify(pluginMarker)}, 'started')`,
+            ],
+            required: false,
+            capabilities: ["tools"],
+          },
+        },
+      }),
+    );
     const entry = join(process.cwd(), "apps", "app-server", "dist", "main.js");
     const child = spawn(process.execPath, [entry], {
       cwd: root,
       env: {
         ...process.env,
-        KODA_HOME: join(root, "state"),
+        KODA_HOME: state,
         OPENAI_API_KEY: "",
       },
       stdio: ["pipe", "pipe", "pipe"],
@@ -55,7 +82,8 @@ describe("app-server subprocess", () => {
           client: { name: "smoke-test" },
         }),
         request(2, "thread/list", {}),
-        request(3, "shutdown", {}),
+        request(3, "extension/catalog", { workspace: "." }),
+        request(4, "shutdown", {}),
       ].join("\n") + "\n",
     );
     const exit = await new Promise<{
@@ -72,13 +100,20 @@ describe("app-server subprocess", () => {
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line) as Record<string, unknown>);
-    expect(messages).toHaveLength(3);
-    expect(messages.map((message) => message.id)).toEqual([1, 2, 3]);
+    expect(messages).toHaveLength(4);
+    expect(messages.map((message) => message.id)).toEqual([1, 2, 3, 4]);
     expect(messages[0]?.result).toMatchObject({
       protocolVersion: APP_SERVER_PROTOCOL_VERSION,
     });
     expect(messages[1]?.result).toMatchObject({ threads: [] });
-    expect(messages[2]?.result).toEqual({});
+    expect(messages[2]?.result).toMatchObject({
+      workspace: await realpath(root),
+      configuredPlugins: [{ pluginId: "smoke", required: false }],
+    });
+    expect(messages[3]?.result).toEqual({});
+    await expect(access(pluginMarker)).rejects.toMatchObject({
+      code: "ENOENT",
+    });
   });
 
   it("recovers an interrupted Plan but never resurrects its acceptance capability", async () => {

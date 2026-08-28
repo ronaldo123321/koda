@@ -114,6 +114,11 @@ export interface TuiInputController {
     action: "up" | "down" | "page_up" | "page_down" | "home" | "end",
   ): void;
   closePlan(): void;
+  openCurrentExtensions(): Promise<void>;
+  scrollExtensions(
+    action: "up" | "down" | "page_up" | "page_down" | "home" | "end",
+  ): void;
+  closeExtensions(): void;
   enterPlanAcceptanceFeedback(): void;
   setPlanAcceptanceFeedback(feedback: string): void;
   cancelPlanAcceptanceFeedback(): void;
@@ -160,6 +165,9 @@ export function KodaView({ state }: KodaViewProps) {
         <ContextInstructionViewer state={state} />
       ) : null}
       {state.mode === "plan_view" ? <PlanView state={state} /> : null}
+      {state.mode === "extensions_view" ? (
+        <ExtensionsView state={state} />
+      ) : null}
 
       {state.mode === "chat" ? (
         <>
@@ -254,6 +262,24 @@ export function routeTuiInput(
       controller.scrollPlan("home");
     } else if (key.end) {
       controller.scrollPlan("end");
+    }
+    return;
+  }
+  if (state.mode === "extensions_view") {
+    if (key.escape) {
+      controller.closeExtensions();
+    } else if (key.upArrow) {
+      controller.scrollExtensions("up");
+    } else if (key.downArrow) {
+      controller.scrollExtensions("down");
+    } else if (key.pageUp) {
+      controller.scrollExtensions("page_up");
+    } else if (key.pageDown) {
+      controller.scrollExtensions("page_down");
+    } else if (key.home) {
+      controller.scrollExtensions("home");
+    } else if (key.end) {
+      controller.scrollExtensions("end");
     }
     return;
   }
@@ -962,6 +988,44 @@ function PlanView({ state }: { state: TuiState }) {
       </Text>
       {navigation.loading ? (
         <Text dimColor>Loading authoritative Plan state…</Text>
+      ) : (
+        visible.map((row, index) => (
+          <Text key={`${navigation.scrollOffset}:${index}`}>
+            {row.length === 0 ? " " : row}
+          </Text>
+        ))
+      )}
+      <Text dimColor>
+        {navigation.loading
+          ? "Loading… · Esc back"
+          : `${firstRow}–${lastRow} / ${navigation.rows.length} rows · ↑/↓ scroll · PgUp/PgDn page · Home/End boundary · Esc back`}
+      </Text>
+    </Box>
+  );
+}
+
+function ExtensionsView({ state }: { state: TuiState }) {
+  const navigation = state.extensionNavigation;
+  if (navigation === undefined) {
+    return <Text color="red">Extension view state is unavailable.</Text>;
+  }
+  const visible = navigation.rows.slice(
+    navigation.scrollOffset,
+    navigation.scrollOffset + navigation.viewportHeight,
+  );
+  const firstRow =
+    navigation.rows.length === 0 ? 0 : navigation.scrollOffset + 1;
+  const lastRow = Math.min(
+    navigation.rows.length,
+    navigation.scrollOffset + navigation.viewportHeight,
+  );
+  return (
+    <Box flexDirection="column" borderStyle="round" paddingX={1}>
+      <Text bold color="cyan">
+        Extension catalogs
+      </Text>
+      {navigation.loading ? (
+        <Text dimColor>Loading current and durable extension catalogs…</Text>
       ) : (
         visible.map((row, index) => (
           <Text key={`${navigation.scrollOffset}:${index}`}>

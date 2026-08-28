@@ -19,6 +19,7 @@ import {
   type ContextInstructionReadResult,
   type ContextReadResult,
   type ContextRequestDescriptor,
+  type ExtensionCatalogResult,
   type ModelProviderId,
   type PlanCheckpoint,
   type PlanEvidenceReference,
@@ -31,6 +32,7 @@ import {
   type ThreadMetadataMessage,
   type ThreadArtifactDescriptor,
   type ThreadId,
+  type ThreadExtensionsResult,
   type ThreadSearchCursor,
   type ThreadSearchMatch,
   type TokenUsage,
@@ -64,6 +66,7 @@ export type TuiMode =
   | "context_detail"
   | "context_instruction_view"
   | "plan_view"
+  | "extensions_view"
   | "thread_list"
   | "thread_search_input"
   | "thread_search_results"
@@ -232,6 +235,16 @@ export interface TuiPlanNavigationState {
   viewportWidth: number;
 }
 
+export interface TuiExtensionNavigationState {
+  current?: ExtensionCatalogResult;
+  historical?: ThreadExtensionsResult;
+  rows: readonly string[];
+  scrollOffset: number;
+  loading: boolean;
+  viewportHeight: number;
+  viewportWidth: number;
+}
+
 export interface TuiActiveTurnState {
   localId: number;
   prompt: string;
@@ -303,6 +316,7 @@ export interface TuiState {
   artifactNavigation: TuiArtifactNavigationState | undefined;
   contextNavigation: TuiContextNavigationState | undefined;
   planNavigation: TuiPlanNavigationState | undefined;
+  extensionNavigation: TuiExtensionNavigationState | undefined;
 }
 
 export type TuiSubmitResult = "handled" | "exit";
@@ -368,6 +382,7 @@ export class TuiController {
       artifactNavigation: undefined,
       contextNavigation: undefined,
       planNavigation: undefined,
+      extensionNavigation: undefined,
     };
     this.unsubscribeNotification = client.onNotification((notification) => {
       this.receiveNotification(notification);
@@ -434,6 +449,7 @@ export class TuiController {
             "/help — show commands",
             "/status — show connection and session state",
             "/plan — inspect the durable Plan and latest checkpoint",
+            "/extensions — inspect current and durable extension catalogs",
             "/clear — clear displayed history only",
             "/threads — browse threads in this workspace",
             "/search <query> — search durable history in this workspace",
@@ -458,6 +474,9 @@ export class TuiController {
         return "handled";
       case "/plan":
         await this.openCurrentPlan();
+        return "handled";
+      case "/extensions":
+        await this.openCurrentExtensions();
         return "handled";
       case "/clear":
         this.update({ transcript: [], notice: "Display history cleared." });
@@ -2673,6 +2692,7 @@ export class TuiController {
     const artifactNavigation = this.state.artifactNavigation;
     const contextNavigation = this.state.contextNavigation;
     const planNavigation = this.state.planNavigation;
+    const extensionNavigation = this.state.extensionNavigation;
     if (!Number.isFinite(height) || !Number.isFinite(width)) {
       return;
     }
@@ -2690,7 +2710,8 @@ export class TuiController {
       browser === undefined &&
       artifactNavigation === undefined &&
       contextNavigation === undefined &&
-      planNavigation === undefined
+      planNavigation === undefined &&
+      extensionNavigation === undefined
     ) {
       return;
     }
@@ -2851,6 +2872,30 @@ export class TuiController {
                 viewportWidth,
                 scrollOffset: Math.min(
                   planNavigation.scrollOffset,
+                  maximumScrollOffset(rows.length, viewportHeight),
+                ),
+              };
+            })(),
+          }),
+      ...(extensionNavigation === undefined
+        ? {}
+        : {
+            extensionNavigation: (() => {
+              const rows =
+                extensionNavigation.current === undefined
+                  ? extensionNavigation.rows
+                  : extensionPresentationRows(
+                      extensionNavigation.current,
+                      extensionNavigation.historical,
+                      viewportWidth,
+                    );
+              return {
+                ...extensionNavigation,
+                rows,
+                viewportHeight,
+                viewportWidth,
+                scrollOffset: Math.min(
+                  extensionNavigation.scrollOffset,
                   maximumScrollOffset(rows.length, viewportHeight),
                 ),
               };
@@ -3554,6 +3599,144 @@ export class TuiController {
     });
   }
 
+  public async openCurrentExtensions(): Promise<void> {
+    if (!this.canEditInput() || this.navigationBusy) {
+      this.update({
+        notice: "Extension inspection is available only while idle.",
+      });
+      return;
+    }
+    const threadId =
+      this.state.threadId === undefined
+        ? undefined
+        : threadIdSchema.parse(this.state.threadId);
+    const generation = this.beginNavigation();
+    this.navigationBusy = true;
+    this.update({
+      mode: "extensions_view",
+      extensionNavigation: {
+        rows: [],
+        scrollOffset: 0,
+        loading: true,
+        viewportHeight: this.viewportHeight,
+        viewportWidth: this.viewportWidth,
+      },
+      notice: "Loading extension catalogs…",
+    });
+    try {
+      const current = await this.client.inspectExtensionCatalog({
+        workspace: this.state.configuration.cwd,
+      });
+      let historical: ThreadExtensionsResult | undefined;
+      let historicalNotice: string | undefined;
+      if (threadId !== undefined) {
+        try {
+          historical = await this.client.inspectThreadExtensions({
+            workspace: this.state.configuration.cwd,
+            threadId,
+          });
+          if (
+            historical.threadId !== threadId ||
+            historical.workspace !== current.workspace
+          ) {
+            throw new Error(
+              "Thread extension response identity did not match the current catalog.",
+            );
+          }
+        } catch (error) {
+          historicalNotice = `Current catalog loaded; Thread snapshot unavailable: ${errorMessage(error)}`;
+        }
+      }
+      if (
+        !this.isCurrentNavigation(generation) ||
+        this.state.mode !== "extensions_view"
+      ) {
+        return;
+      }
+      const navigation = this.state.extensionNavigation;
+      if (navigation === undefined) {
+        return;
+      }
+      this.update({
+        extensionNavigation: {
+          ...navigation,
+          current,
+          ...(historical === undefined ? {} : { historical }),
+          rows: extensionPresentationRows(
+            current,
+            historical,
+            navigation.viewportWidth,
+          ),
+          scrollOffset: 0,
+          loading: false,
+        },
+        notice: historicalNotice,
+      });
+    } catch (error) {
+      if (this.isCurrentNavigation(generation)) {
+        this.update({
+          mode: "chat",
+          extensionNavigation: undefined,
+          notice: `Could not load extensions: ${errorMessage(error)}`,
+        });
+      }
+    } finally {
+      if (this.isCurrentNavigation(generation)) {
+        this.navigationBusy = false;
+      }
+    }
+  }
+
+  public scrollExtensions(
+    action: "up" | "down" | "page_up" | "page_down" | "home" | "end",
+  ): void {
+    const navigation = this.state.extensionNavigation;
+    if (
+      this.state.mode !== "extensions_view" ||
+      navigation === undefined ||
+      navigation.loading
+    ) {
+      return;
+    }
+    const maximum = maximumScrollOffset(
+      navigation.rows.length,
+      navigation.viewportHeight,
+    );
+    const amount =
+      action === "page_up" || action === "page_down"
+        ? navigation.viewportHeight
+        : 1;
+    const scrollOffset =
+      action === "home"
+        ? 0
+        : action === "end"
+          ? maximum
+          : Math.min(
+              maximum,
+              Math.max(
+                0,
+                navigation.scrollOffset +
+                  (action === "up" || action === "page_up" ? -amount : amount),
+              ),
+            );
+    this.update({
+      extensionNavigation: { ...navigation, scrollOffset },
+      notice: undefined,
+    });
+  }
+
+  public closeExtensions(): void {
+    if (this.state.mode !== "extensions_view") {
+      return;
+    }
+    this.cancelNavigation();
+    this.update({
+      mode: "chat",
+      extensionNavigation: undefined,
+      notice: undefined,
+    });
+  }
+
   private detachThread(): void {
     const previous = this.state.threadId;
     const { resumeThreadId: _resumeThreadId, ...configuration } =
@@ -3864,6 +4047,7 @@ export class TuiController {
         artifactNavigation: undefined,
         contextNavigation: undefined,
         planNavigation: undefined,
+        extensionNavigation: undefined,
         notice: undefined,
       });
     } catch (error) {
@@ -3878,6 +4062,7 @@ export class TuiController {
         artifactNavigation: undefined,
         contextNavigation: undefined,
         planNavigation: undefined,
+        extensionNavigation: undefined,
         notice: `Shutdown failed: ${errorMessage(error)}`,
       });
     }
@@ -4262,6 +4447,7 @@ export class TuiController {
       artifactNavigation: undefined,
       contextNavigation: undefined,
       planNavigation: undefined,
+      extensionNavigation: undefined,
       transcript: [
         ...this.state.transcript,
         ...activeEntries.map((entry) => this.withTranscriptId(entry)),
@@ -4972,6 +5158,73 @@ export function compactPlanStatus(
     `${prefix}r${plan.revision} · ${stage.title}${todo === undefined ? "" : ` · ${todo.title} (${todo.status.replaceAll("_", " ")})`}`,
     512,
   );
+}
+
+export function extensionPresentationRows(
+  current: ExtensionCatalogResult,
+  historical: ThreadExtensionsResult | undefined,
+  viewportWidth: number,
+): string[] {
+  const maximumBytes = Math.max(
+    256,
+    Math.min(MAXIMUM_PRESENTATION_CHARACTERS, viewportWidth * 8),
+  );
+  const rows: string[] = [];
+  const push = (text: string) => rows.push(boundText(text, maximumBytes));
+  push(`Current workspace: ${current.workspace}`);
+  push(`Catalog: ${current.catalogSha256}`);
+  push(`Skills (${current.skills.length})`);
+  for (const skill of current.skills) {
+    push(
+      `  ${skill.name} · scope ${skill.scope} · ${skill.bytes} bytes · ${skill.sha256} · ${skill.path}`,
+    );
+  }
+  push(`Command templates (${current.commandTemplates.length})`);
+  for (const template of current.commandTemplates) {
+    push(
+      `  ${template.selector} · scope ${template.scope} · ${template.bytes} bytes · ${template.sha256} · ${template.path}`,
+    );
+  }
+  push(`Configured plugins (${current.configuredPlugins.length})`);
+  for (const plugin of current.configuredPlugins) {
+    push(
+      `  ${plugin.pluginId} · ${plugin.required ? "required" : "optional"} · ${plugin.capabilities.join(", ")} · ${plugin.manifestSha256}`,
+    );
+  }
+  if (historical === undefined) {
+    push("Thread snapshot: none selected or unavailable");
+    return rows;
+  }
+  push(
+    `Thread snapshot: ${historical.threadId} · turn ${historical.turnId} · event #${historical.anchorSequence}`,
+  );
+  push(`Historical Skills (${historical.skills.length})`);
+  for (const skill of historical.skills) {
+    push(
+      `  ${skill.name} · scope ${skill.scope} · ${skill.bytes} bytes · ${skill.sha256} · ${skill.path}`,
+    );
+  }
+  push(`Historical command templates (${historical.commandTemplates.length})`);
+  for (const template of historical.commandTemplates) {
+    push(
+      `  ${template.selector} · scope ${template.scope} · ${template.bytes} bytes · ${template.sha256} · ${template.path}`,
+    );
+  }
+  const toolCatalog = historical.toolCatalogGeneration;
+  push(
+    toolCatalog === undefined
+      ? "Tool generation: legacy snapshot unavailable"
+      : `Tool generation: ${toolCatalog.generationId} · ${toolCatalog.toolCount} tools · ${toolCatalog.toolsSha256}`,
+  );
+  push(`Historical plugins (${historical.plugins.length})`);
+  for (const plugin of historical.plugins) {
+    push(
+      plugin.status === "active"
+        ? `  ${plugin.pluginId} · active · ${plugin.name} ${plugin.version} · tools ${plugin.toolCount} · Skills ${plugin.skillCount} · templates ${plugin.commandTemplateCount} · ${plugin.contributionsSha256}`
+        : `  ${plugin.pluginId} · disabled · ${plugin.errorCode} · ${plugin.manifestSha256}`,
+    );
+  }
+  return rows;
 }
 
 function planPresentationRows(

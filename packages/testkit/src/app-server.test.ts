@@ -66,7 +66,7 @@ describe("KodaAppServer", () => {
     await server.handleLine("not-json");
     await request(server, 1, "thread/list", {});
     await request(server, 2, "initialize", {
-      protocolVersion: 5,
+      protocolVersion: 11,
       client: { name: "wrong-version" },
     });
     await initialize(server, 3);
@@ -96,6 +96,11 @@ describe("KodaAppServer", () => {
         planning: true,
         planCheckpoints: true,
         stageAcceptance: true,
+        extensionInspection: true,
+        skills: true,
+        commandTemplates: true,
+        dynamicToolCatalog: true,
+        plugins: true,
       },
       providers: [
         { id: "openai", defaultModel: "gpt-5.6-terra", configured: true },

@@ -11,9 +11,12 @@ import {
   ARTIFACT_READ_RESULT_BUDGET_BYTES,
   CONTEXT_DETAIL_RESULT_BUDGET_BYTES,
   CONTEXT_INSTRUCTION_READ_RESULT_BUDGET_BYTES,
+  EXTENSION_CATALOG_RESULT_BUDGET_BYTES,
+  EXTENSION_READ_RESULT_BUDGET_BYTES,
   RUNTIME_SETTINGS_RESULT_BUDGET_BYTES,
   THREAD_ARTIFACTS_RESULT_BUDGET_BYTES,
   THREAD_CONTEXT_RESULT_BUDGET_BYTES,
+  THREAD_EXTENSIONS_RESULT_BUDGET_BYTES,
   THREAD_SEARCH_RESULT_BUDGET_BYTES,
   approvalResolveParamsSchema,
   approvalResolveResultSchema,
@@ -33,6 +36,10 @@ import {
   contextInstructionReadResultSchema,
   contextReadParamsSchema,
   contextReadResultSchema,
+  extensionCatalogParamsSchema,
+  extensionCatalogResultSchema,
+  extensionReadParamsSchema,
+  extensionReadResultSchema,
   initializeParamsSchema,
   initializeResultSchema,
   jsonRpcRequestSchema,
@@ -49,6 +56,8 @@ import {
   threadArtifactsResultSchema,
   threadContextParamsSchema,
   threadContextResultSchema,
+  threadExtensionsParamsSchema,
+  threadExtensionsResultSchema,
   threadGetParamsSchema,
   threadGetResultSchema,
   threadListParamsSchema,
@@ -225,6 +234,12 @@ export class KodaAppServer {
         return this.readContext(request.params);
       case "context/instruction/read":
         return this.readContextInstruction(request.params);
+      case "extension/catalog":
+        return this.inspectExtensionCatalog(request.params);
+      case "extension/read":
+        return this.readExtensionSource(request.params);
+      case "thread/extensions":
+        return this.inspectThreadExtensions(request.params);
       case "settings/get":
         return this.getRuntimeSettings(request.params);
       case "settings/update":
@@ -299,6 +314,11 @@ export class KodaAppServer {
           planning: true,
           planCheckpoints: true,
           stageAcceptance: true,
+          extensionInspection: true,
+          skills: true,
+          commandTemplates: true,
+          dynamicToolCatalog: true,
+          plugins: true,
         },
         providers: this.application.listProviders(),
       }),
@@ -481,6 +501,84 @@ export class KodaAppServer {
         CONTEXT_INSTRUCTION_READ_RESULT_BUDGET_BYTES,
         "CONTEXT_RESULT_TOO_LARGE",
         "Context instruction read",
+      );
+      return response;
+    } catch (error) {
+      throw rpcError(
+        APP_SERVER_RPC_ERROR_CODE.APPLICATION,
+        errorMessage(error),
+        applicationErrorCode(error),
+      );
+    }
+  }
+
+  private async inspectExtensionCatalog(
+    params: JsonValue | undefined,
+  ): Promise<JsonValue> {
+    const input = parseParams(extensionCatalogParamsSchema, params);
+    try {
+      const response = jsonValueSchema.parse(
+        extensionCatalogResultSchema.parse(
+          await this.application.inspectExtensionCatalog(input),
+        ),
+      );
+      assertResultBudget(
+        response,
+        EXTENSION_CATALOG_RESULT_BUDGET_BYTES,
+        "EXTENSION_CATALOG_RESULT_TOO_LARGE",
+        "Extension catalog",
+      );
+      return response;
+    } catch (error) {
+      throw rpcError(
+        APP_SERVER_RPC_ERROR_CODE.APPLICATION,
+        errorMessage(error),
+        applicationErrorCode(error),
+      );
+    }
+  }
+
+  private async readExtensionSource(
+    params: JsonValue | undefined,
+  ): Promise<JsonValue> {
+    const input = parseParams(extensionReadParamsSchema, params);
+    try {
+      const response = jsonValueSchema.parse(
+        extensionReadResultSchema.parse(
+          await this.application.readExtensionSource(input),
+        ),
+      );
+      assertResultBudget(
+        response,
+        EXTENSION_READ_RESULT_BUDGET_BYTES,
+        "EXTENSION_READ_RESULT_TOO_LARGE",
+        "Extension source read",
+      );
+      return response;
+    } catch (error) {
+      throw rpcError(
+        APP_SERVER_RPC_ERROR_CODE.APPLICATION,
+        errorMessage(error),
+        applicationErrorCode(error),
+      );
+    }
+  }
+
+  private async inspectThreadExtensions(
+    params: JsonValue | undefined,
+  ): Promise<JsonValue> {
+    const input = parseParams(threadExtensionsParamsSchema, params);
+    try {
+      const response = jsonValueSchema.parse(
+        threadExtensionsResultSchema.parse(
+          await this.application.inspectThreadExtensions(input),
+        ),
+      );
+      assertResultBudget(
+        response,
+        THREAD_EXTENSIONS_RESULT_BUDGET_BYTES,
+        "THREAD_EXTENSIONS_RESULT_TOO_LARGE",
+        "Thread extension snapshot",
       );
       return response;
     } catch (error) {

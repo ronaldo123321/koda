@@ -29,7 +29,7 @@ import {
   planStageIdSchema,
 } from "./plans.js";
 
-export const APP_SERVER_PROTOCOL_VERSION = 11 as const;
+export const APP_SERVER_PROTOCOL_VERSION = 12 as const;
 
 export const THREAD_EVENTS_DEFAULT_LIMIT = 200;
 export const THREAD_EVENTS_MAXIMUM_LIMIT = 200;
@@ -184,6 +184,11 @@ export const initializeResultSchema = z
         planning: z.literal(true),
         planCheckpoints: z.literal(true),
         stageAcceptance: z.literal(true),
+        extensionInspection: z.literal(true),
+        skills: z.literal(true),
+        commandTemplates: z.literal(true),
+        dynamicToolCatalog: z.literal(true),
+        plugins: z.literal(true),
       })
       .strict(),
     providers: z.array(runtimeProviderMetadataSchema).min(1),

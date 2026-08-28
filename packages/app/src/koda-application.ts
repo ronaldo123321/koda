@@ -13,6 +13,7 @@ import {
   estimateTextTokens,
   projectActiveContext,
   summarizeContextItemTypes,
+  sha256CanonicalJson,
   type ApprovalBroker,
   type EventSink,
   type ItemIdFactory,
@@ -24,6 +25,7 @@ import {
   PluginHostError,
   PluginTurnSession,
   diffPluginSnapshots,
+  loadPluginConfiguration,
 } from "@koda/plugin-host-node";
 import {
   ARTIFACT_READ_DEFAULT_BYTES,
@@ -33,6 +35,8 @@ import {
   THREAD_ARTIFACTS_DEFAULT_LIMIT,
   THREAD_ARTIFACTS_MAXIMUM_LIMIT,
   collectArtifactReferences,
+  extensionCatalogParamsSchema,
+  extensionReadParamsSchema,
   itemIdSchema,
   recoveryItemSchema,
   THREAD_EVENTS_DEFAULT_LIMIT,
@@ -47,6 +51,7 @@ import {
   planStateItemSchema,
   runtimeSettingsModelSchema,
   threadIdSchema,
+  threadExtensionsParamsSchema,
   turnContextSnapshotSchema,
   turnIdSchema,
   type ConversationItem,
@@ -60,6 +65,10 @@ import {
   type ContextReadResult,
   type ContextRequestDescriptor,
   type ContextUsageRecord,
+  type ExtensionCatalogParams,
+  type ExtensionCatalogResult,
+  type ExtensionReadParams,
+  type ExtensionReadResult,
   type ArtifactReadParams,
   type ArtifactReadResult,
   type ItemId,
@@ -78,6 +87,8 @@ import {
   type ThreadArtifactsResult,
   type ThreadContextParams,
   type ThreadContextResult,
+  type ThreadExtensionsParams,
+  type ThreadExtensionsResult,
   type ThreadSearchCursor,
   type ThreadSearchMatch,
   type TurnContextSnapshot,
@@ -282,6 +293,17 @@ export class PlanInspectionError extends Error {
   }
 }
 
+export class ExtensionInspectionError extends Error {
+  public constructor(
+    public readonly code: string,
+    message: string,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = "ExtensionInspectionError";
+  }
+}
+
 export interface ThreadQueryResult<T> {
   value: T;
   diagnostics: ThreadIndexDiagnostic[];
@@ -387,6 +409,135 @@ export class KodaApplication {
         (this.environment[provider.credentialEnvironmentVariable]?.trim()
           .length ?? 0) > 0,
     }));
+  }
+
+  public async inspectExtensionCatalog(
+    input: ExtensionCatalogParams,
+  ): Promise<ExtensionCatalogResult> {
+    const request = extensionCatalogParamsSchema.parse(input);
+    const discovered = await this.discoverCurrentExtensions(request.workspace);
+    const skills = discovered.skills.snapshots();
+    const commandTemplates = discovered.commandTemplates.snapshots();
+    const configuredPlugins = discovered.plugins.plugins.map((plugin) => ({
+      pluginId: plugin.id,
+      required: plugin.required,
+      capabilities: [...plugin.capabilities],
+      manifestSha256: plugin.manifestSha256,
+    }));
+    return {
+      workspace: discovered.workspace,
+      catalogSha256: sha256CanonicalJson({
+        workspace: discovered.workspace,
+        skills,
+        commandTemplates,
+        configuredPlugins,
+      }),
+      skills,
+      commandTemplates,
+      configuredPlugins,
+    };
+  }
+
+  public async readExtensionSource(
+    input: ExtensionReadParams,
+  ): Promise<ExtensionReadResult> {
+    const request = extensionReadParamsSchema.parse(input);
+    const discovered = await this.discoverCurrentExtensions(request.workspace);
+    if (request.kind === "skill") {
+      const source = discovered.skills.sources.find(
+        (candidate) => candidate.skillId === request.sourceId,
+      );
+      if (source === undefined) {
+        throw new ExtensionInspectionError(
+          "EXTENSION_SOURCE_NOT_FOUND",
+          `Current Skill '${request.sourceId}' was not found in workspace '${discovered.workspace}'.`,
+        );
+      }
+      return {
+        workspace: discovered.workspace,
+        kind: request.kind,
+        sourceId: source.skillId,
+        path: source.path,
+        scope: source.scope,
+        sha256: source.sha256,
+        totalBytes: source.bytes,
+        content: source.content,
+      };
+    }
+    const source = discovered.commandTemplates.sources.find(
+      (candidate) => candidate.templateId === request.sourceId,
+    );
+    if (source === undefined) {
+      throw new ExtensionInspectionError(
+        "EXTENSION_SOURCE_NOT_FOUND",
+        `Current command template '${request.sourceId}' was not found in workspace '${discovered.workspace}'.`,
+      );
+    }
+    return {
+      workspace: discovered.workspace,
+      kind: request.kind,
+      sourceId: source.templateId,
+      path: source.path,
+      scope: source.scope,
+      sha256: source.sha256,
+      totalBytes: source.bytes,
+      content: source.content,
+    };
+  }
+
+  public async inspectThreadExtensions(
+    input: ThreadExtensionsParams,
+  ): Promise<ThreadExtensionsResult> {
+    const request = threadExtensionsParamsSchema.parse(input);
+    const authorized = await this.authorizedThreadContext(
+      request.workspace,
+      request.threadId,
+    );
+    try {
+      recoverThread(
+        { events: authorized.events, diagnostics: [] },
+        authorized.threadId,
+      );
+    } catch (error) {
+      throw new ExtensionInspectionError(
+        error instanceof ThreadRecoveryError
+          ? error.code
+          : "THREAD_EXTENSION_RECOVERY_INVALID",
+        errorMessage(error),
+        { cause: error },
+      );
+    }
+    const contexts = authorized.events.filter(
+      (event) => event.type === "turn.context",
+    );
+    const selected =
+      request.anchorSequence === undefined
+        ? contexts.at(-1)
+        : contexts.find((event) => event.sequence === request.anchorSequence);
+    if (selected === undefined) {
+      throw new ExtensionInspectionError(
+        "THREAD_EXTENSION_SNAPSHOT_NOT_FOUND",
+        request.anchorSequence === undefined
+          ? `Thread '${authorized.threadId}' does not contain an extension snapshot.`
+          : `Thread '${authorized.threadId}' does not contain a turn context at sequence ${request.anchorSequence}.`,
+      );
+    }
+    return {
+      workspace: authorized.workspace,
+      threadId: authorized.threadId,
+      turnId: selected.turnId,
+      anchorSequence: selected.sequence,
+      skills: [...selected.payload.skills],
+      commandTemplates: [...selected.payload.commandTemplates],
+      ...(selected.payload.toolCatalogGeneration === undefined
+        ? {}
+        : {
+            toolCatalogGeneration: {
+              ...selected.payload.toolCatalogGeneration,
+            },
+          }),
+      plugins: [...selected.payload.plugins],
+    };
   }
 
   public async listApprovalGrants(workspaceInput: string): Promise<{
@@ -1410,6 +1561,18 @@ export class KodaApplication {
     }
   }
 
+  private async discoverCurrentExtensions(workspaceInput: string) {
+    const workspace = await this.canonicalExtensionWorkspace(workspaceInput);
+    const skills = await loadProjectSkills(workspace);
+    const commandTemplates = await loadProjectCommandTemplates(workspace);
+    const plugins = await loadPluginConfiguration({
+      environment: this.environment,
+      kodaHome: resolveKodaHome(this.environment),
+      processDirectory: this.processDirectory,
+    });
+    return { workspace, skills, commandTemplates, plugins };
+  }
+
   private async readValidatedThreadLog(
     threadId: ThreadId,
   ): Promise<AgentEvent[]> {
@@ -1547,6 +1710,26 @@ export class KodaApplication {
     } catch (error) {
       throw new ArtifactInspectionError(
         "INVALID_ARTIFACT_WORKSPACE",
+        `Workspace '${workspaceInput}' could not be resolved to an existing directory.`,
+        { cause: error },
+      );
+    }
+  }
+
+  private async canonicalExtensionWorkspace(
+    workspaceInput: string,
+  ): Promise<string> {
+    try {
+      const workspace = await realpath(
+        resolve(this.processDirectory, workspaceInput),
+      );
+      if (!(await stat(workspace)).isDirectory()) {
+        throw new Error("Workspace is not a directory.");
+      }
+      return workspace;
+    } catch (error) {
+      throw new ExtensionInspectionError(
+        "INVALID_EXTENSION_WORKSPACE",
         `Workspace '${workspaceInput}' could not be resolved to an existing directory.`,
         { cause: error },
       );

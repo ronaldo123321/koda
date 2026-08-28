@@ -1,6 +1,6 @@
 # Koda Phase 3H: Skills and Extension System
 
-- Status: Implementation in progress — Phase 3H1–3H4 implemented and verified; Phase 3H5 next
+- Status: Complete — Phase 3H1–3H5 implemented and verified
 - Date: 2026-08-28
 - Depends on: Phase 3B MCP lifecycle, Phase 3E context inspection, Phase 3F execution boundaries, and Phase 3G durable Plan/Harness
 - Scope: project Skills, reviewed command templates, safe dynamic tool-catalog refresh, bounded plugin lifecycle, inspection, and closure
@@ -241,12 +241,16 @@ Optional spawn, version, protocol, capability, stale-policy, or contribution fai
 
 ### Phase 3H5: clients and closure
 
-Status: **Planned.**
+Status: **Implemented and verified (2026-08-28).**
 
 - Complete protocol v12/client inspection and control surfaces, CLI/Ink views, subprocess/crash/provider matrices, and real-TTY gates.
 - Mark Phase 3 complete only after the entire verification matrix passes.
 
 The accepted H5 boundary is inspection-first: current workspace discovery never starts a Provider, MCP server, or plugin, while runtime-only contributions are read only from validated Thread history. Protocol v12, the exact application/client methods, CLI and Ink views, failure rules, gates, and deliberate deferrals are specified in the [Phase 3H5 extension protocol and client closure design](2026-08-28-phase-3h5-extension-client-closure-design.md).
+
+Implemented with credential-free `extension/catalog`, `extension/read`, and `thread/extensions` methods over app-server protocol v12. `KodaApplication` canonicalizes and strictly rediscovers current project sources, projects only safe user-plugin manifest fields, computes a deterministic catalog digest, and reuses authoritative JSONL/workspace authorization for newest or exact-anchor historical snapshots. Current inspection creates no Provider, MCP session, plugin session, ArtifactStore, or Thread lease.
+
+The strict Node client exposes all three typed methods. The direct CLI adds `extension list` and exact current-source `extension read`; Ink adds an idle-only, scrollable `/extensions` view that labels current workspace and Thread snapshot separately. Verification covers strict schemas, stable ordering/digests, source authorization, secret-safe manifests, malformed inputs, legacy snapshots, exact anchors, workspace mismatch, real v12 client correlation, no-spawn subprocess behavior, five-provider instruction projection, CLI and Ink behavior, and real-TTY Plan/extension navigation with normal terminal restoration. The final repository gate passes formatting, build/typecheck, 57 offline test files with 444 tests, and all six deterministic reliability scenarios.
 
 ## 14. Deliberate deferrals
 

@@ -28,6 +28,10 @@ import {
   type ContextInstructionReadResult,
   type ContextReadParams,
   type ContextReadResult,
+  type ExtensionCatalogParams,
+  type ExtensionCatalogResult,
+  type ExtensionReadParams,
+  type ExtensionReadResult,
   type InitializeResult,
   type PlanAcceptanceResolveParams,
   type PlanAcceptanceResolveResult,
@@ -43,6 +47,8 @@ import {
   type ThreadArtifactsResult,
   type ThreadContextParams,
   type ThreadContextResult,
+  type ThreadExtensionsParams,
+  type ThreadExtensionsResult,
   type ThreadEventsParams,
   type ThreadEventsResult,
   type ThreadListParams,
@@ -469,6 +475,82 @@ describe("TuiController", () => {
     expect(controller.getSnapshot().transcript.at(-1)?.text).toContain(
       "checkpoint: checkpoint:tui-3",
     );
+  });
+
+  it("opens idle-only current and durable extension catalogs without starting a turn", async () => {
+    const client = new FakeAppServerClient();
+    client.extensionCatalogResult = {
+      workspace: "/workspace",
+      catalogSha256: "a".repeat(64),
+      skills: [],
+      commandTemplates: [],
+      configuredPlugins: [
+        {
+          pluginId: "reviewer",
+          required: false,
+          capabilities: ["skills", "tools"],
+          manifestSha256: "b".repeat(64),
+        },
+      ],
+    };
+    client.threadExtensionsResult = {
+      workspace: "/workspace",
+      threadId: threadIdSchema.parse("tui-thread"),
+      turnId: turnIdSchema.parse("tui-extension-turn"),
+      anchorSequence: 8,
+      skills: [],
+      commandTemplates: [],
+      toolCatalogGeneration: {
+        generationId: `tool-catalog:${"c".repeat(64)}`,
+        toolCount: 2,
+        toolsSha256: "d".repeat(64),
+      },
+      plugins: [
+        {
+          pluginId: "reviewer",
+          status: "disabled",
+          required: false,
+          manifestSha256: "b".repeat(64),
+          errorCode: "PLUGIN_START_FAILED",
+        },
+      ],
+    };
+    const controller = new TuiController(client, {
+      cwd: "/workspace",
+      provider: "openai",
+      resumeThreadId: "tui-thread",
+    });
+
+    controller.setInput("/extensions");
+    await controller.submitInput();
+
+    expect(client.startRequests).toEqual([]);
+    expect(client.extensionCatalogRequests).toEqual([
+      { workspace: "/workspace" },
+    ]);
+    expect(client.threadExtensionRequests).toEqual([
+      { workspace: "/workspace", threadId: "tui-thread" },
+    ]);
+    expect(controller.getSnapshot()).toMatchObject({
+      mode: "extensions_view",
+      extensionNavigation: {
+        loading: false,
+        current: { configuredPlugins: [{ pluginId: "reviewer" }] },
+        historical: { anchorSequence: 8 },
+      },
+    });
+    expect(
+      controller.getSnapshot().extensionNavigation?.rows.join("\n"),
+    ).toContain("Current workspace: /workspace");
+    expect(
+      controller.getSnapshot().extensionNavigation?.rows.join("\n"),
+    ).toContain("PLUGIN_START_FAILED");
+    controller.scrollExtensions("end");
+    controller.closeExtensions();
+    expect(controller.getSnapshot()).toMatchObject({
+      mode: "chat",
+      extensionNavigation: undefined,
+    });
   });
 
   it("ignores an authoritative Plan response after the Plan view closes", async () => {
@@ -1737,6 +1819,11 @@ class FakeAppServerClient implements AppServerClientApi {
         planning: true,
         planCheckpoints: true,
         stageAcceptance: true,
+        extensionInspection: true,
+        skills: true,
+        commandTemplates: true,
+        dynamicToolCatalog: true,
+        plugins: true,
       },
       providers: [
         provider("openai", "OpenAI", "OPENAI_API_KEY", "gpt-5.6-terra"),
@@ -1773,6 +1860,9 @@ class FakeAppServerClient implements AppServerClientApi {
   public readonly contextReadRequests: ContextReadParams[] = [];
   public readonly contextInstructionReadRequests: ContextInstructionReadParams[] =
     [];
+  public readonly extensionCatalogRequests: ExtensionCatalogParams[] = [];
+  public readonly extensionReadRequests: ExtensionReadParams[] = [];
+  public readonly threadExtensionRequests: ThreadExtensionsParams[] = [];
   public threadListResult: ThreadListResult = { threads: [], diagnostics: [] };
   public threadGetResult: ThreadGetResult | undefined;
   public threadEventsResult: ThreadEventsResult = {
@@ -1807,6 +1897,23 @@ class FakeAppServerClient implements AppServerClientApi {
   };
   public contextReadResult: ContextReadResult | undefined;
   public contextInstructionReadResult: ContextInstructionReadResult | undefined;
+  public extensionCatalogResult: ExtensionCatalogResult = {
+    workspace: "/workspace",
+    catalogSha256: "a".repeat(64),
+    skills: [],
+    commandTemplates: [],
+    configuredPlugins: [],
+  };
+  public extensionReadResult: ExtensionReadResult | undefined;
+  public threadExtensionsResult: ThreadExtensionsResult = {
+    workspace: "/workspace",
+    threadId: threadIdSchema.parse("tui-thread"),
+    turnId: turnIdSchema.parse("tui-turn-1"),
+    anchorSequence: 0,
+    skills: [],
+    commandTemplates: [],
+    plugins: [],
+  };
   public planGetResult: PlanGetResult | undefined;
   public threadListError: Error | undefined;
   public threadEventsError: Error | undefined;
@@ -1917,6 +2024,32 @@ class FakeAppServerClient implements AppServerClientApi {
       return Promise.reject(new Error("Instruction fixture is unavailable."));
     }
     return Promise.resolve(this.contextInstructionReadResult);
+  }
+
+  public inspectExtensionCatalog(
+    params: ExtensionCatalogParams,
+  ): Promise<ExtensionCatalogResult> {
+    this.extensionCatalogRequests.push(params);
+    return Promise.resolve(this.extensionCatalogResult);
+  }
+
+  public readExtensionSource(
+    params: ExtensionReadParams,
+  ): Promise<ExtensionReadResult> {
+    this.extensionReadRequests.push(params);
+    if (this.extensionReadResult === undefined) {
+      return Promise.reject(
+        new Error("Extension source fixture is unavailable."),
+      );
+    }
+    return Promise.resolve(this.extensionReadResult);
+  }
+
+  public inspectThreadExtensions(
+    params: ThreadExtensionsParams,
+  ): Promise<ThreadExtensionsResult> {
+    this.threadExtensionRequests.push(params);
+    return Promise.resolve(this.threadExtensionsResult);
   }
 
   public searchThreads(

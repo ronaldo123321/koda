@@ -30,9 +30,15 @@ def main() -> int:
         (b"> /plan", b"\r"),
         (b"Durable Plan", None),
         (b"Stage 1/1 [accepted]", b"\x1b"),
+        ("ready · idle".encode(), b"/extensions"),
+        (b"> /extensions", b"\r"),
+        (b"Extension catalogs", None),
+        (b"Current workspace:", b"\x1b"),
+        ("ready · idle".encode(), None),
     ]
     output = bytearray()
     step = 0
+    search_start = 0
     interrupt_at = None
     deadline = time.monotonic() + 20
     status = None
@@ -48,8 +54,14 @@ def main() -> int:
                     chunk = b""
                 output.extend(chunk)
             visible_output = strip_terminal_control(output)
-            if step < len(steps) and steps[step][0] in visible_output:
+            marker_index = (
+                visible_output.find(steps[step][0], search_start)
+                if step < len(steps)
+                else -1
+            )
+            if marker_index != -1:
                 response = steps[step][1]
+                search_start = marker_index + len(steps[step][0])
                 if response is not None:
                     os.write(master, response)
                 step += 1

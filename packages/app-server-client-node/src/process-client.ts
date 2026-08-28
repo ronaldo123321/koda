@@ -17,6 +17,10 @@ import {
   contextInstructionReadResultSchema,
   contextReadParamsSchema,
   contextReadResultSchema,
+  extensionCatalogParamsSchema,
+  extensionCatalogResultSchema,
+  extensionReadParamsSchema,
+  extensionReadResultSchema,
   initializeResultSchema,
   jsonValueSchema,
   planAcceptanceResolveParamsSchema,
@@ -34,6 +38,8 @@ import {
   threadArtifactsResultSchema,
   threadContextParamsSchema,
   threadContextResultSchema,
+  threadExtensionsParamsSchema,
+  threadExtensionsResultSchema,
   threadGetParamsSchema,
   threadGetResultSchema,
   threadListParamsSchema,
@@ -58,6 +64,10 @@ import {
   type ContextInstructionReadResult,
   type ContextReadParams,
   type ContextReadResult,
+  type ExtensionCatalogParams,
+  type ExtensionCatalogResult,
+  type ExtensionReadParams,
+  type ExtensionReadResult,
   type InitializeResult,
   type PlanAcceptanceResolveParams,
   type PlanAcceptanceResolveResult,
@@ -75,6 +85,8 @@ import {
   type ThreadArtifactsResult,
   type ThreadContextParams,
   type ThreadContextResult,
+  type ThreadExtensionsParams,
+  type ThreadExtensionsResult,
   type ThreadListParams,
   type ThreadListResult,
   type ThreadSearchParams,
@@ -121,6 +133,15 @@ export interface AppServerClientApi {
   readContextInstruction(
     params: ContextInstructionReadParams,
   ): Promise<ContextInstructionReadResult>;
+  inspectExtensionCatalog(
+    params: ExtensionCatalogParams,
+  ): Promise<ExtensionCatalogResult>;
+  readExtensionSource(
+    params: ExtensionReadParams,
+  ): Promise<ExtensionReadResult>;
+  inspectThreadExtensions(
+    params: ThreadExtensionsParams,
+  ): Promise<ThreadExtensionsResult>;
   searchThreads(params: ThreadSearchParams): Promise<ThreadSearchResult>;
   getPlan(params: PlanGetParams): Promise<PlanGetResult>;
   getRuntimeSettings(params: SettingsGetParams): Promise<SettingsGetResult>;
@@ -324,6 +345,36 @@ export class NodeAppServerClient implements AppServerClientApi {
       "context/instruction/read",
       jsonValueSchema.parse(contextInstructionReadParamsSchema.parse(params)),
       contextInstructionReadResultSchema,
+    );
+  }
+
+  public inspectExtensionCatalog(
+    params: ExtensionCatalogParams,
+  ): Promise<ExtensionCatalogResult> {
+    return this.connection.request(
+      "extension/catalog",
+      jsonValueSchema.parse(extensionCatalogParamsSchema.parse(params)),
+      extensionCatalogResultSchema,
+    );
+  }
+
+  public readExtensionSource(
+    params: ExtensionReadParams,
+  ): Promise<ExtensionReadResult> {
+    return this.connection.request(
+      "extension/read",
+      jsonValueSchema.parse(extensionReadParamsSchema.parse(params)),
+      extensionReadResultSchema,
+    );
+  }
+
+  public inspectThreadExtensions(
+    params: ThreadExtensionsParams,
+  ): Promise<ThreadExtensionsResult> {
+    return this.connection.request(
+      "thread/extensions",
+      jsonValueSchema.parse(threadExtensionsParamsSchema.parse(params)),
+      threadExtensionsResultSchema,
     );
   }
 

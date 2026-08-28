@@ -16,6 +16,10 @@ import {
   contextPreparedPayloadSchema,
   contextReadParamsSchema,
   contextReadResultSchema,
+  extensionCatalogParamsSchema,
+  extensionCatalogResultSchema,
+  extensionReadParamsSchema,
+  extensionReadResultSchema,
   initializeParamsSchema,
   initializeResultSchema,
   jsonRpcErrorResponseSchema,
@@ -32,6 +36,8 @@ import {
   threadArtifactsResultSchema,
   threadContextParamsSchema,
   threadContextResultSchema,
+  threadExtensionsParamsSchema,
+  threadExtensionsResultSchema,
   threadGetParamsSchema,
   threadSearchParamsSchema,
   threadSearchResultSchema,
@@ -43,7 +49,7 @@ import { describe, expect, it } from "vitest";
 
 describe("app-server protocol", () => {
   it("accepts strict versioned requests and safe JSON-RPC IDs", () => {
-    expect(APP_SERVER_PROTOCOL_VERSION).toBe(11);
+    expect(APP_SERVER_PROTOCOL_VERSION).toBe(12);
     expect(
       jsonRpcRequestSchema.parse({
         jsonrpc: "2.0",
@@ -102,6 +108,11 @@ describe("app-server protocol", () => {
           planning: true,
           planCheckpoints: true,
           stageAcceptance: true,
+          extensionInspection: true,
+          skills: true,
+          commandTemplates: true,
+          dynamicToolCatalog: true,
+          plugins: true,
         },
         providers: [
           {
@@ -117,6 +128,11 @@ describe("app-server protocol", () => {
       planning: true,
       planCheckpoints: true,
       stageAcceptance: true,
+      extensionInspection: true,
+      skills: true,
+      commandTemplates: true,
+      dynamicToolCatalog: true,
+      plugins: true,
     });
 
     expect(
@@ -172,6 +188,104 @@ describe("app-server protocol", () => {
         feedback: "Add a recovery test.",
       }),
     ).toHaveProperty("feedback", "Add a recovery test.");
+  });
+
+  it("validates strict bounded extension catalogs, source reads, and historical snapshots", () => {
+    const skill = {
+      skillId: `skill:${"a".repeat(64)}`,
+      name: "review",
+      description: "Review current code.",
+      path: ".koda/skills/review/SKILL.md",
+      scope: ".",
+      bytes: 64,
+      sha256: "b".repeat(64),
+    };
+    const template = {
+      templateId: `command-template:${"c".repeat(64)}`,
+      name: "summary",
+      description: "Summarize the workspace.",
+      selector: "summary",
+      path: ".koda/commands/summary.md",
+      scope: ".",
+      bytes: 72,
+      sha256: "d".repeat(64),
+      parameters: [],
+    };
+    expect(
+      extensionCatalogParamsSchema.parse({ workspace: "/workspace" }),
+    ).toEqual({ workspace: "/workspace" });
+    expect(
+      extensionCatalogResultSchema.parse({
+        workspace: "/workspace",
+        catalogSha256: "e".repeat(64),
+        skills: [skill],
+        commandTemplates: [template],
+        configuredPlugins: [
+          {
+            pluginId: "reviewer",
+            required: false,
+            capabilities: ["skills", "tools"],
+            manifestSha256: "f".repeat(64),
+          },
+        ],
+      }),
+    ).toMatchObject({ skills: [skill], commandTemplates: [template] });
+    expect(
+      extensionReadParamsSchema.parse({
+        workspace: "/workspace",
+        kind: "skill",
+        sourceId: skill.skillId,
+      }),
+    ).toMatchObject({ kind: "skill", sourceId: skill.skillId });
+    expect(() =>
+      extensionReadParamsSchema.parse({
+        workspace: "/workspace",
+        kind: "command_template",
+        sourceId: skill.skillId,
+      }),
+    ).toThrow();
+    expect(
+      extensionReadResultSchema.parse({
+        workspace: "/workspace",
+        kind: "skill",
+        sourceId: skill.skillId,
+        path: skill.path,
+        scope: skill.scope,
+        sha256: skill.sha256,
+        totalBytes: 3,
+        content: "界",
+      }),
+    ).toMatchObject({ totalBytes: 3 });
+    expect(() =>
+      extensionReadResultSchema.parse({
+        workspace: "/workspace",
+        kind: "skill",
+        sourceId: skill.skillId,
+        path: skill.path,
+        scope: skill.scope,
+        sha256: skill.sha256,
+        totalBytes: 2,
+        content: "界",
+      }),
+    ).toThrow();
+    expect(
+      threadExtensionsParamsSchema.parse({
+        workspace: "/workspace",
+        threadId: "extension-thread",
+        anchorSequence: 4,
+      }),
+    ).toMatchObject({ anchorSequence: 4 });
+    expect(
+      threadExtensionsResultSchema.parse({
+        workspace: "/workspace",
+        threadId: "extension-thread",
+        turnId: "extension-turn",
+        anchorSequence: 4,
+        skills: [skill],
+        commandTemplates: [template],
+        plugins: [],
+      }),
+    ).toMatchObject({ turnId: "extension-turn" });
   });
 
   it("carries a safe paused terminal without converting it into failure", () => {

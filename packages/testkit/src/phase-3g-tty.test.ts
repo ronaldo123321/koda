@@ -10,8 +10,8 @@ const describeRealTty =
     ? describe.skip
     : describe;
 
-describeRealTty("Phase 3G real TTY closure", () => {
-  it("accepts a live Stage, inspects its durable Plan, and restores the terminal", async () => {
+describeRealTty("Phase 3H real TTY closure", () => {
+  it("accepts a live Stage, inspects Plan and extensions, and restores the terminal", async () => {
     const entry = join(
       process.cwd(),
       "packages",
@@ -68,6 +68,8 @@ describeRealTty("Phase 3G real TTY closure", () => {
     expect(stripTerminalControl(output)).toContain(
       "Stage 1/1 [accepted] Review the real-TTY flow",
     );
+    expect(stripTerminalControl(output)).toContain("Extension catalogs");
+    expect(stripTerminalControl(output)).toContain("Current workspace:");
     expect(stripTerminalControl(output)).toContain("[phase-3g-tty] exit 0");
     expect(output).toContain("\u001b[?25h");
     expect(output).not.toContain("An interactive TTY is required");

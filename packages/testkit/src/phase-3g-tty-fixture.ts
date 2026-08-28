@@ -108,6 +108,11 @@ const initialization = initializeResultSchema.parse({
     planning: true,
     planCheckpoints: true,
     stageAcceptance: true,
+    extensionInspection: true,
+    skills: true,
+    commandTemplates: true,
+    dynamicToolCatalog: true,
+    plugins: true,
   },
   providers: [
     {
@@ -147,6 +152,24 @@ const client: AppServerClientApi = {
     Promise.reject(new Error("Not used by TTY fixture.")),
   readContextInstruction: async () =>
     Promise.reject(new Error("Not used by TTY fixture.")),
+  inspectExtensionCatalog: async (params) => ({
+    workspace: params.workspace,
+    catalogSha256: "a".repeat(64),
+    skills: [],
+    commandTemplates: [],
+    configuredPlugins: [],
+  }),
+  readExtensionSource: async () =>
+    Promise.reject(new Error("Not used by TTY fixture.")),
+  inspectThreadExtensions: async (params) => ({
+    workspace: params.workspace,
+    threadId: params.threadId,
+    turnId,
+    anchorSequence: params.anchorSequence ?? 0,
+    skills: [],
+    commandTemplates: [],
+    plugins: [],
+  }),
   searchThreads: async () => ({
     matches: [],
     revision: 0,
