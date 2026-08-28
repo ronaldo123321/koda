@@ -143,7 +143,8 @@ describe("McpTurnSession", () => {
         tool("external_action"),
         tool("large_output"),
       ],
-      call: async (name, arguments_) => {
+      call: async (definition, arguments_) => {
+        const name = definition.name;
         calls.push({ name, arguments: arguments_ });
         return name === "large_output"
           ? {
@@ -321,6 +322,86 @@ describe("McpTurnSession", () => {
       ),
     ).rejects.toMatchObject({ code: "MCP_TOOL_CATALOG_INVALID" });
   });
+
+  it("refreshes complete catalogs atomically and preserves prepared generation bindings", async () => {
+    const fixture = await createFixture();
+    await writeConfiguration(fixture, {
+      version: 1,
+      servers: { fixture: { command: "fixture" } },
+    });
+    let definitions = [tool("value", "version one")];
+    const calledDescriptions: string[] = [];
+    const connection: McpConnection = {
+      serverId: "fixture",
+      listTools: async () => definitions,
+      callTool: async (definition) => {
+        calledDescriptions.push(definition.description ?? "");
+        return { content: [{ type: "text", text: "ok" }] };
+      },
+      close: async () => undefined,
+    };
+    const session = await openSession(fixture, async () => connection);
+    const registry = new ToolRegistry();
+    session.registerTools(registry);
+    const oldInvocation = await prepare(registry, "mcp__fixture__value", {});
+    const before = registry.catalogGeneration();
+    definitions[0]!.description = "mutated after discovery";
+
+    definitions = [tool("added"), tool("value", "version two")];
+    const replacement = await session.refreshTools(
+      2,
+      new AbortController().signal,
+    );
+
+    expect(replacement).toMatchObject({
+      previous: before,
+      current: registry.catalogGeneration(),
+      changes: [
+        expect.objectContaining({
+          name: "mcp__fixture__added",
+          change: "added",
+        }),
+        expect.objectContaining({
+          name: "mcp__fixture__value",
+          change: "changed",
+        }),
+      ],
+    });
+    expect(registry.definitions().map((definition) => definition.name)).toEqual(
+      ["mcp__fixture__added", "mcp__fixture__value"],
+    );
+    const newInvocation = await prepare(registry, "mcp__fixture__value", {});
+    await oldInvocation.execute();
+    await newInvocation.execute();
+    expect(calledDescriptions).toEqual(["version one", "version two"]);
+    await session.close();
+  });
+
+  it("keeps the installed generation when refresh validation fails", async () => {
+    const fixture = await createFixture();
+    await writeConfiguration(fixture, {
+      version: 1,
+      servers: { fixture: { command: "fixture" } },
+    });
+    let definitions = [tool("stable")];
+    const connection = fakeConnection("fixture", {
+      definitions: () => definitions,
+    });
+    const session = await openSession(fixture, async () => connection);
+    const registry = new ToolRegistry();
+    session.registerTools(registry);
+    const before = registry.catalogGeneration();
+
+    definitions = [tool("duplicate"), tool("duplicate")];
+    await expect(
+      session.refreshTools(2, new AbortController().signal),
+    ).rejects.toMatchObject({ code: "MCP_TOOL_CATALOG_INVALID" });
+    expect(registry.catalogGeneration()).toEqual(before);
+    expect(registry.definitions().map((definition) => definition.name)).toEqual(
+      ["mcp__fixture__stable"],
+    );
+    await session.close();
+  });
 });
 
 async function createFixture(): Promise<TestFixture> {
@@ -368,14 +449,19 @@ async function openSession(
 function fakeConnection(
   serverId: string,
   options: {
-    definitions?: Awaited<ReturnType<McpConnection["listTools"]>>;
+    definitions?:
+      | Awaited<ReturnType<McpConnection["listTools"]>>
+      | (() => Awaited<ReturnType<McpConnection["listTools"]>>);
     call?: McpConnection["callTool"];
     closed?: string[];
   } = {},
 ): McpConnection {
   return {
     serverId,
-    listTools: async () => options.definitions ?? [],
+    listTools: async () =>
+      typeof options.definitions === "function"
+        ? options.definitions()
+        : (options.definitions ?? []),
     callTool:
       options.call ??
       (async () => ({ content: [{ type: "text", text: "ok" }] })),
@@ -383,10 +469,10 @@ function fakeConnection(
   };
 }
 
-function tool(name: string) {
+function tool(name: string, description = `Fixture tool ${name}`) {
   return {
     name,
-    description: `Fixture tool ${name}`,
+    description,
     inputSchema: {
       type: "object" as const,
       properties: { value: { type: "string" } },

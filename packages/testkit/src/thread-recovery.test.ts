@@ -14,6 +14,7 @@ import {
   toolCallIdSchema,
   turnIdSchema,
   type AgentEvent,
+  type ToolCatalogGenerationSnapshot,
 } from "@koda/protocol";
 import { describe, expect, it } from "vitest";
 
@@ -61,6 +62,61 @@ describe("recoverThread", () => {
     expect(() => assertResumeWorkspace(recovered, "/workspace")).not.toThrow();
     expect(() => assertResumeWorkspace(recovered, "/other")).toThrowError(
       expect.objectContaining({ code: "THREAD_WORKSPACE_MISMATCH" }),
+    );
+  });
+
+  it("recovers the final durable tool catalog generation", () => {
+    const first = catalogGeneration("1", 2);
+    const second = catalogGeneration("2", 2);
+    const events = [
+      event(0, "turn.started", {}),
+      contextEvent(1, first),
+      event(2, "tool.catalog_changed", {
+        step: 2,
+        previous: first,
+        current: second,
+        changes: [
+          {
+            name: "mcp__fixture__value",
+            change: "changed",
+            beforeSha256: "3".repeat(64),
+            afterSha256: "4".repeat(64),
+          },
+        ],
+      }),
+      event(3, "turn.completed", { steps: 2 }),
+    ];
+
+    expect(recoverThread(readResult(events), threadId).context).toMatchObject({
+      toolCatalogGeneration: second,
+    });
+  });
+
+  it("rejects catalog changes that do not chain from the governing generation", () => {
+    const first = catalogGeneration("1", 1);
+    const unrelated = catalogGeneration("9", 1);
+    const second = catalogGeneration("2", 1);
+    const events = [
+      event(0, "turn.started", {}),
+      contextEvent(1, first),
+      event(2, "tool.catalog_changed", {
+        step: 2,
+        previous: unrelated,
+        current: second,
+        changes: [
+          {
+            name: "mcp__fixture__value",
+            change: "changed",
+            beforeSha256: "3".repeat(64),
+            afterSha256: "4".repeat(64),
+          },
+        ],
+      }),
+      event(3, "turn.completed", { steps: 2 }),
+    ];
+
+    expect(() => recoverThread(readResult(events), threadId)).toThrowError(
+      expect.objectContaining({ code: "THREAD_LOG_INVALID" }),
     );
   });
 
@@ -1033,7 +1089,10 @@ function changeEvidence() {
   };
 }
 
-function contextEvent(sequence: number): AgentEvent {
+function contextEvent(
+  sequence: number,
+  toolCatalogGeneration?: ToolCatalogGenerationSnapshot,
+): AgentEvent {
   return event(sequence, "turn.context", {
     provider: "openai",
     model: "test-model",
@@ -1043,7 +1102,19 @@ function contextEvent(sequence: number): AgentEvent {
     repositoryInstructions: [],
     skills: [],
     commandTemplates: [],
+    ...(toolCatalogGeneration === undefined ? {} : { toolCatalogGeneration }),
   });
+}
+
+function catalogGeneration(
+  character: string,
+  toolCount: number,
+): ToolCatalogGenerationSnapshot {
+  return {
+    generationId: `tool-catalog:${character.repeat(64)}`,
+    toolCount,
+    toolsSha256: character.repeat(64),
+  };
 }
 
 function durableAcceptedPlanSetup() {

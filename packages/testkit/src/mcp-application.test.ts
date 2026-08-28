@@ -28,6 +28,9 @@ const fixtureServer = fileURLToPath(
 const paginatedFixtureServer = fileURLToPath(
   new URL("../fixtures/mcp-paginated-server.mjs", import.meta.url),
 );
+const dynamicFixtureServer = fileURLToPath(
+  new URL("../fixtures/mcp-dynamic-server.mjs", import.meta.url),
+);
 const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
@@ -195,6 +198,210 @@ describe("KodaApplication MCP integration", () => {
     await expect(
       application.startTurn(
         { prompt: "Inspect the full MCP catalog.", cwd: fixture.workspaceRoot },
+        {
+          events: { append: async () => undefined },
+          approvals: rejectApprovals(),
+        },
+      ).completion,
+    ).resolves.toMatchObject({ status: "completed", exitCode: 0 });
+    await expectFile(exitFile);
+  });
+
+  it("installs a changed real MCP catalog only between model steps", async () => {
+    const fixture = await createFixture("dynamic-catalog");
+    const exitFile = join(fixture.root, "server-exited.txt");
+    await writeMcpConfiguration(fixture, {
+      command: process.execPath,
+      args: [dynamicFixtureServer],
+      env: ["KODA_MCP_FIXTURE_EXIT_FILE"],
+      tools: { advance: { effect: "read" } },
+    });
+    let initialGeneration = "";
+    let refreshedGeneration = "";
+    const dynamicThreadId = threadIdSchema.parse("mcp-dynamic-thread");
+    let turnCursor = 0;
+    const provider = new ScriptedModelProvider([
+      {
+        assertRequest: (request) => {
+          expect(
+            request.tools
+              .filter((tool) => tool.name.startsWith("mcp__fixture__"))
+              .map((tool) => tool.name),
+          ).toEqual(["mcp__fixture__advance", "mcp__fixture__old"]);
+        },
+        events: [
+          {
+            type: "tool_call",
+            callId: toolCallIdSchema.parse("mcp-dynamic-advance"),
+            name: "mcp__fixture__advance",
+            arguments: {},
+          },
+          { type: "completed", finishReason: "tool_calls" },
+        ],
+      },
+      {
+        assertRequest: (request) => {
+          expect(
+            request.tools
+              .filter((tool) => tool.name.startsWith("mcp__fixture__"))
+              .map((tool) => tool.name),
+          ).toEqual(["mcp__fixture__advance", "mcp__fixture__next"]);
+          expect(latestToolResult(request.items)).toMatchObject({
+            name: "mcp__fixture__advance",
+            status: "success",
+          });
+        },
+        events: [
+          {
+            type: "tool_call",
+            callId: toolCallIdSchema.parse("mcp-dynamic-next"),
+            name: "mcp__fixture__next",
+            arguments: {},
+          },
+          { type: "completed", finishReason: "tool_calls" },
+        ],
+      },
+      {
+        assertRequest: (request) => {
+          expect(latestToolResult(request.items)).toMatchObject({
+            name: "mcp__fixture__next",
+            status: "success",
+            output: {
+              structured_content: { tool: "next", generation: 2 },
+            },
+          });
+        },
+        events: [
+          { type: "assistant_delta", text: "Dynamic catalog completed." },
+          { type: "completed", finishReason: "stop" },
+        ],
+      },
+      {
+        assertRequest: (request) => {
+          expect(request.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "recovery",
+                toolCatalogGenerationChange: {
+                  previous: expect.objectContaining({
+                    generationId: refreshedGeneration,
+                  }),
+                  current: expect.objectContaining({
+                    generationId: initialGeneration,
+                  }),
+                },
+              }),
+            ]),
+          );
+        },
+        events: [
+          { type: "assistant_delta", text: "Resume catalog audited." },
+          { type: "completed", finishReason: "stop" },
+        ],
+      },
+    ]);
+    const observed: AgentEvent[] = [];
+    let approvals = 0;
+    const application = new KodaApplication({
+      environment: {
+        OPENAI_API_KEY: "offline-test-key",
+        KODA_HOME: fixture.kodaHome,
+        KODA_MCP_FIXTURE_EXIT_FILE: exitFile,
+      },
+      processDirectory: fixture.root,
+      dependencies: {
+        openWorkspace: (root) => ReadOnlyWorkspace.open(root),
+        createProvider: () => provider,
+        createIds: (resumeThreadId) => {
+          turnCursor += 1;
+          return {
+            threadId: resumeThreadId ?? dynamicThreadId,
+            turnId: turnIdSchema.parse(`mcp-dynamic-turn-${turnCursor}`),
+            itemIds: new DeterministicItemIdFactory(
+              `mcp-dynamic-item-${turnCursor}`,
+            ),
+          };
+        },
+      },
+    });
+
+    await expect(
+      application.startTurn(
+        { prompt: "Use the changing MCP catalog.", cwd: fixture.workspaceRoot },
+        {
+          events: {
+            append: async (event) => {
+              observed.push(event);
+              if (event.type === "turn.context") {
+                initialGeneration =
+                  event.payload.toolCatalogGeneration?.generationId ?? "";
+              }
+              if (event.type === "tool.catalog_changed") {
+                refreshedGeneration = event.payload.current.generationId;
+              }
+            },
+          },
+          approvals: {
+            request: async (request) => {
+              approvals += 1;
+              expect(request.name).toBe("mcp__fixture__next");
+              return { decision: "approved" };
+            },
+          },
+        },
+      ).completion,
+    ).resolves.toMatchObject({ status: "completed", exitCode: 0 });
+
+    expect(initialGeneration).toMatch(/^tool-catalog:[a-f0-9]{64}$/u);
+    expect(refreshedGeneration).toMatch(/^tool-catalog:[a-f0-9]{64}$/u);
+    expect(refreshedGeneration).not.toBe(initialGeneration);
+    expect(approvals).toBe(1);
+    expect(
+      observed.filter((event) => event.type === "tool.catalog_changed"),
+    ).toEqual([
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          step: 2,
+          changes: [
+            expect.objectContaining({
+              name: "mcp__fixture__advance",
+              change: "changed",
+            }),
+            expect.objectContaining({
+              name: "mcp__fixture__next",
+              change: "added",
+            }),
+            expect.objectContaining({
+              name: "mcp__fixture__old",
+              change: "removed",
+            }),
+          ],
+        }),
+      }),
+    ]);
+    const preparedGenerations = observed.flatMap((event) =>
+      event.type === "context.prepared"
+        ? [event.payload.toolCatalogGenerationId]
+        : [],
+    );
+    expect(preparedGenerations).toEqual([
+      initialGeneration,
+      refreshedGeneration,
+      refreshedGeneration,
+    ]);
+    const callGenerations = observed.flatMap((event) =>
+      event.type === "item.recorded" && event.payload.item.type === "tool_call"
+        ? [event.payload.item.catalogGenerationId]
+        : [],
+    );
+    expect(callGenerations).toEqual([initialGeneration, refreshedGeneration]);
+    await expect(
+      application.startTurn(
+        {
+          prompt: "Resume the changing MCP catalog.",
+          cwd: fixture.workspaceRoot,
+          resume: dynamicThreadId,
+        },
         {
           events: { append: async () => undefined },
           approvals: rejectApprovals(),

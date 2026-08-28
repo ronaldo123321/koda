@@ -19,7 +19,7 @@ export interface McpConnection {
   readonly serverId: string;
   listTools(signal: AbortSignal, timeoutMs: number): Promise<readonly Tool[]>;
   callTool(
-    name: string,
+    tool: Tool,
     arguments_: JsonObject,
     signal: AbortSignal,
     timeoutMs: number,
@@ -80,7 +80,6 @@ export const connectOfficialMcpClient: McpConnectionFactory = async (
       `Could not start MCP server '${configuration.id}'`,
     );
   }
-  const definitions = new Map<string, Tool>();
   return {
     serverId: configuration.id,
     listTools: async (requestSignal, timeoutMs) => {
@@ -91,10 +90,6 @@ export const connectOfficialMcpClient: McpConnectionFactory = async (
           maxTotalTimeout: timeoutMs,
           cacheMode: "refresh",
         });
-        definitions.clear();
-        for (const tool of result.tools) {
-          definitions.set(tool.name, tool);
-        }
         return result.tools;
       } catch (error) {
         if (requestSignal.aborted) {
@@ -107,22 +102,15 @@ export const connectOfficialMcpClient: McpConnectionFactory = async (
         );
       }
     },
-    callTool: async (name, arguments_, requestSignal, timeoutMs) => {
-      const definition = definitions.get(name);
-      if (definition === undefined) {
-        throw new McpClientError(
-          "MCP_TOOL_CATALOG_INVALID",
-          `MCP tool '${configuration.id}/${name}' is not in the frozen catalog.`,
-        );
-      }
+    callTool: async (tool, arguments_, requestSignal, timeoutMs) => {
       try {
         return await client.callTool(
-          { name, arguments: arguments_ },
+          { name: tool.name, arguments: arguments_ },
           {
             signal: requestSignal,
             timeout: timeoutMs,
             maxTotalTimeout: timeoutMs,
-            toolDefinition: definition,
+            toolDefinition: tool,
           },
         );
       } catch (error) {
@@ -132,7 +120,7 @@ export const connectOfficialMcpClient: McpConnectionFactory = async (
         throw classifyMcpError(
           error,
           "MCP_PROTOCOL_ERROR",
-          `MCP tool '${configuration.id}/${name}' failed`,
+          `MCP tool '${configuration.id}/${tool.name}' failed`,
         );
       }
     },

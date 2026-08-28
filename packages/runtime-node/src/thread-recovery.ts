@@ -107,6 +107,7 @@ export function recoverThread(
 
   const groups = groupTurns(events);
   validateApprovalGrantAudit(groups);
+  validateToolCatalogAudit(groups);
   const recoveredPlan = recoverPlanState(events);
   const previous = groups.at(-1);
   if (previous === undefined) {
@@ -158,13 +159,17 @@ export function recoverThread(
     throw invalidLog("Thread log does not contain a final valid event.");
   }
 
+  const recoveredContext = recoverLatestToolCatalogGeneration(
+    contextEvent,
+    events,
+  );
   return {
     threadId: expectedThreadId,
     previousTurnId: previous.turnId,
     previousStatus,
     nextSequence: lastEvent.sequence + 1,
     history,
-    context: contextEvent.payload,
+    context: recoveredContext,
     uncertainToolCalls,
     workspaceChangeSets,
     ...(recoveredPlan.plan === undefined ? {} : { plan: recoveredPlan.plan }),
@@ -175,6 +180,80 @@ export function recoverThread(
     partialTrailingEventDiscarded,
     message,
   };
+}
+
+function validateToolCatalogAudit(groups: readonly TurnGroup[]): void {
+  for (const group of groups) {
+    const contextEvent = group.events.find(
+      (event) => event.type === "turn.context",
+    );
+    let generation =
+      contextEvent?.type === "turn.context"
+        ? contextEvent.payload.toolCatalogGeneration
+        : undefined;
+    let lastPreparedStep = 0;
+    let lastChangeStep = 0;
+    for (const event of group.events) {
+      if (event.type === "tool.catalog_changed") {
+        if (
+          generation === undefined ||
+          event.payload.previous.generationId !== generation.generationId ||
+          event.payload.step <= lastPreparedStep ||
+          event.payload.step <= lastChangeStep
+        ) {
+          throw invalidLog(
+            `Tool catalog change in turn '${group.turnId}' is not chained to its governing generation.`,
+          );
+        }
+        generation = event.payload.current;
+        lastChangeStep = event.payload.step;
+        continue;
+      }
+      if (event.type === "context.prepared") {
+        const generationId = event.payload.toolCatalogGenerationId;
+        if (
+          generationId !== undefined &&
+          (generation === undefined || generationId !== generation.generationId)
+        ) {
+          throw invalidLog(
+            `Prepared context step ${event.payload.step} references the wrong tool catalog generation.`,
+          );
+        }
+        lastPreparedStep = Math.max(lastPreparedStep, event.payload.step);
+        continue;
+      }
+      if (
+        event.type === "item.recorded" &&
+        event.payload.item.type === "tool_call" &&
+        event.payload.item.catalogGenerationId !== undefined &&
+        (generation === undefined ||
+          event.payload.item.catalogGenerationId !== generation.generationId)
+      ) {
+        throw invalidLog(
+          `Tool call '${event.payload.item.callId}' references the wrong catalog generation.`,
+        );
+      }
+    }
+  }
+}
+
+function recoverLatestToolCatalogGeneration(
+  contextEvent: Extract<AgentEvent, { type: "turn.context" }>,
+  events: readonly AgentEvent[],
+): TurnContextSnapshot {
+  let generation = contextEvent.payload.toolCatalogGeneration;
+  for (const event of events) {
+    if (
+      event.turnId === contextEvent.turnId &&
+      event.sequence > contextEvent.sequence &&
+      event.type === "tool.catalog_changed"
+    ) {
+      generation = event.payload.current;
+    }
+  }
+  return generation === undefined
+    ? contextEvent.payload
+    : { ...contextEvent.payload, toolCatalogGeneration: generation };
 }
 
 function recoverPlanState(events: readonly AgentEvent[]): {

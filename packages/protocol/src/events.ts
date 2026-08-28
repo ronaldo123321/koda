@@ -33,6 +33,7 @@ import {
   contextPreparedPayloadSchema,
   turnContextSnapshotSchema,
 } from "./context.js";
+import { toolCatalogChangedPayloadSchema } from "./tool-catalogs.js";
 
 const metadataShape = {
   schemaVersion: z.literal(1),
@@ -108,6 +109,11 @@ export const agentEventSchema = z.discriminatedUnion("type", [
     ...metadataShape,
     type: z.literal("context.prepared"),
     payload: contextPreparedPayloadSchema,
+  }),
+  z.object({
+    ...metadataShape,
+    type: z.literal("tool.catalog_changed"),
+    payload: toolCatalogChangedPayloadSchema,
   }),
   z.object({
     ...metadataShape,

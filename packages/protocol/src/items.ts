@@ -9,6 +9,10 @@ import { jsonObjectSchema, jsonValueSchema } from "./json.js";
 import { modelProviderIdSchema, providerStateSchema } from "./providers.js";
 import { planCheckpointSchema, planSnapshotSchema } from "./plans.js";
 import { skillChangeSchema } from "./skills.js";
+import {
+  toolCatalogGenerationIdSchema,
+  toolCatalogResumeChangeSchema,
+} from "./tool-catalogs.js";
 
 export const CONVERSATION_ITEM_TYPES = [
   "user_message",
@@ -62,6 +66,7 @@ export const toolCallItemSchema = z.object({
   callId: toolCallIdSchema,
   name: z.string().min(1),
   arguments: jsonObjectSchema,
+  catalogGenerationId: toolCatalogGenerationIdSchema.optional(),
 });
 
 export const toolResultItemSchema = z.object({
@@ -148,6 +153,7 @@ export const recoveryItemSchema = z.object({
     .default([]),
   skillChanges: z.array(skillChangeSchema).default([]),
   commandTemplateChanges: z.array(commandTemplateChangeSchema).default([]),
+  toolCatalogGenerationChange: toolCatalogResumeChangeSchema.optional(),
   uncertainToolCalls: z.array(
     z.object({
       callId: toolCallIdSchema,

@@ -14,6 +14,10 @@ import {
 } from "./items.js";
 import { modelProviderIdSchema } from "./providers.js";
 import { MAX_PROJECT_SKILLS, skillSnapshotSchema } from "./skills.js";
+import {
+  toolCatalogGenerationIdSchema,
+  toolCatalogGenerationSnapshotSchema,
+} from "./tool-catalogs.js";
 
 export const repositoryInstructionSnapshotSchema = z.object({
   path: z.string().min(1),
@@ -35,6 +39,7 @@ export const turnContextSnapshotSchema = z.object({
     .max(MAX_PROJECT_COMMAND_TEMPLATES)
     .default([]),
   commandTemplateActivation: commandTemplateActivationSchema.optional(),
+  toolCatalogGeneration: toolCatalogGenerationSnapshotSchema.optional(),
 });
 
 export const contextPreparedPayloadSchema = z
@@ -60,6 +65,7 @@ export const contextPreparedPayloadSchema = z
     activeItemsSha256: artifactSha256Schema,
     toolCount: z.number().int().nonnegative(),
     toolsSha256: artifactSha256Schema,
+    toolCatalogGenerationId: toolCatalogGenerationIdSchema.optional(),
     compactionItemId: itemIdSchema.optional(),
     planState: z
       .object({

@@ -16,12 +16,19 @@ import type {
   WorkspaceChangeSetPreparedPayload,
   WorkspaceChangeSetRolledBackPayload,
   WorkspaceChangeSetUncertainPayload,
+  ToolCatalogChange,
+  ToolCatalogGenerationSnapshot,
 } from "@koda/protocol";
-import { jsonValueSchema } from "@koda/protocol";
+import {
+  jsonValueSchema,
+  toolCatalogChangeSchema,
+  toolCatalogGenerationSnapshotSchema,
+} from "@koda/protocol";
 import type { z } from "zod";
 
 import type { ModelToolDefinition } from "./model.js";
 import type { ToolApprovalPreview, ToolEffect } from "./policy.js";
+import { digestModelTools, sha256CanonicalJson } from "./context-engine.js";
 
 export interface ToolContext {
   threadId: ThreadId;
@@ -109,6 +116,7 @@ export interface ToolRegistration<Input> {
   inputSchema: z.ZodType<Input>;
   concurrency: "parallel" | "exclusive";
   effect: ToolEffect;
+  catalogIdentity?: JsonValue;
   execute?: (context: ToolContext, input: Input) => Promise<JsonValue>;
   prepare?: (
     context: ToolContext,
@@ -121,6 +129,7 @@ interface ErasedToolRegistration {
   inputSchema: z.ZodType<unknown>;
   concurrency: "parallel" | "exclusive";
   effect: ToolEffect;
+  catalogIdentity?: JsonValue;
   execute?: (context: ToolContext, input: unknown) => Promise<JsonValue>;
   prepare?: (
     context: ToolContext,
@@ -149,50 +158,84 @@ export interface ToolInvocation {
   arguments: JsonObject;
 }
 
+export interface ToolCatalogReplacement {
+  previous: ToolCatalogGenerationSnapshot;
+  current: ToolCatalogGenerationSnapshot;
+  changes: ToolCatalogChange[];
+}
+
 export class ToolRegistry {
-  private readonly tools = new Map<string, ErasedToolRegistration>();
+  private tools = new Map<string, ErasedToolRegistration>();
+  private toolOwners = new Map<string, string | undefined>();
 
   public register<Input>(registration: ToolRegistration<Input>): void {
     if (this.tools.has(registration.spec.name)) {
       throw new Error(`Tool already registered: ${registration.spec.name}`);
     }
-
-    if (
-      (registration.execute === undefined) ===
-      (registration.prepare === undefined)
-    ) {
-      throw new Error(
-        `Tool '${registration.spec.name}' must define exactly one of execute or prepare.`,
-      );
-    }
-
-    const execute = registration.execute;
-    const prepare = registration.prepare;
-    const erased: ErasedToolRegistration = {
-      spec: registration.spec,
-      inputSchema: registration.inputSchema as z.ZodType<unknown>,
-      concurrency: registration.concurrency,
-      effect: registration.effect,
-      ...(execute === undefined
-        ? {}
-        : {
-            execute: async (context: ToolContext, input: unknown) =>
-              execute(context, input as Input),
-          }),
-      ...(prepare === undefined
-        ? {}
-        : {
-            prepare: async (context: ToolContext, input: unknown) =>
-              prepare(context, input as Input),
-          }),
-    };
-    this.tools.set(registration.spec.name, erased);
+    this.tools.set(registration.spec.name, eraseRegistration(registration));
+    this.toolOwners.set(registration.spec.name, undefined);
   }
 
   public definitions(): readonly ModelToolDefinition[] {
     return [...this.tools.values()]
       .map((tool) => tool.spec)
-      .sort((left, right) => left.name.localeCompare(right.name));
+      .sort((left, right) => comparePortable(left.name, right.name));
+  }
+
+  public catalogGeneration(): ToolCatalogGenerationSnapshot {
+    return catalogGeneration(this.tools);
+  }
+
+  public replaceNamespace(
+    namespace: string,
+    populate: (
+      register: <Input>(registration: ToolRegistration<Input>) => void,
+    ) => void,
+  ): ToolCatalogReplacement {
+    if (!/^[a-z][a-z0-9_-]{0,63}$/u.test(namespace)) {
+      throw new Error(`Invalid tool namespace: ${namespace}`);
+    }
+    const staged = new Map<string, ErasedToolRegistration>();
+    populate(<Input>(registration: ToolRegistration<Input>) => {
+      if (staged.has(registration.spec.name)) {
+        throw new Error(
+          `Tool already registered in namespace '${namespace}': ${registration.spec.name}`,
+        );
+      }
+      const owner = this.toolOwners.get(registration.spec.name);
+      if (this.tools.has(registration.spec.name) && owner !== namespace) {
+        throw new Error(
+          `Tool '${registration.spec.name}' conflicts with an existing Koda tool.`,
+        );
+      }
+      staged.set(registration.spec.name, eraseRegistration(registration));
+    });
+
+    const previous = this.catalogGeneration();
+    const previousNamespace = new Map(
+      [...this.tools].filter(
+        ([name]) => this.toolOwners.get(name) === namespace,
+      ),
+    );
+    const candidate = new Map(
+      [...this.tools].filter(
+        ([name]) => this.toolOwners.get(name) !== namespace,
+      ),
+    );
+    for (const [name, registration] of staged) {
+      candidate.set(name, registration);
+    }
+    const current = catalogGeneration(candidate);
+    const changes = diffRegistrations(previousNamespace, staged);
+
+    this.tools = candidate;
+    this.toolOwners = new Map(
+      [...this.toolOwners].filter(([, owner]) => owner !== namespace),
+    );
+    for (const name of staged.keys()) {
+      this.toolOwners.set(name, namespace);
+    }
+    return { previous, current, changes };
   }
 
   public async prepare(
@@ -311,6 +354,111 @@ export class ToolRegistry {
       };
     }
   }
+}
+
+function eraseRegistration<Input>(
+  registration: ToolRegistration<Input>,
+): ErasedToolRegistration {
+  if (
+    (registration.execute === undefined) ===
+    (registration.prepare === undefined)
+  ) {
+    throw new Error(
+      `Tool '${registration.spec.name}' must define exactly one of execute or prepare.`,
+    );
+  }
+  const execute = registration.execute;
+  const prepare = registration.prepare;
+  return {
+    spec: registration.spec,
+    inputSchema: registration.inputSchema as z.ZodType<unknown>,
+    concurrency: registration.concurrency,
+    effect: registration.effect,
+    ...(registration.catalogIdentity === undefined
+      ? {}
+      : {
+          catalogIdentity: jsonValueSchema.parse(registration.catalogIdentity),
+        }),
+    ...(execute === undefined
+      ? {}
+      : {
+          execute: async (context: ToolContext, input: unknown) =>
+            execute(context, input as Input),
+        }),
+    ...(prepare === undefined
+      ? {}
+      : {
+          prepare: async (context: ToolContext, input: unknown) =>
+            prepare(context, input as Input),
+        }),
+  };
+}
+
+function catalogGeneration(
+  tools: ReadonlyMap<string, ErasedToolRegistration>,
+): ToolCatalogGenerationSnapshot {
+  const entries = [...tools]
+    .sort(([left], [right]) => comparePortable(left, right))
+    .map(([name, registration]) => ({
+      name,
+      sha256: registrationDigest(registration),
+    }));
+  const definitions = [...tools.values()]
+    .map((tool) => tool.spec)
+    .sort((left, right) => comparePortable(left.name, right.name));
+  return toolCatalogGenerationSnapshotSchema.parse({
+    generationId: `tool-catalog:${sha256CanonicalJson(entries)}`,
+    toolCount: entries.length,
+    toolsSha256: digestModelTools(definitions),
+  });
+}
+
+function diffRegistrations(
+  previous: ReadonlyMap<string, ErasedToolRegistration>,
+  current: ReadonlyMap<string, ErasedToolRegistration>,
+): ToolCatalogChange[] {
+  const names = [...new Set([...previous.keys(), ...current.keys()])].sort(
+    comparePortable,
+  );
+  const changes: ToolCatalogChange[] = [];
+  for (const name of names) {
+    const before = previous.get(name);
+    const after = current.get(name);
+    const beforeSha256 =
+      before === undefined ? undefined : registrationDigest(before);
+    const afterSha256 =
+      after === undefined ? undefined : registrationDigest(after);
+    if (beforeSha256 === afterSha256) {
+      continue;
+    }
+    changes.push(
+      toolCatalogChangeSchema.parse({
+        name,
+        change:
+          before === undefined
+            ? "added"
+            : after === undefined
+              ? "removed"
+              : "changed",
+        ...(beforeSha256 === undefined ? {} : { beforeSha256 }),
+        ...(afterSha256 === undefined ? {} : { afterSha256 }),
+      }),
+    );
+  }
+  return changes;
+}
+
+function registrationDigest(registration: ErasedToolRegistration): string {
+  return sha256CanonicalJson({
+    spec: registration.spec,
+    concurrency: registration.concurrency,
+    effect: registration.effect,
+    catalogIdentity: registration.catalogIdentity,
+  });
+}
+
+function comparePortable(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function toToolError(

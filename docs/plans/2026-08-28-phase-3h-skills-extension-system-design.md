@@ -1,6 +1,6 @@
 # Koda Phase 3H: Skills and Extension System
 
-- Status: Implementation in progress — Phase 3H1–3H2 implemented and verified; Phase 3H3 next
+- Status: Implementation in progress — Phase 3H1–3H3 implemented and verified; Phase 3H4 next
 - Date: 2026-08-28
 - Depends on: Phase 3B MCP lifecycle, Phase 3E context inspection, Phase 3F execution boundaries, and Phase 3G durable Plan/Harness
 - Scope: project Skills, reviewed command templates, safe dynamic tool-catalog refresh, bounded plugin lifecycle, inspection, and closure
@@ -127,6 +127,14 @@ Phase 3H3 extends the existing frozen MCP catalog with explicit refresh at a saf
 
 Removal never cancels an in-flight call, and a call is resolved against the generation that advertised it. New or changed external tools default to `execute` until local configuration explicitly reviews them as `read`. Refresh cannot weaken approval grants, invent a `control` tool, or cause automatic retry after disconnect. Subscription-driven refresh, remote registries, and cross-Turn shared MCP sessions remain deferred.
 
+Three refresh mechanisms were considered. Mutating one live registry in place is rejected because a failed refresh can expose a partial catalog and a multi-call model response can observe mixed definitions. Resolving a tool against the MCP server's latest catalog at call time is rejected because the definition used for validation and approval could differ from the definition advertised to the model. Phase 3H3 therefore uses **atomic namespace generations**: built-ins remain immutable, the `mcp` namespace is built off to the side, the complete candidate is validated, and one registry reference changes only after success.
+
+The Harness polls `tools/list` before model steps after step one. This is an explicit safe boundary: the preceding model stream has ended and every tool call from that response has completed, while the next Provider request has not started. Notifications and background refresh remain deferred. An unchanged candidate produces no generation or event. A malformed, colliding, oversized, disconnected, or policy-inconsistent candidate leaves the prior generation installed and fails the Turn before another Provider request; Koda never silently continues with a partially refreshed catalog.
+
+Generation identity covers sorted model definitions plus Runtime effect and concurrency metadata. `turn.context` records the initial generation aggregate. Every `context.prepared` and newly recorded Tool Call binds to the generation exposed for that model step. A successful change emits one durable `tool.catalog_changed` event with previous/current identities and bounded added/removed/changed entries. Across resume, Koda reports an aggregate generation change without claiming historical names that were not persisted.
+
+MCP registrations retain the exact SDK Tool definition and connection captured by their generation. Replacing or removing a registration does not mutate an already prepared invocation; that invocation may complete once through the normal policy, approval, cancellation, timeout, artifact, and recovery path. Newly added tools remain `execute` by default. A configured `read` classification remains tied to the exact server tool name and the complete candidate fails if that reviewed name disappears.
+
 ## 9. Plugin lifecycle
 
 Phase 3H4 introduces a local out-of-process plugin host with a strict versioned manifest and stdio control channel. A plugin declares a bounded identity, executable argv, requested capabilities, startup timeout, health status, and shutdown behavior. Koda allowlists capability adapters; a manifest cannot register arbitrary Runtime callbacks.
@@ -189,10 +197,16 @@ Implemented with strict recursive discovery of scoped `<scope>/.koda/commands/<n
 
 ### Phase 3H3: dynamic tool generations
 
-Status: **Planned.**
+Status: **Implemented and verified (2026-08-28).**
 
 - Add immutable catalog generations, safe-boundary refresh, durable diffs, and generation-bound calls.
 - Preserve built-in precedence, conservative effects, approvals, cancellation, and recovery.
+
+Implemented with a Runtime-owned `ToolRegistry` namespace transaction that stages and validates a complete replacement before one atomic swap. Generation identity covers sorted model definitions, concurrency, effect, and opaque source identity; the MCP adapter snapshots the exact SDK Tool definition and passes a fresh copy to each call, so later discovery or connection mutation cannot alter an advertised or prepared generation.
+
+The Harness polls every connected local stdio MCP server before model steps after step one. Unchanged catalogs are silent; malformed, duplicate, oversized, colliding, disconnected, or stale-read candidates fail before the next Provider request and leave the installed generation unchanged. Successful changes emit a bounded `tool.catalog_changed` event before `context.prepared`; the Turn context, every prepared request, and every Tool Call carry the governing generation identity.
+
+Recovery validates generation chains, request bindings, and Tool Call bindings while preserving legacy logs whose new fields are absent. Resume compares the last durable generation from the preceding Turn with the newly discovered initial generation and adds aggregate recovery evidence when they differ. Verification covers atomic replacement, policy/source digests, old prepared-call bindings, failed refresh rollback, safe Harness ordering, real stdio add/change/remove discovery, default-execute approval, restart/resume evidence, and hostile recovery chains. The repository format gate, full typecheck, 51-file/422-test offline suite, and six reliability scenarios pass at the Phase 3H3 checkpoint.
 
 ### Phase 3H4: isolated plugin lifecycle
 

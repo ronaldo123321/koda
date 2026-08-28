@@ -1072,6 +1072,7 @@ export class KodaApplication {
       let initialSequence = 0;
       let recoveredPlan: ReturnType<typeof recoverThread>["plan"];
       let recoveredCheckpoint: ReturnType<typeof recoverThread>["checkpoint"];
+      let previousToolCatalogGeneration: TurnContextSnapshot["toolCatalogGeneration"];
       let planNeedsRevalidation = false;
 
       if (configuration.resumeThreadId !== undefined) {
@@ -1085,6 +1086,7 @@ export class KodaApplication {
         history = recovered.history;
         recoveredPlan = recovered.plan;
         recoveredCheckpoint = recovered.checkpoint;
+        previousToolCatalogGeneration = recovered.context.toolCatalogGeneration;
         planNeedsRevalidation = recovered.planNeedsRevalidation;
         const unavailableArtifacts = await artifactStore.findUnavailable(
           history.flatMap((item) =>
@@ -1189,6 +1191,25 @@ export class KodaApplication {
         signal: controller.signal,
       });
       mcpSession.registerTools(tools);
+      const toolCatalogGeneration = tools.catalogGeneration();
+      if (
+        previousToolCatalogGeneration !== undefined &&
+        previousToolCatalogGeneration.generationId !==
+          toolCatalogGeneration.generationId
+      ) {
+        prefaceItems = prefaceItems.map((item) =>
+          item.type !== "recovery"
+            ? item
+            : recoveryItemSchema.parse({
+                ...item,
+                message: `${item.message} Tool catalog generation changed since the previous turn; the current generation applies to this resumed turn.`,
+                toolCatalogGenerationChange: {
+                  previous: previousToolCatalogGeneration,
+                  current: toolCatalogGeneration,
+                },
+              }),
+        );
+      }
       const contextEngine = new ContextEngine({
         contextWindowTokens: configuration.contextWindowTokens,
         maxOutputTokens: configuration.maxOutputTokens,
@@ -1209,6 +1230,10 @@ export class KodaApplication {
         approvalGrants: this.approvalGrantRegistry.forWorkspace(workspace.root),
         contextEngine,
         planState,
+        toolCatalogRefresher: {
+          refreshBeforeModelStep: (step, signal) =>
+            mcpSession!.refreshTools(step, signal),
+        },
       });
 
       const result = await loop.runTurn({
@@ -1235,6 +1260,7 @@ export class KodaApplication {
             : {
                 commandTemplateActivation: expandedCommandTemplate.activation,
               }),
+          toolCatalogGeneration,
         }),
       });
       if (result.status === "completed") {

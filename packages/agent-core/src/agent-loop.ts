@@ -22,6 +22,7 @@ import {
   type TurnContextSnapshot,
   type TurnUsage,
   type TurnId,
+  type ToolCatalogGenerationSnapshot,
 } from "@koda/protocol";
 
 import {
@@ -50,6 +51,7 @@ import {
   ToolRegistry,
   ToolOperationalEventError,
   type PreparedToolInvocation,
+  type ToolCatalogReplacement,
   type ToolExecutionResult,
 } from "./tools.js";
 import type { PlanRuntimeState } from "./plan-state.js";
@@ -73,6 +75,14 @@ export interface AgentLoopOptions {
   planState?: PlanRuntimeState;
   maxTurnDurationMs?: number;
   monotonicNow?: () => number;
+  toolCatalogRefresher?: ToolCatalogRefresher;
+}
+
+export interface ToolCatalogRefresher {
+  refreshBeforeModelStep(
+    step: number,
+    signal: AbortSignal,
+  ): Promise<ToolCatalogReplacement | undefined>;
 }
 
 export interface RunTurnInput {
@@ -136,6 +146,7 @@ export class AgentLoop {
   private readonly planState: PlanRuntimeState | undefined;
   private readonly maxTurnDurationMs: number;
   private readonly monotonicNow: () => number;
+  private readonly toolCatalogRefresher: ToolCatalogRefresher | undefined;
 
   public constructor(options: AgentLoopOptions) {
     this.provider = options.provider;
@@ -154,6 +165,7 @@ export class AgentLoop {
     this.maxTurnDurationMs =
       options.maxTurnDurationMs ?? DEFAULT_MAX_TURN_DURATION_MS;
     this.monotonicNow = options.monotonicNow ?? Date.now;
+    this.toolCatalogRefresher = options.toolCatalogRefresher;
 
     if (!Number.isInteger(this.maxSteps) || this.maxSteps < 1) {
       throw new Error("maxSteps must be a positive integer.");
@@ -197,7 +209,10 @@ export class AgentLoop {
     if (input.context !== undefined) {
       await recorder.record({
         type: "turn.context",
-        payload: input.context,
+        payload: {
+          ...input.context,
+          toolCatalogGeneration: this.tools.catalogGeneration(),
+        },
       });
     }
 
@@ -226,6 +241,57 @@ export class AgentLoop {
     }
 
     for (let step = 1; step <= this.maxSteps; step += 1) {
+      let catalogGeneration: ToolCatalogGenerationSnapshot;
+      try {
+        const before = this.tools.catalogGeneration();
+        const replacement =
+          await this.toolCatalogRefresher?.refreshBeforeModelStep(step, signal);
+        catalogGeneration = this.tools.catalogGeneration();
+        if (replacement !== undefined) {
+          if (
+            replacement.previous.generationId !== before.generationId ||
+            replacement.current.generationId !==
+              catalogGeneration.generationId ||
+            replacement.changes.length === 0
+          ) {
+            return this.fail(
+              recorder,
+              items,
+              completedSteps,
+              "TOOL_CATALOG_REFRESH_INVALID",
+              "Tool catalog refresher returned inconsistent generation evidence.",
+              usage,
+            );
+          }
+          await recorder.record({
+            type: "tool.catalog_changed",
+            payload: {
+              step,
+              previous: replacement.previous,
+              current: replacement.current,
+              changes: replacement.changes,
+            },
+          });
+        }
+      } catch (error) {
+        if (signal.aborted) {
+          return this.cancel(
+            recorder,
+            items,
+            completedSteps,
+            signal.reason,
+            usage,
+          );
+        }
+        return this.fail(
+          recorder,
+          items,
+          completedSteps,
+          toolCatalogErrorCode(error),
+          error instanceof Error ? error.message : String(error),
+          usage,
+        );
+      }
       const toolDefinitions = this.tools.definitions();
       const checkpointRecommended =
         step >= Math.max(1, Math.ceil(this.maxSteps * 0.8));
@@ -261,6 +327,7 @@ export class AgentLoop {
               activeItemsSha256: digestContextItems(prepared.items),
               toolCount: toolDefinitions.length,
               toolsSha256: digestModelTools(toolDefinitions),
+              toolCatalogGenerationId: catalogGeneration.generationId,
               ...(prepared.compaction === undefined
                 ? {}
                 : { compactionItemId: prepared.compaction.id }),
@@ -506,6 +573,7 @@ export class AgentLoop {
           callId: call.callId,
           name: call.name,
           arguments: call.arguments,
+          catalogGenerationId: catalogGeneration.generationId,
         });
         items.push(callItem);
         await recorder.record({
@@ -1209,6 +1277,17 @@ function providerErrorCode(error: unknown): string {
     return (error as { code: string }).code;
   }
   return "MODEL_ERROR";
+}
+
+function toolCatalogErrorCode(error: unknown): string {
+  if (
+    error instanceof Error &&
+    "code" in error &&
+    typeof (error as { code?: unknown }).code === "string"
+  ) {
+    return (error as { code: string }).code;
+  }
+  return "TOOL_CATALOG_REFRESH_FAILED";
 }
 
 function emptyTurnUsage(): TurnUsage {

@@ -6,7 +6,7 @@ The project is building the control plane around a coding model: typed conversat
 
 ## Current status
 
-Phase 3H is in progress. Phase 3H1 and Phase 3H2 add bounded scoped project Skills plus reviewed declarative command templates, immutable per-Turn catalogs, durable activation/recovery evidence, and current-source inspection on top of the completed Phase 3G planning Harness. Dynamic tool generations are next in Phase 3H3:
+Phase 3H is in progress. Phase 3H1 through Phase 3H3 add bounded scoped project Skills, reviewed declarative command templates, and atomic dynamic MCP tool generations with durable activation, refresh, and recovery evidence on top of the completed Phase 3G planning Harness. The isolated plugin lifecycle is next in Phase 3H4:
 
 - Versioned Thread, Turn, Item, and Agent Event schemas.
 - A provider-neutral streaming model interface.
@@ -65,6 +65,8 @@ Phase 3H is in progress. Phase 3H1 and Phase 3H2 add bounded scoped project Skil
 - Static completed transcript output plus one bounded live region, normal terminal scrollback, `/help`, `/status`, `/clear`, `/new`, `/exit`, `Esc` cancellation/navigation, and context-sensitive `Ctrl+C`.
 - Official MCP v2 client integration for explicitly configured local stdio servers, with one isolated session per turn.
 - Frozen, validated MCP tool catalogs exposed as stable `mcp__<server>__<tool>` aliases without importing MCP into `agent-core`.
+- Atomic MCP namespace generations refreshed only between model steps, with complete-candidate validation and no partial visibility.
+- Generation-bound prepared calls, durable catalog diffs, exact recovery-chain validation, and aggregate resume change evidence.
 - Fail-closed MCP effects: external tools require approval by default, and only explicitly reviewed `read` tools bypass approval.
 - MCP call timeouts, turn cancellation, reverse-order child cleanup, bounded binary/result normalization, artifact-backed large output, and conservative interrupted-call recovery.
 - A bounded thread-scoped Plan/Stage/Todo state machine maintained through the built-in, provider-neutral `update_plan` control tool.
