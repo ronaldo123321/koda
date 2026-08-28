@@ -36,12 +36,12 @@ Status: Recovery core implemented and verified; explicit conflict-resolution cli
 - Preserve divergent journals and block later workspace mutations until an explicit recovery decision is available.
 - Reconcile the operational journal with the originating thread audit without automatically replaying a model tool call.
 
-The detailed contract is in [Phase 4A crash-safe filesystem mutation recovery](2026-08-28-phase-4a-crash-safe-filesystem-mutations-design.md).
+The recovery-core contract is in [Phase 4A crash-safe filesystem mutation recovery](2026-08-28-phase-4a-crash-safe-filesystem-mutations-design.md). The accepted client and explicit-resolution contract is in [Phase 4A2 explicit workspace conflict resolution](2026-08-28-phase-4a2-conflict-resolution-design.md).
 
 Implementation status:
 
 - **Phase 4A1 complete:** private journals, synchronized backups and manifests, staged-candidate tracking, startup classification and repair, symlink/type/hash conflict quarantine, audit reconciliation, recovery receipts, write blocking, and deterministic crash-state tests.
-- **Phase 4A2 next:** read-only conflict inspection plus explicit `restore-original`, `accept-current`, and backup-export RPC/CLI/TUI workflows.
+- **Phase 4A2 in progress:** read-only conflict inspection plus token-bound `restore-original`, `accept-current`, durable resolution audit, and backup-export RPC/CLI/TUI workflows.
 
 ### Phase 4B: supervised native execution boundary
 

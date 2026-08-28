@@ -1,6 +1,6 @@
 # Koda Phase 4A: Crash-Safe Filesystem Mutation Recovery
 
-- Status: Phase 4A1 recovery core implemented and verified; Phase 4A2 conflict-resolution clients pending
+- Status: Phase 4A1 recovery core implemented and verified; Phase 4A2 resolution design accepted and implementation in progress
 - Date: 2026-08-28
 - Depends on: Phase 2 durable recovery, Phase 3F1 change transactions, and the workspace mutation coordinator
 - Scope: durable local journals, bounded backups, orphan reconciliation, safe automatic rollback, conflict quarantine, and thread-audit reconciliation
@@ -175,4 +175,4 @@ Every application turn performs an orphan-recovery pass under the workspace muta
 
 Credential-free coverage includes secure backup publication, all-before cleanup, four-operation partial rollback, all-after recognition, move intermediate recovery, corrupt backups, divergent external edits, symlinked parents, staged-candidate cleanup, retained receipt acknowledgement, repeated recovery, coordinator write blocking, idempotent audit events, missing/conflicting audits, production tool integration, and an application-level restart that repairs files and appends the originating terminal event before a new turn.
 
-Phase 4A is not marked fully complete because the supported client surfaces cannot yet inspect and explicitly resolve a quarantined conflict. That bounded Phase 4A2 workflow remains the next delivery slice.
+Phase 4A is not marked fully complete because the supported client surfaces cannot yet inspect and explicitly resolve a quarantined conflict. The accepted follow-on contract is documented in [Phase 4A2 explicit workspace conflict resolution](2026-08-28-phase-4a2-conflict-resolution-design.md) and is now the active implementation slice.
