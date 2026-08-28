@@ -32,6 +32,7 @@ import {
   threadSearchParamsSchema,
   threadSearchResultSchema,
   turnStartParamsSchema,
+  turnFinishedNotificationParamsSchema,
   workspaceChangeSetPreparedPayloadSchema,
 } from "@koda/protocol";
 import { describe, expect, it } from "vitest";
@@ -69,6 +70,25 @@ describe("app-server protocol", () => {
         id: 1,
         method: "initialize",
         extra: true,
+      }),
+    ).toThrow();
+  });
+
+  it("carries a safe paused terminal without converting it into failure", () => {
+    expect(
+      turnFinishedNotificationParamsSchema.parse({
+        threadId: "paused-thread",
+        turnId: "paused-turn",
+        status: "paused",
+        exitCode: 0,
+      }),
+    ).toMatchObject({ status: "paused", exitCode: 0 });
+    expect(() =>
+      turnFinishedNotificationParamsSchema.parse({
+        threadId: "paused-thread",
+        turnId: "paused-turn",
+        status: "paused",
+        exitCode: 1,
       }),
     ).toThrow();
   });

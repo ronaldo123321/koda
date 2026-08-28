@@ -2,6 +2,7 @@ import type { ModelProvider, ModelRequest } from "@koda/agent-core";
 import {
   assistantMessageItemSchema,
   itemIdSchema,
+  planStateItemSchema,
   providerStateItemSchema,
   threadIdSchema,
   toolCallIdSchema,
@@ -82,6 +83,20 @@ class FakeCompatibleClient implements OpenAICompatibleChatClient {
 }
 
 describe("OpenAICompatibleChatProvider", () => {
+  it("projects pinned Plan state as an authoritative system notice", () => {
+    const messages = projectCompatibleMessages(
+      [...request.items, planState()],
+      "deepseek",
+    );
+
+    expect(messages.at(-1)).toMatchObject({
+      role: "system",
+      content: expect.stringContaining(
+        "Use expected revision 1 for the next update_plan call.",
+      ),
+    });
+  });
+
   it("assembles fragmented tool calls and preserves reasoning continuity", async () => {
     const client = new FakeCompatibleClient([
       chunk({
@@ -345,6 +360,39 @@ describe("OpenAICompatibleChatProvider", () => {
     });
   });
 });
+
+function planState() {
+  return planStateItemSchema.parse({
+    type: "plan_state",
+    id: itemIdSchema.parse("plan-state:plan:compatible:1"),
+    plan: {
+      schemaVersion: 1,
+      planId: "plan:compatible",
+      revision: 1,
+      objective: "Inspect the repository",
+      status: "active",
+      stages: [
+        {
+          id: "stage-inspect",
+          title: "Inspect",
+          status: "active",
+          requiresAcceptance: false,
+          acceptanceCriteria: [],
+          evidence: [],
+          todos: [
+            {
+              id: "todo-read",
+              title: "Read README",
+              status: "in_progress",
+            },
+          ],
+        },
+      ],
+    },
+    needsRevalidation: false,
+    checkpointRecommended: true,
+  });
+}
 
 async function collect(
   provider: ModelProvider,

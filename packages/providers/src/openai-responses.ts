@@ -18,6 +18,7 @@ import {
   mapProviderRequestError,
   type ProviderErrorCode,
 } from "./errors.js";
+import { serializePlanStateNotice } from "./plan-state.js";
 
 export type OpenAIReasoningEffort =
   "none" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -271,7 +272,8 @@ export class OpenAIResponsesProvider implements ModelProvider {
     }
 
     const newItems = items.filter(
-      (item) => !session.submittedItemIds.has(item.id),
+      (item) =>
+        item.type === "plan_state" || !session.submittedItemIds.has(item.id),
     );
     const input: OpenAI.Responses.ResponseInput = [];
     for (const item of newItems) {
@@ -279,6 +281,11 @@ export class OpenAIResponsesProvider implements ModelProvider {
         input.push(toFunctionCallOutput(item));
       } else if (item.type === "user_message") {
         input.push({ role: "user", content: item.content });
+      } else if (item.type === "plan_state") {
+        input.push({
+          role: "developer",
+          content: serializePlanStateNotice(item),
+        });
       }
     }
     if (input.length === 0) {
@@ -332,6 +339,11 @@ function toOpenAIReplayInput(
       input.push({
         role: "developer",
         content: `Koda compacted thread state: ${JSON.stringify(item.summary)}`,
+      });
+    } else if (item.type === "plan_state") {
+      input.push({
+        role: "developer",
+        content: serializePlanStateNotice(item),
       });
     }
   }

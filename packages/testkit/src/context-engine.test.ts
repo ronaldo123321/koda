@@ -8,6 +8,7 @@ import {
 import {
   assistantMessageItemSchema,
   itemIdSchema,
+  planStateItemSchema,
   providerStateItemSchema,
   toolCallIdSchema,
   toolCallItemSchema,
@@ -79,6 +80,54 @@ describe("ContextEngine", () => {
     );
     expect(reconstructed.compaction).toBeUndefined();
     expect(reconstructed.items).toEqual(prepared.items);
+  });
+
+  it("keeps pinned Plan state out of persisted compaction references", () => {
+    const planState = planStateItemSchema.parse({
+      type: "plan_state",
+      id: itemIdSchema.parse("plan-state:plan:test:1"),
+      plan: {
+        schemaVersion: 1,
+        planId: "plan:test",
+        revision: 1,
+        objective: "Finish the active task",
+        status: "active",
+        stages: [
+          {
+            id: "stage-active",
+            title: "Active stage",
+            status: "active",
+            requiresAcceptance: false,
+            acceptanceCriteria: [],
+            evidence: [],
+            todos: [
+              {
+                id: "todo-active",
+                title: "Do the work",
+                status: "in_progress",
+              },
+            ],
+          },
+        ],
+      },
+      needsRevalidation: false,
+      checkpointRecommended: false,
+    });
+    const engine = createEngine({ contextWindowTokens: 1_500 });
+
+    const prepared = engine.prepare(
+      [
+        user("old-plan-user", "x".repeat(2_000)),
+        assistant("old-plan-answer", "y".repeat(2_000)),
+        user("current-plan-user", "Continue the task."),
+        planState,
+      ],
+      [],
+    );
+
+    expect(prepared.compaction).toBeDefined();
+    expect(prepared.items.at(-1)).toEqual(planState);
+    expect(prepared.compaction?.retainedItemIds).not.toContain(planState.id);
   });
 
   it("retains a tool call and result as one group after the newest user", () => {

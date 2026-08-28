@@ -22,6 +22,7 @@ import type {
 } from "@anthropic-ai/sdk/resources/messages";
 
 import { ProviderError, mapProviderRequestError } from "./errors.js";
+import { serializePlanStateNotice } from "./plan-state.js";
 
 export interface AnthropicMessagesClient {
   messages: {
@@ -317,6 +318,10 @@ export function projectAnthropicMessages(items: readonly ConversationItem[]): {
       systemNotices.push(
         `Koda compacted thread state: ${JSON.stringify(item.summary)}`,
       );
+      continue;
+    }
+    if (item.type === "plan_state") {
+      systemNotices.push(serializePlanStateNotice(item));
       continue;
     }
 

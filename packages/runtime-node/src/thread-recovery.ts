@@ -1,14 +1,22 @@
-import type { EventReadResult } from "@koda/agent-core";
-import type {
-  AgentEvent,
-  ConversationItem,
-  ProcessOwnership,
-  ProcessTerminationReason,
-  ThreadId,
-  ToolCallId,
-  TurnContextSnapshot,
-  TurnId,
-  WorkspaceChangeSetRecovery,
+import {
+  PlanReducerError,
+  reducePlanAcceptance,
+  reducePlanUpdate,
+  type EventReadResult,
+} from "@koda/agent-core";
+import {
+  type AgentEvent,
+  type ConversationItem,
+  type PlanAcceptanceResolution,
+  type PlanCheckpoint,
+  type PlanSnapshot,
+  type ProcessOwnership,
+  type ProcessTerminationReason,
+  type ThreadId,
+  type ToolCallId,
+  type TurnContextSnapshot,
+  type TurnId,
+  type WorkspaceChangeSetRecovery,
 } from "@koda/protocol";
 
 export type ThreadRecoveryErrorCode =
@@ -31,7 +39,7 @@ export class ThreadRecoveryError extends Error {
 }
 
 export type PreviousTurnStatus =
-  "completed" | "failed" | "cancelled" | "interrupted";
+  "completed" | "failed" | "cancelled" | "paused" | "interrupted";
 
 export interface RecoveredThread {
   threadId: ThreadId;
@@ -42,6 +50,9 @@ export interface RecoveredThread {
   context: TurnContextSnapshot;
   uncertainToolCalls: UncertainToolCall[];
   workspaceChangeSets: WorkspaceChangeSetRecovery[];
+  plan?: PlanSnapshot;
+  checkpoint?: PlanCheckpoint;
+  planNeedsRevalidation: boolean;
   partialTrailingEventDiscarded: boolean;
   message: string;
 }
@@ -49,7 +60,7 @@ export interface RecoveredThread {
 export interface UncertainToolCall {
   callId: ToolCallId;
   name: string;
-  effect?: "read" | "write" | "execute";
+  effect?: "read" | "control" | "write" | "execute";
   process?: {
     pid: number;
     ownership: ProcessOwnership;
@@ -96,6 +107,7 @@ export function recoverThread(
 
   const groups = groupTurns(events);
   validateApprovalGrantAudit(groups);
+  const recoveredPlan = recoverPlanState(events);
   const previous = groups.at(-1);
   if (previous === undefined) {
     throw invalidLog("Thread log does not contain a turn.");
@@ -126,6 +138,11 @@ export function recoverThread(
 
   const uncertainToolCalls = findUncertainToolCalls(previous.events);
   const workspaceChangeSets = findWorkspaceChangeSets(previous.events);
+  const planNeedsRevalidation = needsPlanRevalidation(
+    previous.events,
+    uncertainToolCalls,
+    recoveredPlan.checkpoint,
+  );
   const partialTrailingEventDiscarded = readResult.diagnostics.some(
     (diagnostic) => diagnostic.code === "PARTIAL_TRAILING_LINE",
   );
@@ -133,6 +150,7 @@ export function recoverThread(
     previousStatus,
     uncertainToolCalls,
     workspaceChangeSets,
+    planNeedsRevalidation,
     partialTrailingEventDiscarded,
   });
   const lastEvent = events.at(-1);
@@ -149,9 +167,211 @@ export function recoverThread(
     context: contextEvent.payload,
     uncertainToolCalls,
     workspaceChangeSets,
+    ...(recoveredPlan.plan === undefined ? {} : { plan: recoveredPlan.plan }),
+    ...(recoveredPlan.checkpoint === undefined
+      ? {}
+      : { checkpoint: recoveredPlan.checkpoint }),
+    planNeedsRevalidation,
     partialTrailingEventDiscarded,
     message,
   };
+}
+
+function recoverPlanState(events: readonly AgentEvent[]): {
+  plan?: PlanSnapshot;
+  checkpoint?: PlanCheckpoint;
+} {
+  let plan: PlanSnapshot | undefined;
+  let checkpoint: PlanCheckpoint | undefined;
+  const started = new Map<ToolCallId, string>();
+  const openTools = new Set<ToolCallId>();
+  const executing = new Map<
+    ToolCallId,
+    "read" | "control" | "write" | "execute"
+  >();
+  const resolutions = new Map<ToolCallId, PlanAcceptanceResolution>();
+  const eventsBySequence = new Map(
+    events.map((event) => [event.sequence, event]),
+  );
+
+  for (const event of events) {
+    if (event.type === "tool.started") {
+      started.set(event.payload.callId, event.payload.name);
+      openTools.add(event.payload.callId);
+      continue;
+    }
+    if (event.type === "tool.execution_started") {
+      executing.set(event.payload.callId, event.payload.effect);
+      continue;
+    }
+    if (event.type === "tool.completed") {
+      executing.delete(event.payload.callId);
+      openTools.delete(event.payload.callId);
+      continue;
+    }
+    if (event.type === "plan.acceptance_resolved") {
+      resolutions.set(event.payload.callId, event.payload);
+      continue;
+    }
+    if (event.type === "plan.updated") {
+      if (
+        started.get(event.payload.callId) !== "update_plan" ||
+        executing.get(event.payload.callId) !== "control"
+      ) {
+        throw invalidLog(
+          `Plan update revision ${event.payload.plan.revision} has no active update_plan control boundary.`,
+        );
+      }
+      try {
+        let expected: PlanSnapshot;
+        if (event.payload.source === "model_update") {
+          expected = reducePlanUpdate({
+            planId: event.payload.plan.planId,
+            ...(plan === undefined ? {} : { previous: plan }),
+            update: {
+              expectedRevision: plan?.revision ?? 0,
+              objective: event.payload.plan.objective,
+              ...(event.payload.explanation === undefined
+                ? {}
+                : { explanation: event.payload.explanation }),
+              stages: event.payload.plan.stages.map((stage) => {
+                const { status: _status, ...draft } = stage;
+                return draft;
+              }),
+            },
+          });
+        } else {
+          if (plan === undefined) {
+            throw invalidLog(
+              "Runtime acceptance cannot create the first Plan revision.",
+            );
+          }
+          const resolution = resolutions.get(event.payload.callId);
+          if (resolution === undefined || resolution.decision !== "accepted") {
+            throw invalidLog(
+              `Runtime Plan update '${event.payload.callId}' has no accepted resolution.`,
+            );
+          }
+          const reduced = reducePlanAcceptance(plan, resolution);
+          if (reduced.status !== "accepted") {
+            throw invalidLog(
+              `Runtime Plan update '${event.payload.callId}' did not accept its Stage.`,
+            );
+          }
+          expected = reduced.plan;
+        }
+        if (JSON.stringify(expected) !== JSON.stringify(event.payload.plan)) {
+          throw invalidLog(
+            `Plan update revision ${event.payload.plan.revision} does not match its validated transition.`,
+          );
+        }
+      } catch (error) {
+        if (error instanceof ThreadRecoveryError) {
+          throw error;
+        }
+        if (error instanceof PlanReducerError) {
+          throw invalidLog(
+            `Plan update revision ${event.payload.plan.revision} is invalid: ${error.code}: ${error.message}`,
+          );
+        }
+        throw error;
+      }
+      plan = event.payload.plan;
+      continue;
+    }
+    if (event.type === "plan.checkpointed") {
+      const candidate = event.payload.checkpoint;
+      if (
+        plan === undefined ||
+        candidate.planId !== plan.planId ||
+        candidate.planRevision !== plan.revision
+      ) {
+        throw invalidLog(
+          `Plan checkpoint '${candidate.checkpointId}' references an unavailable Plan revision.`,
+        );
+      }
+      const unsafeExecution = [...executing.values()].some(
+        (effect) => effect === "write" || effect === "execute",
+      );
+      if (unsafeExecution) {
+        throw invalidLog(
+          `Plan checkpoint '${candidate.checkpointId}' crosses an incomplete side effect.`,
+        );
+      }
+      const safeEvent = eventsBySequence.get(candidate.lastSafeSequence);
+      if (
+        safeEvent === undefined ||
+        safeEvent.sequence >= event.sequence ||
+        safeEvent.threadId !== event.threadId
+      ) {
+        throw invalidLog(
+          `Plan checkpoint '${candidate.checkpointId}' has an invalid safe sequence.`,
+        );
+      }
+      for (const reference of candidate.evidence) {
+        if (
+          reference.kind === "event" &&
+          (reference.sequence >= event.sequence ||
+            !eventsBySequence.has(reference.sequence))
+        ) {
+          throw invalidLog(
+            `Plan checkpoint '${candidate.checkpointId}' references unavailable event evidence.`,
+          );
+        }
+      }
+      const activeStage = plan.stages.find(
+        (stage) => stage.status !== "completed" && stage.status !== "accepted",
+      );
+      const activeTodo = activeStage?.todos.find(
+        (todo) => todo.status === "in_progress",
+      );
+      if (
+        candidate.activeStageId !== activeStage?.id ||
+        candidate.activeTodoId !== activeTodo?.id
+      ) {
+        throw invalidLog(
+          `Plan checkpoint '${candidate.checkpointId}' does not match the active Plan state.`,
+        );
+      }
+      checkpoint = candidate;
+      continue;
+    }
+    if (event.type === "turn.paused") {
+      if (openTools.size > 0 || executing.size > 0) {
+        throw invalidLog(
+          `Paused turn '${event.turnId}' still has an incomplete Tool boundary.`,
+        );
+      }
+      if (
+        checkpoint === undefined ||
+        event.payload.checkpointId !== checkpoint.checkpointId
+      ) {
+        throw invalidLog(
+          `Paused turn '${event.turnId}' has no matching latest Plan checkpoint.`,
+        );
+      }
+    }
+  }
+  return {
+    ...(plan === undefined ? {} : { plan }),
+    ...(checkpoint === undefined ? {} : { checkpoint }),
+  };
+}
+
+function needsPlanRevalidation(
+  events: readonly AgentEvent[],
+  uncertainToolCalls: readonly UncertainToolCall[],
+  checkpoint: PlanCheckpoint | undefined,
+): boolean {
+  const uncertainIds = new Set(uncertainToolCalls.map((call) => call.callId));
+  const safeSequence = checkpoint?.lastSafeSequence ?? -1;
+  return events.some(
+    (event) =>
+      event.type === "tool.execution_started" &&
+      event.sequence > safeSequence &&
+      uncertainIds.has(event.payload.callId) &&
+      (event.payload.effect === "write" || event.payload.effect === "execute"),
+  );
 }
 
 function validateApprovalGrantAudit(groups: readonly TurnGroup[]): void {
@@ -330,7 +550,9 @@ function validateTurnTerminals(
             ? "failed"
             : terminal?.type === "turn.cancelled"
               ? "cancelled"
-              : "interrupted";
+              : terminal?.type === "turn.paused"
+                ? "paused"
+                : "interrupted";
     }
   }
   return previousStatus;
@@ -533,7 +755,7 @@ function findUncertainToolCalls(
   const started = new Map<ToolCallId, string>();
   const executionStarted = new Map<
     ToolCallId,
-    { name: string; effect: "read" | "write" | "execute" }
+    { name: string; effect: "read" | "control" | "write" | "execute" }
   >();
   const processes = new Map<ToolCallId, RecoveryProcessState>();
   const completed = new Set<ToolCallId>();
@@ -831,16 +1053,17 @@ function matchingProcess(
   return processState;
 }
 
-function isTerminalEvent(
-  event: AgentEvent,
-): event is Extract<
+function isTerminalEvent(event: AgentEvent): event is Extract<
   AgentEvent,
-  { type: "turn.completed" | "turn.failed" | "turn.cancelled" }
+  {
+    type: "turn.completed" | "turn.failed" | "turn.cancelled" | "turn.paused";
+  }
 > {
   return (
     event.type === "turn.completed" ||
     event.type === "turn.failed" ||
-    event.type === "turn.cancelled"
+    event.type === "turn.cancelled" ||
+    event.type === "turn.paused"
   );
 }
 
@@ -848,6 +1071,7 @@ function buildRecoveryMessage(options: {
   previousStatus: PreviousTurnStatus;
   uncertainToolCalls: readonly UncertainToolCall[];
   workspaceChangeSets: readonly WorkspaceChangeSetRecovery[];
+  planNeedsRevalidation: boolean;
   partialTrailingEventDiscarded: boolean;
 }): string {
   const parts = [
@@ -868,6 +1092,11 @@ function buildRecoveryMessage(options: {
         .join(
           "; ",
         )}. Do not automatically repeat these writes; inspect affected paths first.`,
+    );
+  }
+  if (options.planNeedsRevalidation) {
+    parts.push(
+      "The active Plan Todo crosses an uncertain write or execute boundary and requires revalidation before it can advance.",
     );
   }
   if (options.partialTrailingEventDiscarded) {

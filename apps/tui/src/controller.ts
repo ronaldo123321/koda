@@ -61,7 +61,13 @@ export type TuiMode =
   | "thread_search_results"
   | "thread_preview";
 export type TuiTurnStatus =
-  "starting" | "running" | "cancelling" | "completed" | "cancelled" | "failed";
+  | "starting"
+  | "running"
+  | "cancelling"
+  | "completed"
+  | "paused"
+  | "cancelled"
+  | "failed";
 export type TuiToolStatus =
   | "preparing"
   | "awaiting_approval"
@@ -3725,6 +3731,21 @@ export class TuiController {
             : { usage: event.payload.usage }),
         };
         break;
+      case "turn.paused":
+        next = {
+          ...next,
+          status: "paused",
+          notes: [
+            ...next.notes,
+            boundText(
+              `Paused (${event.payload.reason}); checkpoint ${event.payload.checkpointId}`,
+            ),
+          ],
+          ...(event.payload.usage === undefined
+            ? {}
+            : { usage: event.payload.usage }),
+        };
+        break;
       case "turn.cancelled":
         next = {
           ...next,
@@ -3777,6 +3798,8 @@ export class TuiController {
     const additions = activeTranscriptEntries(active);
     if (finished.status === "cancelled") {
       additions.push({ kind: "system", text: "Turn cancelled." });
+    } else if (finished.status === "paused") {
+      additions.push({ kind: "system", text: "Turn paused safely." });
     } else if (finished.status === "failed") {
       additions.push({
         kind: "error",

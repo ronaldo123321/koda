@@ -72,6 +72,10 @@ export class TurnEventRecorder {
     this.sequence += 1;
     return event;
   }
+
+  public lastRecordedSequence(): number | undefined {
+    return this.sequence === 0 ? undefined : this.sequence - 1;
+  }
 }
 
 export const systemClock: Clock = {

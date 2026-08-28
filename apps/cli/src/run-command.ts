@@ -93,6 +93,7 @@ export async function runCommand(
           append: async (event: AgentEvent) => {
             terminalEventSeen ||=
               event.type === "turn.completed" ||
+              event.type === "turn.paused" ||
               event.type === "turn.cancelled" ||
               event.type === "turn.failed";
             await consoleEvents.append(event);

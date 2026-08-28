@@ -6,6 +6,7 @@ import { workspaceChangeSetRecoverySchema } from "./change-sets.js";
 import { itemIdSchema, toolCallIdSchema, turnIdSchema } from "./ids.js";
 import { jsonObjectSchema, jsonValueSchema } from "./json.js";
 import { modelProviderIdSchema, providerStateSchema } from "./providers.js";
+import { planCheckpointSchema, planSnapshotSchema } from "./plans.js";
 
 export const CONVERSATION_ITEM_TYPES = [
   "user_message",
@@ -16,6 +17,7 @@ export const CONVERSATION_ITEM_TYPES = [
   "approval",
   "compaction",
   "recovery",
+  "plan_state",
 ] as const;
 
 export const conversationItemTypeSchema = z.enum(CONVERSATION_ITEM_TYPES);
@@ -116,7 +118,13 @@ export const recoveryItemSchema = z.object({
   type: z.literal("recovery"),
   id: itemIdSchema,
   previousTurnId: turnIdSchema,
-  previousStatus: z.enum(["completed", "failed", "cancelled", "interrupted"]),
+  previousStatus: z.enum([
+    "completed",
+    "failed",
+    "cancelled",
+    "paused",
+    "interrupted",
+  ]),
   message: z.string().min(1),
   partialTrailingEventDiscarded: z.boolean(),
   unavailableArtifacts: z
@@ -140,7 +148,7 @@ export const recoveryItemSchema = z.object({
     z.object({
       callId: toolCallIdSchema,
       name: z.string().min(1),
-      effect: z.enum(["read", "write", "execute"]).optional(),
+      effect: z.enum(["read", "control", "write", "execute"]).optional(),
       process: z
         .object({
           pid: z.number().int().positive(),
@@ -167,6 +175,30 @@ export const recoveryItemSchema = z.object({
     .default([]),
 });
 
+export const planStateItemSchema = z
+  .object({
+    type: z.literal("plan_state"),
+    id: itemIdSchema,
+    plan: planSnapshotSchema,
+    checkpoint: planCheckpointSchema.optional(),
+    needsRevalidation: z.boolean(),
+    checkpointRecommended: z.boolean(),
+  })
+  .strict()
+  .superRefine((item, context) => {
+    if (
+      item.checkpoint !== undefined &&
+      (item.checkpoint.planId !== item.plan.planId ||
+        item.checkpoint.planRevision > item.plan.revision)
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "Plan checkpoint does not belong to the active Plan revision.",
+        path: ["checkpoint"],
+      });
+    }
+  });
+
 export const conversationItemSchema = z.discriminatedUnion("type", [
   userMessageItemSchema,
   assistantMessageItemSchema,
@@ -176,6 +208,7 @@ export const conversationItemSchema = z.discriminatedUnion("type", [
   approvalItemSchema,
   compactionItemSchema,
   recoveryItemSchema,
+  planStateItemSchema,
 ]);
 
 export type UserMessageItem = z.infer<typeof userMessageItemSchema>;
@@ -186,5 +219,6 @@ export type ToolResultItem = z.infer<typeof toolResultItemSchema>;
 export type ApprovalItem = z.infer<typeof approvalItemSchema>;
 export type CompactionItem = z.infer<typeof compactionItemSchema>;
 export type RecoveryItem = z.infer<typeof recoveryItemSchema>;
+export type PlanStateItem = z.infer<typeof planStateItemSchema>;
 export type ConversationItem = z.infer<typeof conversationItemSchema>;
 export type ConversationItemType = z.infer<typeof conversationItemTypeSchema>;

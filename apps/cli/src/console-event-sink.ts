@@ -108,6 +108,28 @@ export class ConsoleEventSink implements EventSink {
       return;
     }
 
+    if (event.type === "plan.updated") {
+      this.writeDiagnostic(
+        `plan revision ${event.payload.plan.revision}: ${event.payload.plan.objective}`,
+      );
+      return;
+    }
+
+    if (event.type === "plan.checkpointed") {
+      this.writeDiagnostic(
+        `plan checkpoint ${event.payload.checkpoint.checkpointId}: ${event.payload.checkpoint.reason}`,
+      );
+      return;
+    }
+
+    if (event.type === "turn.paused") {
+      this.writeDiagnostic(
+        `turn paused (${event.payload.reason}); resume from ${event.payload.checkpointId}`,
+      );
+      this.writeUsage(event.payload.usage);
+      return;
+    }
+
     if (event.type === "turn.completed") {
       if (!this.answerEndsWithNewline) {
         this.options.stdout.write("\n");

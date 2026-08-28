@@ -7,7 +7,7 @@ import type {
   ToolCallId,
 } from "@koda/protocol";
 
-export type ToolEffect = "read" | "write" | "execute";
+export type ToolEffect = "read" | "control" | "write" | "execute";
 
 export type PolicyDecision =
   | { decision: "allow" }
@@ -81,7 +81,7 @@ export class EffectToolPolicy implements ToolPolicy {
   public constructor(private readonly approvalMode: ApprovalMode) {}
 
   public evaluate(input: ToolPolicyInput): PolicyDecision {
-    if (input.effect === "read") {
+    if (input.effect === "read" || input.effect === "control") {
       return { decision: "allow" };
     }
     if (input.effect === "execute") {

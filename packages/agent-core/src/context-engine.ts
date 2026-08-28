@@ -259,7 +259,9 @@ export class ContextEngine {
       .slice(retainedStart)
       .flatMap((group) => group.items)
       .filter((item) => item.type !== "compaction");
-    const retainedItemIds = retained.map((item) => item.id);
+    const retainedItemIds = retained
+      .filter((item) => item.type !== "plan_state")
+      .map((item) => item.id);
     const base = {
       type: "compaction" as const,
       id,

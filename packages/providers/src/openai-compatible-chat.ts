@@ -18,6 +18,7 @@ import {
 import OpenAI from "openai";
 
 import { ProviderError, mapProviderRequestError } from "./errors.js";
+import { serializePlanStateNotice } from "./plan-state.js";
 
 export interface OpenAICompatibleProfile {
   id: Extract<ModelProviderId, "deepseek" | "kimi" | "glm">;
@@ -273,6 +274,13 @@ export function projectCompatibleMessages(
       messages.push({
         role: "system",
         content: `Koda compacted thread state: ${JSON.stringify(item.summary)}`,
+      });
+      continue;
+    }
+    if (item.type === "plan_state") {
+      messages.push({
+        role: "system",
+        content: serializePlanStateNotice(item),
       });
       continue;
     }

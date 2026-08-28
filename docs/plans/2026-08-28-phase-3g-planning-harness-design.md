@@ -1,6 +1,6 @@
 # Koda Phase 3G: Durable Planning and Harness Checkpoints
 
-- Status: Implementation in progress — Phase 3G1 implemented and verified
+- Status: Implementation in progress — Phase 3G1 and Phase 3G2 implemented and verified; Phase 3G3 next
 - Date: 2026-08-28
 - Depends on: Phase 2 durable resume and compaction, Phase 3A app-server, Phase 3D Ink interaction, Phase 3E context inspection, and Phase 3F durable execution boundaries
 - Scope: thread-scoped Plan/Todo state, explicit model updates, safe long-task checkpoints, resumable paused turns, and human stage acceptance
@@ -341,12 +341,22 @@ Implemented with first-class protocol schemas and Agent Event variants, a pure `
 
 ### Phase 3G2: Harness, tool, checkpoint, and recovery
 
+Status: **Implemented and verified (2026-08-28).**
+
 - Add the built-in `control` effect and `update_plan` registration.
 - Persist plan events in the AgentLoop ordering boundary.
 - Pin current Plan context across compaction.
 - Add safe checkpoints, plan-aware budgets, `turn.paused`, and recovery validation.
 
+Implemented with a built-in-only `control` effect, a strict provider-neutral `update_plan` schema, event-before-result persistence, a thread-scoped Plan runtime state, provider injection for OpenAI Responses, Anthropic Messages, DeepSeek, Kimi, and GLM-compatible chat, and lightweight Plan references in `context.prepared` for exact Phase 3E digest reconstruction. The Harness records checkpoints after accepted Plan updates, completed tools, normal Turn completion, and safe budget pauses. Step and time exhaustion now produce a durable `turn.paused` only when a Plan exists; Plan-less Turns preserve the earlier `MAX_STEPS_EXCEEDED` behavior.
+
+Resume validates every Plan revision and checkpoint against the ordered JSONL history, rejects checkpoints across incomplete side effects, restores the newest Plan/checkpoint, and marks the injected Plan state `needsRevalidation` when an uncertain write or execute occurred after the last safe boundary. The application composition registers and restores the Plan state. CLI, TUI, thread metadata, and the existing app-server notification can carry the paused terminal without treating it as failure; app-server v11 Plan reads, acceptance methods/capabilities, and the full interactive presentation remain Phase 3G3 and Phase 3G4.
+
+Verification covers the reducer plus the runtime tool, persistence failure boundary, pinned context, compaction references, automatic checkpoints, step/time pauses, forged recovery history, uncertain-effect revalidation, application resume/context inspection, and all five provider families. The repository build, test TypeScript compilation, 351-test offline suite, and six reliability scenarios pass.
+
 ### Phase 3G3: application and protocol v11
+
+Status: **Next.**
 
 - Add application Plan reads and acceptance composition.
 - Upgrade app-server/client schemas, capabilities, methods, events, and lifecycle.

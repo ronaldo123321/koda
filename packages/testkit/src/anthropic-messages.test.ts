@@ -2,6 +2,7 @@ import type { ModelProvider, ModelRequest } from "@koda/agent-core";
 import {
   assistantMessageItemSchema,
   itemIdSchema,
+  planStateItemSchema,
   providerStateItemSchema,
   threadIdSchema,
   toolCallIdSchema,
@@ -71,6 +72,17 @@ class FakeAnthropicClient implements AnthropicMessagesClient {
 }
 
 describe("AnthropicMessagesProvider", () => {
+  it("projects pinned Plan state as an authoritative system notice", () => {
+    const projection = projectAnthropicMessages([
+      ...request.items,
+      planState(),
+    ]);
+
+    expect(projection.systemNotices.at(-1)).toContain(
+      "Use expected revision 1 for the next update_plan call.",
+    );
+  });
+
   it("streams text and tools while preserving signed thinking blocks", async () => {
     const client = new FakeAnthropicClient([
       event({
@@ -300,6 +312,39 @@ describe("AnthropicMessagesProvider", () => {
     ).rejects.toMatchObject({ code: "PROVIDER_RATE_LIMITED" });
   });
 });
+
+function planState() {
+  return planStateItemSchema.parse({
+    type: "plan_state",
+    id: itemIdSchema.parse("plan-state:plan:anthropic:1"),
+    plan: {
+      schemaVersion: 1,
+      planId: "plan:anthropic",
+      revision: 1,
+      objective: "Inspect the repository",
+      status: "active",
+      stages: [
+        {
+          id: "stage-inspect",
+          title: "Inspect",
+          status: "active",
+          requiresAcceptance: false,
+          acceptanceCriteria: [],
+          evidence: [],
+          todos: [
+            {
+              id: "todo-read",
+              title: "Read README",
+              status: "in_progress",
+            },
+          ],
+        },
+      ],
+    },
+    needsRevalidation: true,
+    checkpointRecommended: false,
+  });
+}
 
 async function collect(
   provider: ModelProvider,

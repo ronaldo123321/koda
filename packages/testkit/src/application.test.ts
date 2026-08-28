@@ -224,6 +224,136 @@ describe("KodaApplication", () => {
     });
   });
 
+  it("restores a durable Plan on resume and reconstructs its pinned model context", async () => {
+    const fixture = await createFixture();
+    const threadId = threadIdSchema.parse("application-plan-thread");
+    let resumedPlanObserved = false;
+    const providers = [
+      new ScriptedModelProvider([
+        {
+          events: [
+            {
+              type: "tool_call",
+              callId: toolCallIdSchema.parse("application-plan-call"),
+              name: "update_plan",
+              arguments: {
+                expected_revision: 0,
+                objective: "Implement the feature",
+                stages: [
+                  {
+                    id: "stage-build",
+                    title: "Build it",
+                    requires_acceptance: false,
+                    acceptance_criteria: [],
+                    evidence: [],
+                    todos: [
+                      {
+                        id: "todo-code",
+                        title: "Write the code",
+                        status: "in_progress",
+                      },
+                    ],
+                  },
+                ],
+              },
+            },
+            { type: "completed", finishReason: "tool_calls" },
+          ],
+        },
+        {
+          assertRequest: (request) => {
+            expect(request.items.at(-1)).toMatchObject({
+              type: "plan_state",
+              plan: { revision: 1 },
+            });
+          },
+          events: [{ type: "completed", finishReason: "stop" }],
+        },
+      ]),
+      new ScriptedModelProvider([
+        {
+          assertRequest: (request) => {
+            resumedPlanObserved = request.items.some(
+              (item) => item.type === "plan_state" && item.plan.revision === 1,
+            );
+          },
+          events: [{ type: "completed", finishReason: "stop" }],
+        },
+      ]),
+    ];
+    let providerCursor = 0;
+    let turnCursor = 0;
+    const application = new KodaApplication({
+      environment: {
+        OPENAI_API_KEY: "offline-test-key",
+        KODA_HOME: fixture.kodaHome,
+      },
+      processDirectory: fixture.root,
+      dependencies: {
+        openWorkspace: (root) => ReadOnlyWorkspace.open(root),
+        createProvider: () => providers[providerCursor++]!,
+        createIds: (resumeThreadId) => {
+          turnCursor += 1;
+          return {
+            threadId: resumeThreadId ?? threadId,
+            turnId: turnIdSchema.parse(`application-plan-turn-${turnCursor}`),
+            itemIds: new DeterministicItemIdFactory(
+              `application-plan-item-${turnCursor}`,
+            ),
+          };
+        },
+      },
+    });
+    const client: TurnClient = {
+      events: { append: async () => undefined },
+      approvals: rejectApprovals(),
+    };
+
+    await expect(
+      application.startTurn(
+        { prompt: "Create the plan.", cwd: fixture.workspaceRoot },
+        client,
+      ).completion,
+    ).resolves.toMatchObject({ status: "completed" });
+    const durable = await new JsonlEventStore(
+      join(fixture.kodaHome, "threads", `${threadId}.jsonl`),
+    ).readAllRequired();
+    const preparedWithPlan = durable.events.find(
+      (event) =>
+        event.type === "context.prepared" &&
+        event.payload.planState !== undefined,
+    );
+    if (preparedWithPlan?.type !== "context.prepared") {
+      throw new Error("Expected a prepared context with pinned Plan state.");
+    }
+    await expect(
+      application.readContext({
+        workspace: fixture.workspaceRoot,
+        threadId,
+        anchorSequence: preparedWithPlan.sequence,
+      }),
+    ).resolves.toMatchObject({
+      reconstruction: {
+        valid: true,
+        activeItemTypes: expect.arrayContaining([
+          { type: "plan_state", count: 1 },
+        ]),
+      },
+    });
+
+    await expect(
+      application.startTurn(
+        {
+          prompt: "Continue.",
+          cwd: fixture.workspaceRoot,
+          resume: threadId,
+        },
+        client,
+      ).completion,
+    ).resolves.toMatchObject({ status: "completed" });
+    expect(resumedPlanObserved).toBe(true);
+  });
+
   it("reads authoritative thread history with stable exclusive cursors", async () => {
     const fixture = await createFixture();
     const threadId = threadIdSchema.parse("history-page-thread");

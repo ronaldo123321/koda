@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import { artifactSha256Schema } from "./artifacts.js";
 import { itemIdSchema } from "./ids.js";
+import { planCheckpointIdSchema, planIdSchema } from "./plans.js";
 import {
   CONVERSATION_ITEM_TYPES,
   conversationItemTypeSchema,
@@ -48,6 +49,17 @@ export const contextPreparedPayloadSchema = z
     toolCount: z.number().int().nonnegative(),
     toolsSha256: artifactSha256Schema,
     compactionItemId: itemIdSchema.optional(),
+    planState: z
+      .object({
+        itemId: itemIdSchema,
+        planId: planIdSchema,
+        planRevision: z.number().int().safe().positive(),
+        checkpointId: planCheckpointIdSchema.optional(),
+        needsRevalidation: z.boolean(),
+        checkpointRecommended: z.boolean(),
+      })
+      .strict()
+      .optional(),
   })
   .strict()
   .superRefine((payload, context) => {

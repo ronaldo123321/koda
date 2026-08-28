@@ -6,6 +6,7 @@ import {
   itemIdSchema,
   providerStateBytes,
   providerStateItemSchema,
+  planCheckpointSchema,
   toolCallItemSchema,
   toolResultItemSchema,
   userMessageItemSchema,
@@ -14,6 +15,8 @@ import {
   type ConversationItem,
   type ItemId,
   type ProviderState,
+  type PlanCheckpoint,
+  type PlanEvidenceReference,
   type TokenUsage,
   type ThreadId,
   type TurnContextSnapshot,
@@ -49,6 +52,7 @@ import {
   type PreparedToolInvocation,
   type ToolExecutionResult,
 } from "./tools.js";
+import type { PlanRuntimeState } from "./plan-state.js";
 
 export interface ItemIdFactory {
   next(): ItemId;
@@ -66,6 +70,9 @@ export interface AgentLoopOptions {
   maxSteps?: number;
   maxModelOutputBytes?: number;
   contextEngine?: ContextEngine;
+  planState?: PlanRuntimeState;
+  maxTurnDurationMs?: number;
+  monotonicNow?: () => number;
 }
 
 export interface RunTurnInput {
@@ -100,10 +107,19 @@ export type RunTurnResult =
       items: readonly ConversationItem[];
       error: { code: string; message: string };
       usage: TurnUsage;
+    }
+  | {
+      status: "paused";
+      steps: number;
+      items: readonly ConversationItem[];
+      reason: "step_budget" | "time_budget";
+      checkpoint: PlanCheckpoint;
+      usage: TurnUsage;
     };
 
 const DEFAULT_MAX_STEPS = 8;
 const DEFAULT_MAX_MODEL_OUTPUT_BYTES = 262_144;
+const DEFAULT_MAX_TURN_DURATION_MS = 30 * 60 * 1_000;
 
 export class AgentLoop {
   private readonly provider: ModelProvider;
@@ -117,6 +133,9 @@ export class AgentLoop {
   private readonly maxSteps: number;
   private readonly maxModelOutputBytes: number;
   private readonly contextEngine: ContextEngine | undefined;
+  private readonly planState: PlanRuntimeState | undefined;
+  private readonly maxTurnDurationMs: number;
+  private readonly monotonicNow: () => number;
 
   public constructor(options: AgentLoopOptions) {
     this.provider = options.provider;
@@ -131,6 +150,10 @@ export class AgentLoop {
     this.maxModelOutputBytes =
       options.maxModelOutputBytes ?? DEFAULT_MAX_MODEL_OUTPUT_BYTES;
     this.contextEngine = options.contextEngine;
+    this.planState = options.planState;
+    this.maxTurnDurationMs =
+      options.maxTurnDurationMs ?? DEFAULT_MAX_TURN_DURATION_MS;
+    this.monotonicNow = options.monotonicNow ?? Date.now;
 
     if (!Number.isInteger(this.maxSteps) || this.maxSteps < 1) {
       throw new Error("maxSteps must be a positive integer.");
@@ -140,6 +163,12 @@ export class AgentLoop {
       this.maxModelOutputBytes < 1
     ) {
       throw new Error("maxModelOutputBytes must be a positive integer.");
+    }
+    if (
+      !Number.isFinite(this.maxTurnDurationMs) ||
+      this.maxTurnDurationMs < 1
+    ) {
+      throw new Error("maxTurnDurationMs must be a positive finite number.");
     }
   }
 
@@ -161,6 +190,7 @@ export class AgentLoop {
     );
     const usage = emptyTurnUsage();
     let completedSteps = 0;
+    const startedAt = this.monotonicNow();
 
     await recorder.record({ type: "turn.started", payload: {} });
 
@@ -197,11 +227,19 @@ export class AgentLoop {
 
     for (let step = 1; step <= this.maxSteps; step += 1) {
       const toolDefinitions = this.tools.definitions();
-      let modelItems: readonly ConversationItem[] = items;
+      const checkpointRecommended =
+        step >= Math.max(1, Math.ceil(this.maxSteps * 0.8));
+      const planStateItem = this.planState?.contextItem(checkpointRecommended);
+      const contextItems =
+        planStateItem === undefined ? items : [...items, planStateItem];
+      let modelItems: readonly ConversationItem[] = contextItems;
       let rawEstimatedInputTokens: number | undefined;
       if (this.contextEngine !== undefined) {
         try {
-          const prepared = this.contextEngine.prepare(items, toolDefinitions);
+          const prepared = this.contextEngine.prepare(
+            contextItems,
+            toolDefinitions,
+          );
           modelItems = prepared.items;
           rawEstimatedInputTokens = prepared.rawEstimatedInputTokens;
           if (prepared.compaction !== undefined) {
@@ -226,6 +264,23 @@ export class AgentLoop {
               ...(prepared.compaction === undefined
                 ? {}
                 : { compactionItemId: prepared.compaction.id }),
+              ...(planStateItem === undefined
+                ? {}
+                : {
+                    planState: {
+                      itemId: planStateItem.id,
+                      planId: planStateItem.plan.planId,
+                      planRevision: planStateItem.plan.revision,
+                      ...(planStateItem.checkpoint === undefined
+                        ? {}
+                        : {
+                            checkpointId: planStateItem.checkpoint.checkpointId,
+                          }),
+                      needsRevalidation: planStateItem.needsRevalidation,
+                      checkpointRecommended:
+                        planStateItem.checkpointRecommended,
+                    },
+                  }),
             },
           });
         } catch (error) {
@@ -541,6 +596,30 @@ export class AgentLoop {
                         ...event.payload,
                       },
                     });
+                  } else if (event.type === "plan.updated") {
+                    const recorded = await recorder.record({
+                      type: event.type,
+                      payload: {
+                        callId: call.callId,
+                        ...event.payload,
+                      },
+                    });
+                    if (this.planState === undefined) {
+                      throw new Error(
+                        "Plan state is unavailable for a durable Plan update.",
+                      );
+                    }
+                    this.planState.commitPlan(event.payload.plan);
+                    this.planState.clearRevalidation();
+                    await this.recordPlanCheckpoint(
+                      recorder,
+                      "plan_update",
+                      recorded.sequence,
+                      [
+                        { kind: "event", sequence: recorded.sequence },
+                        { kind: "tool_call", callId: call.callId },
+                      ],
+                    );
                   } else {
                     await recorder.record({
                       type: event.type,
@@ -622,7 +701,7 @@ export class AgentLoop {
             });
           }
         }
-        await recorder.record({
+        const completedEvent = await recorder.record({
           type: "tool.completed",
           payload: {
             callId: call.callId,
@@ -630,9 +709,37 @@ export class AgentLoop {
             status: result.status,
           },
         });
+        if (call.name !== "update_plan") {
+          await this.recordPlanCheckpoint(
+            recorder,
+            "tool_completion",
+            completedEvent.sequence,
+            [{ kind: "tool_call", callId: call.callId }],
+          );
+        }
+      }
+
+      if (
+        toolCalls.length > 0 &&
+        this.planState?.currentPlan() !== undefined &&
+        this.monotonicNow() - startedAt >= this.maxTurnDurationMs
+      ) {
+        return this.pause(
+          recorder,
+          items,
+          completedSteps,
+          "time_budget",
+          usage,
+        );
       }
 
       if (toolCalls.length === 0) {
+        await this.recordPlanCheckpoint(
+          recorder,
+          "turn_completion",
+          recorder.lastRecordedSequence(),
+          [],
+        );
         const payload = finalMessage
           ? { finalMessageId: finalMessage.id, steps: completedSteps }
           : { steps: completedSteps };
@@ -657,6 +764,9 @@ export class AgentLoop {
       }
     }
 
+    if (this.planState?.currentPlan() !== undefined) {
+      return this.pause(recorder, items, completedSteps, "step_budget", usage);
+    }
     return this.fail(
       recorder,
       items,
@@ -915,6 +1025,95 @@ export class AgentLoop {
     return result.status === "success"
       ? toolResultItemSchema.parse({ ...common, output: result.output })
       : toolResultItemSchema.parse({ ...common, error: result.error });
+  }
+
+  private async recordPlanCheckpoint(
+    recorder: TurnEventRecorder,
+    reason: PlanCheckpoint["reason"],
+    lastSafeSequence: number | undefined,
+    evidence: readonly PlanEvidenceReference[],
+  ): Promise<PlanCheckpoint | undefined> {
+    const state = this.planState;
+    const plan = state?.currentPlan();
+    if (
+      state === undefined ||
+      plan === undefined ||
+      lastSafeSequence === undefined
+    ) {
+      return undefined;
+    }
+    const activeStage = plan.stages.find(
+      (stage) => stage.status !== "completed" && stage.status !== "accepted",
+    );
+    const activeTodo = activeStage?.todos.find(
+      (todo) => todo.status === "in_progress",
+    );
+    const nextTodo =
+      activeTodo ??
+      activeStage?.todos.find(
+        (todo) => todo.status === "blocked" || todo.status === "pending",
+      );
+    const checkpoint = planCheckpointSchema.parse({
+      checkpointId: state.createCheckpointId(),
+      planId: plan.planId,
+      planRevision: plan.revision,
+      ...(activeStage === undefined ? {} : { activeStageId: activeStage.id }),
+      ...(activeTodo === undefined ? {} : { activeTodoId: activeTodo.id }),
+      lastSafeSequence,
+      reason,
+      ...(activeStage?.summary === undefined
+        ? {}
+        : { completedSummary: activeStage.summary }),
+      ...(nextTodo === undefined ? {} : { nextAction: nextTodo.title }),
+      evidence,
+    });
+    await recorder.record({
+      type: "plan.checkpointed",
+      payload: { checkpoint },
+    });
+    state.commitCheckpoint(checkpoint);
+    return checkpoint;
+  }
+
+  private async pause(
+    recorder: TurnEventRecorder,
+    items: ConversationItem[],
+    steps: number,
+    reason: "step_budget" | "time_budget",
+    usage: TurnUsage,
+  ): Promise<RunTurnResult> {
+    const checkpoint = await this.recordPlanCheckpoint(
+      recorder,
+      "safe_pause",
+      recorder.lastRecordedSequence(),
+      [],
+    );
+    if (checkpoint === undefined) {
+      return this.fail(
+        recorder,
+        items,
+        steps,
+        "PLAN_CHECKPOINT_INVALID",
+        "The turn could not pause because no durable Plan checkpoint was available.",
+        usage,
+      );
+    }
+    await recorder.record({
+      type: "turn.paused",
+      payload: {
+        reason,
+        checkpointId: checkpoint.checkpointId,
+        usage: copyTurnUsage(usage),
+      },
+    });
+    return {
+      status: "paused",
+      steps,
+      items,
+      reason,
+      checkpoint,
+      usage: copyTurnUsage(usage),
+    };
   }
 
   private async cancel(

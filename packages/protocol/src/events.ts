@@ -69,7 +69,7 @@ const approvalResolvedPayloadSchema = z
     }
   });
 
-export const toolEffectSchema = z.enum(["read", "write", "execute"]);
+export const toolEffectSchema = z.enum(["read", "control", "write", "execute"]);
 export const processOwnershipSchema = z.enum([
   "posix_process_group",
   "windows_taskkill_tree",

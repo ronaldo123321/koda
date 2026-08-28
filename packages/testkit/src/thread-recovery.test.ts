@@ -1,8 +1,11 @@
-import type { EventReadResult } from "@koda/agent-core";
+import { reducePlanUpdate, type EventReadResult } from "@koda/agent-core";
 import { assertResumeWorkspace, recoverThread } from "@koda/runtime-node";
 import {
   agentEventSchema,
   itemIdSchema,
+  jsonValueSchema,
+  planCheckpointIdSchema,
+  planIdSchema,
   threadIdSchema,
   toolCallIdSchema,
   turnIdSchema,
@@ -149,6 +152,112 @@ describe("recoverThread", () => {
       { callId, name: "apply_patch", effect: "write" },
     ]);
     expect(recovered.message).toContain("effect write");
+  });
+
+  it("recovers a safely paused Plan and its latest checkpoint", () => {
+    const setup = durablePlanSetup();
+    const pauseCheckpointId = planCheckpointIdSchema.parse("checkpoint:pause");
+    const events = [
+      ...setup.events,
+      event(10, "plan.checkpointed", {
+        checkpoint: {
+          checkpointId: pauseCheckpointId,
+          planId: setup.plan.planId,
+          planRevision: setup.plan.revision,
+          activeStageId: setup.plan.stages[0]?.id,
+          activeTodoId: setup.plan.stages[0]?.todos[0]?.id,
+          lastSafeSequence: 9,
+          reason: "safe_pause",
+          nextAction: "Write the code",
+          evidence: [],
+        },
+      }),
+      event(11, "turn.paused", {
+        reason: "step_budget",
+        checkpointId: pauseCheckpointId,
+      }),
+    ];
+
+    const recovered = recoverThread(readResult(events), threadId);
+
+    expect(recovered).toMatchObject({
+      previousStatus: "paused",
+      plan: { planId: setup.plan.planId, revision: 1 },
+      checkpoint: {
+        checkpointId: pauseCheckpointId,
+        reason: "safe_pause",
+      },
+      planNeedsRevalidation: false,
+    });
+  });
+
+  it("rejects a forged Plan revision and an invalid checkpoint boundary", () => {
+    const setup = durablePlanSetup();
+    const forged = {
+      ...setup.plan,
+      revision: 2,
+    };
+    const forgedEvents = setup.events.map((candidate) =>
+      candidate.type === "plan.updated"
+        ? event(candidate.sequence, "plan.updated", {
+            ...candidate.payload,
+            plan: forged,
+          })
+        : candidate,
+    );
+    expect(() =>
+      recoverThread(readResult(forgedEvents), threadId),
+    ).toThrowError(expect.objectContaining({ code: "THREAD_LOG_INVALID" }));
+
+    const invalidBoundary = [
+      ...setup.events,
+      event(10, "plan.checkpointed", {
+        checkpoint: {
+          checkpointId: planCheckpointIdSchema.parse("checkpoint:invalid"),
+          planId: setup.plan.planId,
+          planRevision: setup.plan.revision,
+          activeStageId: setup.plan.stages[0]?.id,
+          activeTodoId: setup.plan.stages[0]?.todos[0]?.id,
+          lastSafeSequence: 99,
+          reason: "safe_pause",
+          evidence: [],
+        },
+      }),
+    ];
+    expect(() =>
+      recoverThread(readResult(invalidBoundary), threadId),
+    ).toThrowError(expect.objectContaining({ code: "THREAD_LOG_INVALID" }));
+  });
+
+  it("marks an interrupted write after the last Plan checkpoint for revalidation", () => {
+    const setup = durablePlanSetup();
+    const writeCallId = toolCallIdSchema.parse("write-after-checkpoint");
+    const events = [
+      ...setup.events,
+      recorded(10, {
+        type: "tool_call",
+        id: itemIdSchema.parse("write-after-checkpoint-item"),
+        callId: writeCallId,
+        name: "apply_patch",
+        arguments: {},
+      }),
+      event(11, "tool.started", {
+        callId: writeCallId,
+        name: "apply_patch",
+        executionBoundary: true,
+      }),
+      event(12, "tool.execution_started", {
+        callId: writeCallId,
+        name: "apply_patch",
+        effect: "write",
+      }),
+    ];
+
+    const recovered = recoverThread(readResult(events), threadId);
+
+    expect(recovered.previousStatus).toBe("interrupted");
+    expect(recovered.planNeedsRevalidation).toBe(true);
+    expect(recovered.message).toContain("revalidation");
   });
 
   it("classifies incomplete and durably committed change sets without replay", () => {
@@ -865,6 +974,96 @@ function contextEvent(sequence: number): AgentEvent {
     instructionsSha256: "a".repeat(64),
     repositoryInstructions: [],
   });
+}
+
+function durablePlanSetup() {
+  const callId = toolCallIdSchema.parse("durable-plan-call");
+  const plan = reducePlanUpdate({
+    planId: planIdSchema.parse("plan:durable"),
+    update: {
+      expectedRevision: 0,
+      objective: "Implement planning",
+      stages: [
+        {
+          id: "stage-build",
+          title: "Build it",
+          requiresAcceptance: false,
+          acceptanceCriteria: [],
+          evidence: [],
+          todos: [
+            {
+              id: "todo-code",
+              title: "Write the code",
+              status: "in_progress",
+            },
+          ],
+        },
+      ],
+    },
+  });
+  return {
+    plan,
+    events: [
+      event(0, "turn.started", {}),
+      contextEvent(1),
+      recorded(2, {
+        type: "user_message",
+        id: itemIdSchema.parse("durable-plan-user"),
+        content: "Create a plan.",
+      }),
+      recorded(3, {
+        type: "tool_call",
+        id: itemIdSchema.parse("durable-plan-item"),
+        callId,
+        name: "update_plan",
+        arguments: {},
+      }),
+      event(4, "tool.started", {
+        callId,
+        name: "update_plan",
+        executionBoundary: true,
+      }),
+      event(5, "tool.execution_started", {
+        callId,
+        name: "update_plan",
+        effect: "control",
+      }),
+      event(6, "plan.updated", {
+        callId,
+        source: "model_update",
+        plan,
+      }),
+      event(7, "plan.checkpointed", {
+        checkpoint: {
+          checkpointId: planCheckpointIdSchema.parse("checkpoint:plan-update"),
+          planId: plan.planId,
+          planRevision: plan.revision,
+          activeStageId: plan.stages[0]?.id,
+          activeTodoId: plan.stages[0]?.todos[0]?.id,
+          lastSafeSequence: 6,
+          reason: "plan_update",
+          nextAction: "Write the code",
+          evidence: [
+            { kind: "event", sequence: 6 },
+            { kind: "tool_call", callId },
+          ],
+        },
+      }),
+      recorded(8, {
+        type: "tool_result",
+        id: itemIdSchema.parse("durable-plan-result"),
+        callId,
+        name: "update_plan",
+        status: "success",
+        output: jsonValueSchema.parse({ plan }),
+      }),
+      event(9, "tool.completed", {
+        callId,
+        name: "update_plan",
+        status: "success",
+      }),
+    ],
+  };
 }
 
 function recorded(

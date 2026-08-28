@@ -6,6 +6,7 @@ import type {
   ProcessTerminationMechanism,
   ProcessTerminationOutcome,
   ProcessTerminationReason,
+  PlanUpdatedPayload,
   ThreadId,
   ToolCallId,
   TurnId,
@@ -73,6 +74,10 @@ export type ToolOperationalEvent =
   | {
       type: "workspace.change_set_uncertain";
       payload: WorkspaceChangeSetUncertainPayload;
+    }
+  | {
+      type: "plan.updated";
+      payload: Omit<PlanUpdatedPayload, "callId">;
     };
 
 export class ToolOperationalEventError extends Error {

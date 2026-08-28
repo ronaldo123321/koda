@@ -29,7 +29,13 @@ import { ThreadLease } from "./thread-lease.js";
 import { ThreadRecoveryError, recoverThread } from "./thread-recovery.js";
 
 export type ThreadMetadataStatus =
-  "running" | "completed" | "failed" | "cancelled" | "interrupted" | "invalid";
+  | "running"
+  | "completed"
+  | "paused"
+  | "failed"
+  | "cancelled"
+  | "interrupted"
+  | "invalid";
 
 export interface ThreadUsageSummary {
   modelRequests: number;

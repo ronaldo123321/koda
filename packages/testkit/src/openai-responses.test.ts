@@ -4,6 +4,7 @@ import {
   assistantMessageItemSchema,
   compactionItemSchema,
   itemIdSchema,
+  planStateItemSchema,
   recoveryItemSchema,
   threadIdSchema,
   toolCallIdSchema,
@@ -179,6 +180,7 @@ describe("OpenAIResponsesProvider", () => {
           status: "success",
           output: { content: "# Koda" },
         }),
+        planState(),
       ],
       tools: [toolDefinition],
     };
@@ -204,9 +206,81 @@ describe("OpenAIResponsesProvider", () => {
           output: { content: "# Koda" },
         }),
       },
+      {
+        role: "developer",
+        content: expect.stringContaining(
+          "Use expected revision 1 for the next update_plan call.",
+        ),
+      },
     ]);
     expect(client.requests[1]?.body.instructions).toBe(
       "Inspect the repository.",
+    );
+  });
+
+  it("resends pinned Plan state on every incremental follow-up", async () => {
+    const client = new FakeOpenAIClient([
+      [
+        functionCallEvent(callId, "fc-plan-followup"),
+        completedEvent("resp-plan"),
+      ],
+      [completedEvent("resp-plan-done")],
+    ]);
+    const provider = new OpenAIResponsesProvider({
+      client,
+      model: "gpt-5.6-terra",
+      instructions: "Inspect the repository.",
+    });
+    const pinnedPlan = planState();
+
+    await collect(provider, {
+      threadId,
+      turnId,
+      step: 1,
+      items: [userItem, pinnedPlan],
+      tools: [toolDefinition],
+    });
+    await collect(provider, {
+      threadId,
+      turnId,
+      step: 2,
+      items: [
+        userItem,
+        toolCallItemSchema.parse({
+          type: "tool_call",
+          id: itemIdSchema.parse("openai-plan-call-item"),
+          callId,
+          name: "read_file",
+          arguments: { path: "README.md" },
+        }),
+        toolResultItemSchema.parse({
+          type: "tool_result",
+          id: itemIdSchema.parse("openai-plan-result-item"),
+          callId,
+          name: "read_file",
+          status: "success",
+          output: { content: "# Koda" },
+        }),
+        pinnedPlan,
+      ],
+      tools: [toolDefinition],
+    });
+
+    expect(client.requests[0]?.body.input).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: "developer",
+          content: expect.stringContaining("expected revision 1"),
+        }),
+      ]),
+    );
+    expect(client.requests[1]?.body.input).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: "developer",
+          content: expect.stringContaining("expected revision 1"),
+        }),
+      ]),
     );
   });
 
@@ -632,6 +706,39 @@ describe("OpenAIResponsesProvider", () => {
     ).rejects.toMatchObject({ code });
   });
 });
+
+function planState() {
+  return planStateItemSchema.parse({
+    type: "plan_state",
+    id: itemIdSchema.parse("plan-state:plan:provider:1"),
+    plan: {
+      schemaVersion: 1,
+      planId: "plan:provider",
+      revision: 1,
+      objective: "Inspect the repository",
+      status: "active",
+      stages: [
+        {
+          id: "stage-inspect",
+          title: "Inspect",
+          status: "active",
+          requiresAcceptance: false,
+          acceptanceCriteria: [],
+          evidence: [],
+          todos: [
+            {
+              id: "todo-read",
+              title: "Read README",
+              status: "in_progress",
+            },
+          ],
+        },
+      ],
+    },
+    needsRevalidation: false,
+    checkpointRecommended: false,
+  });
+}
 
 async function collect(
   provider: OpenAIResponsesProvider,

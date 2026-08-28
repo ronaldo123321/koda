@@ -785,6 +785,7 @@ export const threadMetadataSchema = z
     status: z.enum([
       "running",
       "completed",
+      "paused",
       "failed",
       "cancelled",
       "interrupted",
@@ -1137,14 +1138,29 @@ export const turnFinishedNotificationParamsSchema = z
   .object({
     threadId: threadIdSchema,
     turnId: turnIdSchema,
-    status: z.enum(["completed", "cancelled", "failed"]),
+    status: z.enum(["completed", "paused", "cancelled", "failed"]),
     exitCode: z.union([z.literal(0), z.literal(1), z.literal(130)]),
     error: z
       .object({ code: z.string().min(1), message: z.string() })
       .strict()
       .optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((completion, context) => {
+    const expectedExitCode =
+      completion.status === "completed" || completion.status === "paused"
+        ? 0
+        : completion.status === "cancelled"
+          ? 130
+          : 1;
+    if (completion.exitCode !== expectedExitCode) {
+      context.addIssue({
+        code: "custom",
+        message: `Turn status '${completion.status}' requires exit code ${expectedExitCode}.`,
+        path: ["exitCode"],
+      });
+    }
+  });
 
 export type JsonRpcId = z.infer<typeof jsonRpcIdSchema>;
 export type JsonRpcRequest = z.infer<typeof jsonRpcRequestSchema>;

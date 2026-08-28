@@ -7,6 +7,7 @@ import {
   ContextEngine,
   EffectToolPolicy,
   FanoutEventSink,
+  PlanRuntimeState,
   ToolRegistry,
   digestContextItems,
   estimateTextTokens,
@@ -37,6 +38,7 @@ import {
   THREAD_SEARCH_QUERY_BUDGET_BYTES,
   THREAD_SEARCH_RESULT_BUDGET_BYTES,
   modelProviderIdSchema,
+  planStateItemSchema,
   runtimeSettingsModelSchema,
   threadIdSchema,
   turnContextSnapshotSchema,
@@ -56,6 +58,7 @@ import {
   type ArtifactReadResult,
   type ItemId,
   type ModelProviderId,
+  type PlanStateItem,
   type RuntimeProviderMetadata,
   type SettingsGetResult,
   type SettingsUpdateParams,
@@ -101,6 +104,7 @@ import {
   registerPatchSetTool,
   registerReadOnlyWorkspaceTools,
   registerStructuredPatchTool,
+  registerUpdatePlanTool,
   type RepositoryInstructionSet,
   type ThreadIndexDiagnostic,
   type ThreadIndexRecovery,
@@ -141,7 +145,7 @@ export interface ApplicationDiagnostic {
 export interface TurnCompletion {
   threadId: ThreadId;
   turnId: TurnId;
-  status: "completed" | "cancelled" | "failed";
+  status: "completed" | "paused" | "cancelled" | "failed";
   exitCode: 0 | 1 | 130;
   error?: {
     code: string;
@@ -754,8 +758,13 @@ export class KodaApplication {
         `Precise context request ${request.anchorSequence} has no prepared event.`,
       );
     }
+    const recordedItems = recordedItemsBefore(
+      authorized.events,
+      request.anchorSequence,
+    );
+    const planState = reconstructPreparedPlanState(authorized.events, prepared);
     const active = projectActiveContext(
-      recordedItemsBefore(authorized.events, request.anchorSequence),
+      planState === undefined ? recordedItems : [...recordedItems, planState],
     );
     const reconstructedTypes = summarizeContextItemTypes(active);
     const reconstructedSha256 = digestContextItems(active);
@@ -975,6 +984,9 @@ export class KodaApplication {
       let history: ConversationItem[] = [];
       let prefaceItems: ConversationItem[] = [];
       let initialSequence = 0;
+      let recoveredPlan: ReturnType<typeof recoverThread>["plan"];
+      let recoveredCheckpoint: ReturnType<typeof recoverThread>["checkpoint"];
+      let planNeedsRevalidation = false;
 
       if (configuration.resumeThreadId !== undefined) {
         const readResult = await eventStore.readAll();
@@ -985,6 +997,9 @@ export class KodaApplication {
           configuration.provider,
         );
         history = recovered.history;
+        recoveredPlan = recovered.plan;
+        recoveredCheckpoint = recovered.checkpoint;
+        planNeedsRevalidation = recovered.planNeedsRevalidation;
         const unavailableArtifacts = await artifactStore.findUnavailable(
           history.flatMap((item) =>
             item.type === "tool_result" && item.output !== undefined
@@ -1031,7 +1046,16 @@ export class KodaApplication {
         });
       }
 
+      const planState = new PlanRuntimeState({
+        nextOpaqueId: () => ids.itemIds.next(),
+        ...(recoveredPlan === undefined ? {} : { initialPlan: recoveredPlan }),
+        ...(recoveredCheckpoint === undefined
+          ? {}
+          : { initialCheckpoint: recoveredCheckpoint }),
+        needsRevalidation: planNeedsRevalidation,
+      });
       const tools = new ToolRegistry();
+      registerUpdatePlanTool(tools, planState);
       registerArtifactTools(tools, artifactStore);
       registerReadOnlyWorkspaceTools(tools, workspace, { artifactStore });
       const mutationCoordinator = await WorkspaceMutationCoordinator.open(
@@ -1073,6 +1097,7 @@ export class KodaApplication {
         approvals: client.approvals,
         approvalGrants: this.approvalGrantRegistry.forWorkspace(workspace.root),
         contextEngine,
+        planState,
       });
 
       const result = await loop.runTurn({
@@ -1096,6 +1121,9 @@ export class KodaApplication {
       });
       if (result.status === "completed") {
         return completion(ids, "completed", 0);
+      }
+      if (result.status === "paused") {
+        return completion(ids, "paused", 0);
       }
       if (result.status === "cancelled") {
         return completion(ids, "cancelled", 130, {
@@ -1539,6 +1567,61 @@ function recordedItemsBefore(
       ? [event.payload.item]
       : [],
   );
+}
+
+function reconstructPreparedPlanState(
+  events: readonly AgentEvent[],
+  prepared: Extract<AgentEvent, { type: "context.prepared" }>,
+): PlanStateItem | undefined {
+  const reference = prepared.payload.planState;
+  if (reference === undefined) {
+    return undefined;
+  }
+  const planEvent = [...events]
+    .reverse()
+    .find(
+      (event) =>
+        event.sequence < prepared.sequence &&
+        event.type === "plan.updated" &&
+        event.payload.plan.planId === reference.planId &&
+        event.payload.plan.revision === reference.planRevision,
+    );
+  if (planEvent?.type !== "plan.updated") {
+    throw new ContextInspectionError(
+      "CONTEXT_SNAPSHOT_CORRUPT",
+      `Context request ${prepared.sequence} references an unavailable Plan revision.`,
+    );
+  }
+  const checkpointEvent =
+    reference.checkpointId === undefined
+      ? undefined
+      : [...events]
+          .reverse()
+          .find(
+            (event) =>
+              event.sequence < prepared.sequence &&
+              event.type === "plan.checkpointed" &&
+              event.payload.checkpoint.checkpointId === reference.checkpointId,
+          );
+  if (
+    reference.checkpointId !== undefined &&
+    checkpointEvent?.type !== "plan.checkpointed"
+  ) {
+    throw new ContextInspectionError(
+      "CONTEXT_SNAPSHOT_CORRUPT",
+      `Context request ${prepared.sequence} references an unavailable Plan checkpoint.`,
+    );
+  }
+  return planStateItemSchema.parse({
+    type: "plan_state",
+    id: reference.itemId,
+    plan: planEvent.payload.plan,
+    ...(checkpointEvent?.type !== "plan.checkpointed"
+      ? {}
+      : { checkpoint: checkpointEvent.payload.checkpoint }),
+    needsRevalidation: reference.needsRevalidation,
+    checkpointRecommended: reference.checkpointRecommended,
+  });
 }
 
 interface CurrentInstructionInspection {

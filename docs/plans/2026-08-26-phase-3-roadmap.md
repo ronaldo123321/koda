@@ -1,6 +1,6 @@
 # Koda Phase 3 Extensibility Roadmap
 
-- Status: In progress — Phase 3A through Phase 3F3 and Phase 3G1 complete; Phase 3G2 next; Phase 3H queued (2026-08-28)
+- Status: In progress — Phase 3A through Phase 3F3 and Phase 3G1–3G2 complete; Phase 3G3 next; Phase 3H queued (2026-08-28)
 - Date: 2026-08-26
 - Depends on: Phase 2 reliability closure
 - Scope: stable client/tool/provider extension boundaries without weakening the local runtime's durable state and approval guarantees
@@ -173,7 +173,7 @@ The accepted authorization identity, lifecycle, audit, protocol, interaction, fa
 
 ## Phase 3G: durable planning and Harness checkpoints
 
-Status: **Implementation in progress — Phase 3G1 implemented and verified; Phase 3G2 next.**
+Status: **Implementation in progress — Phase 3G1 and Phase 3G2 implemented and verified; Phase 3G3 next.**
 
 - Add a thread-scoped Plan/Stage/Todo state machine maintained explicitly through a built-in `update_plan` control tool.
 - Keep JSONL authoritative, pin the latest Plan across context compaction, and reconstruct it without parsing model prose.
@@ -183,6 +183,8 @@ Status: **Implementation in progress — Phase 3G1 implemented and verified; Pha
 - Add CLI and Ink Plan views, acceptance interaction, provider conformance, crash recovery, and real TTY verification.
 
 The accepted domain model, state machine, checkpoint and recovery rules, acceptance lifecycle, protocol boundary, verification matrix, and five implementation slices are in the [Phase 3G durable planning and Harness checkpoints design](2026-08-28-phase-3g-planning-harness-design.md).
+
+Phase 3G2 now provides the built-in `update_plan` control tool, ordered durable Plan updates, pinned provider context, automatic safe checkpoints, Plan-aware step/time pauses, conservative recovery validation, uncertain-effect revalidation, and application-level resume composition. App-server v11 Plan inspection and acceptance lifecycle are explicitly Phase 3G3; complete CLI/Ink Plan and acceptance interaction remains Phase 3G4; final crash, subprocess, provider, and real-TTY closure remains Phase 3G5.
 
 ## Phase 3H: Skills and extension system
 
