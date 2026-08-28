@@ -191,6 +191,7 @@ describe("AgentLoop", () => {
         approvalMode: "on-request",
         instructionsSha256: "a".repeat(64),
         repositoryInstructions: [],
+        skills: [],
       },
     });
 

@@ -30,6 +30,7 @@ import {
   ArtifactStore,
   JsonlEventStore,
   ReadOnlyWorkspace,
+  loadProjectSkills,
 } from "@koda/runtime-node";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -242,6 +243,253 @@ describe("KodaApplication", () => {
         threadId,
       }),
     ).not.toHaveProperty("plan");
+  });
+
+  it("freezes project Skills, exposes read_skill, and persists activation evidence", async () => {
+    const fixture = await createFixture();
+    const skillDirectory = join(
+      fixture.workspaceRoot,
+      ".koda",
+      "skills",
+      "testing",
+    );
+    await mkdir(skillDirectory, { recursive: true });
+    const skillContent =
+      "---\nname: testing\ndescription: Run focused validation.\n---\nUse BODY-FROZEN for this Turn.\n";
+    const skillPath = join(skillDirectory, "SKILL.md");
+    await writeFile(skillPath, skillContent);
+    const skill = (await loadProjectSkills(fixture.workspaceRoot)).sources[0]!;
+    let effectiveInstructions = "";
+    const provider = new ScriptedModelProvider([
+      {
+        assertRequest: (request) => {
+          expect(request.tools).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({ name: "read_skill" }),
+            ]),
+          );
+        },
+        events: [
+          {
+            type: "tool_call",
+            callId: toolCallIdSchema.parse("application-skill-call"),
+            name: "read_skill",
+            arguments: { skill_id: skill.skillId },
+          },
+          { type: "completed", finishReason: "tool_calls" },
+        ],
+      },
+      {
+        assertRequest: (request) => {
+          expect(request.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "tool_result",
+                name: "read_skill",
+                output: expect.objectContaining({
+                  skill_id: skill.skillId,
+                  content: skillContent,
+                }),
+              }),
+            ]),
+          );
+        },
+        events: [
+          { type: "assistant_delta", text: "Skill applied." },
+          { type: "completed", finishReason: "stop" },
+        ],
+      },
+    ]);
+    const baseDependencies = dependencies(provider, "application-skill");
+    const application = new KodaApplication({
+      environment: {
+        OPENAI_API_KEY: "offline-test-key",
+        KODA_HOME: fixture.kodaHome,
+      },
+      processDirectory: fixture.root,
+      dependencies: {
+        ...baseDependencies,
+        createProvider: (configuration, instructions) => {
+          effectiveInstructions = instructions;
+          return baseDependencies.createProvider(configuration, instructions);
+        },
+      },
+    });
+    const observed: AgentEvent[] = [];
+
+    const handle = application.startTurn(
+      { prompt: "Use the testing Skill.", cwd: fixture.workspaceRoot },
+      {
+        events: { append: async (event) => void observed.push(event) },
+        approvals: rejectApprovals(),
+      },
+    );
+    await expect(handle.completion).resolves.toMatchObject({
+      status: "completed",
+    });
+
+    expect(effectiveInstructions).toContain("testing: Run focused validation.");
+    expect(effectiveInstructions).toContain(skill.skillId);
+    expect(effectiveInstructions).not.toContain("BODY-FROZEN");
+    expect(observed).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "turn.context",
+          payload: expect.objectContaining({
+            skills: [expect.objectContaining({ skillId: skill.skillId })],
+          }),
+        }),
+        expect.objectContaining({
+          type: "tool.completed",
+          payload: expect.objectContaining({
+            callId: "application-skill-call",
+            name: "read_skill",
+            status: "success",
+          }),
+        }),
+      ]),
+    );
+  });
+
+  it("reports changed Skills on resume and exposes them through context inspection", async () => {
+    const fixture = await createFixture();
+    const skillDirectory = join(
+      fixture.workspaceRoot,
+      ".koda",
+      "skills",
+      "review",
+    );
+    await mkdir(skillDirectory, { recursive: true });
+    const skillPath = join(skillDirectory, "SKILL.md");
+    await writeFile(
+      skillPath,
+      "---\nname: review\ndescription: Review version one.\n---\nOriginal review guidance.\n",
+    );
+    const threadId = threadIdSchema.parse("application-skill-resume-thread");
+    const providers = [
+      new ScriptedModelProvider([
+        {
+          events: [
+            { type: "assistant_delta", text: "First Skill turn." },
+            { type: "completed", finishReason: "stop" },
+          ],
+        },
+      ]),
+      new ScriptedModelProvider([
+        {
+          assertRequest: (request) => {
+            expect(request.items).toEqual(
+              expect.arrayContaining([
+                expect.objectContaining({
+                  type: "recovery",
+                  skillChanges: [
+                    expect.objectContaining({
+                      name: "review",
+                      change: "changed",
+                    }),
+                  ],
+                }),
+              ]),
+            );
+          },
+          events: [
+            { type: "assistant_delta", text: "Second Skill turn." },
+            { type: "completed", finishReason: "stop" },
+          ],
+        },
+      ]),
+    ];
+    let providerCursor = 0;
+    let turnCursor = 0;
+    const application = new KodaApplication({
+      environment: {
+        OPENAI_API_KEY: "offline-test-key",
+        KODA_HOME: fixture.kodaHome,
+      },
+      processDirectory: fixture.root,
+      dependencies: {
+        openWorkspace: (root) => ReadOnlyWorkspace.open(root),
+        createProvider: () => providers[providerCursor++]!,
+        createIds: (resumeThreadId) => {
+          turnCursor += 1;
+          return {
+            threadId: resumeThreadId ?? threadId,
+            turnId: turnIdSchema.parse(
+              `application-skill-resume-turn-${turnCursor}`,
+            ),
+            itemIds: new DeterministicItemIdFactory(
+              `application-skill-resume-item-${turnCursor}`,
+            ),
+          };
+        },
+      },
+    });
+    const client: TurnClient = {
+      events: { append: async () => undefined },
+      approvals: rejectApprovals(),
+    };
+
+    const first = application.startTurn(
+      { prompt: "Start Skill history.", cwd: fixture.workspaceRoot },
+      client,
+    );
+    await expect(first.completion).resolves.toMatchObject({
+      status: "completed",
+    });
+    await writeFile(
+      skillPath,
+      "---\nname: review\ndescription: Review version two.\n---\nCurrent review guidance.\n",
+    );
+    const second = application.startTurn(
+      {
+        prompt: "Resume Skill history.",
+        cwd: fixture.workspaceRoot,
+        resume: threadId,
+      },
+      client,
+    );
+    await expect(second.completion).resolves.toMatchObject({
+      status: "completed",
+    });
+
+    const contexts = await application.listThreadContexts({
+      workspace: fixture.workspaceRoot,
+      threadId,
+      limit: 10,
+    });
+    const oldest = contexts.requests.at(-1);
+    if (oldest === undefined) {
+      throw new Error("Expected the first prepared context.");
+    }
+    const detail = await application.readContext({
+      workspace: fixture.workspaceRoot,
+      threadId,
+      anchorSequence: oldest.anchorSequence,
+    });
+    const skillSource = detail.instructions.sources.find(
+      (source) => source.kind === "skill",
+    );
+    expect(skillSource).toMatchObject({
+      kind: "skill",
+      path: ".koda/skills/review/SKILL.md",
+      scope: ".",
+      status: "modified",
+    });
+    if (skillSource?.sourceId === undefined) {
+      throw new Error("Expected a readable current Skill source.");
+    }
+    await expect(
+      application.readContextInstruction({
+        workspace: fixture.workspaceRoot,
+        threadId,
+        anchorSequence: oldest.anchorSequence,
+        sourceId: skillSource.sourceId,
+        maxBytes: 16_384,
+      }),
+    ).resolves.toMatchObject({
+      path: ".koda/skills/review/SKILL.md",
+      content: expect.stringContaining("Current review guidance."),
+    });
   });
 
   it("restores a durable Plan on resume and reconstructs its pinned model context", async () => {

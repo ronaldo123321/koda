@@ -9,4 +9,5 @@ export * from "./items.js";
 export * from "./json.js";
 export * from "./plans.js";
 export * from "./providers.js";
+export * from "./skills.js";
 export * from "./usage.js";

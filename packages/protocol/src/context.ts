@@ -8,6 +8,7 @@ import {
   conversationItemTypeSchema,
 } from "./items.js";
 import { modelProviderIdSchema } from "./providers.js";
+import { MAX_PROJECT_SKILLS, skillSnapshotSchema } from "./skills.js";
 
 export const repositoryInstructionSnapshotSchema = z.object({
   path: z.string().min(1),
@@ -23,6 +24,7 @@ export const turnContextSnapshotSchema = z.object({
   approvalMode: z.enum(["on-request", "never"]),
   instructionsSha256: artifactSha256Schema,
   repositoryInstructions: z.array(repositoryInstructionSnapshotSchema),
+  skills: z.array(skillSnapshotSchema).max(MAX_PROJECT_SKILLS).default([]),
 });
 
 export const contextPreparedPayloadSchema = z

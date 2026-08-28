@@ -632,7 +632,7 @@ const contextInstructionIdentitySchema = z
 
 export const contextInstructionSourceSchema = z
   .object({
-    kind: z.enum(["effective", "repository"]),
+    kind: z.enum(["effective", "repository", "skill"]),
     sourceId: z
       .string()
       .regex(/^ctxsrc:[a-f0-9]{64}$/u)
@@ -673,7 +673,7 @@ export const contextInstructionSummarySchema = z
     historicalEffectiveSha256: artifactSha256Schema,
     currentEffectiveSha256: artifactSha256Schema,
     effectiveMatchesHistorical: z.boolean(),
-    sources: z.array(contextInstructionSourceSchema).max(33),
+    sources: z.array(contextInstructionSourceSchema).max(129),
   })
   .strict();
 

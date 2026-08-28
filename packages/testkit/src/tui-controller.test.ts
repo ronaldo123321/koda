@@ -1332,6 +1332,7 @@ describe("TuiController", () => {
         approvalMode: "on-request",
         instructionsSha256: hash,
         repositoryInstructions: [],
+        skills: [],
       },
       telemetry: {
         step: 1,
@@ -2191,6 +2192,7 @@ function legacyContextResult(threadIdInput: string): ContextReadResult {
       approvalMode: "on-request",
       instructionsSha256: hash,
       repositoryInstructions: [],
+      skills: [],
     },
     instructions: {
       historicalEffectiveSha256: hash,

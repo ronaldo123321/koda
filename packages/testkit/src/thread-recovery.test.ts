@@ -1041,6 +1041,7 @@ function contextEvent(sequence: number): AgentEvent {
     approvalMode: "on-request",
     instructionsSha256: "a".repeat(64),
     repositoryInstructions: [],
+    skills: [],
   });
 }
 

@@ -6,7 +6,7 @@ The project is building the control plane around a coding model: typed conversat
 
 ## Current status
 
-Phase 3G is complete. Koda now has a durable planning Harness with safe checkpoints, explicit Stage acceptance, conservative process-restart recovery, and matching CLI, Ink, app-server, and five-provider semantics. Phase 3H (Skills and extension lifecycle) is next:
+Phase 3H is in progress. Phase 3H1 adds bounded scoped project Skills, immutable per-Turn catalogs, progressive `read_skill` disclosure, recovery diffs, and context inspection on top of the completed Phase 3G planning Harness. Reviewed command templates are next in Phase 3H2:
 
 - Versioned Thread, Turn, Item, and Agent Event schemas.
 - A provider-neutral streaming model interface.
@@ -70,6 +70,8 @@ Phase 3G is complete. Koda now has a durable planning Harness with safe checkpoi
 - A bounded thread-scoped Plan/Stage/Todo state machine maintained through the built-in, provider-neutral `update_plan` control tool.
 - Durable safe checkpoints, Plan-aware step/time pauses, exact recovery validation, and pinned current-Plan context that survives compaction.
 - App-server v11 `plan/get` and exact live `plan/acceptance/resolve`, plus CLI and Ink `/plan`, acceptance, rejection-feedback, and recovery views.
+- Strict `<scope>/.koda/skills/<name>/SKILL.md` discovery with deterministic broad-to-deep ordering, byte/count budgets, canonical containment, and fail-closed symlink handling.
+- Bounded Skill metadata in effective instructions, immutable Skill bodies through the built-in `read_skill` tool, durable catalog snapshots, resume changes, and current-source inspection.
 - Offline provider, runtime, CLI, and deterministic agent-loop tests.
 
 Provider-assisted semantic compaction, exact provider tokenizers and pricing, custom endpoints/profiles, live model discovery, automatic routing/fallback, cross-provider resume, additional providers, FTS5/fuzzy/live or cross-workspace search, alternate-screen navigation, rich Markdown/syntax/diff rendering, binary artifact views and export, overlapping/fuzzy/directory change operations, interactive process UX, and the non-Tool MCP capability surface remain later Phase 3 slices. Remote MCP/HTTP/OAuth, shared or remote artifact stores, remote app-server transports, durable post-crash filesystem journals, strong sandboxing, Windows Job Objects, crash-surviving supervision, the Rust executor, and any high-risk shell-string support remain Phase 4 work. Parent/child thread lineage and multi-agent scenario matrices remain Phase 5 work. Workspace writes, process execution, and MCP tools not explicitly classified as read require approval by default.
@@ -177,6 +179,21 @@ The process accepts one JSON-RPC 2.0 object per UTF-8 line. `initialize` must be
 ```
 
 The v11 initialize result advertises `threadEvents`, `bidirectionalThreadEvents`, `threadSearch`, `runtimeSettings`, `artifactInspection`, `contextInspection`, `multiFileChanges`, `patchDocuments`, `approvalGrants`, `planning`, `planCheckpoints`, and `stageAcceptance` plus the supported providers, credential environment-variable names, default models, and runtime-only availability booleans. `thread/events` returns validated events chronologically; mutually exclusive `beforeSequence` and `afterSequence` are exclusive cursors and `limit` is 1–200. `workspace.change_set_prepared`, `workspace.change_set_committed`, `workspace.change_set_rolled_back`, and `workspace.change_set_uncertain` provide bounded path-and-digest evidence for both `apply_changes` and `apply_patchset` without file bodies. `thread/search` is restricted to the canonical workspace and returns revision-bound cursor pages. `settings/get` returns the canonical workspace preference and revision; `settings/update` requires that revision so concurrent writers cannot silently overwrite one another. `thread/artifacts` lists newest unique references only after canonical-workspace and strict-JSONL authorization. `artifact/read` additionally requires that exact thread reference and returns a bounded, integrity-verified UTF-8 range with mutually exclusive `beforeByte`/`afterByte` cursors. Before each production Provider request, Koda writes `context.prepared` after any Compaction Item. `thread/context` discovers these durable snapshots newest first and projects old logs from `model.usage` without inventing missing estimates. `context/read` reconstructs precise active Items from authoritative JSONL and rejects digest mismatches. `context/instruction/read` accepts only an opaque source ID issued for that authorized request and returns bounded current content; it is not a general workspace file reader. `plan/get` rereads the authorized thread JSONL and returns the latest Plan, checkpoint, and recovery metadata without starting execution. `plan/acceptance/resolve` accepts only an exact live pending identity; restart recovery never turns historical acceptance evidence into a reusable capability. Responses and `turn/event` / `turn/finished` notifications use stdout exclusively; diagnostics use stderr. Clients answer an `approval.requested` event with `approval/resolve`, answer a `plan.acceptance_requested` event with `plan/acceptance/resolve`, may optionally create a bounded session grant only from an eligible command candidate, may inspect or revoke grants through the three `approval/grants/*` methods, may stop a live turn with `turn/cancel`, and should finish with `shutdown`. Provider credentials are server configuration and are never protocol fields.
+
+## Configure project Skills
+
+Place a Skill at `<scope>/.koda/skills/<name>/SKILL.md`. The scope is the directory containing `.koda`; a nested Skill applies to that subtree and is listed after broader sources. Phase 3H1 accepts only `name` and `description` single-line frontmatter fields, and the name must match its directory:
+
+```markdown
+---
+name: code-review
+description: Review changes for correctness, recovery, and missing tests.
+---
+
+Inspect the affected flow, verify failure boundaries, and run focused tests.
+```
+
+Koda injects only bounded catalog metadata. The model calls `read_skill` to obtain one immutable Skill body for the current Turn. Skill text is lower-priority project guidance: it cannot register tools, bypass approval, escape the workspace, or weaken Runtime policy. Files are limited to 48 KiB, with at most 32 Skills and 192 KiB combined content per workspace.
 
 ## Configure local MCP tools
 
@@ -290,5 +307,6 @@ pnpm eval:scenarios
 - [Phase 3F2 strict native patch documents design](docs/plans/2026-08-27-phase-3f2-native-patch-documents-design.md)
 - [Phase 3F3 session-scoped exact-command approval grants design](docs/plans/2026-08-28-phase-3f3-session-command-approval-grants-design.md)
 - [Phase 3G durable planning and Harness checkpoints design](docs/plans/2026-08-28-phase-3g-planning-harness-design.md)
+- [Phase 3H Skills and extension system design](docs/plans/2026-08-28-phase-3h-skills-extension-system-design.md)
 
 The model can propose actions, but the Koda runtime owns validation, policy, approval, and execution. User interfaces consume typed events and do not own agent state.

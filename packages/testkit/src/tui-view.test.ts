@@ -627,6 +627,7 @@ describe("Koda Ink view", () => {
             approvalMode: "on-request",
             instructionsSha256: hash,
             repositoryInstructions: [],
+            skills: [],
           },
           telemetry: {
             step: 1,

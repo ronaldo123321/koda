@@ -7,6 +7,7 @@ import { itemIdSchema, toolCallIdSchema, turnIdSchema } from "./ids.js";
 import { jsonObjectSchema, jsonValueSchema } from "./json.js";
 import { modelProviderIdSchema, providerStateSchema } from "./providers.js";
 import { planCheckpointSchema, planSnapshotSchema } from "./plans.js";
+import { skillChangeSchema } from "./skills.js";
 
 export const CONVERSATION_ITEM_TYPES = [
   "user_message",
@@ -144,6 +145,7 @@ export const recoveryItemSchema = z.object({
       }),
     )
     .default([]),
+  skillChanges: z.array(skillChangeSchema).default([]),
   uncertainToolCalls: z.array(
     z.object({
       callId: toolCallIdSchema,

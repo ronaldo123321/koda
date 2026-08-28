@@ -7,6 +7,7 @@ export * from "./jsonl-event-store.js";
 export * from "./patch-document.js";
 export * from "./patch-set-tool.js";
 export * from "./process-tree-controller.js";
+export * from "./project-skills.js";
 export * from "./read-only-tools.js";
 export * from "./read-only-workspace.js";
 export * from "./repository-instructions.js";
