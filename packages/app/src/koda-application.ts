@@ -87,6 +87,7 @@ import {
   ArtifactMaintenanceLease,
   ArtifactStore,
   JsonlEventStore,
+  ProjectCommandTemplateError,
   ProjectSkillError,
   ReadOnlyWorkspace,
   RepositoryInstructionError,
@@ -99,9 +100,12 @@ import {
   WorkspacePreferenceStore,
   WorkspacePreferenceStoreError,
   assertResumeWorkspace,
+  diffProjectCommandTemplateSnapshots,
   diffRepositoryInstructionSnapshots,
   diffProjectSkillSnapshots,
   buildSkillCatalogInstructions,
+  expandProjectCommandTemplatePrompt,
+  loadProjectCommandTemplates,
   loadProjectSkills,
   loadRepositoryInstructions,
   recoverThread,
@@ -1025,6 +1029,14 @@ export class KodaApplication {
         workspace.root,
       );
       const projectSkills = await loadProjectSkills(workspace.root);
+      const projectCommandTemplates = await loadProjectCommandTemplates(
+        workspace.root,
+      );
+      const expandedCommandTemplate = expandProjectCommandTemplatePrompt(
+        prompt,
+        projectCommandTemplates,
+      );
+      const effectivePrompt = expandedCommandTemplate?.prompt ?? prompt;
       const instructions = buildInstructions(
         workspace.root,
         repositoryInstructions,
@@ -1039,6 +1051,7 @@ export class KodaApplication {
         }),
       );
       const skillSnapshots = projectSkills.snapshots();
+      const commandTemplateSnapshots = projectCommandTemplates.snapshots();
       const eventLogPath = join(
         configuration.kodaHome,
         "threads",
@@ -1091,6 +1104,10 @@ export class KodaApplication {
           recovered.context.skills,
           skillSnapshots,
         );
+        const commandTemplateChanges = diffProjectCommandTemplateSnapshots(
+          recovered.context.commandTemplates,
+          commandTemplateSnapshots,
+        );
         const recoveryParts = [recovered.message];
         if (unavailableArtifactIds.length > 0) {
           recoveryParts.push(
@@ -1107,6 +1124,11 @@ export class KodaApplication {
             `Project Skills changed since the previous turn: ${skillChanges.map((change) => `${change.change} ${change.name} at ${change.path} (scope ${change.scope})`).join(", ")}. The current frozen Skill catalog applies to this resumed turn.`,
           );
         }
+        if (commandTemplateChanges.length > 0) {
+          recoveryParts.push(
+            `Project command templates changed since the previous turn: ${commandTemplateChanges.map((change) => `${change.change} ${change.selector} at ${change.path} (scope ${change.scope})`).join(", ")}. The current frozen command-template catalog applies to this resumed turn.`,
+          );
+        }
         prefaceItems = [
           recoveryItemSchema.parse({
             type: "recovery",
@@ -1119,6 +1141,7 @@ export class KodaApplication {
             unavailableArtifacts,
             instructionChanges,
             skillChanges,
+            commandTemplateChanges,
             uncertainToolCalls: recovered.uncertainToolCalls,
             workspaceChangeSets: recovered.workspaceChangeSets,
           }),
@@ -1191,7 +1214,7 @@ export class KodaApplication {
       const result = await loop.runTurn({
         threadId: ids.threadId,
         turnId: ids.turnId,
-        userInput: prompt,
+        userInput: effectivePrompt,
         signal: controller.signal,
         history,
         prefaceItems,
@@ -1206,6 +1229,12 @@ export class KodaApplication {
             .digest("hex"),
           repositoryInstructions: instructionSnapshots,
           skills: skillSnapshots,
+          commandTemplates: commandTemplateSnapshots,
+          ...(expandedCommandTemplate === undefined
+            ? {}
+            : {
+                commandTemplateActivation: expandedCommandTemplate.activation,
+              }),
         }),
       });
       if (result.status === "completed") {
@@ -1746,6 +1775,9 @@ async function inspectCurrentInstructions(input: {
 }): Promise<CurrentInstructionInspection> {
   const current = await loadRepositoryInstructions(input.workspace);
   const currentSkills = await loadProjectSkills(input.workspace);
+  const currentCommandTemplates = await loadProjectCommandTemplates(
+    input.workspace,
+  );
   const effectiveContent = buildInstructions(
     input.workspace,
     current,
@@ -1915,6 +1947,87 @@ async function inspectCurrentInstructions(input: {
       },
     });
   }
+  const historicalCommandTemplatesById = new Map(
+    input.turnContext.commandTemplates.map((source) => [
+      source.templateId,
+      source,
+    ]),
+  );
+  const currentCommandTemplatesById = new Map(
+    currentCommandTemplates.sources.map((source) => [
+      source.templateId,
+      source,
+    ]),
+  );
+  const commandTemplateIds = [
+    ...new Set([
+      ...historicalCommandTemplatesById.keys(),
+      ...currentCommandTemplatesById.keys(),
+    ]),
+  ].sort();
+  for (const templateId of commandTemplateIds) {
+    const historical = historicalCommandTemplatesById.get(templateId);
+    const currentSource = currentCommandTemplatesById.get(templateId);
+    if (currentSource === undefined && historical !== undefined) {
+      sources.push({
+        kind: "command_template",
+        path: historical.path,
+        scope: historical.scope,
+        status: "missing",
+        historical: {
+          bytes: historical.bytes,
+          sha256: historical.sha256,
+        },
+      });
+      continue;
+    }
+    if (currentSource === undefined) {
+      continue;
+    }
+    const sourceId = contextInstructionSourceId({
+      threadId: input.threadId,
+      anchorSequence: input.anchorSequence,
+      kind: "command_template",
+      path: currentSource.path,
+    });
+    readable.set(sourceId, {
+      path: currentSource.path,
+      content: currentSource.content,
+    });
+    const status =
+      historical === undefined
+        ? "added"
+        : historical.path === currentSource.path &&
+            historical.scope === currentSource.scope &&
+            historical.name === currentSource.name &&
+            historical.description === currentSource.description &&
+            historical.selector === currentSource.selector &&
+            historical.bytes === currentSource.bytes &&
+            historical.sha256 === currentSource.sha256 &&
+            JSON.stringify(historical.parameters) ===
+              JSON.stringify(currentSource.parameters)
+          ? "unchanged"
+          : "modified";
+    sources.push({
+      kind: "command_template",
+      sourceId,
+      path: currentSource.path,
+      scope: currentSource.scope,
+      status,
+      ...(historical === undefined
+        ? {}
+        : {
+            historical: {
+              bytes: historical.bytes,
+              sha256: historical.sha256,
+            },
+          }),
+      current: {
+        bytes: currentSource.bytes,
+        sha256: currentSource.sha256,
+      },
+    });
+  }
   return {
     summary: {
       historicalEffectiveSha256: input.turnContext.instructionsSha256,
@@ -1930,7 +2043,7 @@ async function inspectCurrentInstructions(input: {
 function contextInstructionSourceId(input: {
   threadId: ThreadId;
   anchorSequence: number;
-  kind: "effective" | "repository" | "skill";
+  kind: "effective" | "repository" | "skill" | "command_template";
   path: string;
 }): string {
   const digest = createHash("sha256")
@@ -2078,6 +2191,7 @@ function applicationError(error: unknown): { code: string; message: string } {
     error instanceof ArtifactGarbageCollectionError ||
     error instanceof ConfigurationError ||
     error instanceof McpClientError ||
+    error instanceof ProjectCommandTemplateError ||
     error instanceof ProjectSkillError
       ? error.code
       : "APPLICATION_ERROR";

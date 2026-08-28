@@ -1,6 +1,6 @@
 # Koda Phase 3H: Skills and Extension System
 
-- Status: Implementation in progress — Phase 3H1 implemented and verified; Phase 3H2 next
+- Status: Implementation in progress — Phase 3H1–3H2 implemented and verified; Phase 3H3 next
 - Date: 2026-08-28
 - Depends on: Phase 3B MCP lifecycle, Phase 3E context inspection, Phase 3F execution boundaries, and Phase 3G durable Plan/Harness
 - Scope: project Skills, reviewed command templates, safe dynamic tool-catalog refresh, bounded plugin lifecycle, inspection, and closure
@@ -81,6 +81,46 @@ Phase 3H2 adds declarative prompt templates, not command execution. Templates li
 
 Templates cannot contain an executable argv field, effect classification, approval grant, environment value, or hidden system instruction. A rendered template is ordinary user content under the same Provider and Runtime policy. CLI and Ink invocation remain explicit; name collisions use the same scope rules as Skills. Automatic template execution, shell aliases, and repository-defined slash-command handlers are rejected.
 
+Phase 3H2 accepts exactly one regular Markdown file per template:
+
+```text
+<scope>/.koda/commands/<template-name>.md
+```
+
+The basename and frontmatter `name` must match. Frontmatter accepts only `name`, `description`, and `parameters`; `parameters` is a single-line JSON array so Koda does not inherit YAML tags, aliases, or executable constructors. Parameters are named bounded UTF-8 strings in this slice:
+
+```yaml
+---
+name: review
+description: Review one target for correctness and missing tests.
+parameters:
+  [
+    {
+      "name": "target",
+      "description": "Workspace-relative target.",
+      "type": "string",
+      "required": true,
+      "max_bytes": 1024,
+    },
+  ]
+---
+Review {{target}} for correctness, recovery gaps, and missing tests.
+```
+
+Every declared parameter must occur in the body and every `{{placeholder}}` must be declared. Names are unique lower-case snake case, parameter order is manifest order, and substitutions are literal text rather than a second template or shell evaluation pass. Unknown frontmatter fields, unsupported types, duplicate or unused parameters, unknown placeholders, missing required values, extra values, invalid UTF-8, NUL, symlinks, and budget overflow fail closed before Provider creation.
+
+Hard limits are 32 templates, 48 KiB per file, 192 KiB combined source bytes, 16 parameters per template, 64 UTF-8 bytes for names, 512 UTF-8 bytes for descriptions, 4 KiB for frontmatter, 4 KiB as the largest declared per-parameter value, 16 KiB for an invocation, 64 KiB for the rendered user prompt, and discovery depth 20. A stable `command-template:<sha256>` identity is derived from path, scope, and name.
+
+Invocation is explicit and has no shell grammar:
+
+```text
+/template <selector> <JSON-object>
+```
+
+A root template uses its name as selector (`review`); a nested template uses its scope plus name (`packages/ui/review`). The JSON object is optional only when the template declares no required values, must contain string values only, and is canonicalized for audit hashing. CLI accepts the invocation as the `koda run` prompt; Ink forwards the same `/template` form through the app-server instead of installing repository-defined local command handlers. Rich catalog browsing remains part of the Phase 3H5 protocol/client inspection surface.
+
+Application discovery freezes the template catalog before Provider construction. Successful activation replaces the invocation with a visible ordinary-user header and the rendered body, records template/source/argument/rendered digests in `turn.context`, and stores only the rendered user input in model history. Resume reports added, removed, and changed template snapshots without reinterpreting old turns. Phase 3E current-source inspection may read currently authorized template sources, but command-template metadata and bodies never participate in the effective system-instruction hash.
+
 ## 8. Dynamic tool discovery
 
 Phase 3H3 extends the existing frozen MCP catalog with explicit refresh at a safe Harness boundary. A model request always sees one immutable tool generation. Refresh validates the complete replacement catalog, checks alias and built-in collisions, records a bounded added/removed/changed diff, then atomically installs the next generation before another model request.
@@ -138,10 +178,14 @@ Implemented with strict recursive discovery of scoped `<scope>/.koda/skills/<nam
 
 ### Phase 3H2: reviewed command templates
 
-Status: **Next.**
+Status: **Implemented and verified (2026-08-28).**
 
 - Add strict template manifests, deterministic parameters/expansion, and durable rendered-input evidence.
 - Add explicit CLI and Ink discovery/invocation without repository-defined executable handlers.
+
+Implemented with strict recursive discovery of scoped `<scope>/.koda/commands/<name>.md` sources, bounded JSON parameter manifests, portable exact selectors, canonical containment and no-symlink checks, immutable per-Turn catalogs, and single-pass literal placeholder expansion. CLI and Ink share the explicit `/template <selector> <JSON-object>` application path; malformed catalogs, selectors, invocations, or arguments fail before Provider creation.
+
+`turn.context` records bounded template snapshots plus an optional activation containing source, canonical-argument, and rendered-prompt digests. Rendered prompts carry a visible ordinary-user header and never enter system instructions. Resume emits structured `commandTemplateChanges`, Phase 3E inspection distinguishes currently authorized command-template sources, and legacy logs default to an empty catalog. The repository format gate, full typecheck, 49-file/411-test offline suite, and six reliability scenarios pass at the Phase 3H2 checkpoint. Rich client catalog browsing remains Phase 3H5 as documented.
 
 ### Phase 3H3: dynamic tool generations
 

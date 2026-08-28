@@ -410,6 +410,10 @@ export class TuiController {
       await this.startPrompt(input);
       return "handled";
     }
+    if (input === "/template" || input.startsWith("/template ")) {
+      await this.startPrompt(input);
+      return "handled";
+    }
     if (input.startsWith("/search ")) {
       await this.openThreadSearch(input.slice("/search ".length), "chat");
       return "handled";
@@ -437,6 +441,7 @@ export class TuiController {
             "/artifacts — browse artifacts referenced by this thread",
             "/artifact <id> — open a referenced text artifact",
             "/context — inspect prepared model context and instructions",
+            "/template <selector> <JSON> — render a reviewed project prompt template",
             "/approvals — list session command approval grants",
             "/approvals revoke <id> — revoke one session grant",
             "/approvals clear — revoke all workspace session grants",

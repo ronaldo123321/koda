@@ -628,6 +628,7 @@ describe("Koda Ink view", () => {
             instructionsSha256: hash,
             repositoryInstructions: [],
             skills: [],
+            commandTemplates: [],
           },
           telemetry: {
             step: 1,

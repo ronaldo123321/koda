@@ -2,6 +2,7 @@ export * from "./artifacts.js";
 export * from "./approval-grants.js";
 export * from "./app-server.js";
 export * from "./change-sets.js";
+export * from "./command-templates.js";
 export * from "./context.js";
 export * from "./events.js";
 export * from "./ids.js";

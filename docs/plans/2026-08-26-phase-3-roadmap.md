@@ -1,6 +1,6 @@
 # Koda Phase 3 Extensibility Roadmap
 
-- Status: In progress — Phase 3A through Phase 3G and Phase 3H1 complete; Phase 3H2 next (2026-08-28)
+- Status: In progress — Phase 3A through Phase 3G and Phase 3H1–3H2 complete; Phase 3H3 next (2026-08-28)
 - Date: 2026-08-26
 - Depends on: Phase 2 reliability closure
 - Scope: stable client/tool/provider extension boundaries without weakening the local runtime's durable state and approval guarantees
@@ -190,7 +190,7 @@ Unattended background continuation, durable scheduling, reconnectable remote job
 
 ## Phase 3H: Skills and extension system
 
-Status: **Implementation in progress — Phase 3H1 implemented and verified; Phase 3H2 next.**
+Status: **Implementation in progress — Phase 3H1–3H2 implemented and verified; Phase 3H3 next.**
 
 - Add project Skills with explicit discovery, precedence, scope, budgets, and instruction trust boundaries.
 - Add reviewed command templates without turning repository text into implicit execution authority.
@@ -199,7 +199,7 @@ Status: **Implementation in progress — Phase 3H1 implemented and verified; Pha
 
 The accepted trust hierarchy, scoped discovery rules, immutable catalog model, refresh boundaries, isolated plugin lifecycle, verification matrix, and five implementation slices are in the [Phase 3H Skills and extension system design](2026-08-28-phase-3h-skills-extension-system-design.md).
 
-Phase 3H1 provides strict scoped project Skill discovery, bounded frontmatter and content, deterministic precedence, immutable per-Turn catalogs, the built-in `read_skill` tool, durable Skill snapshots and resume diffs, plus Phase 3E current-source inspection. Phase 3H2 adds reviewed declarative command templates without repository-defined executable handlers. Dynamic tool generations remain Phase 3H3, isolated local plugin lifecycle remains Phase 3H4, and protocol/client/real-TTY closure remains Phase 3H5.
+Phase 3H1 provides strict scoped project Skill discovery, bounded frontmatter and content, deterministic precedence, immutable per-Turn catalogs, the built-in `read_skill` tool, durable Skill snapshots and resume diffs, plus Phase 3E current-source inspection. Phase 3H2 adds strict scoped Markdown command templates, bounded string parameters, deterministic one-pass expansion, explicit shared CLI/Ink invocation, durable activation and resume evidence, and current-source inspection without repository-defined executable handlers. Dynamic tool generations remain Phase 3H3, isolated local plugin lifecycle remains Phase 3H4, and protocol/client/real-TTY closure remains Phase 3H5.
 
 ## Other later Phase 3 slices
 

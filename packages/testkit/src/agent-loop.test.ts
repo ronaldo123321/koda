@@ -192,6 +192,7 @@ describe("AgentLoop", () => {
         instructionsSha256: "a".repeat(64),
         repositoryInstructions: [],
         skills: [],
+        commandTemplates: [],
       },
     });
 

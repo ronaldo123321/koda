@@ -1,6 +1,11 @@
 import { z } from "zod";
 
 import { artifactSha256Schema } from "./artifacts.js";
+import {
+  commandTemplateActivationSchema,
+  commandTemplateSnapshotSchema,
+  MAX_PROJECT_COMMAND_TEMPLATES,
+} from "./command-templates.js";
 import { itemIdSchema } from "./ids.js";
 import { planCheckpointIdSchema, planIdSchema } from "./plans.js";
 import {
@@ -25,6 +30,11 @@ export const turnContextSnapshotSchema = z.object({
   instructionsSha256: artifactSha256Schema,
   repositoryInstructions: z.array(repositoryInstructionSnapshotSchema),
   skills: z.array(skillSnapshotSchema).max(MAX_PROJECT_SKILLS).default([]),
+  commandTemplates: z
+    .array(commandTemplateSnapshotSchema)
+    .max(MAX_PROJECT_COMMAND_TEMPLATES)
+    .default([]),
+  commandTemplateActivation: commandTemplateActivationSchema.optional(),
 });
 
 export const contextPreparedPayloadSchema = z

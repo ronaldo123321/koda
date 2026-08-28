@@ -251,6 +251,9 @@ describe("TuiController", () => {
     expect(controller.getSnapshot().transcript.at(-1)?.text).toContain(
       "/clear",
     );
+    expect(controller.getSnapshot().transcript.at(-1)?.text).toContain(
+      "/template <selector> <JSON>",
+    );
     controller.setInput("/clear");
     await controller.submitInput();
     expect(controller.getSnapshot()).toMatchObject({
@@ -260,6 +263,27 @@ describe("TuiController", () => {
     controller.setInput("/exit");
     await expect(controller.submitInput()).resolves.toBe("exit");
     expect(client.startRequests).toEqual([]);
+  });
+
+  it("forwards explicit command-template invocations to the app-server", async () => {
+    const client = new FakeAppServerClient();
+    const controller = createController(client);
+    const prompt = '/template review {"target":"src/agent.ts"}';
+
+    controller.setInput(prompt);
+    await expect(controller.submitInput()).resolves.toBe("handled");
+
+    expect(client.startRequests).toEqual([
+      expect.objectContaining({ prompt, cwd: "/workspace" }),
+    ]);
+    expect(controller.getSnapshot()).toMatchObject({
+      activeTurn: { prompt, status: "running" },
+    });
+    expect(controller.getSnapshot().transcript).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "user", text: prompt }),
+      ]),
+    );
   });
 
   it("reduces early streaming events and carries the thread into later turns", async () => {
@@ -1333,6 +1357,7 @@ describe("TuiController", () => {
         instructionsSha256: hash,
         repositoryInstructions: [],
         skills: [],
+        commandTemplates: [],
       },
       telemetry: {
         step: 1,
@@ -2193,6 +2218,7 @@ function legacyContextResult(threadIdInput: string): ContextReadResult {
       instructionsSha256: hash,
       repositoryInstructions: [],
       skills: [],
+      commandTemplates: [],
     },
     instructions: {
       historicalEffectiveSha256: hash,

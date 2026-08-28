@@ -6,7 +6,7 @@ The project is building the control plane around a coding model: typed conversat
 
 ## Current status
 
-Phase 3H is in progress. Phase 3H1 adds bounded scoped project Skills, immutable per-Turn catalogs, progressive `read_skill` disclosure, recovery diffs, and context inspection on top of the completed Phase 3G planning Harness. Reviewed command templates are next in Phase 3H2:
+Phase 3H is in progress. Phase 3H1 and Phase 3H2 add bounded scoped project Skills plus reviewed declarative command templates, immutable per-Turn catalogs, durable activation/recovery evidence, and current-source inspection on top of the completed Phase 3G planning Harness. Dynamic tool generations are next in Phase 3H3:
 
 - Versioned Thread, Turn, Item, and Agent Event schemas.
 - A provider-neutral streaming model interface.
@@ -72,6 +72,7 @@ Phase 3H is in progress. Phase 3H1 adds bounded scoped project Skills, immutable
 - App-server v11 `plan/get` and exact live `plan/acceptance/resolve`, plus CLI and Ink `/plan`, acceptance, rejection-feedback, and recovery views.
 - Strict `<scope>/.koda/skills/<name>/SKILL.md` discovery with deterministic broad-to-deep ordering, byte/count budgets, canonical containment, and fail-closed symlink handling.
 - Bounded Skill metadata in effective instructions, immutable Skill bodies through the built-in `read_skill` tool, durable catalog snapshots, resume changes, and current-source inspection.
+- Strict `<scope>/.koda/commands/<name>.md` prompt templates with bounded string parameters, one-pass literal rendering, explicit CLI/Ink `/template` activation, and no executable handlers.
 - Offline provider, runtime, CLI, and deterministic agent-loop tests.
 
 Provider-assisted semantic compaction, exact provider tokenizers and pricing, custom endpoints/profiles, live model discovery, automatic routing/fallback, cross-provider resume, additional providers, FTS5/fuzzy/live or cross-workspace search, alternate-screen navigation, rich Markdown/syntax/diff rendering, binary artifact views and export, overlapping/fuzzy/directory change operations, interactive process UX, and the non-Tool MCP capability surface remain later Phase 3 slices. Remote MCP/HTTP/OAuth, shared or remote artifact stores, remote app-server transports, durable post-crash filesystem journals, strong sandboxing, Windows Job Objects, crash-surviving supervision, the Rust executor, and any high-risk shell-string support remain Phase 4 work. Parent/child thread lineage and multi-agent scenario matrices remain Phase 5 work. Workspace writes, process execution, and MCP tools not explicitly classified as read require approval by default.
@@ -194,6 +195,31 @@ Inspect the affected flow, verify failure boundaries, and run focused tests.
 ```
 
 Koda injects only bounded catalog metadata. The model calls `read_skill` to obtain one immutable Skill body for the current Turn. Skill text is lower-priority project guidance: it cannot register tools, bypass approval, escape the workspace, or weaken Runtime policy. Files are limited to 48 KiB, with at most 32 Skills and 192 KiB combined content per workspace.
+
+## Configure command templates
+
+Place a reviewed prompt template at `<scope>/.koda/commands/<name>.md`. Parameters use one single-line JSON array in frontmatter; Phase 3H2 accepts bounded strings only:
+
+```markdown
+---
+name: review
+description: Review one target for correctness and missing tests.
+parameters:
+  [
+    {
+      "name": "target",
+      "description": "Workspace-relative target.",
+      "type": "string",
+      "required": true,
+      "max_bytes": 1024,
+    },
+  ]
+---
+
+Review {{target}} for correctness, recovery gaps, and missing tests.
+```
+
+Invoke a root template with `koda run '/template review {"target":"src/agent.ts"}' --cwd .` or enter the same `/template` prompt in Ink. Nested templates use selectors such as `packages/ui/review`. Koda freezes and validates the catalog, performs one literal substitution pass, and records source, argument, and rendered-input digests before the Provider starts. Templates are ordinary user prompts: they cannot define argv, environment, effects, approvals, tools, or local slash-command handlers.
 
 ## Configure local MCP tools
 

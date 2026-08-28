@@ -1042,6 +1042,7 @@ function contextEvent(sequence: number): AgentEvent {
     instructionsSha256: "a".repeat(64),
     repositoryInstructions: [],
     skills: [],
+    commandTemplates: [],
   });
 }
 

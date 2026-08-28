@@ -3,6 +3,7 @@ import { z } from "zod";
 import { artifactIdSchema } from "./artifacts.js";
 import { approvalGrantIdSchema } from "./approval-grants.js";
 import { workspaceChangeSetRecoverySchema } from "./change-sets.js";
+import { commandTemplateChangeSchema } from "./command-templates.js";
 import { itemIdSchema, toolCallIdSchema, turnIdSchema } from "./ids.js";
 import { jsonObjectSchema, jsonValueSchema } from "./json.js";
 import { modelProviderIdSchema, providerStateSchema } from "./providers.js";
@@ -146,6 +147,7 @@ export const recoveryItemSchema = z.object({
     )
     .default([]),
   skillChanges: z.array(skillChangeSchema).default([]),
+  commandTemplateChanges: z.array(commandTemplateChangeSchema).default([]),
   uncertainToolCalls: z.array(
     z.object({
       callId: toolCallIdSchema,
