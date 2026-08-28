@@ -406,7 +406,7 @@ Status: **Complete; Phase 2A through 2F are implemented and pass offline regress
 
 ### Phase 3: extensibility
 
-Status: **In progress; Phase 3A app-server and Phase 3B local MCP boundaries are implemented and verified.**
+Status: **Phase 3A through Phase 3H are complete; Phase 3I client interaction and observability closure is in progress.**
 
 - Shared transport-neutral application workflow. **Completed in Phase 3A.**
 - Local stdio JSON-RPC app-server protocol. **Completed in Phase 3A.**
@@ -418,6 +418,7 @@ Status: **In progress; Phase 3A app-server and Phase 3B local MCP boundaries are
 - Native or richer patch capabilities, multi-file operations, moves, and deletion.
 - Interactive PTY and managed background-process UX.
 - Approval caching and trusted command-prefix UX.
+- Compact Tool activity, a durable activity inspector, and bounded streaming refresh. **Phase 3I closure in progress.**
 
 ### Phase 4: hardening
 
@@ -425,7 +426,7 @@ Status: **In progress; Phase 3A app-server and Phase 3B local MCP boundaries are
 - OS-specific sandboxing and network policy.
 - Secret handling and signed cross-platform releases.
 - High-risk shell-string execution, if retained after sandbox evaluation.
-- **TODO — Progressive tool-activity presentation:** keep a compact aggregate plus the current/recent tools while a turn is running; collapse successful read-only calls into one summary when the turn finishes; keep approvals, mutations, command execution, external calls, failures, rejections, rollbacks, and uncertain outcomes individually visible; and provide an on-demand activity inspector for the complete durable trace. This is a presentation change only and must not weaken event-log durability or auditability.
+- Progressive Tool activity presentation and its complete durable inspector moved to **Phase 3I client closure** so Phase 4 remains focused on runtime, security, remote operation, and distribution hardening.
 
 ### Phase 5: multi-agent and curated memory
 

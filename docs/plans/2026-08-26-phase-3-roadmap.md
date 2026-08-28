@@ -1,6 +1,6 @@
 # Koda Phase 3 Extensibility Roadmap
 
-- Status: Complete — Phase 3A through Phase 3H implemented and verified (2026-08-28)
+- Status: Phase 3A through Phase 3H complete; Phase 3I client closure in progress
 - Date: 2026-08-26
 - Depends on: Phase 2 reliability closure
 - Scope: stable client/tool/provider extension boundaries without weakening the local runtime's durable state and approval guarantees
@@ -200,6 +200,17 @@ Status: **Complete — Phase 3H1–3H5 implemented and verified.**
 The accepted trust hierarchy, scoped discovery rules, immutable catalog model, refresh boundaries, isolated plugin lifecycle, verification matrix, and five implementation slices are in the [Phase 3H Skills and extension system design](2026-08-28-phase-3h-skills-extension-system-design.md).
 
 Phase 3H1 provides strict scoped project Skill discovery, bounded frontmatter and content, deterministic precedence, immutable per-Turn catalogs, the built-in `read_skill` tool, durable Skill snapshots and resume diffs, plus Phase 3E current-source inspection. Phase 3H2 adds strict scoped Markdown command templates, bounded string parameters, deterministic one-pass expansion, explicit shared CLI/Ink invocation, durable activation and resume evidence, and current-source inspection without repository-defined executable handlers. Phase 3H3 adds atomic MCP namespace generations, safe-boundary `tools/list` refresh, generation-bound prepared calls, durable diffs, strict recovery chains, and aggregate resume evidence. Phase 3H4 adds user-owned strict plugin manifests, transactional required/optional startup, an isolated NDJSON process protocol, capability allowlists, qualified validated contributions, conservative tool policy, bounded diagnostics, durable plugin snapshots/resume diffs, and reverse process-tree shutdown. Phase 3H5 closes the system with app-server protocol v12, current and historical extension inspection, a strict Node client, credential-free CLI list/read commands, idle-only Ink `/extensions`, no-spawn subprocess proof, provider-neutral projection, and a real-TTY navigation/shutdown gate. The completed Phase 3 baseline passes 57 offline test files, 444 tests, and six deterministic reliability scenarios.
+
+## Phase 3I: client interaction and observability closure
+
+Status: **In progress.**
+
+- Collapse successful read-only Tool calls into deterministic summaries while keeping safety-relevant operations individually visible.
+- Add an idle-only `/activity` view over authoritative, paginated protocol-v12 Thread events.
+- Coalesce adjacent assistant-delta render notifications without delaying approvals, errors, Tool state, completion, or disconnect.
+- Preserve complete assistant output, normal terminal scrollback, strict presentation bounds, and all runtime semantics.
+
+The accepted projection rules, activity inspector, refresh scheduler, verification matrix, and deliberate deferrals are in the [Phase 3I client interaction and observability closure design](2026-08-28-phase-3i-client-observability-closure-design.md).
 
 ## Deferred follow-on slices after the Phase 3 baseline
 
