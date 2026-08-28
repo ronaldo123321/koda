@@ -54,6 +54,7 @@ const MAXIMUM_VIEWPORT_HEIGHT = 30;
 const DEFAULT_VIEWPORT_WIDTH = 80;
 const MINIMUM_VIEWPORT_WIDTH = 20;
 const MAXIMUM_VIEWPORT_WIDTH = 240;
+const DEFAULT_STREAM_FRAME_MS = 32;
 
 export type TuiConnectionStatus = "ready" | "closing" | "closed" | "error";
 export type TuiMode =
@@ -67,6 +68,7 @@ export type TuiMode =
   | "context_instruction_view"
   | "plan_view"
   | "extensions_view"
+  | "activity_view"
   | "thread_list"
   | "thread_search_input"
   | "thread_search_results"
@@ -109,6 +111,16 @@ export interface TuiConfiguration {
   model: string;
   resumeThreadId?: string;
   approvalMode: "on-request" | "never";
+}
+
+export interface TuiNotificationScheduler {
+  schedule(callback: () => void, delayMs: number): unknown;
+  cancel(handle: unknown): void;
+}
+
+export interface TuiControllerOptions {
+  streamFrameMs?: number;
+  notificationScheduler?: TuiNotificationScheduler;
 }
 
 export interface TuiNewThreadConfiguration {
@@ -197,7 +209,15 @@ export interface TuiToolState {
   callId: ToolCallId;
   name: string;
   status: TuiToolStatus;
+  effect?: "read" | "control" | "write" | "execute";
+  safetyRelevant: boolean;
   detail?: string;
+}
+
+export interface TuiToolActivityProjection {
+  readSummary?: string;
+  visibleTools: readonly TuiToolState[];
+  hiddenCompletedCount: number;
 }
 
 export interface TuiApprovalState {
@@ -241,6 +261,18 @@ export interface TuiExtensionNavigationState {
   rows: readonly string[];
   scrollOffset: number;
   loading: boolean;
+  viewportHeight: number;
+  viewportWidth: number;
+}
+
+export interface TuiActivityNavigationState {
+  threadId: ThreadId;
+  events: readonly AgentEvent[];
+  rows: readonly string[];
+  scrollOffset: number;
+  loading: boolean;
+  hasEarlier: boolean;
+  hasLater: boolean;
   viewportHeight: number;
   viewportWidth: number;
 }
@@ -317,6 +349,7 @@ export interface TuiState {
   contextNavigation: TuiContextNavigationState | undefined;
   planNavigation: TuiPlanNavigationState | undefined;
   extensionNavigation: TuiExtensionNavigationState | undefined;
+  activityNavigation: TuiActivityNavigationState | undefined;
 }
 
 export type TuiSubmitResult = "handled" | "exit";
@@ -336,10 +369,15 @@ export class TuiController {
   private persistedPreference: RuntimePreference | undefined;
   private cancelPromise: Promise<void> | undefined;
   private shutdownPromise: Promise<void> | undefined;
+  private readonly streamFrameMs: number;
+  private readonly notificationScheduler: TuiNotificationScheduler;
+  private pendingStreamNotification: unknown | undefined;
+  private streamNotificationDirty = false;
 
   public constructor(
     private readonly client: AppServerClientApi,
     configuration: TuiConfigurationInput,
+    options: TuiControllerOptions = {},
   ) {
     const provider = modelProviderIdSchema.parse(configuration.provider);
     const metadata = client.initialization.providers.find(
@@ -353,6 +391,16 @@ export class TuiController {
     );
     this.preferenceRevision = configuration.settingsRevision ?? 0;
     this.persistedPreference = configuration.settingsPreference;
+    this.streamFrameMs = options.streamFrameMs ?? DEFAULT_STREAM_FRAME_MS;
+    if (
+      !Number.isSafeInteger(this.streamFrameMs) ||
+      this.streamFrameMs < 1 ||
+      this.streamFrameMs > 1_000
+    ) {
+      throw new Error("streamFrameMs must be an integer from 1 through 1000.");
+    }
+    this.notificationScheduler =
+      options.notificationScheduler ?? defaultNotificationScheduler;
     this.state = {
       connection: "ready",
       mode: "chat",
@@ -383,6 +431,7 @@ export class TuiController {
       contextNavigation: undefined,
       planNavigation: undefined,
       extensionNavigation: undefined,
+      activityNavigation: undefined,
     };
     this.unsubscribeNotification = client.onNotification((notification) => {
       this.receiveNotification(notification);
@@ -450,6 +499,7 @@ export class TuiController {
             "/status — show connection and session state",
             "/plan — inspect the durable Plan and latest checkpoint",
             "/extensions — inspect current and durable extension catalogs",
+            "/activity — inspect the complete durable execution trace",
             "/clear — clear displayed history only",
             "/threads — browse threads in this workspace",
             "/search <query> — search durable history in this workspace",
@@ -477,6 +527,9 @@ export class TuiController {
         return "handled";
       case "/extensions":
         await this.openCurrentExtensions();
+        return "handled";
+      case "/activity":
+        await this.openCurrentActivity();
         return "handled";
       case "/clear":
         this.update({ transcript: [], notice: "Display history cleared." });
@@ -2693,6 +2746,7 @@ export class TuiController {
     const contextNavigation = this.state.contextNavigation;
     const planNavigation = this.state.planNavigation;
     const extensionNavigation = this.state.extensionNavigation;
+    const activityNavigation = this.state.activityNavigation;
     if (!Number.isFinite(height) || !Number.isFinite(width)) {
       return;
     }
@@ -2711,7 +2765,8 @@ export class TuiController {
       artifactNavigation === undefined &&
       contextNavigation === undefined &&
       planNavigation === undefined &&
-      extensionNavigation === undefined
+      extensionNavigation === undefined &&
+      activityNavigation === undefined
     ) {
       return;
     }
@@ -2900,6 +2955,22 @@ export class TuiController {
                 ),
               };
             })(),
+          }),
+      ...(activityNavigation === undefined
+        ? {}
+        : {
+            activityNavigation: {
+              ...activityNavigation,
+              viewportHeight,
+              viewportWidth,
+              scrollOffset: Math.min(
+                activityNavigation.scrollOffset,
+                maximumScrollOffset(
+                  activityNavigation.rows.length,
+                  viewportHeight,
+                ),
+              ),
+            },
           }),
     });
   }
@@ -3737,6 +3808,242 @@ export class TuiController {
     });
   }
 
+  public async openCurrentActivity(): Promise<void> {
+    if (!this.canEditInput() || this.navigationBusy) {
+      this.update({
+        notice: "Activity inspection is available only while idle.",
+      });
+      return;
+    }
+    if (this.state.threadId === undefined) {
+      this.update({ notice: "No current thread is selected." });
+      return;
+    }
+    const threadId = threadIdSchema.parse(this.state.threadId);
+    const generation = this.beginNavigation();
+    this.navigationBusy = true;
+    this.update({
+      mode: "activity_view",
+      activityNavigation: {
+        threadId,
+        events: [],
+        rows: [],
+        scrollOffset: 0,
+        loading: true,
+        hasEarlier: false,
+        hasLater: false,
+        viewportHeight: this.viewportHeight,
+        viewportWidth: this.viewportWidth,
+      },
+      notice: "Loading durable activity…",
+    });
+    try {
+      const page = await this.client.readThreadEvents({
+        threadId,
+        limit: 200,
+      });
+      if (
+        !this.isCurrentNavigation(generation) ||
+        this.state.mode !== "activity_view"
+      ) {
+        return;
+      }
+      const current = this.state.activityNavigation;
+      if (current === undefined) {
+        return;
+      }
+      const rows = activityPresentationRows(page.events);
+      this.update({
+        activityNavigation: {
+          ...current,
+          events: page.events,
+          rows,
+          scrollOffset: maximumScrollOffset(
+            rows.length,
+            current.viewportHeight,
+          ),
+          loading: false,
+          hasEarlier: page.hasEarlier,
+          hasLater: page.hasLater,
+        },
+        notice:
+          rows.length === 0
+            ? "This event page contains no execution activity. Use PageUp to inspect earlier events."
+            : undefined,
+      });
+    } catch (error) {
+      if (this.isCurrentNavigation(generation)) {
+        this.update({
+          mode: "chat",
+          activityNavigation: undefined,
+          notice: `Could not load activity: ${errorMessage(error)}`,
+        });
+      }
+    } finally {
+      if (this.isCurrentNavigation(generation)) {
+        this.navigationBusy = false;
+      }
+    }
+  }
+
+  public async navigateActivity(
+    action: "up" | "down" | "page_up" | "page_down" | "home" | "end",
+  ): Promise<void> {
+    const navigation = this.state.activityNavigation;
+    if (
+      this.state.mode !== "activity_view" ||
+      navigation === undefined ||
+      navigation.loading ||
+      this.navigationBusy
+    ) {
+      return;
+    }
+    if (action === "up" || action === "down") {
+      const maximum = maximumScrollOffset(
+        navigation.rows.length,
+        navigation.viewportHeight,
+      );
+      this.update({
+        activityNavigation: {
+          ...navigation,
+          scrollOffset: Math.min(
+            maximum,
+            Math.max(0, navigation.scrollOffset + (action === "up" ? -1 : 1)),
+          ),
+        },
+        notice: undefined,
+      });
+      return;
+    }
+    await this.loadActivityPage(
+      action === "page_up" || action === "home" ? "older" : "newer",
+      action === "home" || action === "end",
+    );
+  }
+
+  public closeActivity(): void {
+    if (this.state.mode !== "activity_view") {
+      return;
+    }
+    this.cancelNavigation();
+    this.update({
+      mode: "chat",
+      activityNavigation: undefined,
+      notice: undefined,
+    });
+  }
+
+  private async loadActivityPage(
+    direction: "older" | "newer",
+    toBoundary: boolean,
+  ): Promise<void> {
+    const navigation = this.state.activityNavigation;
+    if (navigation === undefined || this.navigationBusy) {
+      return;
+    }
+    if (
+      !toBoundary &&
+      ((direction === "older" && !navigation.hasEarlier) ||
+        (direction === "newer" && !navigation.hasLater))
+    ) {
+      return;
+    }
+    const generation = this.beginNavigation();
+    this.navigationBusy = true;
+    this.update({
+      activityNavigation: { ...navigation, loading: true },
+      notice:
+        direction === "older"
+          ? "Loading older activity…"
+          : "Loading newer activity…",
+    });
+    try {
+      let page =
+        direction === "newer" && toBoundary
+          ? await this.client.readThreadEvents({
+              threadId: navigation.threadId,
+              limit: 200,
+            })
+          : await this.client.readThreadEvents({
+              threadId: navigation.threadId,
+              ...(direction === "older"
+                ? { beforeSequence: navigation.events[0]?.sequence ?? 0 }
+                : {
+                    afterSequence:
+                      navigation.events.at(-1)?.sequence ??
+                      Number.MAX_SAFE_INTEGER,
+                  }),
+              limit: 200,
+            });
+      while (
+        this.isCurrentNavigation(generation) &&
+        toBoundary &&
+        direction === "older" &&
+        page.hasEarlier &&
+        page.events.length > 0
+      ) {
+        const cursor = page.events[0]?.sequence;
+        if (cursor === undefined) {
+          break;
+        }
+        page = await this.client.readThreadEvents({
+          threadId: navigation.threadId,
+          beforeSequence: cursor,
+          limit: 200,
+        });
+      }
+      if (!this.isCurrentNavigation(generation)) {
+        return;
+      }
+      if (
+        page.events.length === 0 &&
+        ((direction === "older" && page.hasEarlier) ||
+          (direction === "newer" && page.hasLater))
+      ) {
+        throw new Error("Activity pagination returned no cursor progress.");
+      }
+      const current = this.state.activityNavigation;
+      if (this.state.mode !== "activity_view" || current === undefined) {
+        return;
+      }
+      const rows = activityPresentationRows(page.events);
+      this.update({
+        activityNavigation: {
+          ...current,
+          events: page.events,
+          rows,
+          scrollOffset:
+            direction === "older"
+              ? 0
+              : maximumScrollOffset(rows.length, current.viewportHeight),
+          loading: false,
+          hasEarlier: page.hasEarlier,
+          hasLater: page.hasLater,
+        },
+        notice:
+          rows.length === 0
+            ? "This event page contains no execution activity."
+            : undefined,
+      });
+    } catch (error) {
+      const current = this.state.activityNavigation;
+      if (
+        this.isCurrentNavigation(generation) &&
+        this.state.mode === "activity_view" &&
+        current !== undefined
+      ) {
+        this.update({
+          activityNavigation: { ...current, loading: false },
+          notice: `Could not load activity: ${errorMessage(error)}`,
+        });
+      }
+    } finally {
+      if (this.isCurrentNavigation(generation)) {
+        this.navigationBusy = false;
+      }
+    }
+  }
+
   private detachThread(): void {
     const previous = this.state.threadId;
     const { resumeThreadId: _resumeThreadId, ...configuration } =
@@ -3996,6 +4303,7 @@ export class TuiController {
   public dispose(): void {
     this.unsubscribeNotification();
     this.unsubscribeDisconnect();
+    this.cancelPendingStreamNotification();
     this.listeners.clear();
   }
 
@@ -4048,6 +4356,7 @@ export class TuiController {
         contextNavigation: undefined,
         planNavigation: undefined,
         extensionNavigation: undefined,
+        activityNavigation: undefined,
         notice: undefined,
       });
     } catch (error) {
@@ -4063,6 +4372,7 @@ export class TuiController {
         contextNavigation: undefined,
         planNavigation: undefined,
         extensionNavigation: undefined,
+        activityNavigation: undefined,
         notice: `Shutdown failed: ${errorMessage(error)}`,
       });
     }
@@ -4126,11 +4436,13 @@ export class TuiController {
       case "tool.started":
         next = updateTool(next, event.payload.callId, event.payload.name, {
           status: "preparing",
+          safetyRelevant: isExternalToolName(event.payload.name),
         });
         break;
       case "approval.requested":
         next = updateTool(next, event.payload.callId, event.payload.name, {
           status: "awaiting_approval",
+          safetyRelevant: true,
           detail: event.payload.summary,
         });
         approval = {
@@ -4151,6 +4463,7 @@ export class TuiController {
         next = updateTool(next, event.payload.callId, undefined, {
           status:
             event.payload.decision === "approved" ? "approved" : "rejected",
+          safetyRelevant: true,
           ...(event.payload.reason === undefined
             ? {}
             : { detail: event.payload.reason }),
@@ -4162,65 +4475,79 @@ export class TuiController {
       case "approval.grant_created":
         next = updateTool(next, event.payload.callId, undefined, {
           status: "approved",
+          safetyRelevant: true,
           detail: `session grant ${event.payload.grant.id}`,
         });
         break;
       case "approval.grant_used":
         next = updateTool(next, event.payload.callId, event.payload.name, {
           status: "approved",
+          safetyRelevant: true,
           detail: `reused session grant ${event.payload.grantId}`,
         });
         break;
       case "tool.execution_started":
         next = updateTool(next, event.payload.callId, event.payload.name, {
           status: "running",
+          effect: event.payload.effect,
+          safetyRelevant:
+            event.payload.effect !== "read" ||
+            isExternalToolName(event.payload.name),
           detail: event.payload.effect,
         });
         break;
       case "tool.completed":
         next = updateTool(next, event.payload.callId, event.payload.name, {
           status: event.payload.status,
+          safetyRelevant: event.payload.status === "error",
         });
         break;
       case "process.started":
         next = updateTool(next, event.payload.callId, event.payload.name, {
           status: "running",
+          safetyRelevant: true,
           detail: `process ${event.payload.pid}`,
         });
         break;
       case "process.termination_requested":
         next = updateTool(next, event.payload.callId, event.payload.name, {
           status: "terminating",
+          safetyRelevant: true,
           detail: `${event.payload.reason}, ${event.payload.attempt}`,
         });
         break;
       case "process.termination_completed":
         next = updateTool(next, event.payload.callId, event.payload.name, {
           status: event.payload.outcome === "uncertain" ? "error" : "success",
+          safetyRelevant: true,
           detail: `termination ${event.payload.outcome}`,
         });
         break;
       case "workspace.change_set_prepared":
         next = updateTool(next, event.payload.callId, event.payload.name, {
           status: "running",
+          safetyRelevant: true,
           detail: `${event.payload.changes.length} changes prepared`,
         });
         break;
       case "workspace.change_set_committed":
         next = updateTool(next, event.payload.callId, event.payload.name, {
           status: "success",
+          safetyRelevant: true,
           detail: `${event.payload.changeCount} changes committed`,
         });
         break;
       case "workspace.change_set_rolled_back":
         next = updateTool(next, event.payload.callId, event.payload.name, {
           status: "error",
+          safetyRelevant: true,
           detail: `${event.payload.appliedCount} changes rolled back`,
         });
         break;
       case "workspace.change_set_uncertain":
         next = updateTool(next, event.payload.callId, event.payload.name, {
           status: "error",
+          safetyRelevant: true,
           detail: `uncertain: ${event.payload.uncertainPaths.join(", ")}`,
         });
         break;
@@ -4236,6 +4563,7 @@ export class TuiController {
         currentPlan = event.payload.plan;
         planNeedsRevalidation = false;
         next = updateTool(next, event.payload.callId, "update_plan", {
+          safetyRelevant: true,
           detail: `plan r${event.payload.plan.revision} · ${event.payload.plan.status}`,
         });
         break;
@@ -4275,6 +4603,7 @@ export class TuiController {
         }
         next = updateTool(next, event.payload.callId, "update_plan", {
           status: "awaiting_acceptance",
+          safetyRelevant: true,
           detail: stage.title,
         });
         planAcceptance = {
@@ -4297,6 +4626,7 @@ export class TuiController {
             event.payload.decision === "accepted"
               ? "accepted"
               : "changes_requested",
+          safetyRelevant: true,
           ...(event.payload.decision === "accepted"
             ? { detail: `stage ${event.payload.stageId}` }
             : event.payload.feedback === undefined
@@ -4366,15 +4696,18 @@ export class TuiController {
       default:
         break;
     }
-    this.update({
-      threadId: event.threadId,
-      activeTurn: next,
-      approval,
-      planAcceptance,
-      currentPlan,
-      currentPlanCheckpoint,
-      planNeedsRevalidation,
-    });
+    this.update(
+      {
+        threadId: event.threadId,
+        activeTurn: next,
+        approval,
+        planAcceptance,
+        currentPlan,
+        currentPlanCheckpoint,
+        planNeedsRevalidation,
+      },
+      event.type === "assistant.delta" ? "stream" : "immediate",
+    );
   }
 
   private finishTurn(
@@ -4553,13 +4886,57 @@ export class TuiController {
     };
   }
 
-  private update(changes: Partial<TuiState>): void {
+  private update(
+    changes: Partial<TuiState>,
+    notification: "immediate" | "stream" = "immediate",
+  ): void {
     this.state = { ...this.state, ...changes };
+    if (notification === "stream") {
+      this.streamNotificationDirty = true;
+      if (this.pendingStreamNotification === undefined) {
+        this.pendingStreamNotification = this.notificationScheduler.schedule(
+          () => {
+            this.pendingStreamNotification = undefined;
+            if (!this.streamNotificationDirty) {
+              return;
+            }
+            this.streamNotificationDirty = false;
+            this.notifyListeners();
+          },
+          this.streamFrameMs,
+        );
+      }
+      return;
+    }
+    this.cancelPendingStreamNotification();
+    this.notifyListeners();
+  }
+
+  private cancelPendingStreamNotification(): void {
+    if (this.pendingStreamNotification !== undefined) {
+      this.notificationScheduler.cancel(this.pendingStreamNotification);
+      this.pendingStreamNotification = undefined;
+    }
+    this.streamNotificationDirty = false;
+  }
+
+  private notifyListeners(): void {
     for (const listener of this.listeners) {
       listener();
     }
   }
 }
+
+const defaultNotificationScheduler: TuiNotificationScheduler = {
+  schedule(callback, delayMs) {
+    const timer = setTimeout(callback, delayMs);
+    timer.unref();
+    return timer;
+  },
+  cancel(handle) {
+    clearTimeout(handle as ReturnType<typeof setTimeout>);
+  },
+};
 
 function artifactListState(
   result: {
@@ -4731,6 +5108,10 @@ function updateTool(
           callId,
           name: boundText(name ?? "tool"),
           status: changes.status ?? "preparing",
+          safetyRelevant:
+            changes.safetyRelevant === true ||
+            isExternalToolName(name ?? "tool"),
+          ...(changes.effect === undefined ? {} : { effect: changes.effect }),
           ...(changes.detail === undefined
             ? {}
             : { detail: boundText(changes.detail) }),
@@ -4738,6 +5119,8 @@ function updateTool(
       : {
           ...existing,
           ...changes,
+          safetyRelevant:
+            existing.safetyRelevant || changes.safetyRelevant === true,
           ...(name === undefined ? {} : { name: boundText(name) }),
           ...(changes.detail === undefined
             ? {}
@@ -5238,6 +5621,100 @@ export function extensionPresentationRows(
   return rows;
 }
 
+export function activityPresentationRows(
+  events: readonly AgentEvent[],
+): string[] {
+  return events.flatMap((event) => {
+    const detail = activityEventDetail(event);
+    return detail === undefined
+      ? []
+      : [
+          boundText(
+            `#${event.sequence} ${event.type}${detail.length === 0 ? "" : ` · ${detail}`}`,
+          ),
+        ];
+  });
+}
+
+function activityEventDetail(event: AgentEvent): string | undefined {
+  switch (event.type) {
+    case "assistant.delta":
+    case "model.usage":
+    case "turn.context":
+    case "context.prepared":
+      return undefined;
+    case "turn.started":
+      return "";
+    case "tool.catalog_changed":
+      return `${event.payload.changes.length} change(s) · ${event.payload.current.toolCount} tools`;
+    case "item.recorded": {
+      const item = event.payload.item;
+      switch (item.type) {
+        case "tool_call":
+          return `item tool_call · ${item.name} · call ${item.callId}`;
+        case "tool_result":
+          return `item tool_result · ${item.name} · ${item.status} · call ${item.callId}`;
+        case "approval":
+          return `item approval · ${item.decision} · call ${item.callId}`;
+        case "recovery":
+          return `item recovery · previous ${item.previousStatus} · ${item.uncertainToolCalls.length} uncertain`;
+        case "plan_state":
+          return `item plan_state · r${item.plan.revision} · ${item.plan.status}`;
+        default:
+          return undefined;
+      }
+    }
+    case "artifact.recorded":
+      return `${event.payload.name} · ${event.payload.artifact.bytes} bytes · call ${event.payload.callId}`;
+    case "tool.started":
+      return `${event.payload.name} · call ${event.payload.callId}`;
+    case "tool.execution_started":
+      return `${event.payload.name} · ${event.payload.effect} · call ${event.payload.callId}`;
+    case "tool.completed":
+      return `${event.payload.name} · ${event.payload.status} · call ${event.payload.callId}`;
+    case "process.started":
+      return `${event.payload.name} · pid ${event.payload.pid} · ${event.payload.ownership} · call ${event.payload.callId}`;
+    case "process.exited":
+      return `${event.payload.name} · pid ${event.payload.pid} · ${event.payload.signal ?? `exit ${event.payload.exitCode ?? "unknown"}`} · call ${event.payload.callId}`;
+    case "process.termination_requested":
+      return `${event.payload.name} · pid ${event.payload.pid} · ${event.payload.reason}/${event.payload.attempt} · call ${event.payload.callId}`;
+    case "process.termination_completed":
+      return `${event.payload.name} · pid ${event.payload.pid} · ${event.payload.outcome} · call ${event.payload.callId}`;
+    case "workspace.change_set_prepared":
+      return `${event.payload.name} · ${event.payload.changes.length} change(s) · call ${event.payload.callId}`;
+    case "workspace.change_set_committed":
+      return `${event.payload.name} · ${event.payload.changeCount} committed · call ${event.payload.callId}`;
+    case "workspace.change_set_rolled_back":
+      return `${event.payload.name} · ${event.payload.appliedCount} rolled back · call ${event.payload.callId}`;
+    case "workspace.change_set_uncertain":
+      return `${event.payload.name} · ${event.payload.uncertainPaths.length} uncertain path(s) · call ${event.payload.callId}`;
+    case "approval.requested":
+      return `${event.payload.name} · ${event.payload.reason} · call ${event.payload.callId}`;
+    case "approval.resolved":
+      return `${event.payload.decision} · call ${event.payload.callId}`;
+    case "approval.grant_created":
+      return `${event.payload.grant.kind} · ${event.payload.grant.toolName} · call ${event.payload.callId}`;
+    case "approval.grant_used":
+      return `${event.payload.kind} · ${event.payload.name} · call ${event.payload.callId}`;
+    case "plan.updated":
+      return `r${event.payload.plan.revision} · ${event.payload.plan.status} · call ${event.payload.callId}`;
+    case "plan.checkpointed":
+      return `${event.payload.checkpoint.reason} · ${event.payload.checkpoint.checkpointId}`;
+    case "plan.acceptance_requested":
+      return `${event.payload.stageId} · call ${event.payload.callId}`;
+    case "plan.acceptance_resolved":
+      return `${event.payload.stageId} · ${event.payload.decision} · call ${event.payload.callId}`;
+    case "turn.completed":
+      return `${event.payload.steps} step(s)`;
+    case "turn.paused":
+      return `${event.payload.reason} · ${event.payload.checkpointId}`;
+    case "turn.cancelled":
+      return event.payload.reason;
+    case "turn.failed":
+      return `${event.payload.code}: ${event.payload.message}`;
+  }
+}
+
 function planPresentationRows(
   result: PlanGetResult,
   viewportWidth: number,
@@ -5369,7 +5846,14 @@ function activeTranscriptEntries(
   if (active.assistantText.length > 0) {
     entries.push({ kind: "assistant", text: active.assistantText });
   }
-  for (const tool of active.tools) {
+  const collapsibleReads = active.tools.filter(isCollapsibleReadSuccess);
+  const readSummary = successfulReadSummary(collapsibleReads);
+  if (readSummary !== undefined) {
+    entries.push({ kind: "tool", text: readSummary });
+  }
+  for (const tool of active.tools.filter(
+    (candidate) => !isCollapsibleReadSuccess(candidate),
+  )) {
     entries.push({
       kind: "tool",
       text: `${tool.name}: ${toolStatusLabel(tool.status)}${tool.detail === undefined ? "" : ` (${tool.detail})`}`,
@@ -5382,6 +5866,71 @@ function activeTranscriptEntries(
     entries.push({ kind: "usage", text: formatUsage(active.usage) });
   }
   return entries;
+}
+
+export function projectLiveToolActivity(
+  tools: readonly TuiToolState[],
+  maximumRecentCompleted = 4,
+): TuiToolActivityProjection {
+  const collapsibleReads = tools.filter(isCollapsibleReadSuccess);
+  const ordinaryCompleted = tools.filter(
+    (tool) =>
+      !isCollapsibleReadSuccess(tool) && isTerminalToolStatus(tool.status),
+  );
+  const active = tools.filter((tool) => !isTerminalToolStatus(tool.status));
+  const recentCompleted = ordinaryCompleted.slice(-maximumRecentCompleted);
+  const readSummary = successfulReadSummary(collapsibleReads);
+  return {
+    ...(readSummary === undefined ? {} : { readSummary }),
+    visibleTools: [...recentCompleted, ...active].filter(
+      (tool, index, projected) =>
+        projected.findIndex((candidate) => candidate.callId === tool.callId) ===
+        index,
+    ),
+    hiddenCompletedCount: Math.max(
+      0,
+      ordinaryCompleted.length - recentCompleted.length,
+    ),
+  };
+}
+
+function isCollapsibleReadSuccess(tool: TuiToolState): boolean {
+  return (
+    tool.effect === "read" &&
+    tool.status === "success" &&
+    !tool.safetyRelevant &&
+    !isExternalToolName(tool.name)
+  );
+}
+
+function successfulReadSummary(
+  tools: readonly TuiToolState[],
+): string | undefined {
+  if (tools.length === 0) {
+    return undefined;
+  }
+  const counts = new Map<string, number>();
+  for (const tool of tools) {
+    counts.set(tool.name, (counts.get(tool.name) ?? 0) + 1);
+  }
+  const names = [...counts.entries()]
+    .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+    .map(([name, count]) => `${name} ×${count}`)
+    .join(", ");
+  return `${tools.length} read-only tool call${tools.length === 1 ? "" : "s"} succeeded (${names}).`;
+}
+
+function isTerminalToolStatus(status: TuiToolStatus): boolean {
+  return (
+    status === "success" ||
+    status === "error" ||
+    status === "rejected" ||
+    status === "changes_requested"
+  );
+}
+
+function isExternalToolName(name: string): boolean {
+  return name.startsWith("mcp__") || name.startsWith("plugin__");
 }
 
 function toolStatusLabel(status: TuiToolStatus): string {

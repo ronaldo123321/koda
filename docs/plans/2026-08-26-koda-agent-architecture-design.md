@@ -406,7 +406,7 @@ Status: **Complete; Phase 2A through 2F are implemented and pass offline regress
 
 ### Phase 3: extensibility
 
-Status: **Phase 3A through Phase 3H are complete; Phase 3I client interaction and observability closure is in progress.**
+Status: **Complete; Phase 3A through Phase 3I are implemented and verified.**
 
 - Shared transport-neutral application workflow. **Completed in Phase 3A.**
 - Local stdio JSON-RPC app-server protocol. **Completed in Phase 3A.**
@@ -418,7 +418,7 @@ Status: **Phase 3A through Phase 3H are complete; Phase 3I client interaction an
 - Native or richer patch capabilities, multi-file operations, moves, and deletion.
 - Interactive PTY and managed background-process UX.
 - Approval caching and trusted command-prefix UX.
-- Compact Tool activity, a durable activity inspector, and bounded streaming refresh. **Phase 3I closure in progress.**
+- Compact Tool activity, a durable activity inspector, and bounded streaming refresh. **Completed in Phase 3I.**
 
 ### Phase 4: hardening
 
@@ -426,7 +426,7 @@ Status: **Phase 3A through Phase 3H are complete; Phase 3I client interaction an
 - OS-specific sandboxing and network policy.
 - Secret handling and signed cross-platform releases.
 - High-risk shell-string execution, if retained after sandbox evaluation.
-- Progressive Tool activity presentation and its complete durable inspector moved to **Phase 3I client closure** so Phase 4 remains focused on runtime, security, remote operation, and distribution hardening.
+- Progressive Tool activity presentation and its complete durable inspector were completed in **Phase 3I client closure**, leaving Phase 4 focused on runtime, security, remote operation, and distribution hardening.
 
 ### Phase 5: multi-agent and curated memory
 

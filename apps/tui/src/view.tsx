@@ -6,6 +6,7 @@ import {
   boundPresentationText,
   compactPlanStatus,
   planEvidenceLabel,
+  projectLiveToolActivity,
   type TuiState,
   type TuiTranscriptEntry,
 } from "./controller.js";
@@ -119,6 +120,11 @@ export interface TuiInputController {
     action: "up" | "down" | "page_up" | "page_down" | "home" | "end",
   ): void;
   closeExtensions(): void;
+  openCurrentActivity(): Promise<void>;
+  navigateActivity(
+    action: "up" | "down" | "page_up" | "page_down" | "home" | "end",
+  ): Promise<void>;
+  closeActivity(): void;
   enterPlanAcceptanceFeedback(): void;
   setPlanAcceptanceFeedback(feedback: string): void;
   cancelPlanAcceptanceFeedback(): void;
@@ -168,6 +174,7 @@ export function KodaView({ state }: KodaViewProps) {
       {state.mode === "extensions_view" ? (
         <ExtensionsView state={state} />
       ) : null}
+      {state.mode === "activity_view" ? <ActivityView state={state} /> : null}
 
       {state.mode === "chat" ? (
         <>
@@ -262,6 +269,24 @@ export function routeTuiInput(
       controller.scrollPlan("home");
     } else if (key.end) {
       controller.scrollPlan("end");
+    }
+    return;
+  }
+  if (state.mode === "activity_view") {
+    if (key.escape) {
+      controller.closeActivity();
+    } else if (key.upArrow) {
+      void controller.navigateActivity("up");
+    } else if (key.downArrow) {
+      void controller.navigateActivity("down");
+    } else if (key.pageUp) {
+      void controller.navigateActivity("page_up");
+    } else if (key.pageDown) {
+      void controller.navigateActivity("page_down");
+    } else if (key.home) {
+      void controller.navigateActivity("home");
+    } else if (key.end) {
+      void controller.navigateActivity("end");
     }
     return;
   }
@@ -1042,6 +1067,46 @@ function ExtensionsView({ state }: { state: TuiState }) {
   );
 }
 
+function ActivityView({ state }: { state: TuiState }) {
+  const navigation = state.activityNavigation;
+  if (navigation === undefined) {
+    return <Text color="red">Activity view state is unavailable.</Text>;
+  }
+  const visible = navigation.rows.slice(
+    navigation.scrollOffset,
+    navigation.scrollOffset + navigation.viewportHeight,
+  );
+  const firstRow =
+    navigation.rows.length === 0 ? 0 : navigation.scrollOffset + 1;
+  const lastRow = Math.min(
+    navigation.rows.length,
+    navigation.scrollOffset + navigation.viewportHeight,
+  );
+  return (
+    <Box flexDirection="column" borderStyle="round" paddingX={1}>
+      <Text bold color="cyan">
+        Durable activity · {navigation.threadId}
+      </Text>
+      {navigation.loading ? (
+        <Text dimColor>Loading authoritative activity events…</Text>
+      ) : visible.length === 0 ? (
+        <Text dimColor>No execution activity on this event page.</Text>
+      ) : (
+        visible.map((row, index) => (
+          <Text key={`${navigation.scrollOffset}:${index}`}>
+            {row.length === 0 ? " " : row}
+          </Text>
+        ))
+      )}
+      <Text dimColor>
+        {navigation.loading
+          ? "Loading… · Esc back"
+          : `${firstRow}–${lastRow} / ${navigation.rows.length} activity rows · ${navigation.hasEarlier ? "earlier available" : "earliest page"} · ${navigation.hasLater ? "later available" : "latest page"} · ↑/↓ scroll · PgUp/PgDn event page · Home/End boundary · Esc back`}
+      </Text>
+    </Box>
+  );
+}
+
 function PlanAcceptanceCard({ state }: { state: TuiState }) {
   const acceptance = state.planAcceptance;
   if (acceptance === undefined) {
@@ -1232,6 +1297,7 @@ function TranscriptRow({ entry }: { entry: TuiTranscriptEntry }) {
 }
 
 function ActiveTurn({ state }: { state: NonNullable<TuiState["activeTurn"]> }) {
+  const activity = projectLiveToolActivity(state.tools);
   return (
     <Box flexDirection="column">
       <Box>
@@ -1242,7 +1308,15 @@ function ActiveTurn({ state }: { state: NonNullable<TuiState["activeTurn"]> }) {
           {state.assistantText.length === 0 ? " …" : ` ${state.assistantText}`}
         </Text>
       </Box>
-      {state.tools.map((tool) => (
+      {activity.readSummary === undefined ? null : (
+        <Text color="yellow">{`↳ ${activity.readSummary}`}</Text>
+      )}
+      {activity.hiddenCompletedCount === 0 ? null : (
+        <Text dimColor>
+          {`↳ ${activity.hiddenCompletedCount} older completed tool call${activity.hiddenCompletedCount === 1 ? "" : "s"} hidden · /activity for full trace`}
+        </Text>
+      )}
+      {activity.visibleTools.map((tool) => (
         <Text key={tool.callId} color="yellow">
           {`↳ ${tool.name}: ${tool.status.replaceAll("_", " ")}${tool.detail === undefined ? "" : ` · ${tool.detail}`}`}
         </Text>

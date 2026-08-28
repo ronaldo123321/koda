@@ -1,6 +1,6 @@
 # Koda Phase 3I: Client Interaction and Observability Closure
 
-- Status: Approved; implementation in progress
+- Status: Implemented and verified
 - Date: 2026-08-28
 - Depends on: Phase 3D Ink chat, Phase 3E history inspection, Phase 3F durable tool evidence, and Phase 3H extension closure
 - Scope: compact Tool activity presentation, an authoritative activity inspector, and bounded streaming refresh without changing runtime execution or approval semantics
@@ -114,3 +114,10 @@ Phase 3I is complete when:
 - OS sandboxing, network policy, Secret isolation, remote transport/authentication, shared storage, plugin distribution, and signed releases remain Phase 4.
 - Child-agent activity, lineage, mailbox, and delegated-plan views remain Phase 5.
 
+## 10. Implementation verification
+
+Phase 3I is implemented on `main` without changing app-server protocol v12 or runtime execution semantics. Only a proven successful local `read` call without approval, process, mutation, external, failure, rollback, or uncertainty evidence can enter the compact summary. All unknown and safety-relevant states remain individually visible.
+
+`/activity` reads existing authoritative `thread/events` pages and renders bounded sequence/type rows without replaying messages or granting execution authority. Adjacent assistant deltas update controller state immediately and share one 32 ms notification frame; completion and every semantic event cancel the pending frame and publish the newest exact state.
+
+The final gate passes formatting, build and typecheck, 57 offline test files with 454 tests, six deterministic reliability scenarios, and a real-TTY flow covering Stage acceptance, Plan, extension, and durable activity navigation with normal terminal restoration.

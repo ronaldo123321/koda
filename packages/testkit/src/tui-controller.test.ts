@@ -60,7 +60,11 @@ import {
   type TurnStartParams,
   type TurnStartResult,
 } from "@koda/protocol";
-import { TuiController, projectThreadHistory } from "@koda/tui";
+import {
+  TuiController,
+  projectThreadHistory,
+  type TuiNotificationScheduler,
+} from "@koda/tui";
 import { describe, expect, it } from "vitest";
 
 describe("TuiController", () => {
@@ -374,6 +378,274 @@ describe("TuiController", () => {
       .find((entry) => entry.kind === "assistant");
     expect(Buffer.byteLength(completeAnswer, "utf8")).toBeGreaterThan(8_192);
     expect(completedAnswer?.text).toBe(completeAnswer);
+  });
+
+  it("coalesces adjacent assistant delta notifications and flushes completion immediately", async () => {
+    const client = new FakeAppServerClient();
+    const scheduler = new ManualNotificationScheduler();
+    const controller = new TuiController(
+      client,
+      { cwd: "/workspace", provider: "openai" },
+      { streamFrameMs: 32, notificationScheduler: scheduler },
+    );
+    let notifications = 0;
+    controller.subscribe(() => {
+      notifications += 1;
+    });
+    await controller.startPrompt("Stream a burst");
+    const beforeBurst = notifications;
+
+    for (let index = 0; index < 100; index += 1) {
+      client.emitEvent("assistant.delta", { text: `${index},` });
+    }
+    const expected = Array.from(
+      { length: 100 },
+      (_, index) => `${index},`,
+    ).join("");
+    expect(controller.getSnapshot().activeTurn?.assistantText).toBe(expected);
+    expect(notifications).toBe(beforeBurst);
+    expect(scheduler.pendingCount).toBe(1);
+
+    scheduler.flushAll();
+    expect(notifications).toBe(beforeBurst + 1);
+    expect(scheduler.pendingCount).toBe(0);
+
+    client.emitEvent("assistant.delta", { text: "done" });
+    expect(scheduler.pendingCount).toBe(1);
+    client.finish("completed");
+    expect(scheduler.pendingCount).toBe(0);
+    expect(
+      controller
+        .getSnapshot()
+        .transcript.find((entry) => entry.kind === "assistant")?.text,
+    ).toBe(`${expected}done`);
+    expect(notifications).toBe(beforeBurst + 2);
+  });
+
+  it("cancels a pending streamed notification when disposed", async () => {
+    const client = new FakeAppServerClient();
+    const scheduler = new ManualNotificationScheduler();
+    const controller = new TuiController(
+      client,
+      { cwd: "/workspace", provider: "openai" },
+      { notificationScheduler: scheduler },
+    );
+    await controller.startPrompt("Dispose while streaming");
+    client.emitEvent("assistant.delta", { text: "partial" });
+    expect(scheduler.pendingCount).toBe(1);
+
+    controller.dispose();
+    expect(scheduler.pendingCount).toBe(0);
+    scheduler.flushAll();
+  });
+
+  it("collapses only proven successful local read tools in completed output", async () => {
+    const client = new FakeAppServerClient();
+    const controller = createController(client);
+    await controller.startPrompt("Inspect several files");
+
+    for (const [call, name] of [
+      ["read-call-1", "read_file"],
+      ["read-call-2", "read_file"],
+      ["list-call-1", "list_files"],
+    ] as const) {
+      const callId = toolCallIdSchema.parse(call);
+      client.emitEvent("tool.started", { callId, name });
+      client.emitEvent("tool.execution_started", {
+        callId,
+        name,
+        effect: "read",
+      });
+      client.emitEvent("tool.completed", {
+        callId,
+        name,
+        status: "success",
+      });
+    }
+
+    const externalCallId = toolCallIdSchema.parse("external-read-call");
+    client.emitEvent("tool.started", {
+      callId: externalCallId,
+      name: "mcp__docs__lookup",
+    });
+    client.emitEvent("tool.execution_started", {
+      callId: externalCallId,
+      name: "mcp__docs__lookup",
+      effect: "read",
+    });
+    client.emitEvent("tool.completed", {
+      callId: externalCallId,
+      name: "mcp__docs__lookup",
+      status: "success",
+    });
+
+    const writeCallId = toolCallIdSchema.parse("write-call");
+    client.emitEvent("tool.started", {
+      callId: writeCallId,
+      name: "apply_patch",
+    });
+    client.emitEvent("tool.execution_started", {
+      callId: writeCallId,
+      name: "apply_patch",
+      effect: "write",
+    });
+    client.emitEvent("tool.completed", {
+      callId: writeCallId,
+      name: "apply_patch",
+      status: "success",
+    });
+    client.finish("completed");
+
+    const toolRows = controller
+      .getSnapshot()
+      .transcript.filter((entry) => entry.kind === "tool")
+      .map((entry) => entry.text);
+    expect(toolRows).toEqual([
+      "3 read-only tool calls succeeded (list_files ×1, read_file ×2).",
+      "mcp__docs__lookup: success (read)",
+      "apply_patch: success (write)",
+    ]);
+  });
+
+  it("keeps unknown-effect and failed read tools individually visible", async () => {
+    const client = new FakeAppServerClient();
+    const controller = createController(client);
+    await controller.startPrompt("Inspect uncertain reads");
+
+    const unknownCallId = toolCallIdSchema.parse("unknown-read-call");
+    client.emitEvent("tool.started", {
+      callId: unknownCallId,
+      name: "read_file",
+    });
+    client.emitEvent("tool.completed", {
+      callId: unknownCallId,
+      name: "read_file",
+      status: "success",
+    });
+
+    const failedCallId = toolCallIdSchema.parse("failed-read-call");
+    client.emitEvent("tool.started", {
+      callId: failedCallId,
+      name: "search_text",
+    });
+    client.emitEvent("tool.execution_started", {
+      callId: failedCallId,
+      name: "search_text",
+      effect: "read",
+    });
+    client.emitEvent("tool.completed", {
+      callId: failedCallId,
+      name: "search_text",
+      status: "error",
+    });
+    client.finish("completed");
+
+    expect(
+      controller
+        .getSnapshot()
+        .transcript.filter((entry) => entry.kind === "tool")
+        .map((entry) => entry.text),
+    ).toEqual(["read_file: success", "search_text: error (read)"]);
+  });
+
+  it("inspects and pages the authoritative durable activity trace", async () => {
+    const client = new FakeAppServerClient();
+    const controller = createController(client);
+    await controller.startPrompt("Create a durable thread");
+    client.finish("completed");
+
+    const latestEvents = [
+      agentEventSchema.parse({
+        schemaVersion: 1,
+        sequence: 10,
+        timestamp: "2026-08-28T00:00:10.000Z",
+        threadId: "tui-thread",
+        turnId: "tui-turn-1",
+        type: "assistant.delta",
+        payload: { text: "not duplicated in activity" },
+      }),
+      agentEventSchema.parse({
+        schemaVersion: 1,
+        sequence: 11,
+        timestamp: "2026-08-28T00:00:11.000Z",
+        threadId: "tui-thread",
+        turnId: "tui-turn-1",
+        type: "tool.started",
+        payload: { callId: "activity-call", name: "read_file" },
+      }),
+      agentEventSchema.parse({
+        schemaVersion: 1,
+        sequence: 12,
+        timestamp: "2026-08-28T00:00:12.000Z",
+        threadId: "tui-thread",
+        turnId: "tui-turn-1",
+        type: "tool.execution_started",
+        payload: {
+          callId: "activity-call",
+          name: "read_file",
+          effect: "read",
+        },
+      }),
+    ];
+    const olderEvents = [
+      agentEventSchema.parse({
+        schemaVersion: 1,
+        sequence: 1,
+        timestamp: "2026-08-28T00:00:01.000Z",
+        threadId: "tui-thread",
+        turnId: "tui-turn-1",
+        type: "turn.started",
+        payload: {},
+      }),
+    ];
+    client.threadEventsImplementation = (params) => {
+      if (params.beforeSequence !== undefined) {
+        return Promise.resolve({
+          events: olderEvents,
+          hasEarlier: false,
+          hasLater: true,
+        });
+      }
+      return Promise.resolve({
+        events: latestEvents,
+        hasEarlier: true,
+        hasLater: false,
+      });
+    };
+
+    controller.setInput("/activity");
+    await controller.submitInput();
+    expect(controller.getSnapshot()).toMatchObject({
+      mode: "activity_view",
+      activityNavigation: {
+        threadId: "tui-thread",
+        hasEarlier: true,
+        hasLater: false,
+        loading: false,
+      },
+    });
+    expect(controller.getSnapshot().activityNavigation?.rows).toEqual([
+      "#11 tool.started · read_file · call activity-call",
+      "#12 tool.execution_started · read_file · read · call activity-call",
+    ]);
+    expect(
+      controller.getSnapshot().activityNavigation?.rows.join("\n"),
+    ).not.toContain("not duplicated");
+
+    await controller.navigateActivity("page_up");
+    expect(client.threadEventRequests.at(-1)).toEqual({
+      threadId: "tui-thread",
+      beforeSequence: 10,
+      limit: 200,
+    });
+    expect(controller.getSnapshot().activityNavigation?.rows).toEqual([
+      "#1 turn.started",
+    ]);
+    controller.closeActivity();
+    expect(controller.getSnapshot()).toMatchObject({
+      mode: "chat",
+      activityNavigation: undefined,
+    });
   });
 
   it("locks input during approval and sends only one-shot decisions", async () => {
@@ -1814,6 +2086,36 @@ describe("TuiController", () => {
     );
   });
 });
+
+class ManualNotificationScheduler implements TuiNotificationScheduler {
+  private readonly callbacks = new Map<number, () => void>();
+  private nextId = 1;
+
+  public get pendingCount(): number {
+    return this.callbacks.size;
+  }
+
+  public schedule(callback: () => void, _delayMs: number): unknown {
+    const id = this.nextId;
+    this.nextId += 1;
+    this.callbacks.set(id, callback);
+    return id;
+  }
+
+  public cancel(handle: unknown): void {
+    if (typeof handle === "number") {
+      this.callbacks.delete(handle);
+    }
+  }
+
+  public flushAll(): void {
+    const callbacks = [...this.callbacks.values()];
+    this.callbacks.clear();
+    for (const callback of callbacks) {
+      callback();
+    }
+  }
+}
 
 class FakeAppServerClient implements AppServerClientApi {
   public readonly initialization: InitializeResult =

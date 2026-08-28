@@ -34,6 +34,10 @@ def main() -> int:
         (b"> /extensions", b"\r"),
         (b"Extension catalogs", None),
         (b"Current workspace:", b"\x1b"),
+        ("ready · idle".encode(), b"/activity"),
+        (b"> /activity", b"\r"),
+        (b"Durable activity", None),
+        (b"#0 tool.started", b"\x1b"),
         ("ready · idle".encode(), None),
     ]
     output = bytearray()

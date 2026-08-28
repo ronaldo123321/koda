@@ -41,6 +41,7 @@ describe("Koda Ink view", () => {
           callId: toolCallIdSchema.parse("view-call"),
           name: "read_file",
           status: "running",
+          safetyRelevant: false,
           detail: "src/main.ts",
         },
       ],
@@ -83,6 +84,84 @@ describe("Koda Ink view", () => {
     expect(frame).toContain("old -> new");
     expect(frame).toContain("y approve · n reject · d details");
     expect(frame).not.toContain(">  ");
+  });
+
+  it("renders a compact live read summary and bounds older completed rows", () => {
+    const state = baseState();
+    state.activeTurn = {
+      localId: 1,
+      prompt: "Inspect",
+      status: "running",
+      assistantText: "Working…",
+      tools: [
+        ...Array.from({ length: 5 }, (_, index) => ({
+          callId: toolCallIdSchema.parse(`read-${index}`),
+          name: "read_file",
+          status: "success" as const,
+          effect: "read" as const,
+          safetyRelevant: false,
+        })),
+        ...Array.from({ length: 6 }, (_, index) => ({
+          callId: toolCallIdSchema.parse(`write-${index}`),
+          name: "apply_patch",
+          status: "success" as const,
+          effect: "write" as const,
+          safetyRelevant: true,
+        })),
+        {
+          callId: toolCallIdSchema.parse("running-read"),
+          name: "search_text",
+          status: "running",
+          effect: "read",
+          safetyRelevant: false,
+        },
+      ],
+      notes: [],
+      cancelRequested: false,
+    };
+
+    const frame = renderToString(createElement(KodaView, { state }));
+    expect(frame).toContain("5 read-only tool calls succeeded (read_file ×5).");
+    expect(frame).toContain("2 older completed tool calls hidden");
+    expect(frame).toContain("search_text: running");
+    expect(frame).not.toContain("read_file: success");
+  });
+
+  it("renders and routes the durable activity view", () => {
+    const controller = fakeInputController();
+    const state = baseState();
+    state.mode = "activity_view";
+    state.activityNavigation = {
+      threadId: threadIdSchema.parse("activity-thread"),
+      events: [],
+      rows: [
+        "#10 tool.started · read_file · call activity-call",
+        "#11 tool.completed · read_file · success · call activity-call",
+      ],
+      scrollOffset: 0,
+      loading: false,
+      hasEarlier: true,
+      hasLater: false,
+      viewportHeight: 5,
+      viewportWidth: 80,
+    };
+
+    const frame = renderToString(createElement(KodaView, { state }));
+    expect(frame).toContain("Durable activity · activity-thread");
+    expect(frame).toContain("#10 tool.started");
+    expect(frame).toContain("earlier available");
+    expect(frame).toContain("latest page");
+
+    routeTuiInput(controller, state, "", key({ downArrow: true }), vi.fn());
+    routeTuiInput(controller, state, "", key({ pageUp: true }), vi.fn());
+    routeTuiInput(controller, state, "", key({ end: true }), vi.fn());
+    routeTuiInput(controller, state, "", key({ escape: true }), vi.fn());
+    expect(controller.navigateActivity.mock.calls).toEqual([
+      ["down"],
+      ["page_up"],
+      ["end"],
+    ]);
+    expect(controller.closeActivity).toHaveBeenCalledOnce();
   });
 
   it("renders a bounded durable Plan view and compact chat status", () => {
@@ -898,6 +977,7 @@ function baseState(): TuiState {
     contextNavigation: undefined,
     planNavigation: undefined,
     extensionNavigation: undefined,
+    activityNavigation: undefined,
   };
 }
 
@@ -950,6 +1030,9 @@ function fakeInputController() {
     openCurrentExtensions: vi.fn(() => Promise.resolve()),
     scrollExtensions: vi.fn(),
     closeExtensions: vi.fn(),
+    openCurrentActivity: vi.fn(() => Promise.resolve()),
+    navigateActivity: vi.fn(() => Promise.resolve()),
+    closeActivity: vi.fn(),
     enterPlanAcceptanceFeedback: vi.fn(),
     setPlanAcceptanceFeedback: vi.fn(),
     cancelPlanAcceptanceFeedback: vi.fn(),

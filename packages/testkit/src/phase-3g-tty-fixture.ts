@@ -83,6 +83,7 @@ const notificationListeners = new Set<
   (notification: AppServerNotification) => void
 >();
 const disconnectListeners = new Set<(error?: Error) => void>();
+const durableEvents: AgentEvent[] = [];
 let currentPlan = awaitingPlan;
 let currentCheckpoint = awaitingCheckpoint;
 
@@ -130,7 +131,7 @@ const client: AppServerClientApi = {
   listThreads: async () => ({ threads: [], diagnostics: [] }),
   getThread: async () => Promise.reject(new Error("Not used by TTY fixture.")),
   readThreadEvents: async () => ({
-    events: [],
+    events: durableEvents,
     hasEarlier: false,
     hasLater: false,
   }),
@@ -323,18 +324,20 @@ function emitEvent(
   type: AgentEvent["type"],
   payload: unknown,
 ): void {
+  const event = agentEventSchema.parse({
+    schemaVersion: 1,
+    sequence,
+    timestamp: "2026-08-28T00:00:00.000Z",
+    threadId,
+    turnId,
+    type,
+    payload,
+  });
+  durableEvents.push(event);
   emit({
     method: "turn/event",
     params: {
-      event: agentEventSchema.parse({
-        schemaVersion: 1,
-        sequence,
-        timestamp: "2026-08-28T00:00:00.000Z",
-        threadId,
-        turnId,
-        type,
-        payload,
-      }),
+      event,
     },
   });
 }

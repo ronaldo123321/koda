@@ -1,6 +1,6 @@
 # Koda Phase 3 Extensibility Roadmap
 
-- Status: Phase 3A through Phase 3H complete; Phase 3I client closure in progress
+- Status: Complete — Phase 3A through Phase 3I implemented and verified (2026-08-28)
 - Date: 2026-08-26
 - Depends on: Phase 2 reliability closure
 - Scope: stable client/tool/provider extension boundaries without weakening the local runtime's durable state and approval guarantees
@@ -203,7 +203,7 @@ Phase 3H1 provides strict scoped project Skill discovery, bounded frontmatter an
 
 ## Phase 3I: client interaction and observability closure
 
-Status: **In progress.**
+Status: **Complete.**
 
 - Collapse successful read-only Tool calls into deterministic summaries while keeping safety-relevant operations individually visible.
 - Add an idle-only `/activity` view over authoritative, paginated protocol-v12 Thread events.
@@ -211,6 +211,8 @@ Status: **In progress.**
 - Preserve complete assistant output, normal terminal scrollback, strict presentation bounds, and all runtime semantics.
 
 The accepted projection rules, activity inspector, refresh scheduler, verification matrix, and deliberate deferrals are in the [Phase 3I client interaction and observability closure design](2026-08-28-phase-3i-client-observability-closure-design.md).
+
+Phase 3I1 adds fail-visible Tool effect/prominence state, a bounded live aggregate, and deterministic completed summaries for proven successful local reads. Phase 3I2 adds idle-only `/activity` pagination over authoritative protocol-v12 Thread events with event sequence/type labels, navigation generation guards, and no new execution authority. Phase 3I3 adds an injectable 32 ms delta-notification scheduler that coalesces adjacent assistant chunks while immediately flushing semantic lifecycle changes and preserving exact final text. The completed Phase 3 baseline passes 57 offline test files, 454 tests, six deterministic reliability scenarios, and a real TTY that accepts a Stage, inspects Plan/extensions/activity, and restores the terminal.
 
 ## Deferred follow-on slices after the Phase 3 baseline
 
