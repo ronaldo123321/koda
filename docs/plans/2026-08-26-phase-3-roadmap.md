@@ -1,6 +1,6 @@
 # Koda Phase 3 Extensibility Roadmap
 
-- Status: Implemented and verified — planned Phase 3A through Phase 3F3 slices complete (2026-08-28)
+- Status: In progress — Phase 3A through Phase 3F3 complete; Phase 3G accepted and pending implementation; Phase 3H queued (2026-08-28)
 - Date: 2026-08-26
 - Depends on: Phase 2 reliability closure
 - Scope: stable client/tool/provider extension boundaries without weakening the local runtime's durable state and approval guarantees
@@ -171,7 +171,31 @@ Status: **Implemented and verified.**
 
 The accepted authorization identity, lifecycle, audit, protocol, interaction, failure, and verification contract is in the [Phase 3F3 session-scoped exact-command approval grants design](2026-08-28-phase-3f3-session-command-approval-grants-design.md).
 
-## Later Phase 3 slices
+## Phase 3G: durable planning and Harness checkpoints
+
+Status: **Accepted design — implementation pending.**
+
+- Add a thread-scoped Plan/Stage/Todo state machine maintained explicitly through a built-in `update_plan` control tool.
+- Keep JSONL authoritative, pin the latest Plan across context compaction, and reconstruct it without parsing model prose.
+- Add safe logical checkpoints, plan-aware bounded execution, resumable `turn.paused`, and conservative recovery after uncertain effects.
+- Add optional per-Stage human acceptance that is separate from tool approvals and cannot be granted by the model.
+- Upgrade the local protocol to v11 with bounded Plan inspection and exact live acceptance resolution.
+- Add CLI and Ink Plan views, acceptance interaction, provider conformance, crash recovery, and real TTY verification.
+
+The accepted domain model, state machine, checkpoint and recovery rules, acceptance lifecycle, protocol boundary, verification matrix, and five implementation slices are in the [Phase 3G durable planning and Harness checkpoints design](2026-08-28-phase-3g-planning-harness-design.md).
+
+## Phase 3H: Skills and extension system
+
+Status: **Queued for design after Phase 3G acceptance.**
+
+- Add project Skills with explicit discovery, precedence, scope, budgets, and instruction trust boundaries.
+- Add reviewed command templates without turning repository text into implicit execution authority.
+- Add dynamic tool discovery and refresh without weakening policy, approval, cancellation, or recovery semantics.
+- Add a bounded plugin lifecycle for activation, capability registration, failure isolation, shutdown, and diagnostics.
+
+Phase 3H receives its own alternatives review and accepted design after Phase 3G is implemented and verified. Skills, templates, tools, and plugins will reuse the Phase 3G Plan/Harness boundary rather than create a parallel agent loop.
+
+## Other later Phase 3 slices
 
 ### Provider and context extensions after Phase 3C
 
@@ -210,4 +234,4 @@ The accepted authorization identity, lifecycle, audit, protocol, interaction, fa
 
 ## Phase 3 exit criterion
 
-Phase 3 is complete when multiple model providers and interactive local clients can use one durable application workflow; external tools have explicit lifecycle, policy, approval, cancellation, and recovery semantics; richer local workflows remain auditable; and the full offline regression and provider-conformance gates pass. Phase 3 does not claim remote multi-user security or multi-agent orchestration.
+Phase 3 is complete when multiple model providers and interactive local clients can use one durable application workflow; external tools have explicit lifecycle, policy, approval, cancellation, and recovery semantics; durable Plan/Harness workflows and the Skills extension boundary are implemented and auditable; and the full offline regression and provider-conformance gates pass. Phase 3 does not claim remote multi-user security or multi-agent orchestration.
