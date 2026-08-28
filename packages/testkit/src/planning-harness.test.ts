@@ -4,6 +4,7 @@ import {
   ToolRegistry,
   reducePlanUpdate,
   type EventSink,
+  type PlanAcceptanceBroker,
 } from "@koda/agent-core";
 import {
   planIdSchema,
@@ -199,6 +200,218 @@ describe("planning Harness", () => {
     );
   });
 
+  it("persists an exact accepted Stage decision and Runtime-authored revision", async () => {
+    const events = new MemoryEventStore();
+    const state = createPlanState();
+    const callId = toolCallIdSchema.parse("accept-plan");
+    const broker: PlanAcceptanceBroker = {
+      request: async (request) => ({
+        callId: request.callId,
+        planId: request.planId,
+        planRevision: request.planRevision,
+        stageId: request.stageId,
+        decision: "accepted",
+      }),
+    };
+    const provider = new ScriptedModelProvider([
+      {
+        events: [
+          {
+            type: "tool_call",
+            callId,
+            name: "update_plan",
+            arguments: gatedPlanInput(0, callId),
+          },
+          { type: "completed", finishReason: "tool_calls" },
+        ],
+      },
+      {
+        assertRequest: (request) => {
+          expect(
+            request.items.find(
+              (item) => item.type === "tool_result" && item.callId === callId,
+            ),
+          ).toMatchObject({
+            status: "success",
+            output: {
+              plan: { revision: 2, status: "completed" },
+              acceptance: { status: "accepted" },
+            },
+          });
+        },
+        events: [{ type: "completed", finishReason: "stop" }],
+      },
+    ]);
+
+    const result = await new AgentLoop({
+      provider,
+      tools: createPlanTools(state, broker),
+      events,
+      ids: new DeterministicItemIdFactory("accept-item"),
+      clock: new FixedClock(),
+      planState: state,
+    }).runTurn({ threadId, turnId, userInput: "Finish the gated Stage." });
+
+    expect(result.status).toBe("completed");
+    expect(state.currentPlan()).toMatchObject({
+      revision: 2,
+      status: "completed",
+      stages: [{ status: "accepted" }],
+    });
+    expect(
+      events.events
+        .filter((event) =>
+          [
+            "plan.updated",
+            "plan.checkpointed",
+            "plan.acceptance_requested",
+            "plan.acceptance_resolved",
+          ].includes(event.type),
+        )
+        .map((event) => event.type),
+    ).toEqual([
+      "plan.updated",
+      "plan.checkpointed",
+      "plan.acceptance_requested",
+      "plan.acceptance_resolved",
+      "plan.updated",
+      "plan.checkpointed",
+      "plan.checkpointed",
+    ]);
+    expect(
+      events.events
+        .filter((event) => event.type === "plan.checkpointed")
+        .map((event) => event.payload.checkpoint.reason),
+    ).toEqual(["plan_update", "stage_acceptance", "turn_completion"]);
+  });
+
+  it("returns changes-requested feedback without inventing a new Plan revision", async () => {
+    const events = new MemoryEventStore();
+    const state = createPlanState();
+    const callId = toolCallIdSchema.parse("change-plan");
+    const broker: PlanAcceptanceBroker = {
+      request: async (request) => ({
+        callId: request.callId,
+        planId: request.planId,
+        planRevision: request.planRevision,
+        stageId: request.stageId,
+        decision: "changes_requested",
+        feedback: "Add a regression test.",
+      }),
+    };
+    const provider = new ScriptedModelProvider([
+      {
+        events: [
+          {
+            type: "tool_call",
+            callId,
+            name: "update_plan",
+            arguments: gatedPlanInput(0, callId),
+          },
+          { type: "completed", finishReason: "tool_calls" },
+        ],
+      },
+      {
+        assertRequest: (request) => {
+          expect(
+            request.items.find(
+              (item) => item.type === "tool_result" && item.callId === callId,
+            ),
+          ).toMatchObject({
+            status: "success",
+            output: {
+              plan: { revision: 1, status: "active" },
+              acceptance: {
+                status: "changes_requested",
+                feedback: "Add a regression test.",
+              },
+            },
+          });
+        },
+        events: [{ type: "completed", finishReason: "stop" }],
+      },
+    ]);
+
+    await new AgentLoop({
+      provider,
+      tools: createPlanTools(state, broker),
+      events,
+      ids: new DeterministicItemIdFactory("changes-item"),
+      clock: new FixedClock(),
+      planState: state,
+    }).runTurn({ threadId, turnId, userInput: "Finish the gated Stage." });
+
+    expect(state.currentPlan()).toMatchObject({
+      revision: 1,
+      stages: [{ status: "awaiting_acceptance" }],
+    });
+    expect(
+      events.events.filter((event) => event.type === "plan.updated"),
+    ).toHaveLength(1);
+    expect(
+      events.events.find((event) => event.type === "plan.acceptance_resolved"),
+    ).toMatchObject({
+      payload: {
+        decision: "changes_requested",
+        feedback: "Add a regression test.",
+      },
+    });
+  });
+
+  it("fails a mismatched acceptance before persisting the decision", async () => {
+    const events = new MemoryEventStore();
+    const state = createPlanState();
+    const callId = toolCallIdSchema.parse("stale-acceptance");
+    const broker: PlanAcceptanceBroker = {
+      request: async (request) => ({
+        callId: request.callId,
+        planId: request.planId,
+        planRevision: request.planRevision + 1,
+        stageId: request.stageId,
+        decision: "accepted",
+      }),
+    };
+    const provider = new ScriptedModelProvider([
+      {
+        events: [
+          {
+            type: "tool_call",
+            callId,
+            name: "update_plan",
+            arguments: gatedPlanInput(0, callId),
+          },
+          { type: "completed", finishReason: "tool_calls" },
+        ],
+      },
+      {
+        assertRequest: (request) => {
+          expect(
+            request.items.find(
+              (item) => item.type === "tool_result" && item.callId === callId,
+            ),
+          ).toMatchObject({
+            status: "error",
+            error: { code: "PLAN_ACCEPTANCE_STALE" },
+          });
+        },
+        events: [{ type: "completed", finishReason: "stop" }],
+      },
+    ]);
+
+    await new AgentLoop({
+      provider,
+      tools: createPlanTools(state, broker),
+      events,
+      ids: new DeterministicItemIdFactory("stale-acceptance-item"),
+      clock: new FixedClock(),
+      planState: state,
+    }).runTurn({ threadId, turnId, userInput: "Finish the gated Stage." });
+
+    expect(
+      events.events.some((event) => event.type === "plan.acceptance_resolved"),
+    ).toBe(false);
+  });
+
   it.each(budgetCases)("pauses safely at the $name", async (testCase) => {
     const events = new MemoryEventStore();
     const state = createPlanState();
@@ -251,9 +464,14 @@ function createPlanState(): PlanRuntimeState {
   return new PlanRuntimeState({ nextOpaqueId: () => ids.next() });
 }
 
-function createPlanTools(state: PlanRuntimeState): ToolRegistry {
+function createPlanTools(
+  state: PlanRuntimeState,
+  acceptances?: PlanAcceptanceBroker,
+): ToolRegistry {
   const tools = new ToolRegistry();
-  registerUpdatePlanTool(tools, state);
+  registerUpdatePlanTool(tools, state, {
+    ...(acceptances === undefined ? {} : { acceptances }),
+  });
   return tools;
 }
 
@@ -273,6 +491,34 @@ function activePlanInput(expectedRevision: number): JsonObject {
             id: "todo-code",
             title: "Write the code",
             status: "in_progress",
+          },
+        ],
+      },
+    ],
+  };
+}
+
+function gatedPlanInput(
+  expectedRevision: number,
+  callId: ReturnType<typeof toolCallIdSchema.parse>,
+): JsonObject {
+  return {
+    expected_revision: expectedRevision,
+    objective: "Finish the gated work",
+    stages: [
+      {
+        id: "stage-gated",
+        title: "Gated Stage",
+        requires_acceptance: true,
+        acceptance_criteria: ["Regression tests pass"],
+        summary: "Implementation and tests are complete.",
+        evidence: [{ kind: "tool_call", callId }],
+        todos: [
+          {
+            id: "todo-gated",
+            title: "Implement and test",
+            status: "completed",
+            outcome: "Implemented with passing tests.",
           },
         ],
       },

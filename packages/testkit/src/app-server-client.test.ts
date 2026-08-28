@@ -12,6 +12,7 @@ import {
 } from "@koda/app-server-client-node";
 import {
   APP_SERVER_PROTOCOL_VERSION,
+  planAcceptanceResolveParamsSchema,
   threadIdSchema,
   turnIdSchema,
 } from "@koda/protocol";
@@ -259,6 +260,9 @@ describe("NodeAppServerClient", () => {
         multiFileChanges: true,
         patchDocuments: true,
         approvalGrants: true,
+        planning: true,
+        planCheckpoints: true,
+        stageAcceptance: true,
       },
       providers: [
         { id: "openai", configured: true },
@@ -311,6 +315,21 @@ describe("NodeAppServerClient", () => {
       ]),
       hasEarlier: false,
       hasLater: false,
+    });
+    await expect(
+      client.getPlan({
+        workspace: canonicalRoot,
+        threadId: threadIdSchema.parse("client-history"),
+      }),
+    ).resolves.toMatchObject({
+      workspace: canonicalRoot,
+      threadId: "client-history",
+      recovery: {
+        previousTurnId: "client-history-turn",
+        previousStatus: "completed",
+        needsRevalidation: false,
+        uncertainToolCalls: [],
+      },
     });
     await expect(
       client.searchThreads({
@@ -419,6 +438,39 @@ describe("NodeAppServerClient", () => {
     await expect(client.shutdown()).resolves.toBeUndefined();
   });
 
+  it("sends and validates typed Plan inspection and acceptance RPCs", async () => {
+    const client = await NodeAppServerClient.connect({
+      command: process.execPath,
+      args: ["-e", fixtureServerScript({})],
+      shutdownTimeoutMs: 500,
+    });
+
+    await expect(
+      client.getPlan({
+        workspace: "/workspace",
+        threadId: threadIdSchema.parse("fixture-plan-thread"),
+      }),
+    ).resolves.toMatchObject({
+      workspace: "/workspace",
+      threadId: "fixture-plan-thread",
+      recovery: { previousStatus: "completed", uncertainToolCalls: [] },
+    });
+    await expect(
+      client.resolvePlanAcceptance(
+        planAcceptanceResolveParamsSchema.parse({
+          threadId: "fixture-plan-thread",
+          turnId: "fixture-plan-turn",
+          callId: "fixture-plan-call",
+          planId: "plan:fixture",
+          planRevision: 1,
+          stageId: "stage:fixture",
+          decision: "accepted",
+        }),
+      ),
+    ).resolves.toEqual({ accepted: true });
+    await client.shutdown();
+  });
+
   it("reports an unexpected child exit and closes future requests", async () => {
     const client = await NodeAppServerClient.connect({
       command: process.execPath,
@@ -498,6 +550,9 @@ function fixtureServerScript(options: {
       multiFileChanges: true,
       patchDocuments: true,
       approvalGrants: true,
+      planning: true,
+      planCheckpoints: true,
+      stageAcceptance: true,
     },
     providers: [
       {
@@ -528,6 +583,19 @@ process.stdin.on("data", (chunk) => {
     } else if (request.method === "shutdown") {
       process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result: {} }) + "\\n");
       setTimeout(() => process.exit(0), 10);
+    } else if (request.method === "plan/get") {
+      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result: {
+        workspace: request.params.workspace,
+        threadId: request.params.threadId,
+        recovery: {
+          previousTurnId: "fixture-plan-turn",
+          previousStatus: "completed",
+          needsRevalidation: false,
+          uncertainToolCalls: []
+        }
+      } }) + "\\n");
+    } else if (request.method === "plan/acceptance/resolve") {
+      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { accepted: true } }) + "\\n");
     }
     newline = buffered.indexOf("\\n");
   }

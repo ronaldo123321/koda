@@ -19,6 +19,10 @@ import {
   contextReadResultSchema,
   initializeResultSchema,
   jsonValueSchema,
+  planAcceptanceResolveParamsSchema,
+  planAcceptanceResolveResultSchema,
+  planGetParamsSchema,
+  planGetResultSchema,
   settingsGetParamsSchema,
   settingsGetResultSchema,
   settingsUpdateParamsSchema,
@@ -55,6 +59,10 @@ import {
   type ContextReadParams,
   type ContextReadResult,
   type InitializeResult,
+  type PlanAcceptanceResolveParams,
+  type PlanAcceptanceResolveResult,
+  type PlanGetParams,
+  type PlanGetResult,
   type SettingsGetParams,
   type SettingsGetResult,
   type SettingsUpdateParams,
@@ -114,6 +122,7 @@ export interface AppServerClientApi {
     params: ContextInstructionReadParams,
   ): Promise<ContextInstructionReadResult>;
   searchThreads(params: ThreadSearchParams): Promise<ThreadSearchResult>;
+  getPlan(params: PlanGetParams): Promise<PlanGetResult>;
   getRuntimeSettings(params: SettingsGetParams): Promise<SettingsGetResult>;
   updateRuntimeSettings(
     params: SettingsUpdateParams,
@@ -123,6 +132,9 @@ export interface AppServerClientApi {
   resolveApproval(
     params: ApprovalResolveParams,
   ): Promise<ApprovalResolveResult>;
+  resolvePlanAcceptance(
+    params: PlanAcceptanceResolveParams,
+  ): Promise<PlanAcceptanceResolveResult>;
   listApprovalGrants(
     params: ApprovalGrantsListParams,
   ): Promise<ApprovalGrantsListResult>;
@@ -325,6 +337,14 @@ export class NodeAppServerClient implements AppServerClientApi {
     );
   }
 
+  public getPlan(params: PlanGetParams): Promise<PlanGetResult> {
+    return this.connection.request(
+      "plan/get",
+      jsonValueSchema.parse(planGetParamsSchema.parse(params)),
+      planGetResultSchema,
+    );
+  }
+
   public getRuntimeSettings(
     params: SettingsGetParams,
   ): Promise<SettingsGetResult> {
@@ -368,6 +388,16 @@ export class NodeAppServerClient implements AppServerClientApi {
       "approval/resolve",
       jsonValueSchema.parse(approvalResolveParamsSchema.parse(params)),
       approvalResolveResultSchema,
+    );
+  }
+
+  public resolvePlanAcceptance(
+    params: PlanAcceptanceResolveParams,
+  ): Promise<PlanAcceptanceResolveResult> {
+    return this.connection.request(
+      "plan/acceptance/resolve",
+      jsonValueSchema.parse(planAcceptanceResolveParamsSchema.parse(params)),
+      planAcceptanceResolveResultSchema,
     );
   }
 

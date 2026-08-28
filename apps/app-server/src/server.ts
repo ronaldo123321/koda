@@ -7,6 +7,7 @@ import {
   APP_SERVER_PROTOCOL_VERSION,
   APP_SERVER_RPC_ERROR_CODE,
   APPROVAL_GRANTS_RESULT_BUDGET_BYTES,
+  PLAN_GET_RESULT_BUDGET_BYTES,
   ARTIFACT_READ_RESULT_BUDGET_BYTES,
   CONTEXT_DETAIL_RESULT_BUDGET_BYTES,
   CONTEXT_INSTRUCTION_READ_RESULT_BUDGET_BYTES,
@@ -22,6 +23,10 @@ import {
   approvalGrantsRevokeAllResultSchema,
   approvalGrantsRevokeParamsSchema,
   approvalGrantsRevokeResultSchema,
+  planAcceptanceResolveParamsSchema,
+  planAcceptanceResolveResultSchema,
+  planGetParamsSchema,
+  planGetResultSchema,
   artifactReadParamsSchema,
   artifactReadResultSchema,
   contextInstructionReadParamsSchema,
@@ -65,6 +70,7 @@ import {
 import { ZodError, type ZodType } from "zod";
 
 import { PendingApprovalRegistry } from "./approval-registry.js";
+import { PendingPlanAcceptanceRegistry } from "./plan-acceptance-registry.js";
 import type { ProtocolMessageWriter } from "./message-writer.js";
 
 export interface KodaAppServerOptions {
@@ -73,6 +79,7 @@ export interface KodaAppServerOptions {
   serverVersion?: string;
   diagnostic?(message: string): unknown | Promise<unknown>;
   fatal?(error: Error): unknown;
+  planAcceptanceTimeoutMs?: number;
 }
 
 export class KodaAppServer {
@@ -82,6 +89,7 @@ export class KodaAppServer {
   private readonly diagnostic: (message: string) => unknown | Promise<unknown>;
   private readonly fatal: (error: Error) => unknown;
   private readonly approvals = new PendingApprovalRegistry();
+  private readonly planAcceptances: PendingPlanAcceptanceRegistry;
   private readonly activeTurns = new Map<TurnId, TurnHandle>();
   private readonly turnMonitors = new Map<TurnId, Promise<void>>();
   private initialized = false;
@@ -94,6 +102,9 @@ export class KodaAppServer {
     this.serverVersion = options.serverVersion ?? "0.1.0";
     this.diagnostic = options.diagnostic ?? (() => undefined);
     this.fatal = options.fatal ?? (() => undefined);
+    this.planAcceptances = new PendingPlanAcceptanceRegistry(
+      options.planAcceptanceTimeoutMs,
+    );
   }
 
   public get shouldClose(): boolean {
@@ -208,6 +219,8 @@ export class KodaAppServer {
         return this.readArtifact(request.params);
       case "thread/context":
         return this.listThreadContexts(request.params);
+      case "plan/get":
+        return this.getPlan(request.params);
       case "context/read":
         return this.readContext(request.params);
       case "context/instruction/read":
@@ -222,6 +235,8 @@ export class KodaAppServer {
         return this.cancelTurn(request.params);
       case "approval/resolve":
         return this.resolveApproval(request.params);
+      case "plan/acceptance/resolve":
+        return this.resolvePlanAcceptance(request.params);
       case "approval/grants/list":
         return this.listApprovalGrants(request.params);
       case "approval/grants/revoke":
@@ -281,6 +296,9 @@ export class KodaAppServer {
           multiFileChanges: true,
           patchDocuments: true,
           approvalGrants: true,
+          planning: true,
+          planCheckpoints: true,
+          stageAcceptance: true,
         },
         providers: this.application.listProviders(),
       }),
@@ -534,6 +552,28 @@ export class KodaAppServer {
     }
   }
 
+  private async getPlan(params: JsonValue | undefined): Promise<JsonValue> {
+    const input = parseParams(planGetParamsSchema, params);
+    try {
+      const response = jsonValueSchema.parse(
+        planGetResultSchema.parse(await this.application.getPlan(input)),
+      );
+      assertResultBudget(
+        response,
+        PLAN_GET_RESULT_BUDGET_BYTES,
+        "PLAN_GET_RESULT_TOO_LARGE",
+        "Plan inspection",
+      );
+      return response;
+    } catch (error) {
+      throw rpcError(
+        APP_SERVER_RPC_ERROR_CODE.APPLICATION,
+        errorMessage(error),
+        applicationErrorCode(error),
+      );
+    }
+  }
+
   private async updateRuntimeSettings(
     params: JsonValue | undefined,
   ): Promise<JsonValue> {
@@ -579,6 +619,13 @@ export class KodaAppServer {
               if (event.type === "approval.requested") {
                 this.approvals.preregister(event.turnId, event.payload.callId);
               }
+              if (event.type === "plan.acceptance_requested") {
+                this.planAcceptances.preregister({
+                  threadId: event.threadId,
+                  turnId: event.turnId,
+                  ...event.payload,
+                });
+              }
               await this.notify(
                 "turn/event",
                 jsonValueSchema.parse(
@@ -588,6 +635,7 @@ export class KodaAppServer {
             },
           },
           approvals: this.approvals.broker(() => turnId),
+          planAcceptances: this.planAcceptances.broker(),
           diagnostic: (diagnostic) =>
             this.reportApplicationDiagnostic(diagnostic),
         },
@@ -627,6 +675,7 @@ export class KodaAppServer {
     const reason = input.reason ?? "Cancelled by the app-server client.";
     const accepted = handle.cancel(reason);
     this.approvals.rejectTurn(input.turnId, reason);
+    this.planAcceptances.rejectTurn(input.turnId, reason);
     return jsonValueSchema.parse(turnCancelResultSchema.parse({ accepted }));
   }
 
@@ -660,6 +709,43 @@ export class KodaAppServer {
     }
     return jsonValueSchema.parse(
       approvalResolveResultSchema.parse({ accepted: true }),
+    );
+  }
+
+  private resolvePlanAcceptance(params: JsonValue | undefined): JsonValue {
+    const input = parseParams(planAcceptanceResolveParamsSchema, params);
+    const handle = this.activeTurns.get(input.turnId);
+    if (handle === undefined || handle.threadId !== input.threadId) {
+      throw rpcError(
+        APP_SERVER_RPC_ERROR_CODE.TURN_NOT_FOUND,
+        `Turn '${input.turnId}' is not active for Thread '${input.threadId}'.`,
+        "TURN_NOT_FOUND",
+      );
+    }
+    const resolution = this.planAcceptances.resolve(input);
+    if (resolution === "not_found") {
+      throw rpcError(
+        APP_SERVER_RPC_ERROR_CODE.PLAN_ACCEPTANCE_NOT_FOUND,
+        `Plan acceptance '${input.callId}' is not pending.`,
+        "PLAN_ACCEPTANCE_NOT_PENDING",
+      );
+    }
+    if (resolution === "already_resolved") {
+      throw rpcError(
+        APP_SERVER_RPC_ERROR_CODE.PLAN_ACCEPTANCE_ALREADY_RESOLVED,
+        `Plan acceptance '${input.callId}' was already resolved.`,
+        "PLAN_ACCEPTANCE_NOT_PENDING",
+      );
+    }
+    if (resolution === "stale") {
+      throw rpcError(
+        APP_SERVER_RPC_ERROR_CODE.PLAN_ACCEPTANCE_STALE,
+        `Plan acceptance '${input.callId}' targets stale Plan identity.`,
+        "PLAN_ACCEPTANCE_STALE",
+      );
+    }
+    return jsonValueSchema.parse(
+      planAcceptanceResolveResultSchema.parse({ accepted: true }),
     );
   }
 
@@ -739,6 +825,10 @@ export class KodaAppServer {
         handle.turnId,
         "The turn finished before approval resolved.",
       );
+      this.planAcceptances.rejectTurn(
+        handle.turnId,
+        "The turn finished before Plan acceptance resolved.",
+      );
       await this.notify(
         "turn/finished",
         jsonValueSchema.parse(
@@ -753,6 +843,7 @@ export class KodaAppServer {
     } finally {
       this.activeTurns.delete(handle.turnId);
       this.approvals.clearTurn(handle.turnId);
+      this.planAcceptances.clearTurn(handle.turnId);
     }
   }
 
@@ -766,6 +857,7 @@ export class KodaAppServer {
       for (const handle of this.activeTurns.values()) {
         handle.cancel(reason);
         this.approvals.rejectTurn(handle.turnId, reason);
+        this.planAcceptances.rejectTurn(handle.turnId, reason);
         completions.push(handle.completion);
       }
       await Promise.allSettled(completions);
@@ -818,6 +910,7 @@ export class KodaAppServer {
     for (const handle of this.activeTurns.values()) {
       handle.cancel(reason);
       this.approvals.rejectTurn(handle.turnId, reason);
+      this.planAcceptances.rejectTurn(handle.turnId, reason);
     }
     try {
       this.fatal(error instanceof Error ? error : new Error(String(error)));

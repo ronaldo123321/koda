@@ -20,8 +20,16 @@ import { compactionItemSchema, conversationItemTypeSchema } from "./items.js";
 import { jsonValueSchema } from "./json.js";
 import { tokenUsageSchema } from "./usage.js";
 import { modelProviderIdSchema, providerMetadataSchema } from "./providers.js";
+import {
+  PLAN_DETAIL_BUDGET_BYTES,
+  planAcceptanceDecisionSchema,
+  planCheckpointSchema,
+  planIdSchema,
+  planSnapshotSchema,
+  planStageIdSchema,
+} from "./plans.js";
 
-export const APP_SERVER_PROTOCOL_VERSION = 10 as const;
+export const APP_SERVER_PROTOCOL_VERSION = 11 as const;
 
 export const THREAD_EVENTS_DEFAULT_LIMIT = 200;
 export const THREAD_EVENTS_MAXIMUM_LIMIT = 200;
@@ -55,6 +63,7 @@ export const CONTEXT_INSTRUCTION_READ_MAXIMUM_BYTES = 64 * 1_024;
 export const CONTEXT_INSTRUCTION_READ_RESULT_BUDGET_BYTES = 80 * 1_024;
 export const CONTEXT_WORKSPACE_BUDGET_BYTES = 4_096;
 export const APPROVAL_GRANTS_RESULT_BUDGET_BYTES = 128 * 1_024;
+export const PLAN_GET_RESULT_BUDGET_BYTES = 384 * 1_024;
 
 export const APP_SERVER_RPC_ERROR_CODE = {
   PARSE: -32700,
@@ -68,6 +77,9 @@ export const APP_SERVER_RPC_ERROR_CODE = {
   TURN_NOT_FOUND: -32010,
   APPROVAL_NOT_FOUND: -32011,
   APPROVAL_ALREADY_RESOLVED: -32012,
+  PLAN_ACCEPTANCE_NOT_FOUND: -32013,
+  PLAN_ACCEPTANCE_ALREADY_RESOLVED: -32014,
+  PLAN_ACCEPTANCE_STALE: -32015,
   SHUTTING_DOWN: -32020,
   THREAD_NOT_FOUND: -32030,
   APPLICATION: -32050,
@@ -169,6 +181,9 @@ export const initializeResultSchema = z
         multiFileChanges: z.literal(true),
         patchDocuments: z.literal(true),
         approvalGrants: z.literal(true),
+        planning: z.literal(true),
+        planCheckpoints: z.literal(true),
+        stageAcceptance: z.literal(true),
       })
       .strict(),
     providers: z.array(runtimeProviderMetadataSchema).min(1),
@@ -1127,6 +1142,123 @@ export const approvalGrantsRevokeAllResultSchema = z
   .object({ revokedCount: z.number().int().safe().nonnegative().max(64) })
   .strict();
 
+const planWorkspaceSchema = z
+  .string()
+  .min(1)
+  .refine(
+    (value) =>
+      new TextEncoder().encode(value).byteLength <=
+      RUNTIME_SETTINGS_WORKSPACE_BUDGET_BYTES,
+    `Workspace must not exceed ${RUNTIME_SETTINGS_WORKSPACE_BUDGET_BYTES} UTF-8 bytes.`,
+  );
+
+const planRecoveryToolCallSchema = z
+  .object({
+    callId: toolCallIdSchema,
+    name: z.string().min(1).max(1_024),
+    effect: z.enum(["read", "control", "write", "execute"]).optional(),
+  })
+  .strict();
+
+export const planGetParamsSchema = z
+  .object({
+    workspace: planWorkspaceSchema,
+    threadId: localThreadIdSchema,
+  })
+  .strict();
+
+export const planGetResultSchema = z
+  .object({
+    workspace: planWorkspaceSchema,
+    threadId: threadIdSchema,
+    plan: planSnapshotSchema.optional(),
+    checkpoint: planCheckpointSchema.optional(),
+    recovery: z
+      .object({
+        previousTurnId: turnIdSchema,
+        previousStatus: z.enum([
+          "completed",
+          "paused",
+          "failed",
+          "cancelled",
+          "interrupted",
+        ]),
+        needsRevalidation: z.boolean(),
+        uncertainToolCalls: z.array(planRecoveryToolCallSchema),
+      })
+      .strict(),
+  })
+  .strict()
+  .superRefine((result, context) => {
+    if (result.checkpoint !== undefined && result.plan === undefined) {
+      context.addIssue({
+        code: "custom",
+        message: "A Plan checkpoint requires an active Plan.",
+        path: ["checkpoint"],
+      });
+    }
+    if (
+      result.plan !== undefined &&
+      result.checkpoint !== undefined &&
+      (result.checkpoint.planId !== result.plan.planId ||
+        result.checkpoint.planRevision > result.plan.revision)
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "Plan checkpoint does not belong to the returned Plan.",
+        path: ["checkpoint"],
+      });
+    }
+  });
+
+const planAcceptanceFeedbackSchema = z
+  .string()
+  .min(1)
+  .refine(
+    (value) =>
+      new TextEncoder().encode(value).byteLength <= PLAN_DETAIL_BUDGET_BYTES,
+    `Acceptance feedback must not exceed ${PLAN_DETAIL_BUDGET_BYTES} UTF-8 bytes.`,
+  );
+
+export const planAcceptanceResolveParamsSchema = z
+  .object({
+    threadId: threadIdSchema,
+    turnId: turnIdSchema,
+    callId: toolCallIdSchema,
+    planId: planIdSchema,
+    planRevision: z.number().int().safe().positive(),
+    stageId: planStageIdSchema,
+    decision: planAcceptanceDecisionSchema,
+    feedback: planAcceptanceFeedbackSchema.optional(),
+  })
+  .strict()
+  .superRefine((resolution, context) => {
+    if (
+      resolution.decision === "changes_requested" &&
+      resolution.feedback === undefined
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "Requested changes require feedback.",
+        path: ["feedback"],
+      });
+    }
+    if (
+      resolution.decision === "accepted" &&
+      resolution.feedback !== undefined
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "An accepted Stage cannot include change feedback.",
+        path: ["feedback"],
+      });
+    }
+  });
+
+export const planAcceptanceResolveResultSchema = z
+  .object({ accepted: z.literal(true) })
+  .strict();
+
 export const shutdownParamsSchema = z.object({}).strict();
 export const shutdownResultSchema = z.object({}).strict();
 
@@ -1248,6 +1380,14 @@ export type ApprovalGrantsRevokeAllParams = z.infer<
 >;
 export type ApprovalGrantsRevokeAllResult = z.infer<
   typeof approvalGrantsRevokeAllResultSchema
+>;
+export type PlanGetParams = z.infer<typeof planGetParamsSchema>;
+export type PlanGetResult = z.infer<typeof planGetResultSchema>;
+export type PlanAcceptanceResolveParams = z.infer<
+  typeof planAcceptanceResolveParamsSchema
+>;
+export type PlanAcceptanceResolveResult = z.infer<
+  typeof planAcceptanceResolveResultSchema
 >;
 export type ShutdownResult = z.infer<typeof shutdownResultSchema>;
 export type TurnEventNotificationParams = z.infer<

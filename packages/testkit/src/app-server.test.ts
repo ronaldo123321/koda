@@ -23,6 +23,7 @@ import type { ModelProvider } from "@koda/agent-core";
 import {
   APP_SERVER_PROTOCOL_VERSION,
   agentEventSchema,
+  itemIdSchema,
   threadIdSchema,
   toolCallIdSchema,
   turnIdSchema,
@@ -92,6 +93,9 @@ describe("KodaAppServer", () => {
         multiFileChanges: true,
         patchDocuments: true,
         approvalGrants: true,
+        planning: true,
+        planCheckpoints: true,
+        stageAcceptance: true,
       },
       providers: [
         { id: "openai", defaultModel: "gpt-5.6-terra", configured: true },
@@ -288,6 +292,98 @@ describe("KodaAppServer", () => {
     expect(errorDataCode(writer, 2)).toBe("INVALID_CONFIGURATION");
   });
 
+  it("rejects a Plan inspection response that exceeds its transport budget", async () => {
+    const fixture = await createFixture();
+    const canonicalWorkspace = await realpath(fixture.workspaceRoot);
+    const threadId = threadIdSchema.parse("server-plan-budget-thread");
+    const turnId = turnIdSchema.parse("server-plan-budget-turn");
+    const events = [
+      agentEventSchema.parse({
+        schemaVersion: 1,
+        sequence: 0,
+        timestamp: "2026-08-28T00:00:00.000Z",
+        threadId,
+        turnId,
+        type: "turn.started",
+        payload: {},
+      }),
+      agentEventSchema.parse({
+        schemaVersion: 1,
+        sequence: 1,
+        timestamp: "2026-08-28T00:00:00.000Z",
+        threadId,
+        turnId,
+        type: "turn.context",
+        payload: {
+          provider: "openai",
+          model: "fixture-model",
+          workspaceRoot: canonicalWorkspace,
+          approvalMode: "on-request",
+          instructionsSha256: "a".repeat(64),
+          repositoryInstructions: [],
+        },
+      }),
+    ];
+    for (let index = 0; index < 370; index += 1) {
+      const callId = toolCallIdSchema.parse(`budget-call-${index}`);
+      const name = `${index}-`.padEnd(1_024, "x");
+      const sequence = 2 + index * 3;
+      events.push(
+        agentEventSchema.parse({
+          schemaVersion: 1,
+          sequence,
+          timestamp: "2026-08-28T00:00:00.000Z",
+          threadId,
+          turnId,
+          type: "item.recorded",
+          payload: {
+            item: {
+              type: "tool_call",
+              id: itemIdSchema.parse(`budget-item-${index}`),
+              callId,
+              name,
+              arguments: {},
+            },
+          },
+        }),
+        agentEventSchema.parse({
+          schemaVersion: 1,
+          sequence: sequence + 1,
+          timestamp: "2026-08-28T00:00:00.000Z",
+          threadId,
+          turnId,
+          type: "tool.started",
+          payload: { callId, name, executionBoundary: true },
+        }),
+        agentEventSchema.parse({
+          schemaVersion: 1,
+          sequence: sequence + 2,
+          timestamp: "2026-08-28T00:00:00.000Z",
+          threadId,
+          turnId,
+          type: "tool.execution_started",
+          payload: { callId, name, effect: "write" },
+        }),
+      );
+    }
+    await mkdir(join(fixture.kodaHome, "threads"), { recursive: true });
+    await writeFile(
+      join(fixture.kodaHome, "threads", `${threadId}.jsonl`),
+      `${events.map((event) => JSON.stringify(event)).join("\n")}\n`,
+      "utf8",
+    );
+    const writer = new MemoryProtocolWriter();
+    const server = createServer(fixture, writer);
+    await initialize(server, 1);
+
+    await request(server, 2, "plan/get", {
+      workspace: fixture.workspaceRoot,
+      threadId,
+    });
+
+    expect(errorDataCode(writer, 2)).toBe("PLAN_GET_RESULT_TOO_LARGE");
+  });
+
   it("streams durable events, resolves approval, and exposes thread queries", async () => {
     const fixture = await createFixture();
     await writeFile(join(fixture.workspaceRoot, "README.md"), "Before\n");
@@ -477,6 +573,221 @@ describe("KodaAppServer", () => {
     await request(server, 12, "shutdown", {});
     expect(responseResult(writer, 12)).toEqual({});
     expect(server.shouldClose).toBe(true);
+  });
+
+  it("resolves an exact Stage acceptance and serves the durable Plan", async () => {
+    const fixture = await createFixture();
+    const callId = toolCallIdSchema.parse("server-plan-call");
+    const provider = new ScriptedModelProvider([
+      {
+        events: [
+          {
+            type: "tool_call",
+            callId,
+            name: "update_plan",
+            arguments: gatedPlanInput(callId),
+          },
+          { type: "completed", finishReason: "tool_calls" },
+        ],
+      },
+      {
+        assertRequest: (request) => {
+          expect(
+            request.items.find(
+              (item) => item.type === "tool_result" && item.callId === callId,
+            ),
+          ).toMatchObject({
+            status: "success",
+            output: {
+              plan: { revision: 2, status: "completed" },
+              acceptance: { status: "accepted" },
+            },
+          });
+        },
+        events: [{ type: "completed", finishReason: "stop" }],
+      },
+    ]);
+    const writer = new MemoryProtocolWriter();
+    const server = createServer(fixture, writer, provider, "server-plan");
+    await initialize(server, 1);
+    await request(server, 2, "turn/start", {
+      prompt: "Finish and verify the gated Stage.",
+      cwd: fixture.workspaceRoot,
+    });
+    const acceptanceRequest = await waitForMessage(
+      writer,
+      (message) =>
+        notificationMethod(message) === "turn/event" &&
+        eventType(message) === "plan.acceptance_requested",
+    );
+    const identity = planAcceptanceIdentity(acceptanceRequest);
+
+    await request(server, 3, "plan/acceptance/resolve", {
+      ...identity,
+      planRevision: identity.planRevision + 1,
+      decision: "accepted",
+    });
+    expect(errorDataCode(writer, 3)).toBe("PLAN_ACCEPTANCE_STALE");
+    await request(server, 4, "plan/acceptance/resolve", {
+      ...identity,
+      decision: "accepted",
+    });
+    expect(responseResult(writer, 4)).toEqual({ accepted: true });
+    await waitForMessage(
+      writer,
+      (message) => notificationMethod(message) === "turn/finished",
+    );
+
+    const durableEventTypes = writer.messages
+      .filter((message) => notificationMethod(message) === "turn/event")
+      .map(eventType);
+    expect(durableEventTypes.indexOf("plan.updated")).toBeLessThan(
+      durableEventTypes.indexOf("plan.acceptance_requested"),
+    );
+    expect(durableEventTypes.indexOf("plan.acceptance_requested")).toBeLessThan(
+      durableEventTypes.indexOf("plan.acceptance_resolved"),
+    );
+    await request(server, 5, "plan/get", {
+      workspace: fixture.workspaceRoot,
+      threadId: identity.threadId,
+    });
+    expect(responseResult(writer, 5)).toMatchObject({
+      threadId: identity.threadId,
+      plan: {
+        planId: identity.planId,
+        revision: 2,
+        status: "completed",
+        stages: [{ id: identity.stageId, status: "accepted" }],
+      },
+      checkpoint: { planRevision: 2, reason: "turn_completion" },
+      recovery: {
+        previousTurnId: identity.turnId,
+        previousStatus: "completed",
+        needsRevalidation: false,
+        uncertainToolCalls: [],
+      },
+    });
+  });
+
+  it("cancels a Turn that is waiting for Stage acceptance", async () => {
+    const fixture = await createFixture();
+    const callId = toolCallIdSchema.parse("server-plan-cancel-call");
+    const provider = new ScriptedModelProvider([
+      {
+        events: [
+          {
+            type: "tool_call",
+            callId,
+            name: "update_plan",
+            arguments: gatedPlanInput(callId),
+          },
+          { type: "completed", finishReason: "tool_calls" },
+        ],
+      },
+    ]);
+    const writer = new MemoryProtocolWriter();
+    const server = createServer(
+      fixture,
+      writer,
+      provider,
+      "server-plan-cancel",
+    );
+    await initialize(server, 1);
+    await request(server, 2, "turn/start", {
+      prompt: "Wait for Stage acceptance.",
+      cwd: fixture.workspaceRoot,
+    });
+    const start = responseResult(writer, 2) as { turnId: string };
+    await waitForMessage(
+      writer,
+      (message) => eventType(message) === "plan.acceptance_requested",
+    );
+
+    await request(server, 3, "turn/cancel", {
+      turnId: start.turnId,
+      reason: "Acceptance client disconnected.",
+    });
+    expect(responseResult(writer, 3)).toEqual({ accepted: true });
+    await expect(
+      waitForMessage(
+        writer,
+        (message) =>
+          notificationMethod(message) === "turn/finished" &&
+          finishedTurnId(message) === start.turnId,
+      ),
+    ).resolves.toMatchObject({
+      params: { status: "cancelled", exitCode: 130 },
+    });
+  });
+
+  it("fails Stage acceptance closed when the client disconnects", async () => {
+    const fixture = await createFixture();
+    const callId = toolCallIdSchema.parse("server-plan-disconnect-call");
+    const provider = new ScriptedModelProvider([
+      {
+        events: [
+          {
+            type: "tool_call",
+            callId,
+            name: "update_plan",
+            arguments: gatedPlanInput(callId),
+          },
+          { type: "completed", finishReason: "tool_calls" },
+        ],
+      },
+    ]);
+    const writer = new MemoryProtocolWriter();
+    const server = createServer(
+      fixture,
+      writer,
+      provider,
+      "server-plan-disconnect",
+    );
+    await initialize(server, 1);
+    await request(server, 2, "turn/start", {
+      prompt: "Wait for the client decision.",
+      cwd: fixture.workspaceRoot,
+    });
+    const start = responseResult(writer, 2) as {
+      threadId: string;
+      turnId: string;
+    };
+    await waitForMessage(
+      writer,
+      (message) => eventType(message) === "plan.acceptance_requested",
+    );
+
+    await server.disconnect("Acceptance client disconnected.");
+
+    expect(server.shouldClose).toBe(true);
+    expect(
+      writer.messages.some(
+        (message) => eventType(message) === "plan.acceptance_resolved",
+      ),
+    ).toBe(false);
+    await expect(
+      waitForMessage(
+        writer,
+        (message) => finishedTurnId(message) === start.turnId,
+      ),
+    ).resolves.toMatchObject({
+      params: { status: "cancelled", exitCode: 130 },
+    });
+    const durable = await new JsonlEventStore(
+      join(fixture.kodaHome, "threads", `${start.threadId}.jsonl`),
+    ).readAllRequired();
+    expect(
+      [...durable.events]
+        .reverse()
+        .find((event) => event.type === "plan.updated"),
+    ).toMatchObject({
+      payload: {
+        plan: {
+          revision: 1,
+          stages: [{ status: "awaiting_acceptance" }],
+        },
+      },
+    });
   });
 
   it("creates, lists, and revokes a session-scoped exact command grant", async () => {
@@ -1068,6 +1379,64 @@ function finishedTurnId(message: JsonValue): string | undefined {
     typeof params.turnId === "string"
     ? params.turnId
     : undefined;
+}
+
+function planAcceptanceIdentity(message: JsonValue): {
+  threadId: string;
+  turnId: string;
+  callId: string;
+  planId: string;
+  planRevision: number;
+  stageId: string;
+} {
+  const params = notificationParams(message);
+  const event = isObject(params) ? params.event : undefined;
+  const payload = isObject(event) ? event.payload : undefined;
+  if (
+    !isObject(event) ||
+    !isObject(payload) ||
+    typeof event.threadId !== "string" ||
+    typeof event.turnId !== "string" ||
+    typeof payload.callId !== "string" ||
+    typeof payload.planId !== "string" ||
+    typeof payload.planRevision !== "number" ||
+    typeof payload.stageId !== "string"
+  ) {
+    throw new Error("Plan acceptance notification has invalid identity.");
+  }
+  return {
+    threadId: event.threadId,
+    turnId: event.turnId,
+    callId: payload.callId,
+    planId: payload.planId,
+    planRevision: payload.planRevision,
+    stageId: payload.stageId,
+  };
+}
+
+function gatedPlanInput(callId: ReturnType<typeof toolCallIdSchema.parse>) {
+  return {
+    expected_revision: 0,
+    objective: "Finish the gated app-server work",
+    stages: [
+      {
+        id: "stage-gated",
+        title: "Gated Stage",
+        requires_acceptance: true,
+        acceptance_criteria: ["Regression tests pass"],
+        summary: "Implementation and tests are complete.",
+        evidence: [{ kind: "tool_call", callId }],
+        todos: [
+          {
+            id: "todo-gated",
+            title: "Implement and test",
+            status: "completed",
+            outcome: "Implemented with passing tests.",
+          },
+        ],
+      },
+    ],
+  };
 }
 
 function isObject(

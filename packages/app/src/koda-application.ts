@@ -17,6 +17,7 @@ import {
   type EventSink,
   type ItemIdFactory,
   type ModelProvider,
+  type PlanAcceptanceBroker,
 } from "@koda/agent-core";
 import { McpClientError, McpTurnSession } from "@koda/mcp-client-node";
 import {
@@ -58,6 +59,8 @@ import {
   type ArtifactReadResult,
   type ItemId,
   type ModelProviderId,
+  type PlanGetParams,
+  type PlanGetResult,
   type PlanStateItem,
   type RuntimeProviderMetadata,
   type SettingsGetResult,
@@ -133,6 +136,7 @@ export interface StartTurnInput {
 export interface TurnClient {
   events: EventSink;
   approvals: ApprovalBroker;
+  planAcceptances?: PlanAcceptanceBroker;
   diagnostic?(diagnostic: ApplicationDiagnostic): unknown | Promise<unknown>;
 }
 
@@ -249,6 +253,17 @@ export class ApprovalGrantError extends Error {
   ) {
     super(message, options);
     this.name = "ApprovalGrantError";
+  }
+}
+
+export class PlanInspectionError extends Error {
+  public constructor(
+    public readonly code: string,
+    message: string,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = "PlanInspectionError";
   }
 }
 
@@ -699,6 +714,55 @@ export class KodaApplication {
     };
   }
 
+  public async getPlan(input: PlanGetParams): Promise<PlanGetResult> {
+    const workspace = await this.canonicalPlanWorkspace(input.workspace);
+    const threadId = parseLocalThreadId(input.threadId);
+    const events = await this.readValidatedThreadLog(threadId);
+    const contexts = events.filter((event) => event.type === "turn.context");
+    if (contexts.length === 0) {
+      throw new PlanInspectionError(
+        "THREAD_EVENT_LOG_CORRUPT",
+        `Thread '${threadId}' does not contain a durable workspace context.`,
+      );
+    }
+    if (contexts.some((event) => event.payload.workspaceRoot !== workspace)) {
+      throw new PlanInspectionError(
+        "THREAD_WORKSPACE_MISMATCH",
+        `Thread '${threadId}' does not belong to workspace '${workspace}'.`,
+      );
+    }
+    let recovered;
+    try {
+      recovered = recoverThread({ events, diagnostics: [] }, threadId);
+    } catch (error) {
+      throw new PlanInspectionError(
+        error instanceof ThreadRecoveryError
+          ? error.code
+          : "PLAN_RECOVERY_INVALID",
+        errorMessage(error),
+        { cause: error },
+      );
+    }
+    return {
+      workspace,
+      threadId,
+      ...(recovered.plan === undefined ? {} : { plan: recovered.plan }),
+      ...(recovered.checkpoint === undefined
+        ? {}
+        : { checkpoint: recovered.checkpoint }),
+      recovery: {
+        previousTurnId: recovered.previousTurnId,
+        previousStatus: recovered.previousStatus,
+        needsRevalidation: recovered.planNeedsRevalidation,
+        uncertainToolCalls: recovered.uncertainToolCalls.map((call) => ({
+          callId: call.callId,
+          name: call.name,
+          ...(call.effect === undefined ? {} : { effect: call.effect }),
+        })),
+      },
+    };
+  }
+
   public async readContext(
     input: ContextReadParams,
   ): Promise<ContextReadResult> {
@@ -1055,7 +1119,11 @@ export class KodaApplication {
         needsRevalidation: planNeedsRevalidation,
       });
       const tools = new ToolRegistry();
-      registerUpdatePlanTool(tools, planState);
+      registerUpdatePlanTool(tools, planState, {
+        ...(client.planAcceptances === undefined
+          ? {}
+          : { acceptances: client.planAcceptances }),
+      });
       registerArtifactTools(tools, artifactStore);
       registerReadOnlyWorkspaceTools(tools, workspace, { artifactStore });
       const mutationCoordinator = await WorkspaceMutationCoordinator.open(
@@ -1376,6 +1444,26 @@ export class KodaApplication {
     } catch (error) {
       throw new ContextInspectionError(
         "INVALID_CONTEXT_WORKSPACE",
+        `Workspace '${workspaceInput}' could not be resolved to an existing directory.`,
+        { cause: error },
+      );
+    }
+  }
+
+  private async canonicalPlanWorkspace(
+    workspaceInput: string,
+  ): Promise<string> {
+    try {
+      const workspace = await realpath(
+        resolve(this.processDirectory, workspaceInput),
+      );
+      if (!(await stat(workspace)).isDirectory()) {
+        throw new Error("Workspace is not a directory.");
+      }
+      return workspace;
+    } catch (error) {
+      throw new PlanInspectionError(
+        "INVALID_PLAN_WORKSPACE",
         `Workspace '${workspaceInput}' could not be resolved to an existing directory.`,
         { cause: error },
       );

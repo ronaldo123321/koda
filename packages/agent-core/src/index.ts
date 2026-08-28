@@ -3,6 +3,7 @@ export * from "./context-engine.js";
 export * from "./events.js";
 export * from "./model.js";
 export * from "./plan-reducer.js";
+export * from "./plan-acceptance.js";
 export * from "./plan-state.js";
 export * from "./policy.js";
 export * from "./tools.js";

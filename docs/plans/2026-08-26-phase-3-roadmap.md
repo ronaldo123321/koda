@@ -1,6 +1,6 @@
 # Koda Phase 3 Extensibility Roadmap
 
-- Status: In progress — Phase 3A through Phase 3F3 and Phase 3G1–3G2 complete; Phase 3G3 next; Phase 3H queued (2026-08-28)
+- Status: In progress — Phase 3A through Phase 3F3 and Phase 3G1–3G3 complete; Phase 3G4 next; Phase 3H queued (2026-08-28)
 - Date: 2026-08-26
 - Depends on: Phase 2 reliability closure
 - Scope: stable client/tool/provider extension boundaries without weakening the local runtime's durable state and approval guarantees
@@ -173,7 +173,7 @@ The accepted authorization identity, lifecycle, audit, protocol, interaction, fa
 
 ## Phase 3G: durable planning and Harness checkpoints
 
-Status: **Implementation in progress — Phase 3G1 and Phase 3G2 implemented and verified; Phase 3G3 next.**
+Status: **Implementation in progress — Phase 3G1 through Phase 3G3 implemented and verified; Phase 3G4 next.**
 
 - Add a thread-scoped Plan/Stage/Todo state machine maintained explicitly through a built-in `update_plan` control tool.
 - Keep JSONL authoritative, pin the latest Plan across context compaction, and reconstruct it without parsing model prose.
@@ -184,7 +184,7 @@ Status: **Implementation in progress — Phase 3G1 and Phase 3G2 implemented and
 
 The accepted domain model, state machine, checkpoint and recovery rules, acceptance lifecycle, protocol boundary, verification matrix, and five implementation slices are in the [Phase 3G durable planning and Harness checkpoints design](2026-08-28-phase-3g-planning-harness-design.md).
 
-Phase 3G2 now provides the built-in `update_plan` control tool, ordered durable Plan updates, pinned provider context, automatic safe checkpoints, Plan-aware step/time pauses, conservative recovery validation, uncertain-effect revalidation, and application-level resume composition. App-server v11 Plan inspection and acceptance lifecycle are explicitly Phase 3G3; complete CLI/Ink Plan and acceptance interaction remains Phase 3G4; final crash, subprocess, provider, and real-TTY closure remains Phase 3G5.
+Phase 3G2 provides the built-in `update_plan` control tool, ordered durable Plan updates, pinned provider context, automatic safe checkpoints, Plan-aware step/time pauses, conservative recovery validation, uncertain-effect revalidation, and application-level resume composition. Phase 3G3 adds authoritative application Plan reads, app-server protocol v11 capabilities and methods, an exact one-shot Stage acceptance registry, typed Node client operations, lifecycle cleanup, hostile-log recovery validation, and response-budget enforcement. Complete CLI/Ink Plan and acceptance interaction remains Phase 3G4; final crash, subprocess, provider, and real-TTY closure remains Phase 3G5.
 
 ## Phase 3H: Skills and extension system
 
@@ -210,8 +210,8 @@ Phase 3H receives its own alternatives review and accepted design after Phase 3G
 ### Interactive clients and client APIs
 
 - Maintain the completed Phase 3D Ink chat REPL on the Phase 3A application protocol.
-- Maintain the completed Phase 3E1 semantics for recent-thread selection, bounded history preview, and safe resume through the current protocol v10 transport.
-- Maintain the completed Phase 3E2 boundary as bounded bidirectional history navigation and workspace-scoped substring search over app-server protocol v10; retain the normal terminal buffer and a disposable SQLite projection.
+- Maintain the completed Phase 3E1 semantics for recent-thread selection, bounded history preview, and safe resume through the current protocol v11 transport.
+- Maintain the completed Phase 3E2 boundary as bounded bidirectional history navigation and workspace-scoped substring search over app-server protocol v11; retain the normal terminal buffer and a disposable SQLite projection.
 - Maintain the completed Phase 3E3 boundary for explicit provider/model preferences that affect only new threads.
 - Maintain the completed Phase 3E4 boundary for thread-scoped discovery and bounded UTF-8 artifact reads.
 - Maintain the completed Phase 3E5 boundary for durable per-request context telemetry and bounded current-instruction inspection.

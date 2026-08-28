@@ -190,6 +190,11 @@ function recoverPlanState(events: readonly AgentEvent[]): {
     "read" | "control" | "write" | "execute"
   >();
   const resolutions = new Map<ToolCallId, PlanAcceptanceResolution>();
+  const acceptanceRequests = new Map<
+    ToolCallId,
+    Extract<AgentEvent, { type: "plan.acceptance_requested" }>["payload"]
+  >();
+  const consumedAcceptances = new Set<ToolCallId>();
   const eventsBySequence = new Map(
     events.map((event) => [event.sequence, event]),
   );
@@ -205,11 +210,65 @@ function recoverPlanState(events: readonly AgentEvent[]): {
       continue;
     }
     if (event.type === "tool.completed") {
+      const resolution = resolutions.get(event.payload.callId);
+      if (
+        resolution?.decision === "accepted" &&
+        !consumedAcceptances.has(event.payload.callId)
+      ) {
+        throw invalidLog(
+          `Accepted Plan resolution '${event.payload.callId}' has no durable Runtime Plan update.`,
+        );
+      }
       executing.delete(event.payload.callId);
       openTools.delete(event.payload.callId);
       continue;
     }
+    if (event.type === "plan.acceptance_requested") {
+      const stage = plan?.stages.find(
+        (candidate) => candidate.id === event.payload.stageId,
+      );
+      if (
+        plan === undefined ||
+        started.get(event.payload.callId) !== "update_plan" ||
+        executing.get(event.payload.callId) !== "control" ||
+        event.payload.planId !== plan.planId ||
+        event.payload.planRevision !== plan.revision ||
+        stage?.status !== "awaiting_acceptance" ||
+        JSON.stringify(event.payload.criteria) !==
+          JSON.stringify(stage.acceptanceCriteria) ||
+        event.payload.summary !== stage.summary ||
+        JSON.stringify(event.payload.evidence) !==
+          JSON.stringify(stage.evidence)
+      ) {
+        throw invalidLog(
+          `Plan acceptance request '${event.payload.callId}' does not match the active gated Stage.`,
+        );
+      }
+      if (acceptanceRequests.has(event.payload.callId)) {
+        throw invalidLog(
+          `Plan acceptance request '${event.payload.callId}' is duplicated.`,
+        );
+      }
+      acceptanceRequests.set(event.payload.callId, event.payload);
+      continue;
+    }
     if (event.type === "plan.acceptance_resolved") {
+      const request = acceptanceRequests.get(event.payload.callId);
+      if (
+        request === undefined ||
+        request.planId !== event.payload.planId ||
+        request.planRevision !== event.payload.planRevision ||
+        request.stageId !== event.payload.stageId
+      ) {
+        throw invalidLog(
+          `Plan acceptance resolution '${event.payload.callId}' is stale or has no matching request.`,
+        );
+      }
+      if (resolutions.has(event.payload.callId)) {
+        throw invalidLog(
+          `Plan acceptance resolution '${event.payload.callId}' is duplicated.`,
+        );
+      }
       resolutions.set(event.payload.callId, event.payload);
       continue;
     }
@@ -247,7 +306,11 @@ function recoverPlanState(events: readonly AgentEvent[]): {
             );
           }
           const resolution = resolutions.get(event.payload.callId);
-          if (resolution === undefined || resolution.decision !== "accepted") {
+          if (
+            resolution === undefined ||
+            resolution.decision !== "accepted" ||
+            consumedAcceptances.has(event.payload.callId)
+          ) {
             throw invalidLog(
               `Runtime Plan update '${event.payload.callId}' has no accepted resolution.`,
             );
@@ -259,6 +322,7 @@ function recoverPlanState(events: readonly AgentEvent[]): {
             );
           }
           expected = reduced.plan;
+          consumedAcceptances.add(event.payload.callId);
         }
         if (JSON.stringify(expected) !== JSON.stringify(event.payload.plan)) {
           throw invalidLog(

@@ -27,6 +27,10 @@ import {
   type ContextReadParams,
   type ContextReadResult,
   type InitializeResult,
+  type PlanAcceptanceResolveParams,
+  type PlanAcceptanceResolveResult,
+  type PlanGetParams,
+  type PlanGetResult,
   type SettingsGetParams,
   type SettingsGetResult,
   type SettingsUpdateParams,
@@ -1459,6 +1463,9 @@ class FakeAppServerClient implements AppServerClientApi {
         multiFileChanges: true,
         patchDocuments: true,
         approvalGrants: true,
+        planning: true,
+        planCheckpoints: true,
+        stageAcceptance: true,
       },
       providers: [
         provider("openai", "OpenAI", "OPENAI_API_KEY", "gpt-5.6-terra"),
@@ -1476,6 +1483,8 @@ class FakeAppServerClient implements AppServerClientApi {
   public readonly startRequests: TurnStartParams[] = [];
   public readonly cancelRequests: TurnCancelParams[] = [];
   public readonly approvalRequests: ApprovalResolveParams[] = [];
+  public readonly planAcceptanceRequests: PlanAcceptanceResolveParams[] = [];
+  public readonly planGetRequests: PlanGetParams[] = [];
   public readonly approvalGrantListRequests: ApprovalGrantsListParams[] = [];
   public readonly approvalGrantRevokeRequests: ApprovalGrantsRevokeParams[] =
     [];
@@ -1649,6 +1658,20 @@ class FakeAppServerClient implements AppServerClientApi {
     return Promise.resolve(this.threadSearchResult);
   }
 
+  public getPlan(params: PlanGetParams): Promise<PlanGetResult> {
+    this.planGetRequests.push(params);
+    return Promise.resolve({
+      workspace: params.workspace,
+      threadId: params.threadId,
+      recovery: {
+        previousTurnId: turnIdSchema.parse("tui-turn-1"),
+        previousStatus: "completed",
+        needsRevalidation: false,
+        uncertainToolCalls: [],
+      },
+    });
+  }
+
   public getRuntimeSettings(
     params: SettingsGetParams,
   ): Promise<SettingsGetResult> {
@@ -1704,6 +1727,13 @@ class FakeAppServerClient implements AppServerClientApi {
     params: ApprovalResolveParams,
   ): Promise<ApprovalResolveResult> {
     this.approvalRequests.push(params);
+    return Promise.resolve({ accepted: true });
+  }
+
+  public resolvePlanAcceptance(
+    params: PlanAcceptanceResolveParams,
+  ): Promise<PlanAcceptanceResolveResult> {
+    this.planAcceptanceRequests.push(params);
     return Promise.resolve({ accepted: true });
   }
 

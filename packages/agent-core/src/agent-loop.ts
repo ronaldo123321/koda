@@ -613,13 +613,31 @@ export class AgentLoop {
                     this.planState.clearRevalidation();
                     await this.recordPlanCheckpoint(
                       recorder,
-                      "plan_update",
+                      event.payload.source === "runtime_acceptance"
+                        ? "stage_acceptance"
+                        : "plan_update",
                       recorded.sequence,
                       [
                         { kind: "event", sequence: recorded.sequence },
                         { kind: "tool_call", callId: call.callId },
                       ],
                     );
+                  } else if (event.type === "plan.acceptance_requested") {
+                    await recorder.record({
+                      type: event.type,
+                      payload: {
+                        callId: call.callId,
+                        ...event.payload,
+                      },
+                    });
+                  } else if (event.type === "plan.acceptance_resolved") {
+                    await recorder.record({
+                      type: event.type,
+                      payload: {
+                        callId: call.callId,
+                        ...event.payload,
+                      },
+                    });
                   } else {
                     await recorder.record({
                       type: event.type,

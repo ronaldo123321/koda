@@ -222,6 +222,26 @@ describe("KodaApplication", () => {
     await expect(queryApplication.getThread(threadId)).resolves.toMatchObject({
       value: { threadId, status: "completed" },
     });
+    await expect(
+      queryApplication.getPlan({
+        workspace: fixture.workspaceRoot,
+        threadId,
+      }),
+    ).resolves.toMatchObject({
+      threadId,
+      recovery: {
+        previousTurnId: "application-turn-2",
+        previousStatus: "completed",
+        needsRevalidation: false,
+        uncertainToolCalls: [],
+      },
+    });
+    expect(
+      await queryApplication.getPlan({
+        workspace: fixture.workspaceRoot,
+        threadId,
+      }),
+    ).not.toHaveProperty("plan");
   });
 
   it("restores a durable Plan on resume and reconstructs its pinned model context", async () => {
@@ -315,6 +335,28 @@ describe("KodaApplication", () => {
         client,
       ).completion,
     ).resolves.toMatchObject({ status: "completed" });
+    await expect(
+      application.getPlan({ workspace: fixture.workspaceRoot, threadId }),
+    ).resolves.toMatchObject({
+      threadId,
+      plan: {
+        revision: 1,
+        objective: "Implement the feature",
+        stages: [{ id: "stage-build", status: "active" }],
+      },
+      checkpoint: { planRevision: 1, reason: "turn_completion" },
+      recovery: {
+        previousTurnId: "application-plan-turn-1",
+        previousStatus: "completed",
+        needsRevalidation: false,
+        uncertainToolCalls: [],
+      },
+    });
+    const otherWorkspace = join(fixture.root, "other-workspace");
+    await mkdir(otherWorkspace);
+    await expect(
+      application.getPlan({ workspace: otherWorkspace, threadId }),
+    ).rejects.toMatchObject({ code: "THREAD_WORKSPACE_MISMATCH" });
     const durable = await new JsonlEventStore(
       join(fixture.kodaHome, "threads", `${threadId}.jsonl`),
     ).readAllRequired();

@@ -17,8 +17,12 @@ import {
   contextReadParamsSchema,
   contextReadResultSchema,
   initializeParamsSchema,
+  initializeResultSchema,
   jsonRpcErrorResponseSchema,
   jsonRpcRequestSchema,
+  planAcceptanceResolveParamsSchema,
+  planGetParamsSchema,
+  planGetResultSchema,
   settingsGetResultSchema,
   settingsUpdateParamsSchema,
   settingsUpdateResultSchema,
@@ -39,7 +43,7 @@ import { describe, expect, it } from "vitest";
 
 describe("app-server protocol", () => {
   it("accepts strict versioned requests and safe JSON-RPC IDs", () => {
-    expect(APP_SERVER_PROTOCOL_VERSION).toBe(10);
+    expect(APP_SERVER_PROTOCOL_VERSION).toBe(11);
     expect(
       jsonRpcRequestSchema.parse({
         jsonrpc: "2.0",
@@ -72,6 +76,102 @@ describe("app-server protocol", () => {
         extra: true,
       }),
     ).toThrow();
+  });
+
+  it("negotiates planning capabilities and validates exact Plan RPC identities", () => {
+    expect(
+      initializeResultSchema.parse({
+        protocolVersion: APP_SERVER_PROTOCOL_VERSION,
+        server: { name: "koda-app-server", version: "test" },
+        capabilities: {
+          threadQueries: true,
+          turnStart: true,
+          turnResume: true,
+          turnCancellation: true,
+          interactiveApproval: true,
+          durableEventNotifications: true,
+          threadEvents: true,
+          threadSearch: true,
+          bidirectionalThreadEvents: true,
+          runtimeSettings: true,
+          artifactInspection: true,
+          contextInspection: true,
+          multiFileChanges: true,
+          patchDocuments: true,
+          approvalGrants: true,
+          planning: true,
+          planCheckpoints: true,
+          stageAcceptance: true,
+        },
+        providers: [
+          {
+            id: "openai",
+            displayName: "OpenAI",
+            credentialEnvironmentVariable: "OPENAI_API_KEY",
+            defaultModel: "test-model",
+            configured: true,
+          },
+        ],
+      }).capabilities,
+    ).toMatchObject({
+      planning: true,
+      planCheckpoints: true,
+      stageAcceptance: true,
+    });
+
+    expect(
+      planGetParamsSchema.parse({
+        workspace: "/workspace",
+        threadId: "planning-thread",
+      }),
+    ).toEqual({ workspace: "/workspace", threadId: "planning-thread" });
+    expect(
+      planGetResultSchema.parse({
+        workspace: "/workspace",
+        threadId: "planning-thread",
+        recovery: {
+          previousTurnId: "planning-turn",
+          previousStatus: "completed",
+          needsRevalidation: false,
+          uncertainToolCalls: [],
+        },
+      }),
+    ).not.toHaveProperty("plan");
+
+    const identity = {
+      threadId: "planning-thread",
+      turnId: "planning-turn",
+      callId: "planning-call",
+      planId: "plan:planning",
+      planRevision: 1,
+      stageId: "stage:verify",
+    } as const;
+    expect(
+      planAcceptanceResolveParamsSchema.parse({
+        ...identity,
+        decision: "accepted",
+      }),
+    ).toMatchObject(identity);
+    expect(() =>
+      planAcceptanceResolveParamsSchema.parse({
+        ...identity,
+        decision: "changes_requested",
+      }),
+    ).toThrow();
+    expect(() =>
+      planAcceptanceResolveParamsSchema.parse({
+        ...identity,
+        decision: "accepted",
+        feedback: "Already accepted.",
+      }),
+    ).toThrow();
+    expect(
+      planAcceptanceResolveParamsSchema.parse({
+        ...identity,
+        decision: "changes_requested",
+        feedback: "Add a recovery test.",
+      }),
+    ).toHaveProperty("feedback", "Add a recovery test.");
   });
 
   it("carries a safe paused terminal without converting it into failure", () => {

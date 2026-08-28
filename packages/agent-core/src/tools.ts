@@ -7,6 +7,8 @@ import type {
   ProcessTerminationOutcome,
   ProcessTerminationReason,
   PlanUpdatedPayload,
+  PlanAcceptanceRequest,
+  PlanAcceptanceResolution,
   ThreadId,
   ToolCallId,
   TurnId,
@@ -78,6 +80,14 @@ export type ToolOperationalEvent =
   | {
       type: "plan.updated";
       payload: Omit<PlanUpdatedPayload, "callId">;
+    }
+  | {
+      type: "plan.acceptance_requested";
+      payload: Omit<PlanAcceptanceRequest, "callId">;
+    }
+  | {
+      type: "plan.acceptance_resolved";
+      payload: Omit<PlanAcceptanceResolution, "callId">;
     };
 
 export class ToolOperationalEventError extends Error {

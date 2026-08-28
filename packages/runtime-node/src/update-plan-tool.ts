@@ -1,7 +1,10 @@
 import {
   PlanReducerError,
   ToolOperationalEventError,
+  reducePlanAcceptance,
   reducePlanUpdate,
+  rejectPlanAcceptancesBroker,
+  type PlanAcceptanceBroker,
   type PlanRuntimeState,
   type ToolRegistry,
 } from "@koda/agent-core";
@@ -17,12 +20,14 @@ import {
   PLAN_TITLE_BUDGET_BYTES,
   jsonValueSchema,
   planEvidenceReferenceSchema,
+  planAcceptanceResolutionSchema,
   planStageIdSchema,
   planTodoIdSchema,
   planTodoStatusSchema,
   type JsonObject,
   type JsonValue,
   type PlanStageDraft,
+  type PlanAcceptanceRequest,
   type PlanTodo,
   type PlanUpdateDraft,
 } from "@koda/protocol";
@@ -77,10 +82,16 @@ export const updatePlanInputSchema = z
   })
   .strict();
 
+export interface RegisterUpdatePlanToolOptions {
+  acceptances?: PlanAcceptanceBroker;
+}
+
 export function registerUpdatePlanTool(
   registry: ToolRegistry,
   state: PlanRuntimeState,
+  options: RegisterUpdatePlanToolOptions = {},
 ): void {
+  const acceptances = options.acceptances ?? rejectPlanAcceptancesBroker;
   registry.register({
     spec: {
       name: "update_plan",
@@ -126,9 +137,75 @@ export function registerUpdatePlanTool(
             : { explanation: input.explanation }),
         },
       });
-      return jsonValueSchema.parse({ plan });
+      const awaitingStage = plan.stages.find(
+        (stage) => stage.status === "awaiting_acceptance",
+      );
+      if (awaitingStage === undefined) {
+        return jsonValueSchema.parse({ plan });
+      }
+      const request: PlanAcceptanceRequest = {
+        callId: context.callId,
+        planId: plan.planId,
+        planRevision: plan.revision,
+        stageId: awaitingStage.id,
+        criteria: awaitingStage.acceptanceCriteria,
+        summary: awaitingStage.summary!,
+        evidence: awaitingStage.evidence,
+      };
+      await context.report({
+        type: "plan.acceptance_requested",
+        payload: withoutCallId(request),
+      });
+      const resolution = planAcceptanceResolutionSchema.parse(
+        await acceptances.request(
+          {
+            ...request,
+            threadId: context.threadId,
+            turnId: context.turnId,
+          },
+          context.signal,
+        ),
+      );
+      if (resolution.callId !== context.callId) {
+        throw new PlanReducerError(
+          "PLAN_ACCEPTANCE_STALE",
+          "The Plan acceptance decision targets another Tool Call.",
+        );
+      }
+      const reduced = reducePlanAcceptance(plan, resolution);
+      await context.report({
+        type: "plan.acceptance_resolved",
+        payload: withoutCallId(resolution),
+      });
+      if (reduced.status === "changes_requested") {
+        return jsonValueSchema.parse({
+          plan: reduced.plan,
+          acceptance: {
+            status: "changes_requested",
+            feedback: reduced.feedback,
+          },
+        });
+      }
+      await context.report({
+        type: "plan.updated",
+        payload: {
+          source: "runtime_acceptance",
+          plan: reduced.plan,
+        },
+      });
+      return jsonValueSchema.parse({
+        plan: reduced.plan,
+        acceptance: { status: "accepted" },
+      });
     },
   });
+}
+
+function withoutCallId<T extends { callId: unknown }>(
+  value: T,
+): Omit<T, "callId"> {
+  const { callId: _callId, ...rest } = value;
+  return rest;
 }
 
 function toPlanUpdateDraft(

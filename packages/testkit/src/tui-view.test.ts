@@ -675,6 +675,9 @@ function baseState(): TuiState {
       multiFileChanges: true,
       patchDocuments: true,
       approvalGrants: true,
+      planning: true,
+      planCheckpoints: true,
+      stageAcceptance: true,
     },
     providers: [
       {

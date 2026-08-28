@@ -1,6 +1,6 @@
 # Koda Phase 3G: Durable Planning and Harness Checkpoints
 
-- Status: Implementation in progress — Phase 3G1 and Phase 3G2 implemented and verified; Phase 3G3 next
+- Status: Implementation in progress — Phase 3G1 through Phase 3G3 implemented and verified; Phase 3G4 next
 - Date: 2026-08-28
 - Depends on: Phase 2 durable resume and compaction, Phase 3A app-server, Phase 3D Ink interaction, Phase 3E context inspection, and Phase 3F durable execution boundaries
 - Scope: thread-scoped Plan/Todo state, explicit model updates, safe long-task checkpoints, resumable paused turns, and human stage acceptance
@@ -356,13 +356,21 @@ Verification covers the reducer plus the runtime tool, persistence failure bound
 
 ### Phase 3G3: application and protocol v11
 
-Status: **Next.**
+Status: **Implemented and verified (2026-08-28).**
 
 - Add application Plan reads and acceptance composition.
 - Upgrade app-server/client schemas, capabilities, methods, events, and lifecycle.
 - Add acceptance concurrency, stale-resolution, disconnect, and result-budget coverage.
 
+Implemented with an authoritative `KodaApplication.getPlan` JSONL reread after canonical workspace ownership validation, bounded Plan/checkpoint/recovery projection, and no Provider, MCP, or command startup. App-server protocol v11 advertises `planning`, `planCheckpoints`, and `stageAcceptance`; it adds strict `plan/get` and exact-identity `plan/acceptance/resolve` methods, and the Node client exposes both as typed operations.
+
+The dedicated pending-acceptance registry preregisters the durable request before notifying the client, permits exactly one matching decision, rejects stale revisions and duplicate decisions, times out fail-closed, and releases waiters on cancellation, disconnect, shutdown, or terminal cleanup. Accepted decisions are durably ordered before the Runtime-authored revision; changes-requested feedback returns to the model without fabricating a revision. Recovery validates request, resolution, and Runtime revision identity and rejects forged, duplicate, stale, or incompletely applied accepted decisions.
+
+Verification covers exact acceptance and changes-requested results, concurrent/double decisions, stale identities, timeout, cancellation and disconnect cleanup, authoritative Plan/no-Plan reads, workspace mismatch, response budgets, typed Node request correlation, protocol capability negotiation, and hostile recovery logs. The repository format gate, full typecheck, 366-test offline suite, and six reliability scenarios pass. Complete one-shot CLI and Ink Plan/acceptance interaction remains Phase 3G4; final subprocess, crash, provider, and real-TTY closure remains Phase 3G5.
+
 ### Phase 3G4: CLI and Ink interaction
+
+Status: **Next.**
 
 - Add `/plan`, bounded Plan/checkpoint rendering, active-step status, and acceptance cards.
 - Add one-shot terminal acceptance and fail-closed input behavior.

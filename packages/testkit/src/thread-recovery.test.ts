@@ -1,4 +1,8 @@
-import { reducePlanUpdate, type EventReadResult } from "@koda/agent-core";
+import {
+  reducePlanAcceptance,
+  reducePlanUpdate,
+  type EventReadResult,
+} from "@koda/agent-core";
 import { assertResumeWorkspace, recoverThread } from "@koda/runtime-node";
 import {
   agentEventSchema,
@@ -226,6 +230,70 @@ describe("recoverThread", () => {
     ];
     expect(() =>
       recoverThread(readResult(invalidBoundary), threadId),
+    ).toThrowError(expect.objectContaining({ code: "THREAD_LOG_INVALID" }));
+  });
+
+  it("recovers an exact accepted Stage lifecycle", () => {
+    const setup = durableAcceptedPlanSetup();
+
+    const recovered = recoverThread(readResult(setup.events), threadId);
+
+    expect(recovered).toMatchObject({
+      previousStatus: "completed",
+      plan: {
+        planId: setup.acceptedPlan.planId,
+        revision: 2,
+        status: "completed",
+        stages: [{ id: setup.stageId, status: "accepted" }],
+      },
+      checkpoint: { planRevision: 2, reason: "turn_completion" },
+      planNeedsRevalidation: false,
+    });
+  });
+
+  it("rejects stale, unmatched, and duplicate Stage acceptance audit events", () => {
+    const setup = durableAcceptedPlanSetup();
+    const staleResolution = setup.events.map((candidate) =>
+      candidate.type === "plan.acceptance_resolved"
+        ? event(candidate.sequence, "plan.acceptance_resolved", {
+            ...candidate.payload,
+            planRevision: candidate.payload.planRevision + 1,
+          })
+        : candidate,
+    );
+    expect(() =>
+      recoverThread(readResult(staleResolution), threadId),
+    ).toThrowError(expect.objectContaining({ code: "THREAD_LOG_INVALID" }));
+
+    const request = setup.events.find(
+      (candidate) => candidate.type === "plan.acceptance_requested",
+    );
+    if (request?.type !== "plan.acceptance_requested") {
+      throw new Error("Accepted Plan fixture has no acceptance request.");
+    }
+    const duplicateRequest = setup.events.map((candidate) =>
+      candidate.type === "plan.acceptance_resolved"
+        ? event(
+            candidate.sequence,
+            "plan.acceptance_requested",
+            request.payload,
+          )
+        : candidate,
+    );
+    expect(() =>
+      recoverThread(readResult(duplicateRequest), threadId),
+    ).toThrowError(expect.objectContaining({ code: "THREAD_LOG_INVALID" }));
+
+    const acceptedWithoutRuntimeUpdate = [
+      ...setup.events.slice(0, 9),
+      event(9, "tool.completed", {
+        callId: toolCallIdSchema.parse("accepted-plan-call"),
+        name: "update_plan",
+        status: "success",
+      }),
+    ];
+    expect(() =>
+      recoverThread(readResult(acceptedWithoutRuntimeUpdate), threadId),
     ).toThrowError(expect.objectContaining({ code: "THREAD_LOG_INVALID" }));
   });
 
@@ -974,6 +1042,152 @@ function contextEvent(sequence: number): AgentEvent {
     instructionsSha256: "a".repeat(64),
     repositoryInstructions: [],
   });
+}
+
+function durableAcceptedPlanSetup() {
+  const callId = toolCallIdSchema.parse("accepted-plan-call");
+  const stageId = "stage-accepted";
+  const awaitingPlan = reducePlanUpdate({
+    planId: planIdSchema.parse("plan:accepted"),
+    update: {
+      expectedRevision: 0,
+      objective: "Finish accepted planning",
+      stages: [
+        {
+          id: stageId,
+          title: "Verify the implementation",
+          requiresAcceptance: true,
+          acceptanceCriteria: ["Regression tests pass"],
+          summary: "Implementation and tests are complete.",
+          evidence: [{ kind: "tool_call", callId }],
+          todos: [
+            {
+              id: "todo-accepted",
+              title: "Implement and test",
+              status: "completed",
+              outcome: "Implemented with passing tests.",
+            },
+          ],
+        },
+      ],
+    },
+  });
+  const accepted = reducePlanAcceptance(awaitingPlan, {
+    callId,
+    planId: awaitingPlan.planId,
+    planRevision: awaitingPlan.revision,
+    stageId: awaitingPlan.stages[0]!.id,
+    decision: "accepted",
+  });
+  if (accepted.status !== "accepted") {
+    throw new Error("Accepted Plan fixture did not reach accepted state.");
+  }
+  const requestPayload = {
+    callId,
+    planId: awaitingPlan.planId,
+    planRevision: awaitingPlan.revision,
+    stageId: awaitingPlan.stages[0]!.id,
+    criteria: awaitingPlan.stages[0]!.acceptanceCriteria,
+    summary: awaitingPlan.stages[0]!.summary!,
+    evidence: awaitingPlan.stages[0]!.evidence,
+  };
+  return {
+    stageId,
+    acceptedPlan: accepted.plan,
+    events: [
+      event(0, "turn.started", {}),
+      contextEvent(1),
+      recorded(2, {
+        type: "tool_call",
+        id: itemIdSchema.parse("accepted-plan-item"),
+        callId,
+        name: "update_plan",
+        arguments: {},
+      }),
+      event(3, "tool.started", {
+        callId,
+        name: "update_plan",
+        executionBoundary: true,
+      }),
+      event(4, "tool.execution_started", {
+        callId,
+        name: "update_plan",
+        effect: "control",
+      }),
+      event(5, "plan.updated", {
+        callId,
+        source: "model_update",
+        plan: awaitingPlan,
+      }),
+      event(6, "plan.checkpointed", {
+        checkpoint: {
+          checkpointId: planCheckpointIdSchema.parse(
+            "checkpoint:awaiting-acceptance",
+          ),
+          planId: awaitingPlan.planId,
+          planRevision: awaitingPlan.revision,
+          activeStageId: awaitingPlan.stages[0]!.id,
+          lastSafeSequence: 5,
+          reason: "plan_update",
+          evidence: [{ kind: "event", sequence: 5 }],
+        },
+      }),
+      event(7, "plan.acceptance_requested", requestPayload),
+      event(8, "plan.acceptance_resolved", {
+        callId,
+        planId: awaitingPlan.planId,
+        planRevision: awaitingPlan.revision,
+        stageId: awaitingPlan.stages[0]!.id,
+        decision: "accepted",
+      }),
+      event(9, "plan.updated", {
+        callId,
+        source: "runtime_acceptance",
+        plan: accepted.plan,
+      }),
+      event(10, "plan.checkpointed", {
+        checkpoint: {
+          checkpointId: planCheckpointIdSchema.parse(
+            "checkpoint:stage-accepted",
+          ),
+          planId: accepted.plan.planId,
+          planRevision: accepted.plan.revision,
+          lastSafeSequence: 9,
+          reason: "stage_acceptance",
+          evidence: [{ kind: "event", sequence: 9 }],
+        },
+      }),
+      recorded(11, {
+        type: "tool_result",
+        id: itemIdSchema.parse("accepted-plan-result"),
+        callId,
+        name: "update_plan",
+        status: "success",
+        output: jsonValueSchema.parse({
+          plan: accepted.plan,
+          acceptance: { status: "accepted" },
+        }),
+      }),
+      event(12, "tool.completed", {
+        callId,
+        name: "update_plan",
+        status: "success",
+      }),
+      event(13, "plan.checkpointed", {
+        checkpoint: {
+          checkpointId: planCheckpointIdSchema.parse(
+            "checkpoint:accepted-turn",
+          ),
+          planId: accepted.plan.planId,
+          planRevision: accepted.plan.revision,
+          lastSafeSequence: 12,
+          reason: "turn_completion",
+          evidence: [],
+        },
+      }),
+      event(14, "turn.completed", { steps: 1 }),
+    ],
+  };
 }
 
 function durablePlanSetup() {

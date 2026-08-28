@@ -256,6 +256,16 @@ export const planAcceptanceResolutionSchema = z
         path: ["feedback"],
       });
     }
+    if (
+      resolution.decision === "accepted" &&
+      resolution.feedback !== undefined
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "An accepted Stage cannot include change feedback.",
+        path: ["feedback"],
+      });
+    }
   });
 
 export const planUpdatedPayloadSchema = z
