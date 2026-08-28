@@ -356,6 +356,26 @@ describe("TuiController", () => {
     });
   });
 
+  it("preserves a completed streamed assistant response beyond the preview bound", async () => {
+    const client = new FakeAppServerClient();
+    const controller = createController(client);
+    const completeAnswer = `start\n${"界".repeat(4_000)}\nend`;
+
+    await controller.startPrompt("Return a long answer");
+    client.emitEvent("assistant.delta", { text: completeAnswer });
+    expect(controller.getSnapshot().activeTurn?.assistantText).toBe(
+      completeAnswer,
+    );
+
+    client.finish("completed");
+
+    const completedAnswer = [...controller.getSnapshot().transcript]
+      .reverse()
+      .find((entry) => entry.kind === "assistant");
+    expect(Buffer.byteLength(completeAnswer, "utf8")).toBeGreaterThan(8_192);
+    expect(completedAnswer?.text).toBe(completeAnswer);
+  });
+
   it("locks input during approval and sends only one-shot decisions", async () => {
     const client = new FakeAppServerClient();
     const controller = createController(client);

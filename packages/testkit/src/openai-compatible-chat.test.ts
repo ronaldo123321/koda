@@ -198,6 +198,64 @@ describe("OpenAICompatibleChatProvider", () => {
     });
   });
 
+  it("ignores nullable reasoning continuity chunks", async () => {
+    const provider = new OpenAICompatibleChatProvider({
+      client: new FakeCompatibleClient([
+        chunk({
+          choices: [
+            {
+              index: 0,
+              delta: { content: "Hello", reasoning_content: null },
+              finish_reason: null,
+            },
+          ],
+        }),
+        chunk({
+          choices: [
+            {
+              index: 0,
+              delta: { reasoning_content: null },
+              finish_reason: "stop",
+            },
+          ],
+        }),
+      ]),
+      profile: deepSeekProfile,
+      model: "deepseek-v4-pro",
+      instructions: "Inspect safely.",
+    });
+
+    await expect(
+      collect(provider, request, new AbortController().signal),
+    ).resolves.toEqual([
+      { type: "assistant_delta", text: "Hello" },
+      { type: "completed", finishReason: "stop" },
+    ]);
+  });
+
+  it("rejects non-null non-string reasoning continuity chunks", async () => {
+    const provider = new OpenAICompatibleChatProvider({
+      client: new FakeCompatibleClient([
+        chunk({
+          choices: [
+            {
+              index: 0,
+              delta: { reasoning_content: { unexpected: true } },
+              finish_reason: null,
+            },
+          ],
+        }),
+      ]),
+      profile: deepSeekProfile,
+      model: "deepseek-v4-pro",
+      instructions: "Inspect safely.",
+    });
+
+    await expect(
+      collect(provider, request, new AbortController().signal),
+    ).rejects.toMatchObject({ code: "PROVIDER_OUTPUT_INVALID" });
+  });
+
   it("projects one durable multi-tool step into one assistant tool message", () => {
     const firstCallId = toolCallIdSchema.parse("projection-first-call");
     const secondCallId = toolCallIdSchema.parse("projection-second-call");

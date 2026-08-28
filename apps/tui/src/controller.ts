@@ -4411,7 +4411,9 @@ export class TuiController {
       threadId: finished.threadId,
       transcript: [
         ...this.state.transcript,
-        ...additions.map((entry) => this.withTranscriptId(entry)),
+        ...additions.map((entry) =>
+          this.withTranscriptId(entry, entry.kind === "assistant"),
+        ),
       ],
       activeTurn: undefined,
       approval: undefined,
@@ -4450,7 +4452,9 @@ export class TuiController {
       extensionNavigation: undefined,
       transcript: [
         ...this.state.transcript,
-        ...activeEntries.map((entry) => this.withTranscriptId(entry)),
+        ...activeEntries.map((entry) =>
+          this.withTranscriptId(entry, entry.kind === "assistant"),
+        ),
         this.withTranscriptId({ kind: "error", text: boundText(message) }),
       ],
       notice: boundText(message),
@@ -4536,10 +4540,17 @@ export class TuiController {
 
   private withTranscriptId(
     entry: Omit<TuiTranscriptEntry, "id">,
+    preserveCompleteText = false,
   ): TuiTranscriptEntry {
     const id = `transcript-${this.nextTranscriptId}`;
     this.nextTranscriptId += 1;
-    return { id, ...entry, text: boundText(entry.text) };
+    return {
+      id,
+      ...entry,
+      text: preserveCompleteText
+        ? sanitizeText(entry.text)
+        : boundText(entry.text),
+    };
   }
 
   private update(changes: Partial<TuiState>): void {
@@ -5381,10 +5392,7 @@ function boundText(
   text: string,
   maximum = MAXIMUM_PRESENTATION_CHARACTERS,
 ): string {
-  const normalized = text
-    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/gu, "")
-    .replace(/\r\n?/gu, "\n")
-    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/gu, "");
+  const normalized = sanitizeText(text);
   if (Buffer.byteLength(normalized, "utf8") <= maximum) {
     return normalized;
   }
@@ -5404,6 +5412,13 @@ function boundText(
     prefix = prefix.slice(0, -1);
   }
   return `${prefix}...`;
+}
+
+function sanitizeText(text: string): string {
+  return text
+    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/gu, "")
+    .replace(/\r\n?/gu, "\n")
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/gu, "");
 }
 
 export function boundPresentationText(

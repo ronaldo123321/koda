@@ -425,6 +425,7 @@ Status: **In progress; Phase 3A app-server and Phase 3B local MCP boundaries are
 - OS-specific sandboxing and network policy.
 - Secret handling and signed cross-platform releases.
 - High-risk shell-string execution, if retained after sandbox evaluation.
+- **TODO — Progressive tool-activity presentation:** keep a compact aggregate plus the current/recent tools while a turn is running; collapse successful read-only calls into one summary when the turn finishes; keep approvals, mutations, command execution, external calls, failures, rejections, rollbacks, and uncertain outcomes individually visible; and provide an on-demand activity inspector for the complete durable trace. This is a presentation change only and must not weaken event-log durability or auditability.
 
 ### Phase 5: multi-agent and curated memory
 

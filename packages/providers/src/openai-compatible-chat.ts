@@ -136,7 +136,10 @@ export class OpenAICompatibleChatProvider implements ModelProvider {
           if (typeof delta.content === "string" && delta.content.length > 0) {
             yield { type: "assistant_delta", text: delta.content };
           }
-          if (delta.reasoning_content !== undefined) {
+          if (
+            delta.reasoning_content !== undefined &&
+            delta.reasoning_content !== null
+          ) {
             if (typeof delta.reasoning_content !== "string") {
               throw new ProviderError(
                 "PROVIDER_OUTPUT_INVALID",
