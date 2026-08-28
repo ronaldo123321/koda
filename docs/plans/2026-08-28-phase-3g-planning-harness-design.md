@@ -1,6 +1,6 @@
 # Koda Phase 3G: Durable Planning and Harness Checkpoints
 
-- Status: Implementation in progress — Phase 3G1 through Phase 3G3 implemented and verified; Phase 3G4 next
+- Status: Implementation in progress — Phase 3G1 through Phase 3G4 implemented and verified; Phase 3G5 next
 - Date: 2026-08-28
 - Depends on: Phase 2 durable resume and compaction, Phase 3A app-server, Phase 3D Ink interaction, Phase 3E context inspection, and Phase 3F durable execution boundaries
 - Scope: thread-scoped Plan/Todo state, explicit model updates, safe long-task checkpoints, resumable paused turns, and human stage acceptance
@@ -366,17 +366,25 @@ Implemented with an authoritative `KodaApplication.getPlan` JSONL reread after c
 
 The dedicated pending-acceptance registry preregisters the durable request before notifying the client, permits exactly one matching decision, rejects stale revisions and duplicate decisions, times out fail-closed, and releases waiters on cancellation, disconnect, shutdown, or terminal cleanup. Accepted decisions are durably ordered before the Runtime-authored revision; changes-requested feedback returns to the model without fabricating a revision. Recovery validates request, resolution, and Runtime revision identity and rejects forged, duplicate, stale, or incompletely applied accepted decisions.
 
-Verification covers exact acceptance and changes-requested results, concurrent/double decisions, stale identities, timeout, cancellation and disconnect cleanup, authoritative Plan/no-Plan reads, workspace mismatch, response budgets, typed Node request correlation, protocol capability negotiation, and hostile recovery logs. The repository format gate, full typecheck, 366-test offline suite, and six reliability scenarios pass. Complete one-shot CLI and Ink Plan/acceptance interaction remains Phase 3G4; final subprocess, crash, provider, and real-TTY closure remains Phase 3G5.
+Verification covers exact acceptance and changes-requested results, concurrent/double decisions, stale identities, timeout, cancellation and disconnect cleanup, authoritative Plan/no-Plan reads, workspace mismatch, response budgets, typed Node request correlation, protocol capability negotiation, and hostile recovery logs. The repository format gate, full typecheck, 366-test offline suite, and six reliability scenarios passed at the Phase 3G3 checkpoint. One-shot CLI and Ink Plan/acceptance interaction is implemented in Phase 3G4; final subprocess, crash, provider, and real-TTY closure remains Phase 3G5.
 
 ### Phase 3G4: CLI and Ink interaction
 
-Status: **Next.**
+Status: **Implemented and verified (2026-08-28).**
 
 - Add `/plan`, bounded Plan/checkpoint rendering, active-step status, and acceptance cards.
 - Add one-shot terminal acceptance and fail-closed input behavior.
-- Add controller, view, subprocess, and TTY coverage.
+- Add controller and view coverage; reserve the final subprocess/crash/provider/real-TTY matrix for Phase 3G5.
+
+Implemented with an idle-only Ink `/plan` view backed by authoritative `plan/get`, generation-based stale-response rejection, resize-aware bounded rows, checkpoint/recovery evidence, and layered Escape navigation without transcript mutation. The chat status line and `/status` expose compact current Plan/checkpoint state, while live `plan.updated`, `plan.checkpointed`, `plan.acceptance_requested`, and `plan.acceptance_resolved` events project into controller-owned state rather than model prose.
+
+The Ink acceptance card verifies exact Tool Call, Plan ID/revision, Stage, criteria, summary, and evidence before enabling a decision. `y` accepts; `n` opens bounded UTF-8 feedback, requires non-empty changes, and sends the exact app-server identity. Disconnect, shutdown, Turn completion, and cancellation clear pending presentation state without manufacturing a decision. The one-shot CLI uses a dedicated terminal broker: only explicit `y` or `yes` accepts, explicit rejection collects bounded feedback, other input requests changes by default, and EOF/cancellation leaves acceptance unresolved.
+
+Verification covers terminal acceptance, rejection, default-deny, EOF, and cancellation; controller Plan query, scrolling, resize, status, stale response, exact live acceptance, feedback bounds, protocol mismatch, and disconnect; Ink rendering and keyboard routing; and an offline CLI gated-Stage lifecycle through durable JSONL. The repository format gate, full typecheck, 44-file/381-test offline suite, and six reliability scenarios pass. Subprocess interruption/crash matrices, the final provider conformance sweep, and real-TTY acceptance/navigation remain deliberately assigned to Phase 3G5.
 
 ### Phase 3G5: closure
+
+Status: **Next.**
 
 - Run all provider conformance, compaction/recovery, crash, reliability, app-server, client, CLI, Ink, and real TTY gates.
 - Update architecture and roadmap status only after every gate passes.

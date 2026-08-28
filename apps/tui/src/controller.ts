@@ -5,6 +5,7 @@ import type {
 import {
   ARTIFACT_READ_DEFAULT_BYTES,
   CONTEXT_INSTRUCTION_READ_DEFAULT_BYTES,
+  PLAN_DETAIL_BUDGET_BYTES,
   RUNTIME_SETTINGS_MODEL_BUDGET_BYTES,
   artifactIdSchema,
   approvalGrantIdSchema,
@@ -19,6 +20,12 @@ import {
   type ContextReadResult,
   type ContextRequestDescriptor,
   type ModelProviderId,
+  type PlanCheckpoint,
+  type PlanEvidenceReference,
+  type PlanGetResult,
+  type PlanId,
+  type PlanStageId,
+  type PlanSnapshot,
   type RuntimePreference,
   type RuntimeProviderMetadata,
   type ThreadMetadataMessage,
@@ -56,6 +63,7 @@ export type TuiMode =
   | "context_list"
   | "context_detail"
   | "context_instruction_view"
+  | "plan_view"
   | "thread_list"
   | "thread_search_input"
   | "thread_search_results"
@@ -71,8 +79,11 @@ export type TuiTurnStatus =
 export type TuiToolStatus =
   | "preparing"
   | "awaiting_approval"
+  | "awaiting_acceptance"
   | "approved"
+  | "accepted"
   | "rejected"
+  | "changes_requested"
   | "running"
   | "success"
   | "error"
@@ -198,6 +209,29 @@ export interface TuiApprovalState {
   grantCandidate?: ApprovalGrantCandidate;
 }
 
+export interface TuiPlanAcceptanceState {
+  callId: ToolCallId;
+  planId: PlanId;
+  planRevision: number;
+  stageId: PlanStageId;
+  criteria: readonly string[];
+  summary: string;
+  evidence: readonly PlanEvidenceReference[];
+  interaction: "decision" | "feedback";
+  feedback: string;
+  resolving: boolean;
+}
+
+export interface TuiPlanNavigationState {
+  threadId: ThreadId;
+  result?: PlanGetResult;
+  rows: readonly string[];
+  scrollOffset: number;
+  loading: boolean;
+  viewportHeight: number;
+  viewportWidth: number;
+}
+
 export interface TuiActiveTurnState {
   localId: number;
   prompt: string;
@@ -258,12 +292,17 @@ export interface TuiState {
   transcript: readonly TuiTranscriptEntry[];
   activeTurn: TuiActiveTurnState | undefined;
   approval: TuiApprovalState | undefined;
+  planAcceptance: TuiPlanAcceptanceState | undefined;
+  currentPlan: PlanSnapshot | undefined;
+  currentPlanCheckpoint: PlanCheckpoint | undefined;
+  planNeedsRevalidation: boolean;
   input: string;
   notice: string | undefined;
   threadBrowser: TuiThreadBrowserState | undefined;
   runtimeSettings: TuiRuntimeSettingsState | undefined;
   artifactNavigation: TuiArtifactNavigationState | undefined;
   contextNavigation: TuiContextNavigationState | undefined;
+  planNavigation: TuiPlanNavigationState | undefined;
 }
 
 export type TuiSubmitResult = "handled" | "exit";
@@ -318,12 +357,17 @@ export class TuiController {
       transcript: [],
       activeTurn: undefined,
       approval: undefined,
+      planAcceptance: undefined,
+      currentPlan: undefined,
+      currentPlanCheckpoint: undefined,
+      planNeedsRevalidation: false,
       input: "",
       notice: configuration.initialNotice,
       threadBrowser: undefined,
       runtimeSettings: undefined,
       artifactNavigation: undefined,
       contextNavigation: undefined,
+      planNavigation: undefined,
     };
     this.unsubscribeNotification = client.onNotification((notification) => {
       this.receiveNotification(notification);
@@ -385,6 +429,7 @@ export class TuiController {
           [
             "/help — show commands",
             "/status — show connection and session state",
+            "/plan — inspect the durable Plan and latest checkpoint",
             "/clear — clear displayed history only",
             "/threads — browse threads in this workspace",
             "/search <query> — search durable history in this workspace",
@@ -405,6 +450,9 @@ export class TuiController {
         return "handled";
       case "/status":
         this.appendTranscript("system", this.statusText());
+        return "handled";
+      case "/plan":
+        await this.openCurrentPlan();
         return "handled";
       case "/clear":
         this.update({ transcript: [], notice: "Display history cleared." });
@@ -469,6 +517,7 @@ export class TuiController {
     this.appendTranscript("user", prompt, {
       activeTurn,
       approval: undefined,
+      planAcceptance: undefined,
       notice: undefined,
     });
     try {
@@ -2576,6 +2625,10 @@ export class TuiController {
           resumeThreadId: thread.threadId,
         },
         threadId: thread.threadId,
+        currentPlan: undefined,
+        currentPlanCheckpoint: undefined,
+        planNeedsRevalidation: false,
+        planNavigation: undefined,
         transcript: [
           ...this.state.transcript,
           this.withTranscriptId({
@@ -2614,6 +2667,7 @@ export class TuiController {
     const browser = this.state.threadBrowser;
     const artifactNavigation = this.state.artifactNavigation;
     const contextNavigation = this.state.contextNavigation;
+    const planNavigation = this.state.planNavigation;
     if (!Number.isFinite(height) || !Number.isFinite(width)) {
       return;
     }
@@ -2630,7 +2684,8 @@ export class TuiController {
     if (
       browser === undefined &&
       artifactNavigation === undefined &&
-      contextNavigation === undefined
+      contextNavigation === undefined &&
+      planNavigation === undefined
     ) {
       return;
     }
@@ -2775,6 +2830,26 @@ export class TuiController {
                     })(),
                   }),
             },
+          }),
+      ...(planNavigation === undefined
+        ? {}
+        : {
+            planNavigation: (() => {
+              const rows =
+                planNavigation.result === undefined
+                  ? planNavigation.rows
+                  : planPresentationRows(planNavigation.result, viewportWidth);
+              return {
+                ...planNavigation,
+                rows,
+                viewportHeight,
+                viewportWidth,
+                scrollOffset: Math.min(
+                  planNavigation.scrollOffset,
+                  maximumScrollOffset(rows.length, viewportHeight),
+                ),
+              };
+            })(),
           }),
     });
   }
@@ -3346,6 +3421,134 @@ export class TuiController {
     );
   }
 
+  public async openCurrentPlan(): Promise<void> {
+    if (!this.canEditInput() || this.navigationBusy) {
+      this.update({ notice: "Plan inspection is available only while idle." });
+      return;
+    }
+    if (this.state.threadId === undefined) {
+      this.update({ notice: "No current thread is selected." });
+      return;
+    }
+    const threadId = threadIdSchema.parse(this.state.threadId);
+    const generation = this.beginNavigation();
+    this.navigationBusy = true;
+    this.update({
+      mode: "plan_view",
+      planNavigation: {
+        threadId,
+        rows: [],
+        scrollOffset: 0,
+        loading: true,
+        viewportHeight: this.viewportHeight,
+        viewportWidth: this.viewportWidth,
+      },
+      notice: "Loading durable Plan…",
+    });
+    try {
+      const result = await this.client.getPlan({
+        workspace: this.state.configuration.cwd,
+        threadId,
+      });
+      if (
+        !this.isCurrentNavigation(generation) ||
+        this.state.mode !== "plan_view"
+      ) {
+        return;
+      }
+      if (
+        result.threadId !== threadId ||
+        result.workspace !== this.state.configuration.cwd
+      ) {
+        throw new Error(
+          "Plan inspection response identity did not match the request.",
+        );
+      }
+      const current = this.state.planNavigation;
+      if (current === undefined) {
+        return;
+      }
+      this.update({
+        currentPlan: result.plan,
+        currentPlanCheckpoint: result.checkpoint,
+        planNeedsRevalidation: result.recovery.needsRevalidation,
+        planNavigation: {
+          ...current,
+          result,
+          rows: planPresentationRows(result, current.viewportWidth),
+          scrollOffset: 0,
+          loading: false,
+        },
+        notice:
+          result.plan === undefined
+            ? "This thread has no durable Plan."
+            : undefined,
+      });
+    } catch (error) {
+      if (this.isCurrentNavigation(generation)) {
+        this.update({
+          mode: "chat",
+          planNavigation: undefined,
+          notice: `Could not load Plan: ${errorMessage(error)}`,
+        });
+      }
+    } finally {
+      if (this.isCurrentNavigation(generation)) {
+        this.navigationBusy = false;
+      }
+    }
+  }
+
+  public scrollPlan(
+    action: "up" | "down" | "page_up" | "page_down" | "home" | "end",
+  ): void {
+    const navigation = this.state.planNavigation;
+    if (
+      this.state.mode !== "plan_view" ||
+      navigation === undefined ||
+      navigation.loading
+    ) {
+      return;
+    }
+    const maximum = maximumScrollOffset(
+      navigation.rows.length,
+      navigation.viewportHeight,
+    );
+    const amount =
+      action === "page_up" || action === "page_down"
+        ? navigation.viewportHeight
+        : 1;
+    const scrollOffset =
+      action === "home"
+        ? 0
+        : action === "end"
+          ? maximum
+          : Math.min(
+              maximum,
+              Math.max(
+                0,
+                navigation.scrollOffset +
+                  (action === "up" || action === "page_up" ? -amount : amount),
+              ),
+            );
+    this.update({
+      planNavigation: { ...navigation, scrollOffset },
+      notice: undefined,
+    });
+  }
+
+  public closePlan(): void {
+    if (this.state.mode !== "plan_view") {
+      return;
+    }
+    this.cancelNavigation();
+    this.update({
+      mode: "chat",
+      planNavigation: undefined,
+      notice: undefined,
+    });
+  }
+
   private detachThread(): void {
     const previous = this.state.threadId;
     const { resumeThreadId: _resumeThreadId, ...configuration } =
@@ -3363,9 +3566,118 @@ export class TuiController {
       {
         configuration: nextConfiguration,
         threadId: undefined,
+        currentPlan: undefined,
+        currentPlanCheckpoint: undefined,
+        planNeedsRevalidation: false,
+        planNavigation: undefined,
         notice: undefined,
       },
     );
+  }
+
+  public enterPlanAcceptanceFeedback(): void {
+    const acceptance = this.state.planAcceptance;
+    if (acceptance === undefined || acceptance.resolving) {
+      return;
+    }
+    this.update({
+      planAcceptance: {
+        ...acceptance,
+        interaction: "feedback",
+        feedback: "",
+      },
+      notice: undefined,
+    });
+  }
+
+  public setPlanAcceptanceFeedback(feedback: string): void {
+    const acceptance = this.state.planAcceptance;
+    if (
+      acceptance === undefined ||
+      acceptance.interaction !== "feedback" ||
+      acceptance.resolving
+    ) {
+      return;
+    }
+    this.update({
+      planAcceptance: {
+        ...acceptance,
+        feedback: sliceUtf8Input(
+          sanitizeInput(feedback),
+          PLAN_DETAIL_BUDGET_BYTES,
+        ),
+      },
+      notice: undefined,
+    });
+  }
+
+  public cancelPlanAcceptanceFeedback(): void {
+    const acceptance = this.state.planAcceptance;
+    if (
+      acceptance === undefined ||
+      acceptance.interaction !== "feedback" ||
+      acceptance.resolving
+    ) {
+      return;
+    }
+    this.update({
+      planAcceptance: {
+        ...acceptance,
+        interaction: "decision",
+        feedback: "",
+      },
+      notice: undefined,
+    });
+  }
+
+  public async resolvePlanAcceptance(
+    decision: "accepted" | "changes_requested",
+  ): Promise<void> {
+    const acceptance = this.state.planAcceptance;
+    const active = this.state.activeTurn;
+    if (
+      acceptance === undefined ||
+      active?.threadId === undefined ||
+      active.turnId === undefined ||
+      acceptance.resolving
+    ) {
+      return;
+    }
+    const feedback = acceptance.feedback.trim();
+    if (decision === "changes_requested" && feedback.length === 0) {
+      this.update({
+        notice: "Describe the required changes before submitting.",
+      });
+      return;
+    }
+    this.update({
+      planAcceptance: { ...acceptance, resolving: true },
+      notice: undefined,
+    });
+    try {
+      await this.client.resolvePlanAcceptance({
+        threadId: threadIdSchema.parse(active.threadId),
+        turnId: active.turnId,
+        callId: acceptance.callId,
+        planId: acceptance.planId,
+        planRevision: acceptance.planRevision,
+        stageId: acceptance.stageId,
+        decision,
+        ...(decision === "changes_requested" ? { feedback } : {}),
+      });
+    } catch (error) {
+      const current = this.state.planAcceptance;
+      if (
+        current?.callId === acceptance.callId &&
+        current.planRevision === acceptance.planRevision &&
+        current.stageId === acceptance.stageId
+      ) {
+        this.update({
+          planAcceptance: { ...current, resolving: false },
+          notice: `Stage acceptance was not resolved: ${errorMessage(error)}`,
+        });
+      }
+    }
   }
 
   public toggleApprovalDetails(): void {
@@ -3541,10 +3853,12 @@ export class TuiController {
         mode: "chat",
         activeTurn: undefined,
         approval: undefined,
+        planAcceptance: undefined,
         threadBrowser: undefined,
         runtimeSettings: undefined,
         artifactNavigation: undefined,
         contextNavigation: undefined,
+        planNavigation: undefined,
         notice: undefined,
       });
     } catch (error) {
@@ -3553,10 +3867,12 @@ export class TuiController {
         mode: "chat",
         activeTurn: undefined,
         approval: undefined,
+        planAcceptance: undefined,
         threadBrowser: undefined,
         runtimeSettings: undefined,
         artifactNavigation: undefined,
         contextNavigation: undefined,
+        planNavigation: undefined,
         notice: `Shutdown failed: ${errorMessage(error)}`,
       });
     }
@@ -3600,6 +3916,10 @@ export class TuiController {
           : active.status,
     };
     let approval = this.state.approval;
+    let planAcceptance = this.state.planAcceptance;
+    let currentPlan = this.state.currentPlan;
+    let currentPlanCheckpoint = this.state.currentPlanCheckpoint;
+    let planNeedsRevalidation = this.state.planNeedsRevalidation;
     switch (event.type) {
       case "assistant.delta":
         next = {
@@ -3722,6 +4042,90 @@ export class TuiController {
       case "item.recorded":
         next = receiveItem(next, event);
         break;
+      case "plan.updated":
+        currentPlan = event.payload.plan;
+        planNeedsRevalidation = false;
+        next = updateTool(next, event.payload.callId, "update_plan", {
+          detail: `plan r${event.payload.plan.revision} · ${event.payload.plan.status}`,
+        });
+        break;
+      case "plan.checkpointed":
+        currentPlanCheckpoint = event.payload.checkpoint;
+        break;
+      case "plan.acceptance_requested": {
+        const stage = currentPlan?.stages.find(
+          (candidate) => candidate.id === event.payload.stageId,
+        );
+        if (
+          currentPlan === undefined ||
+          currentPlan.planId !== event.payload.planId ||
+          currentPlan.revision !== event.payload.planRevision ||
+          stage?.status !== "awaiting_acceptance" ||
+          stage.summary !== event.payload.summary ||
+          JSON.stringify(stage.acceptanceCriteria) !==
+            JSON.stringify(event.payload.criteria) ||
+          JSON.stringify(stage.evidence) !==
+            JSON.stringify(event.payload.evidence)
+        ) {
+          this.recordSemanticProtocolError(
+            "Stage acceptance request did not match the current durable Plan.",
+          );
+          break;
+        }
+        if (
+          planAcceptance !== undefined &&
+          (planAcceptance.callId !== event.payload.callId ||
+            planAcceptance.planRevision !== event.payload.planRevision ||
+            planAcceptance.stageId !== event.payload.stageId)
+        ) {
+          this.recordSemanticProtocolError(
+            "Received a second Stage acceptance while another request was pending.",
+          );
+          break;
+        }
+        next = updateTool(next, event.payload.callId, "update_plan", {
+          status: "awaiting_acceptance",
+          detail: stage.title,
+        });
+        planAcceptance = {
+          callId: event.payload.callId,
+          planId: event.payload.planId,
+          planRevision: event.payload.planRevision,
+          stageId: event.payload.stageId,
+          criteria: event.payload.criteria,
+          summary: event.payload.summary,
+          evidence: event.payload.evidence,
+          interaction: "decision",
+          feedback: "",
+          resolving: false,
+        };
+        break;
+      }
+      case "plan.acceptance_resolved":
+        next = updateTool(next, event.payload.callId, "update_plan", {
+          status:
+            event.payload.decision === "accepted"
+              ? "accepted"
+              : "changes_requested",
+          ...(event.payload.decision === "accepted"
+            ? { detail: `stage ${event.payload.stageId}` }
+            : event.payload.feedback === undefined
+              ? {}
+              : { detail: event.payload.feedback }),
+        });
+        if (
+          planAcceptance?.callId === event.payload.callId &&
+          planAcceptance.planId === event.payload.planId &&
+          planAcceptance.planRevision === event.payload.planRevision &&
+          planAcceptance.stageId === event.payload.stageId
+        ) {
+          planAcceptance = undefined;
+        } else {
+          this.recordSemanticProtocolError(
+            "Stage acceptance resolution did not match the pending request.",
+          );
+        }
+        break;
       case "turn.completed":
         next = {
           ...next,
@@ -3776,6 +4180,10 @@ export class TuiController {
       threadId: event.threadId,
       activeTurn: next,
       approval,
+      planAcceptance,
+      currentPlan,
+      currentPlanCheckpoint,
+      planNeedsRevalidation,
     });
   }
 
@@ -3817,6 +4225,7 @@ export class TuiController {
       ],
       activeTurn: undefined,
       approval: undefined,
+      planAcceptance: undefined,
       notice: undefined,
     });
   }
@@ -3842,10 +4251,12 @@ export class TuiController {
       mode: "chat",
       activeTurn: undefined,
       approval: undefined,
+      planAcceptance: undefined,
       threadBrowser: undefined,
       runtimeSettings: undefined,
       artifactNavigation: undefined,
       contextNavigation: undefined,
+      planNavigation: undefined,
       transcript: [
         ...this.state.transcript,
         ...activeEntries.map((entry) => this.withTranscriptId(entry)),
@@ -3870,6 +4281,8 @@ export class TuiController {
       `workspace: ${this.state.configuration.cwd}`,
       `approval: ${this.state.configuration.approvalMode}`,
       `turn: ${this.state.activeTurn?.status ?? "idle"}`,
+      `plan: ${compactPlanStatus(this.state.currentPlan, this.state.planNeedsRevalidation) ?? "none"}`,
+      `checkpoint: ${this.state.currentPlanCheckpoint?.checkpointId ?? "none"}`,
       `view: ${this.state.mode}`,
       `diagnostics: ${diagnostics.length === 0 ? "none" : boundText(diagnostics, 2_000)}`,
     ].join("\n");
@@ -3880,7 +4293,8 @@ export class TuiController {
       this.state.connection === "ready" &&
       this.state.mode === "chat" &&
       this.state.activeTurn === undefined &&
-      this.state.approval === undefined
+      this.state.approval === undefined &&
+      this.state.planAcceptance === undefined
     );
   }
 
@@ -3889,7 +4303,8 @@ export class TuiController {
       this.state.connection === "ready" &&
       this.state.mode === "chat" &&
       this.state.activeTurn === undefined &&
-      this.state.approval === undefined
+      this.state.approval === undefined &&
+      this.state.planAcceptance === undefined
     );
   }
 
@@ -4524,6 +4939,153 @@ function addModelUsage(
       totalTokens: (tokens?.totalTokens ?? 0) + usage.totalTokens,
     },
   };
+}
+
+export function compactPlanStatus(
+  plan: PlanSnapshot | undefined,
+  needsRevalidation = false,
+): string | undefined {
+  if (plan === undefined) {
+    return undefined;
+  }
+  const prefix = needsRevalidation ? "revalidate · " : "";
+  if (plan.status !== "active") {
+    return boundText(`${prefix}r${plan.revision} · ${plan.status}`, 512);
+  }
+  const stage = plan.stages.find(
+    (candidate) =>
+      candidate.status !== "completed" && candidate.status !== "accepted",
+  );
+  if (stage === undefined) {
+    return boundText(`${prefix}r${plan.revision} · active`, 512);
+  }
+  const todo =
+    stage.todos.find((candidate) => candidate.status === "in_progress") ??
+    stage.todos.find((candidate) => candidate.status === "blocked") ??
+    stage.todos.find((candidate) => candidate.status === "pending");
+  return boundText(
+    `${prefix}r${plan.revision} · ${stage.title}${todo === undefined ? "" : ` · ${todo.title} (${todo.status.replaceAll("_", " ")})`}`,
+    512,
+  );
+}
+
+function planPresentationRows(
+  result: PlanGetResult,
+  viewportWidth: number,
+): string[] {
+  const maximumBytes = Math.max(
+    256,
+    Math.min(MAXIMUM_PRESENTATION_CHARACTERS, viewportWidth * 8),
+  );
+  const rows: string[] = [];
+  const push = (text: string) => rows.push(boundText(text, maximumBytes));
+  const plan = result.plan;
+  if (plan === undefined) {
+    push("No durable Plan exists for this thread.");
+  } else {
+    push(`Plan ${plan.planId} · revision ${plan.revision} · ${plan.status}`);
+    push(`Objective: ${plan.objective}`);
+    if (result.recovery.needsRevalidation) {
+      push(
+        "Recovery: uncertain effects require revalidation before progress claims.",
+      );
+    }
+    const checkpoint = result.checkpoint;
+    if (checkpoint === undefined) {
+      push("Checkpoint: none");
+    } else {
+      push(
+        `Checkpoint: ${checkpoint.checkpointId} · r${checkpoint.planRevision} · ${checkpoint.reason} · safe through event #${checkpoint.lastSafeSequence}`,
+      );
+      if (checkpoint.completedSummary !== undefined) {
+        push(`Checkpoint summary: ${checkpoint.completedSummary}`);
+      }
+      if (checkpoint.nextAction !== undefined) {
+        push(`Next action: ${checkpoint.nextAction}`);
+      }
+    }
+    for (const [stageIndex, stage] of plan.stages.entries()) {
+      push(
+        `Stage ${stageIndex + 1}/${plan.stages.length} [${stage.status.replaceAll("_", " ")}] ${stage.title} (${stage.id})`,
+      );
+      push(
+        `  acceptance: ${stage.requiresAcceptance ? "required" : "not required"}`,
+      );
+      for (const criterion of stage.acceptanceCriteria) {
+        push(`  criterion: ${criterion}`);
+      }
+      if (stage.summary !== undefined) {
+        push(`  summary: ${stage.summary}`);
+      }
+      for (const evidence of stage.evidence) {
+        push(`  evidence: ${planEvidenceLabel(evidence)}`);
+      }
+      for (const todo of stage.todos) {
+        push(
+          `  Todo [${todo.status.replaceAll("_", " ")}] ${todo.title} (${todo.id})`,
+        );
+        if (todo.outcome !== undefined) {
+          push(`    outcome: ${todo.outcome}`);
+        }
+        if (todo.blockedReason !== undefined) {
+          push(`    blocked: ${todo.blockedReason}`);
+        }
+        if (todo.cancellationReason !== undefined) {
+          push(`    cancelled: ${todo.cancellationReason}`);
+        }
+        if (todo.reopenReason !== undefined) {
+          push(`    reopened: ${todo.reopenReason}`);
+        }
+      }
+    }
+  }
+  push(
+    `Previous turn: ${result.recovery.previousTurnId} · ${result.recovery.previousStatus}`,
+  );
+  for (const call of result.recovery.uncertainToolCalls) {
+    push(
+      `Uncertain tool: ${call.name} (${call.callId}${call.effect === undefined ? "" : ` · ${call.effect}`})`,
+    );
+  }
+  return rows;
+}
+
+export function planEvidenceLabel(evidence: PlanEvidenceReference): string {
+  switch (evidence.kind) {
+    case "item":
+      return `item ${evidence.itemId}`;
+    case "tool_call":
+      return `tool call ${evidence.callId}`;
+    case "artifact":
+      return `artifact ${evidence.artifactId}`;
+    case "event":
+      return `event #${evidence.sequence}`;
+  }
+}
+
+function sanitizeInput(input: string): string {
+  return input.replace(/[\u0000-\u001f\u007f-\u009f]/gu, "");
+}
+
+function sliceUtf8Input(input: string, maximumBytes: number): string {
+  if (Buffer.byteLength(input, "utf8") <= maximumBytes) {
+    return input;
+  }
+  let low = 0;
+  let high = input.length;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (Buffer.byteLength(input.slice(0, middle), "utf8") <= maximumBytes) {
+      low = middle;
+    } else {
+      high = middle - 1;
+    }
+  }
+  let prefix = input.slice(0, low);
+  if (/\p{Surrogate}$/u.test(prefix)) {
+    prefix = prefix.slice(0, -1);
+  }
+  return prefix;
 }
 
 function formatUsage(usage: TurnUsage): string {

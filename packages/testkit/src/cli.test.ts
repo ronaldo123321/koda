@@ -6,7 +6,10 @@ import {
   type RunCommandDependencies,
   type TextWriter,
 } from "@koda/cli";
-import type { ModelProvider } from "@koda/agent-core";
+import type {
+  ModelProvider,
+  PlanAcceptanceBrokerRequest,
+} from "@koda/agent-core";
 import {
   artifactReferenceSchema,
   agentEventSchema,
@@ -365,6 +368,162 @@ describe("Phase 1A CLI", () => {
       },
     );
     metadataIndex.close();
+  });
+
+  it("accepts a gated Plan Stage through the CLI broker and persists its lifecycle", async () => {
+    const root = await mkdtemp(join(tmpdir(), "koda-plan-cli-"));
+    temporaryDirectories.push(root);
+    const workspaceRoot = join(root, "repo");
+    const kodaHome = join(root, "state");
+    await mkdir(workspaceRoot);
+    const callId = toolCallIdSchema.parse("cli-plan-call");
+    const provider = new ScriptedModelProvider([
+      {
+        assertRequest: (request) => {
+          expect(request.tools.map((tool) => tool.name)).toContain(
+            "update_plan",
+          );
+        },
+        events: [
+          {
+            type: "tool_call",
+            callId,
+            name: "update_plan",
+            arguments: {
+              expected_revision: 0,
+              objective: "Finish the gated CLI Stage",
+              stages: [
+                {
+                  id: "stage-cli",
+                  title: "Verify CLI planning",
+                  requires_acceptance: true,
+                  acceptance_criteria: ["The CLI Plan lifecycle is durable."],
+                  summary: "CLI planning is ready for acceptance.",
+                  evidence: [{ kind: "tool_call", callId }],
+                  todos: [
+                    {
+                      id: "todo-cli",
+                      title: "Implement CLI Plan acceptance",
+                      status: "completed",
+                      outcome: "Implemented with an interactive broker.",
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+          { type: "completed", finishReason: "tool_calls" },
+        ],
+      },
+      {
+        assertRequest: (request) => {
+          expect(
+            request.items.find(
+              (item) => item.type === "tool_result" && item.callId === callId,
+            ),
+          ).toMatchObject({
+            status: "success",
+            output: {
+              plan: {
+                revision: 2,
+                status: "completed",
+                stages: [{ id: "stage-cli", status: "accepted" }],
+              },
+              acceptance: { status: "accepted" },
+            },
+          });
+        },
+        events: [
+          { type: "assistant_delta", text: "The gated Stage was accepted." },
+          { type: "completed", finishReason: "stop" },
+        ],
+      },
+    ]);
+    const acceptanceRequests: PlanAcceptanceBrokerRequest[] = [];
+    const dependencies: RunCommandDependencies = {
+      openWorkspace: (path) => ReadOnlyWorkspace.open(path),
+      createProvider: () => provider,
+      createApprovalBroker: () => ({
+        request: async () => ({ decision: "rejected" }),
+      }),
+      createPlanAcceptanceBroker: () => ({
+        request: async (request) => {
+          acceptanceRequests.push(request);
+          return {
+            callId: request.callId,
+            planId: request.planId,
+            planRevision: request.planRevision,
+            stageId: request.stageId,
+            decision: "accepted",
+          };
+        },
+      }),
+      createIds: () => ({
+        threadId: threadIdSchema.parse("plan-cli-thread"),
+        turnId: turnIdSchema.parse("plan-cli-turn"),
+        itemIds: new DeterministicItemIdFactory("plan-cli-item"),
+      }),
+    };
+    const stdout = new MemoryWriter();
+    const stderr = new MemoryWriter();
+
+    await expect(
+      runCommand(
+        {
+          prompt: "Finish the gated CLI Stage.",
+          cwd: workspaceRoot,
+          signal: new AbortController().signal,
+        },
+        {
+          environment: {
+            OPENAI_API_KEY: "offline-test-key",
+            KODA_HOME: kodaHome,
+          },
+          processDirectory: root,
+          stdout,
+          stderr,
+        },
+        dependencies,
+      ),
+    ).resolves.toBe(0);
+
+    expect(acceptanceRequests).toEqual([
+      expect.objectContaining({
+        threadId: "plan-cli-thread",
+        turnId: "plan-cli-turn",
+        callId: "cli-plan-call",
+        planRevision: 1,
+        stageId: "stage-cli",
+        criteria: ["The CLI Plan lifecycle is durable."],
+        summary: "CLI planning is ready for acceptance.",
+      }),
+    ]);
+    expect(stdout.value).toBe("The gated Stage was accepted.\n");
+    expect(stderr.value).toContain("plan revision 1");
+    expect(stderr.value).toContain("plan revision 2");
+    const eventLog = await new JsonlEventStore(
+      join(kodaHome, "threads", "plan-cli-thread.jsonl"),
+    ).readAll();
+    expect(
+      eventLog.events
+        .filter((event) =>
+          [
+            "plan.updated",
+            "plan.checkpointed",
+            "plan.acceptance_requested",
+            "plan.acceptance_resolved",
+          ].includes(event.type),
+        )
+        .map((event) => event.type),
+    ).toEqual([
+      "plan.updated",
+      "plan.checkpointed",
+      "plan.acceptance_requested",
+      "plan.acceptance_resolved",
+      "plan.updated",
+      "plan.checkpointed",
+      "plan.checkpointed",
+    ]);
   });
 
   it("cancels an in-flight turn through the caller signal", async () => {

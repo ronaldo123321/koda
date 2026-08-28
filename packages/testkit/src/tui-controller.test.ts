@@ -7,6 +7,8 @@ import {
   agentEventSchema,
   artifactReferenceSchema,
   initializeResultSchema,
+  planGetResultSchema,
+  planSnapshotSchema,
   threadIdSchema,
   threadMetadataSchema,
   toolCallIdSchema,
@@ -366,6 +368,248 @@ describe("TuiController", () => {
     expect(controller.getSnapshot().approval).toBeUndefined();
     expect(controller.getSnapshot().activeTurn?.tools[0]).toMatchObject({
       status: "approved",
+    });
+  });
+
+  it("opens the authoritative durable Plan without mutating transcript history", async () => {
+    const idleClient = new FakeAppServerClient();
+    const idleController = createController(idleClient);
+    idleController.setInput("/plan");
+    await idleController.submitInput();
+    expect(idleClient.planGetRequests).toEqual([]);
+    expect(idleController.getSnapshot().notice).toBe(
+      "No current thread is selected.",
+    );
+
+    const client = new FakeAppServerClient();
+    const controller = createController(client);
+    await controller.startPrompt("Create a planned thread");
+    client.finish("completed");
+    const plan = tuiPlan(3, "active");
+    client.planGetResult = planGetResultSchema.parse({
+      workspace: "/workspace",
+      threadId: "tui-thread",
+      plan,
+      checkpoint: {
+        checkpointId: "checkpoint:tui-3",
+        planId: plan.planId,
+        planRevision: plan.revision,
+        activeStageId: plan.stages[0]?.id,
+        activeTodoId: plan.stages[0]?.todos[0]?.id,
+        lastSafeSequence: 12,
+        reason: "tool_completion",
+        nextAction: "Run the acceptance checks.",
+        evidence: [{ kind: "event", sequence: 12 }],
+      },
+      recovery: {
+        previousTurnId: "tui-turn-1",
+        previousStatus: "completed",
+        needsRevalidation: true,
+        uncertainToolCalls: [
+          { callId: "uncertain-call", name: "exec_command", effect: "execute" },
+        ],
+      },
+    });
+    controller.setViewportHeight(3, 48);
+    const transcriptLength = controller.getSnapshot().transcript.length;
+
+    controller.setInput("/plan");
+    await controller.submitInput();
+
+    expect(client.planGetRequests).toEqual([
+      { workspace: "/workspace", threadId: "tui-thread" },
+    ]);
+    expect(controller.getSnapshot()).toMatchObject({
+      mode: "plan_view",
+      currentPlan: { planId: "plan:tui", revision: 3 },
+      currentPlanCheckpoint: { checkpointId: "checkpoint:tui-3" },
+      planNeedsRevalidation: true,
+      planNavigation: { loading: false, scrollOffset: 0 },
+    });
+    expect(controller.getSnapshot().planNavigation?.rows.join("\n")).toContain(
+      "Recovery: uncertain effects require revalidation",
+    );
+    controller.scrollPlan("end");
+    expect(
+      controller.getSnapshot().planNavigation?.scrollOffset,
+    ).toBeGreaterThan(0);
+    controller.closePlan();
+    expect(controller.getSnapshot()).toMatchObject({
+      mode: "chat",
+      planNavigation: undefined,
+    });
+    expect(controller.getSnapshot().transcript).toHaveLength(transcriptLength);
+
+    controller.setInput("/status");
+    await controller.submitInput();
+    expect(controller.getSnapshot().transcript.at(-1)?.text).toContain(
+      "checkpoint: checkpoint:tui-3",
+    );
+  });
+
+  it("ignores an authoritative Plan response after the Plan view closes", async () => {
+    const client = new FakeAppServerClient();
+    const controller = createController(client);
+    await controller.startPrompt("Create a planned thread");
+    client.finish("completed");
+    let release: ((result: PlanGetResult) => void) | undefined;
+    client.planGetImplementation = () =>
+      new Promise<PlanGetResult>((resolve) => {
+        release = resolve;
+      });
+
+    controller.setInput("/plan");
+    const opening = controller.submitInput();
+    await Promise.resolve();
+    expect(controller.getSnapshot().mode).toBe("plan_view");
+    controller.closePlan();
+    release?.(
+      planGetResultSchema.parse({
+        workspace: "/workspace",
+        threadId: "tui-thread",
+        plan: tuiPlan(1, "active"),
+        recovery: {
+          previousTurnId: "tui-turn-1",
+          previousStatus: "completed",
+          needsRevalidation: false,
+          uncertainToolCalls: [],
+        },
+      }),
+    );
+    await opening;
+
+    expect(controller.getSnapshot()).toMatchObject({
+      mode: "chat",
+      currentPlan: undefined,
+      planNavigation: undefined,
+    });
+  });
+
+  it("resolves an exact live Stage acceptance and waits for its durable event", async () => {
+    const client = new FakeAppServerClient();
+    const controller = createController(client);
+    await controller.startPrompt("Complete the planned Stage");
+    const callId = toolCallIdSchema.parse("plan-accept-call");
+    const plan = tuiPlan(4, "awaiting_acceptance");
+    const stage = plan.stages[0];
+    if (stage === undefined || stage.summary === undefined) {
+      throw new Error("Plan acceptance fixture is incomplete.");
+    }
+    client.emitEvent("tool.started", { callId, name: "update_plan" });
+    client.emitEvent("plan.updated", {
+      callId,
+      source: "model_update",
+      plan,
+    });
+    client.emitEvent("plan.acceptance_requested", {
+      callId,
+      planId: plan.planId,
+      planRevision: plan.revision,
+      stageId: stage.id,
+      criteria: stage.acceptanceCriteria,
+      summary: stage.summary,
+      evidence: stage.evidence,
+    });
+
+    expect(controller.getSnapshot()).toMatchObject({
+      currentPlan: { revision: 4 },
+      planAcceptance: {
+        callId: "plan-accept-call",
+        stageId: "stage:tui",
+        interaction: "decision",
+        resolving: false,
+      },
+    });
+    controller.setInput("must remain locked");
+    expect(controller.getSnapshot().input).toBe("");
+    await controller.resolvePlanAcceptance("accepted");
+    expect(client.planAcceptanceRequests).toEqual([
+      {
+        threadId: "tui-thread",
+        turnId: "tui-turn-1",
+        callId: "plan-accept-call",
+        planId: "plan:tui",
+        planRevision: 4,
+        stageId: "stage:tui",
+        decision: "accepted",
+      },
+    ]);
+    expect(controller.getSnapshot().planAcceptance?.resolving).toBe(true);
+    client.emitEvent("plan.acceptance_resolved", {
+      callId,
+      planId: plan.planId,
+      planRevision: plan.revision,
+      stageId: stage.id,
+      decision: "accepted",
+    });
+    expect(controller.getSnapshot().planAcceptance).toBeUndefined();
+    expect(controller.getSnapshot().activeTurn?.tools[0]).toMatchObject({
+      status: "accepted",
+      detail: "stage stage:tui",
+    });
+  });
+
+  it("requires bounded feedback for changes and rejects mismatched acceptance", async () => {
+    const client = new FakeAppServerClient();
+    const controller = createController(client);
+    await controller.startPrompt("Review the planned Stage");
+    const callId = toolCallIdSchema.parse("plan-changes-call");
+    const plan = tuiPlan(5, "awaiting_acceptance");
+    const stage = plan.stages[0];
+    if (stage === undefined || stage.summary === undefined) {
+      throw new Error("Plan acceptance fixture is incomplete.");
+    }
+    client.emitEvent("tool.started", { callId, name: "update_plan" });
+    client.emitEvent("plan.updated", { callId, source: "model_update", plan });
+    client.emitEvent("plan.acceptance_requested", {
+      callId,
+      planId: plan.planId,
+      planRevision: plan.revision,
+      stageId: stage.id,
+      criteria: ["A different criterion"],
+      summary: stage.summary,
+      evidence: stage.evidence,
+    });
+    expect(controller.getSnapshot().planAcceptance).toBeUndefined();
+    expect(controller.getSnapshot().transcript.at(-1)?.text).toContain(
+      "Protocol state error",
+    );
+
+    client.emitEvent("plan.acceptance_requested", {
+      callId,
+      planId: plan.planId,
+      planRevision: plan.revision,
+      stageId: stage.id,
+      criteria: stage.acceptanceCriteria,
+      summary: stage.summary,
+      evidence: stage.evidence,
+    });
+    controller.enterPlanAcceptanceFeedback();
+    await controller.resolvePlanAcceptance("changes_requested");
+    expect(client.planAcceptanceRequests).toEqual([]);
+    expect(controller.getSnapshot().notice).toContain(
+      "Describe the required changes",
+    );
+    controller.setPlanAcceptanceFeedback(
+      `  Add regression coverage.\n${"界".repeat(9_000)}`,
+    );
+    expect(
+      Buffer.byteLength(
+        controller.getSnapshot().planAcceptance?.feedback ?? "",
+        "utf8",
+      ),
+    ).toBeLessThanOrEqual(16_384);
+    await controller.resolvePlanAcceptance("changes_requested");
+    expect(client.planAcceptanceRequests[0]).toMatchObject({
+      callId: "plan-changes-call",
+      planRevision: 5,
+      decision: "changes_requested",
+      feedback: expect.stringContaining("Add regression coverage."),
+    });
+    client.disconnect(new Error("acceptance transport closed"));
+    expect(controller.getSnapshot()).toMatchObject({
+      connection: "error",
+      planAcceptance: undefined,
     });
   });
 
@@ -1536,6 +1780,7 @@ class FakeAppServerClient implements AppServerClientApi {
   };
   public contextReadResult: ContextReadResult | undefined;
   public contextInstructionReadResult: ContextInstructionReadResult | undefined;
+  public planGetResult: PlanGetResult | undefined;
   public threadListError: Error | undefined;
   public threadEventsError: Error | undefined;
   public threadSearchError: Error | undefined;
@@ -1557,6 +1802,8 @@ class FakeAppServerClient implements AppServerClientApi {
     | undefined;
   public contextReadImplementation:
     ((params: ContextReadParams) => Promise<ContextReadResult>) | undefined;
+  public planGetImplementation:
+    ((params: PlanGetParams) => Promise<PlanGetResult>) | undefined;
   public diagnosticText = "";
   public beforeStartResult: (() => void) | undefined;
   public startImplementation:
@@ -1660,6 +1907,12 @@ class FakeAppServerClient implements AppServerClientApi {
 
   public getPlan(params: PlanGetParams): Promise<PlanGetResult> {
     this.planGetRequests.push(params);
+    if (this.planGetImplementation !== undefined) {
+      return this.planGetImplementation(params);
+    }
+    if (this.planGetResult !== undefined) {
+      return Promise.resolve(this.planGetResult);
+    }
     return Promise.resolve({
       workspace: params.workspace,
       threadId: params.threadId,
@@ -1993,6 +2246,48 @@ function createController(
   return new TuiController(client, {
     cwd: "/workspace",
     provider: overrides.provider ?? "openai",
+  });
+}
+
+function tuiPlan(
+  revision: number,
+  stageStatus: "active" | "awaiting_acceptance" | "accepted",
+) {
+  return planSnapshotSchema.parse({
+    schemaVersion: 1,
+    planId: "plan:tui",
+    revision,
+    objective: "Ship the durable Plan interaction.",
+    status: stageStatus === "accepted" ? "completed" : "active",
+    stages: [
+      {
+        id: "stage:tui",
+        title: "Verify Plan interaction",
+        status: stageStatus,
+        requiresAcceptance: true,
+        acceptanceCriteria: ["The Plan interaction passes regression tests."],
+        summary:
+          stageStatus === "active"
+            ? undefined
+            : "The Plan interaction is ready for review.",
+        evidence:
+          stageStatus === "active" ? [] : [{ kind: "event", sequence: 12 }],
+        todos: [
+          stageStatus === "active"
+            ? {
+                id: "todo:tui",
+                title: "Implement the Plan interaction",
+                status: "in_progress",
+              }
+            : {
+                id: "todo:tui",
+                title: "Implement the Plan interaction",
+                status: "completed",
+                outcome: "Plan interaction implemented and verified.",
+              },
+        ],
+      },
+    ],
   });
 }
 

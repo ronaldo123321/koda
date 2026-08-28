@@ -4,6 +4,8 @@ import { Box, Static, Text, useApp, useInput, useStdout, type Key } from "ink";
 import {
   TuiController,
   boundPresentationText,
+  compactPlanStatus,
+  planEvidenceLabel,
   type TuiState,
   type TuiTranscriptEntry,
 } from "./controller.js";
@@ -107,6 +109,17 @@ export interface TuiInputController {
     action: "up" | "down" | "page_up" | "page_down" | "home" | "end",
   ): Promise<void>;
   closeContextLevel(): void;
+  openCurrentPlan(): Promise<void>;
+  scrollPlan(
+    action: "up" | "down" | "page_up" | "page_down" | "home" | "end",
+  ): void;
+  closePlan(): void;
+  enterPlanAcceptanceFeedback(): void;
+  setPlanAcceptanceFeedback(feedback: string): void;
+  cancelPlanAcceptanceFeedback(): void;
+  resolvePlanAcceptance(
+    decision: "accepted" | "changes_requested",
+  ): Promise<void>;
 }
 
 export function KodaView({ state }: KodaViewProps) {
@@ -146,6 +159,7 @@ export function KodaView({ state }: KodaViewProps) {
       {state.mode === "context_instruction_view" ? (
         <ContextInstructionViewer state={state} />
       ) : null}
+      {state.mode === "plan_view" ? <PlanView state={state} /> : null}
 
       {state.mode === "chat" ? (
         <>
@@ -176,6 +190,10 @@ export function KodaView({ state }: KodaViewProps) {
                     : "y approve once · a approve for 15m · n reject · d details · Esc cancel turn"}
               </Text>
             </Box>
+          )}
+
+          {state.planAcceptance === undefined ? null : (
+            <PlanAcceptanceCard state={state} />
           )}
         </>
       ) : null}
@@ -218,6 +236,24 @@ export function routeTuiInput(
       requestExit();
     } else {
       void controller.cancelActiveTurn();
+    }
+    return;
+  }
+  if (state.mode === "plan_view") {
+    if (key.escape) {
+      controller.closePlan();
+    } else if (key.upArrow) {
+      controller.scrollPlan("up");
+    } else if (key.downArrow) {
+      controller.scrollPlan("down");
+    } else if (key.pageUp) {
+      controller.scrollPlan("page_up");
+    } else if (key.pageDown) {
+      controller.scrollPlan("page_down");
+    } else if (key.home) {
+      controller.scrollPlan("home");
+    } else if (key.end) {
+      controller.scrollPlan("end");
     }
     return;
   }
@@ -440,6 +476,49 @@ export function routeTuiInput(
       void controller.openPreviewArtifacts();
     } else if (input.toLowerCase() === "c") {
       void controller.openPreviewContext();
+    }
+    return;
+  }
+  if (state.planAcceptance !== undefined) {
+    const acceptance = state.planAcceptance;
+    if (acceptance.resolving) {
+      return;
+    }
+    if (acceptance.interaction === "feedback") {
+      if (key.escape) {
+        controller.cancelPlanAcceptanceFeedback();
+      } else if (key.return) {
+        void controller.resolvePlanAcceptance("changes_requested");
+      } else if (key.backspace || key.delete) {
+        controller.setPlanAcceptanceFeedback(
+          [...acceptance.feedback].slice(0, -1).join(""),
+        );
+      } else if (
+        !key.ctrl &&
+        !key.meta &&
+        !key.upArrow &&
+        !key.downArrow &&
+        !key.leftArrow &&
+        !key.rightArrow &&
+        !key.pageDown &&
+        !key.pageUp &&
+        !key.home &&
+        !key.end &&
+        !key.tab
+      ) {
+        const printable = input.replace(/[\u0000-\u001f\u007f-\u009f]/gu, "");
+        if (printable.length > 0) {
+          controller.setPlanAcceptanceFeedback(acceptance.feedback + printable);
+        }
+      }
+      return;
+    }
+    if (key.escape) {
+      void controller.cancelActiveTurn();
+    } else if (input.toLowerCase() === "y") {
+      void controller.resolvePlanAcceptance("accepted");
+    } else if (input.toLowerCase() === "n") {
+      controller.enterPlanAcceptanceFeedback();
     }
     return;
   }
@@ -861,6 +940,94 @@ function ContextInstructionViewer({ state }: { state: TuiState }) {
   );
 }
 
+function PlanView({ state }: { state: TuiState }) {
+  const navigation = state.planNavigation;
+  if (navigation === undefined) {
+    return <Text color="red">Plan view state is unavailable.</Text>;
+  }
+  const visible = navigation.rows.slice(
+    navigation.scrollOffset,
+    navigation.scrollOffset + navigation.viewportHeight,
+  );
+  const firstRow =
+    navigation.rows.length === 0 ? 0 : navigation.scrollOffset + 1;
+  const lastRow = Math.min(
+    navigation.rows.length,
+    navigation.scrollOffset + navigation.viewportHeight,
+  );
+  return (
+    <Box flexDirection="column" borderStyle="round" paddingX={1}>
+      <Text bold color="cyan">
+        Durable Plan · {navigation.threadId}
+      </Text>
+      {navigation.loading ? (
+        <Text dimColor>Loading authoritative Plan state…</Text>
+      ) : (
+        visible.map((row, index) => (
+          <Text key={`${navigation.scrollOffset}:${index}`}>
+            {row.length === 0 ? " " : row}
+          </Text>
+        ))
+      )}
+      <Text dimColor>
+        {navigation.loading
+          ? "Loading… · Esc back"
+          : `${firstRow}–${lastRow} / ${navigation.rows.length} rows · ↑/↓ scroll · PgUp/PgDn page · Home/End boundary · Esc back`}
+      </Text>
+    </Box>
+  );
+}
+
+function PlanAcceptanceCard({ state }: { state: TuiState }) {
+  const acceptance = state.planAcceptance;
+  if (acceptance === undefined) {
+    return null;
+  }
+  return (
+    <Box
+      flexDirection="column"
+      borderStyle="round"
+      borderColor="magenta"
+      paddingX={1}
+    >
+      <Text bold color="magenta">
+        {`Stage acceptance required · ${acceptance.stageId} · Plan r${acceptance.planRevision}`}
+      </Text>
+      <Text>{acceptance.summary}</Text>
+      {acceptance.criteria.map((criterion, index) => (
+        <Text key={`criterion:${index}`}>{`criterion: ${criterion}`}</Text>
+      ))}
+      {acceptance.evidence.map((evidence, index) => (
+        <Text key={`evidence:${index}`} dimColor>
+          {`evidence: ${planEvidenceLabel(evidence)}`}
+        </Text>
+      ))}
+      {acceptance.interaction === "feedback" ? (
+        <>
+          <Box>
+            <Text bold color="cyan">
+              changes{"> "}
+            </Text>
+            <Text>{acceptance.feedback}</Text>
+            <Text inverse> </Text>
+          </Box>
+          <Text dimColor>
+            {acceptance.resolving
+              ? "Submitting required changes…"
+              : "Enter submit · Esc back"}
+          </Text>
+        </>
+      ) : (
+        <Text dimColor>
+          {acceptance.resolving
+            ? "Resolving Stage acceptance…"
+            : "y accept · n request changes · Esc cancel turn"}
+        </Text>
+      )}
+    </Box>
+  );
+}
+
 function ThreadSearchInput({ state }: { state: TuiState }) {
   const search = state.threadBrowser?.search;
   if (search === undefined) {
@@ -1029,16 +1196,20 @@ function StatusLine({ state }: { state: TuiState }) {
     next.model === state.configuration.model
       ? ""
       : ` · next ${next.provider}/${boundPresentationText(next.model, 256)}`;
+  const plan = compactPlanStatus(
+    state.currentPlan,
+    state.planNeedsRevalidation,
+  );
   return (
     <Text dimColor>
-      {`${state.connection} · ${active} · approval ${state.configuration.approvalMode}${nextLabel}`}
+      {`${state.connection} · ${active} · approval ${state.configuration.approvalMode}${nextLabel}${plan === undefined ? "" : ` · plan ${plan}`}`}
       {usage === undefined ? "" : ` · ${usage.tokens.totalTokens} tokens`}
     </Text>
   );
 }
 
 function Prompt({ state }: { state: TuiState }) {
-  if (state.approval !== undefined) {
+  if (state.approval !== undefined || state.planAcceptance !== undefined) {
     return null;
   }
   if (state.activeTurn !== undefined) {

@@ -1,7 +1,11 @@
 import { randomUUID } from "node:crypto";
 
 import { KodaApplication, type KodaApplicationDependencies } from "@koda/app";
-import { type ApprovalBroker, type ItemIdFactory } from "@koda/agent-core";
+import {
+  type ApprovalBroker,
+  type ItemIdFactory,
+  type PlanAcceptanceBroker,
+} from "@koda/agent-core";
 import {
   itemIdSchema,
   threadIdSchema,
@@ -15,6 +19,7 @@ import { ReadOnlyWorkspace } from "@koda/runtime-node";
 import { ConfigurationError } from "./config.js";
 import { ConsoleEventSink, type TextWriter } from "./console-event-sink.js";
 import { TerminalApprovalBroker } from "./terminal-approval-broker.js";
+import { TerminalPlanAcceptanceBroker } from "./terminal-plan-acceptance-broker.js";
 
 export interface RunCommandInput {
   approvalMode?: string;
@@ -36,6 +41,7 @@ export interface RunCommandContext {
 
 export interface RunCommandDependencies extends KodaApplicationDependencies {
   createApprovalBroker(context: RunCommandContext): ApprovalBroker;
+  createPlanAcceptanceBroker?(context: RunCommandContext): PlanAcceptanceBroker;
 }
 
 const productionDependencies: RunCommandDependencies = {
@@ -50,6 +56,11 @@ const productionDependencies: RunCommandDependencies = {
     }),
   createApprovalBroker: (context) =>
     new TerminalApprovalBroker({
+      input: context.stdin ?? process.stdin,
+      output: context.stderr,
+    }),
+  createPlanAcceptanceBroker: (context) =>
+    new TerminalPlanAcceptanceBroker({
       input: context.stdin ?? process.stdin,
       output: context.stderr,
     }),
@@ -100,6 +111,12 @@ export async function runCommand(
           },
         },
         approvals: dependencies.createApprovalBroker(context),
+        planAcceptances:
+          dependencies.createPlanAcceptanceBroker?.(context) ??
+          new TerminalPlanAcceptanceBroker({
+            input: context.stdin ?? process.stdin,
+            output: context.stderr,
+          }),
         diagnostic: (diagnostic) => {
           const label =
             diagnostic.code === "THREAD_LEASE_CLEANUP_FAILED"

@@ -5,6 +5,9 @@ import {
   artifactReferenceSchema,
   initializeResultSchema,
   modelProviderIdSchema,
+  planIdSchema,
+  planSnapshotSchema,
+  planStageIdSchema,
   threadIdSchema,
   toolCallIdSchema,
   turnIdSchema,
@@ -80,6 +83,141 @@ describe("Koda Ink view", () => {
     expect(frame).toContain("old -> new");
     expect(frame).toContain("y approve · n reject · d details");
     expect(frame).not.toContain(">  ");
+  });
+
+  it("renders a bounded durable Plan view and compact chat status", () => {
+    const state = baseState();
+    state.threadId = "tui-thread";
+    state.mode = "plan_view";
+    state.planNavigation = {
+      threadId: threadIdSchema.parse("tui-thread"),
+      rows: [
+        "Plan plan:tui · revision 2 · active",
+        "Objective: Ship it",
+        "hidden",
+      ],
+      scrollOffset: 1,
+      loading: false,
+      viewportHeight: 1,
+      viewportWidth: 80,
+    };
+    let frame = renderToString(createElement(KodaView, { state }));
+    expect(frame).toContain("Durable Plan · tui-thread");
+    expect(frame).toContain("Objective: Ship it");
+    expect(frame).not.toContain("hidden");
+    expect(frame).toContain("2–2 / 3 rows");
+
+    state.mode = "chat";
+    state.planNavigation = undefined;
+    state.currentPlan = planSnapshotSchema.parse({
+      schemaVersion: 1,
+      planId: "plan:tui",
+      revision: 2,
+      objective: "Ship it",
+      status: "active",
+      stages: [
+        {
+          id: "stage:tui",
+          title: "Build interaction",
+          status: "active",
+          requiresAcceptance: false,
+          acceptanceCriteria: [],
+          evidence: [],
+          todos: [
+            {
+              id: "todo:tui",
+              title: "Add tests",
+              status: "in_progress",
+            },
+          ],
+        },
+      ],
+    });
+    frame = renderToString(createElement(KodaView, { state }));
+    expect(frame).toContain("plan r2 · Build interaction · Add tests");
+    expect(frame).toContain("progress)");
+  });
+
+  it("renders Stage acceptance and routes decision and feedback keys", () => {
+    const controller = fakeInputController();
+    const state = baseState();
+    state.threadId = "tui-thread";
+    state.activeTurn = {
+      localId: 1,
+      prompt: "Review",
+      status: "running",
+      threadId: "tui-thread",
+      turnId: turnIdSchema.parse("tui-turn"),
+      assistantText: "",
+      tools: [],
+      notes: [],
+      cancelRequested: false,
+    };
+    state.planAcceptance = {
+      callId: toolCallIdSchema.parse("plan-view-call"),
+      planId: planIdSchema.parse("plan:tui"),
+      planRevision: 4,
+      stageId: planStageIdSchema.parse("stage:tui"),
+      criteria: ["Regression tests pass."],
+      summary: "Ready for review.",
+      evidence: [{ kind: "event", sequence: 12 }],
+      interaction: "decision",
+      feedback: "",
+      resolving: false,
+    };
+
+    let frame = renderToString(createElement(KodaView, { state }));
+    expect(frame).toContain("Stage acceptance required · stage:tui · Plan r4");
+    expect(frame).toContain("criterion: Regression tests pass.");
+    expect(frame).toContain("evidence: event #12");
+    expect(frame).toContain("y accept · n request changes");
+    expect(frame).not.toContain(">  ");
+
+    routeTuiInput(controller, state, "y", key(), vi.fn());
+    routeTuiInput(controller, state, "n", key(), vi.fn());
+    expect(controller.resolvePlanAcceptance).toHaveBeenCalledWith("accepted");
+    expect(controller.enterPlanAcceptanceFeedback).toHaveBeenCalledOnce();
+
+    state.planAcceptance.interaction = "feedback";
+    state.planAcceptance.feedback = "Add";
+    frame = renderToString(createElement(KodaView, { state }));
+    expect(frame).toContain("changes> Add");
+    routeTuiInput(controller, state, " tests", key(), vi.fn());
+    routeTuiInput(controller, state, "", key({ backspace: true }), vi.fn());
+    routeTuiInput(controller, state, "", key({ return: true }), vi.fn());
+    routeTuiInput(controller, state, "", key({ escape: true }), vi.fn());
+    expect(controller.setPlanAcceptanceFeedback).toHaveBeenCalledWith(
+      "Add tests",
+    );
+    expect(controller.setPlanAcceptanceFeedback).toHaveBeenCalledWith("Ad");
+    expect(controller.resolvePlanAcceptance).toHaveBeenCalledWith(
+      "changes_requested",
+    );
+    expect(controller.cancelPlanAcceptanceFeedback).toHaveBeenCalledOnce();
+  });
+
+  it("routes Plan navigation keys only within the Plan view", () => {
+    const controller = fakeInputController();
+    const state = baseState();
+    state.mode = "plan_view";
+    state.planNavigation = {
+      threadId: threadIdSchema.parse("tui-thread"),
+      rows: ["row"],
+      scrollOffset: 0,
+      loading: false,
+      viewportHeight: 10,
+      viewportWidth: 80,
+    };
+    routeTuiInput(controller, state, "", key({ downArrow: true }), vi.fn());
+    routeTuiInput(controller, state, "", key({ pageDown: true }), vi.fn());
+    routeTuiInput(controller, state, "", key({ end: true }), vi.fn());
+    routeTuiInput(controller, state, "", key({ escape: true }), vi.fn());
+    expect(controller.scrollPlan.mock.calls).toEqual([
+      ["down"],
+      ["page_down"],
+      ["end"],
+    ]);
+    expect(controller.closePlan).toHaveBeenCalledOnce();
   });
 
   it("routes prompt, approval, cancellation, and exit keys", async () => {
@@ -707,12 +845,17 @@ function baseState(): TuiState {
     transcript: [],
     activeTurn: undefined,
     approval: undefined,
+    planAcceptance: undefined,
+    currentPlan: undefined,
+    currentPlanCheckpoint: undefined,
+    planNeedsRevalidation: false,
     input: "",
     notice: undefined,
     threadBrowser: undefined,
     runtimeSettings: undefined,
     artifactNavigation: undefined,
     contextNavigation: undefined,
+    planNavigation: undefined,
   };
 }
 
@@ -759,6 +902,13 @@ function fakeInputController() {
     openSelectedContextInstruction: vi.fn(() => Promise.resolve()),
     scrollContextInstruction: vi.fn(() => Promise.resolve()),
     closeContextLevel: vi.fn(),
+    openCurrentPlan: vi.fn(() => Promise.resolve()),
+    scrollPlan: vi.fn(),
+    closePlan: vi.fn(),
+    enterPlanAcceptanceFeedback: vi.fn(),
+    setPlanAcceptanceFeedback: vi.fn(),
+    cancelPlanAcceptanceFeedback: vi.fn(),
+    resolvePlanAcceptance: vi.fn(() => Promise.resolve()),
   } satisfies TuiInputController;
 }
 
