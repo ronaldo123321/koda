@@ -12,7 +12,9 @@ import {
 import {
   JsonlEventStore,
   reconcileWorkspaceMutationAudit,
+  reconcileWorkspaceMutationResolutionAudit,
   type WorkspaceMutationRecoveryResult,
+  type WorkspaceMutationResolutionReceipt,
 } from "@koda/runtime-node";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
@@ -96,6 +98,44 @@ describe("reconcileWorkspaceMutationAudit", () => {
       message: expect.stringContaining("conflicting terminal"),
     });
     expect((await eventStore.readAllRequired()).events).toHaveLength(4);
+  });
+});
+
+describe("reconcileWorkspaceMutationResolutionAudit", () => {
+  it("appends one idempotent resolution after the uncertain boundary", async () => {
+    await eventStore.append(terminalEvent(3, "workspace.change_set_uncertain"));
+    const receipt = resolutionReceipt();
+
+    await expect(
+      reconcileWorkspaceMutationResolutionAudit(kodaHome, receipt, {
+        now: () => "2026-08-28T02:00:00.000Z",
+      }),
+    ).resolves.toEqual({ status: "reconciled" });
+    expect((await eventStore.readAllRequired()).events.at(-1)).toMatchObject({
+      sequence: 4,
+      timestamp: "2026-08-28T02:00:00.000Z",
+      type: "workspace.change_set_resolved",
+      payload: {
+        callId: "audit-call",
+        name: "apply_changes",
+        planSha256: "a".repeat(64),
+        resolution: "restored_original",
+        stateToken: "d".repeat(64),
+      },
+    });
+    await expect(
+      reconcileWorkspaceMutationResolutionAudit(kodaHome, receipt),
+    ).resolves.toEqual({ status: "already_reconciled" });
+    expect((await eventStore.readAllRequired()).events).toHaveLength(5);
+  });
+
+  it("defers when the uncertain boundary is missing", async () => {
+    await expect(
+      reconcileWorkspaceMutationResolutionAudit(kodaHome, resolutionReceipt()),
+    ).resolves.toMatchObject({
+      status: "deferred",
+      message: expect.stringContaining("uncertain"),
+    });
   });
 });
 
@@ -191,6 +231,23 @@ function recoveryResult(
     changeCount: 1,
     appliedCount: status === "not_started" ? 0 : 1,
     restoredPaths: status === "rolled_back" ? ["README.md"] : [],
+    journalDirectory: join(temporaryRoot, "journal"),
+  };
+}
+
+function resolutionReceipt(): WorkspaceMutationResolutionReceipt {
+  return {
+    conflictId: `wmc_${"e".repeat(64)}`,
+    threadId: "audit-thread",
+    turnId: "audit-turn",
+    callId: "audit-call",
+    toolName: "apply_changes",
+    planSha256: "a".repeat(64),
+    resolution: "restored_original",
+    stateToken: "d".repeat(64),
+    resolvedAt: "2026-08-28T01:30:00.000Z",
+    paths: ["README.md"],
+    changeCount: 1,
     journalDirectory: join(temporaryRoot, "journal"),
   };
 }

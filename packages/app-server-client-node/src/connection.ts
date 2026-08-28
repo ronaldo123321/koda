@@ -20,7 +20,7 @@ import {
   clientErrorMessage,
 } from "./errors.js";
 
-export const DEFAULT_MAXIMUM_LINE_BYTES = 1_048_576;
+export const DEFAULT_MAXIMUM_LINE_BYTES = 2_359_296;
 export const DEFAULT_REQUEST_TIMEOUT_MS = 5_000;
 
 export type AppServerNotification =

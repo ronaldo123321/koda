@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 
 import {
@@ -31,6 +32,14 @@ import {
   settingsGetResultSchema,
   settingsUpdateParamsSchema,
   settingsUpdateResultSchema,
+  workspaceMutationBackupExportParamsSchema,
+  workspaceMutationBackupExportResultSchema,
+  workspaceMutationConflictGetParamsSchema,
+  workspaceMutationConflictGetResultSchema,
+  workspaceMutationConflictResolveParamsSchema,
+  workspaceMutationConflictResolveResultSchema,
+  workspaceMutationConflictsListParamsSchema,
+  workspaceMutationConflictsListResultSchema,
   shutdownResultSchema,
   threadEventsParamsSchema,
   threadEventsResultSchema,
@@ -77,6 +86,14 @@ import {
   type SettingsGetResult,
   type SettingsUpdateParams,
   type SettingsUpdateResult,
+  type WorkspaceMutationBackupExportParams,
+  type WorkspaceMutationBackupExportResult,
+  type WorkspaceMutationConflictGetParams,
+  type WorkspaceMutationConflictGetResult,
+  type WorkspaceMutationConflictResolveParams,
+  type WorkspaceMutationConflictResolveResult,
+  type WorkspaceMutationConflictsListParams,
+  type WorkspaceMutationConflictsListResult,
   type ThreadGetParams,
   type ThreadGetResult,
   type ThreadEventsParams,
@@ -148,6 +165,18 @@ export interface AppServerClientApi {
   updateRuntimeSettings(
     params: SettingsUpdateParams,
   ): Promise<SettingsUpdateResult>;
+  listWorkspaceMutationConflicts(
+    params: WorkspaceMutationConflictsListParams,
+  ): Promise<WorkspaceMutationConflictsListResult>;
+  inspectWorkspaceMutationConflict(
+    params: WorkspaceMutationConflictGetParams,
+  ): Promise<WorkspaceMutationConflictGetResult>;
+  exportWorkspaceMutationBackup(
+    params: WorkspaceMutationBackupExportParams,
+  ): Promise<WorkspaceMutationBackupExportResult>;
+  resolveWorkspaceMutationConflict(
+    params: WorkspaceMutationConflictResolveParams,
+  ): Promise<WorkspaceMutationConflictResolveResult>;
   startTurn(params: TurnStartParams): Promise<TurnStartResult>;
   cancelTurn(params: TurnCancelParams): Promise<TurnCancelResult>;
   resolveApproval(
@@ -413,6 +442,65 @@ export class NodeAppServerClient implements AppServerClientApi {
       "settings/update",
       jsonValueSchema.parse(settingsUpdateParamsSchema.parse(params)),
       settingsUpdateResultSchema,
+    );
+  }
+
+  public listWorkspaceMutationConflicts(
+    params: WorkspaceMutationConflictsListParams,
+  ): Promise<WorkspaceMutationConflictsListResult> {
+    return this.connection.request(
+      "workspace/mutation/conflicts",
+      jsonValueSchema.parse(
+        workspaceMutationConflictsListParamsSchema.parse(params),
+      ),
+      workspaceMutationConflictsListResultSchema,
+    );
+  }
+
+  public inspectWorkspaceMutationConflict(
+    params: WorkspaceMutationConflictGetParams,
+  ): Promise<WorkspaceMutationConflictGetResult> {
+    return this.connection.request(
+      "workspace/mutation/conflict/get",
+      jsonValueSchema.parse(
+        workspaceMutationConflictGetParamsSchema.parse(params),
+      ),
+      workspaceMutationConflictGetResultSchema,
+    );
+  }
+
+  public async exportWorkspaceMutationBackup(
+    params: WorkspaceMutationBackupExportParams,
+  ): Promise<WorkspaceMutationBackupExportResult> {
+    const result = await this.connection.request(
+      "workspace/mutation/backup/export",
+      jsonValueSchema.parse(
+        workspaceMutationBackupExportParamsSchema.parse(params),
+      ),
+      workspaceMutationBackupExportResultSchema,
+    );
+    const bytes = Buffer.from(result.contentBase64, "base64");
+    if (
+      bytes.byteLength !== result.bytes ||
+      createHash("sha256").update(bytes).digest("hex") !== result.sha256
+    ) {
+      throw new AppServerClientError(
+        "APP_SERVER_PROTOCOL_ERROR",
+        "App-server returned a workspace mutation backup with invalid integrity evidence.",
+      );
+    }
+    return result;
+  }
+
+  public resolveWorkspaceMutationConflict(
+    params: WorkspaceMutationConflictResolveParams,
+  ): Promise<WorkspaceMutationConflictResolveResult> {
+    return this.connection.request(
+      "workspace/mutation/conflict/resolve",
+      jsonValueSchema.parse(
+        workspaceMutationConflictResolveParamsSchema.parse(params),
+      ),
+      workspaceMutationConflictResolveResultSchema,
     );
   }
 

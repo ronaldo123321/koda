@@ -5,6 +5,7 @@ import {
   mkdir,
   open,
   readFile,
+  readlink,
   readdir,
   realpath,
   rename,
@@ -174,18 +175,51 @@ const mutationJournalManifestSchema = z
 const mutationJournalStateSchema = z
   .object({
     schemaVersion: z.literal(JOURNAL_SCHEMA_VERSION),
-    status: z.enum(["active", "committed", "rolled_back", "conflicted"]),
+    status: z.enum([
+      "active",
+      "committed",
+      "rolled_back",
+      "conflicted",
+      "resolution_pending",
+    ]),
     updatedAt: z.string().datetime({ offset: true }),
     reason: z.string().min(1).max(256).optional(),
     paths: z
       .array(boundedPathSchema)
       .max(MAXIMUM_CHANGES * 3)
       .optional(),
+    resolution: z.enum(["restored_original", "accepted_current"]).optional(),
+    stateToken: sha256Schema.optional(),
+    resolvedAt: z.string().datetime({ offset: true }).optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((state, context) => {
+    const hasResolution =
+      state.resolution !== undefined ||
+      state.stateToken !== undefined ||
+      state.resolvedAt !== undefined;
+    if (
+      (state.status === "resolution_pending" &&
+        (state.resolution === undefined ||
+          state.stateToken === undefined ||
+          state.resolvedAt === undefined)) ||
+      (state.status !== "resolution_pending" && hasResolution)
+    ) {
+      context.addIssue({
+        code: "custom",
+        message:
+          "Resolution evidence must be complete and may appear only in a pending resolution state.",
+      });
+    }
+  });
 
 export type WorkspaceMutationJournalErrorCode =
-  "WORKSPACE_MUTATION_JOURNAL_CORRUPT" | "WORKSPACE_MUTATION_RECOVERY_CONFLICT";
+  | "WORKSPACE_MUTATION_JOURNAL_CORRUPT"
+  | "WORKSPACE_MUTATION_RECOVERY_CONFLICT"
+  | "WORKSPACE_MUTATION_CONFLICT_NOT_FOUND"
+  | "WORKSPACE_MUTATION_CONFLICT_STALE"
+  | "WORKSPACE_MUTATION_CONFLICT_NOT_RESOLVABLE"
+  | "WORKSPACE_MUTATION_BACKUP_NOT_FOUND";
 
 export class WorkspaceMutationJournalError extends Error {
   public constructor(
@@ -247,13 +281,82 @@ export interface WorkspaceMutationRecoveryOptions {
   retainRecovered?: boolean;
 }
 
+export type WorkspaceMutationConflictResolution =
+  "restore_original" | "accept_current";
+
+export interface WorkspaceMutationConflictObservation {
+  kind: "absent" | "file" | "divergent";
+  sha256?: string;
+  mode?: number;
+  fingerprint?: string;
+}
+
+export interface WorkspaceMutationConflictChange {
+  index: number;
+  operation: "create" | "update" | "move" | "delete";
+  path: string;
+  destination?: string;
+  beforeSha256: string | null;
+  afterSha256: string | null;
+  beforeMode: number | null;
+  afterMode: number | null;
+  source: WorkspaceMutationConflictObservation;
+  destinationState?: WorkspaceMutationConflictObservation;
+  stagedPath?: string;
+  stagedState?: WorkspaceMutationConflictObservation;
+  backup?: {
+    bytes: number;
+    sha256: string;
+  };
+}
+
+export interface WorkspaceMutationConflictSnapshot {
+  conflictId: string;
+  threadId: string;
+  turnId: string;
+  callId: string;
+  toolName: string;
+  planSha256: string;
+  createdAt: string;
+  status: "conflicted" | "resolution_pending";
+  stateToken: string;
+  pendingResolution?: {
+    resolution: "restored_original" | "accepted_current";
+    stateToken: string;
+    resolvedAt: string;
+  };
+  changes: WorkspaceMutationConflictChange[];
+}
+
+export interface WorkspaceMutationConflictResolutionRequest {
+  conflictId: string;
+  stateToken: string;
+  resolution: WorkspaceMutationConflictResolution;
+}
+
+export interface WorkspaceMutationResolutionReceipt {
+  conflictId: string;
+  threadId: string;
+  turnId: string;
+  callId: string;
+  toolName: string;
+  planSha256: string;
+  resolution: "restored_original" | "accepted_current";
+  stateToken: string;
+  resolvedAt: string;
+  paths: string[];
+  changeCount: number;
+  journalDirectory: string;
+}
+
 type MutationJournalManifest = z.infer<typeof mutationJournalManifestSchema>;
 type MutationJournalOperation = z.infer<typeof journalOperationSchema>;
+type MutationJournalState = z.infer<typeof mutationJournalStateSchema>;
 
 type ObservedFileState =
   | { kind: "absent" }
   | { kind: "file"; sha256: string; mode: number }
-  | { kind: "divergent" };
+  | { kind: "divergent"; fingerprint: string };
 
 type OperationState = "before" | "after" | "intermediate" | "divergent";
 
@@ -383,6 +486,232 @@ export class WorkspaceMutationJournalStore {
     return results;
   }
 
+  public async listConflicts(): Promise<WorkspaceMutationConflictSnapshot[]> {
+    const transactions = await listTransactionDirectories(
+      this.workspaceDirectory,
+    );
+    const conflicts: WorkspaceMutationConflictSnapshot[] = [];
+    for (const transactionDirectory of transactions) {
+      const state = await readState(transactionDirectory);
+      if (
+        state.status !== "conflicted" &&
+        state.status !== "resolution_pending"
+      ) {
+        continue;
+      }
+      conflicts.push(
+        await this.createConflictSnapshot(transactionDirectory, state),
+      );
+    }
+    return conflicts.sort((left, right) =>
+      left.conflictId.localeCompare(right.conflictId),
+    );
+  }
+
+  public async inspectConflict(
+    conflictId: string,
+  ): Promise<WorkspaceMutationConflictSnapshot> {
+    const transactionDirectory = await this.findConflictDirectory(conflictId);
+    const state = await readState(transactionDirectory);
+    if (
+      state.status !== "conflicted" &&
+      state.status !== "resolution_pending"
+    ) {
+      throw new WorkspaceMutationJournalError(
+        "WORKSPACE_MUTATION_CONFLICT_NOT_RESOLVABLE",
+        `Workspace mutation conflict '${conflictId}' is not awaiting a resolution.`,
+      );
+    }
+    return this.createConflictSnapshot(transactionDirectory, state);
+  }
+
+  public async exportConflictBackup(
+    conflictId: string,
+    stateToken: string,
+    operationIndex: number,
+  ): Promise<Buffer> {
+    const snapshot = await this.inspectConflict(conflictId);
+    assertCurrentStateToken(snapshot, stateToken);
+    if (snapshot.status !== "conflicted") {
+      throw new WorkspaceMutationJournalError(
+        "WORKSPACE_MUTATION_CONFLICT_NOT_RESOLVABLE",
+        `Workspace mutation conflict '${conflictId}' already has a pending resolution.`,
+      );
+    }
+    const transactionDirectory = await this.findConflictDirectory(conflictId);
+    const manifest = await readManifest(transactionDirectory);
+    const change = manifest.changes[operationIndex];
+    if (change === undefined || change.index !== operationIndex) {
+      throw new WorkspaceMutationJournalError(
+        "WORKSPACE_MUTATION_BACKUP_NOT_FOUND",
+        `Workspace mutation conflict '${conflictId}' has no operation ${operationIndex}.`,
+      );
+    }
+    if (change.backup === undefined) {
+      throw new WorkspaceMutationJournalError(
+        "WORKSPACE_MUTATION_BACKUP_NOT_FOUND",
+        `Operation ${operationIndex} in conflict '${conflictId}' has no original backup.`,
+      );
+    }
+    assertCurrentStateToken(
+      await this.createConflictSnapshot(
+        transactionDirectory,
+        await readState(transactionDirectory),
+      ),
+      stateToken,
+    );
+    return readVerifiedBackup(transactionDirectory, change);
+  }
+
+  public async resolveConflict(
+    request: WorkspaceMutationConflictResolutionRequest,
+  ): Promise<WorkspaceMutationResolutionReceipt> {
+    if (
+      request.resolution !== "restore_original" &&
+      request.resolution !== "accept_current"
+    ) {
+      throw new WorkspaceMutationJournalError(
+        "WORKSPACE_MUTATION_CONFLICT_NOT_RESOLVABLE",
+        "Workspace mutation conflict resolution action is invalid.",
+      );
+    }
+    const transactionDirectory = await this.findConflictDirectory(
+      request.conflictId,
+    );
+    const state = await readState(transactionDirectory);
+    if (state.status !== "conflicted") {
+      throw new WorkspaceMutationJournalError(
+        "WORKSPACE_MUTATION_CONFLICT_NOT_RESOLVABLE",
+        `Workspace mutation conflict '${request.conflictId}' is not awaiting a new decision.`,
+      );
+    }
+    const snapshot = await this.createConflictSnapshot(
+      transactionDirectory,
+      state,
+    );
+    assertCurrentStateToken(snapshot, request.stateToken);
+    const manifest = await readManifest(transactionDirectory);
+    await verifyBackups(transactionDirectory, manifest);
+    assertCurrentStateToken(
+      await this.createConflictSnapshot(
+        transactionDirectory,
+        await readState(transactionDirectory),
+      ),
+      request.stateToken,
+    );
+
+    const resolution =
+      request.resolution === "restore_original"
+        ? "restored_original"
+        : "accepted_current";
+    if (request.resolution === "restore_original") {
+      for (const change of [...manifest.changes].reverse()) {
+        await this.forceRestoreBefore(transactionDirectory, change);
+      }
+      for (const change of manifest.changes) {
+        if (change.staged !== undefined) {
+          await this.removeJournalEndpoint(change.staged);
+        }
+      }
+      await this.verifyOriginalState(manifest);
+    }
+
+    const resolvedAt = this.options.now();
+    await writeAtomicJson(
+      join(transactionDirectory, "state.json"),
+      mutationJournalStateSchema.parse({
+        schemaVersion: JOURNAL_SCHEMA_VERSION,
+        status: "resolution_pending",
+        updatedAt: resolvedAt,
+        reason: "EXPLICIT_USER_RESOLUTION",
+        paths: snapshot.changes.flatMap((change) =>
+          change.destination === undefined
+            ? [change.path]
+            : [change.path, change.destination],
+        ),
+        resolution,
+        stateToken: request.stateToken,
+        resolvedAt,
+      }),
+      this.options.token,
+    );
+    return createResolutionReceipt(
+      transactionDirectory,
+      manifest,
+      resolution,
+      request.stateToken,
+      resolvedAt,
+    );
+  }
+
+  public async listPendingResolutionReceipts(): Promise<
+    WorkspaceMutationResolutionReceipt[]
+  > {
+    const transactions = await listTransactionDirectories(
+      this.workspaceDirectory,
+    );
+    const receipts: WorkspaceMutationResolutionReceipt[] = [];
+    for (const transactionDirectory of transactions) {
+      const state = await readState(transactionDirectory);
+      if (state.status !== "resolution_pending") {
+        continue;
+      }
+      const manifest = await readManifest(transactionDirectory);
+      await verifyBackups(transactionDirectory, manifest);
+      if (state.resolution === "restored_original") {
+        await this.verifyOriginalState(manifest);
+      }
+      receipts.push(
+        createResolutionReceipt(
+          transactionDirectory,
+          manifest,
+          state.resolution!,
+          state.stateToken!,
+          state.resolvedAt!,
+        ),
+      );
+    }
+    return receipts;
+  }
+
+  public async acknowledgeResolution(
+    receipt: WorkspaceMutationResolutionReceipt,
+  ): Promise<void> {
+    const relativeDirectory = relative(
+      this.workspaceDirectory,
+      receipt.journalDirectory,
+    );
+    if (
+      relativeDirectory === ".." ||
+      relativeDirectory.startsWith(`..${sep}`) ||
+      isAbsolute(relativeDirectory)
+    ) {
+      throw new WorkspaceMutationJournalError(
+        "WORKSPACE_MUTATION_JOURNAL_CORRUPT",
+        "Resolution receipt points outside the workspace mutation journal.",
+      );
+    }
+    const state = await readState(receipt.journalDirectory);
+    const manifest = await readManifest(receipt.journalDirectory);
+    if (
+      state.status !== "resolution_pending" ||
+      state.resolution !== receipt.resolution ||
+      state.stateToken !== receipt.stateToken ||
+      state.resolvedAt !== receipt.resolvedAt ||
+      conflictIdFor(manifest) !== receipt.conflictId ||
+      manifest.threadId !== receipt.threadId ||
+      manifest.turnId !== receipt.turnId ||
+      manifest.callId !== receipt.callId ||
+      manifest.planSha256 !== receipt.planSha256
+    ) {
+      throw new WorkspaceMutationJournalError(
+        "WORKSPACE_MUTATION_JOURNAL_CORRUPT",
+        "Resolution receipt no longer matches its mutation journal.",
+      );
+    }
+    await removeTransactionDirectory(receipt.journalDirectory);
+  }
+
   public async acknowledgeRecovery(
     result: WorkspaceMutationRecoveryResult,
   ): Promise<void> {
@@ -413,6 +742,203 @@ export class WorkspaceMutationJournalStore {
       );
     }
     await removeTransactionDirectory(result.journalDirectory);
+  }
+
+  private async findConflictDirectory(conflictId: string): Promise<string> {
+    if (!/^wmc_[a-f0-9]{64}$/u.test(conflictId)) {
+      throw new WorkspaceMutationJournalError(
+        "WORKSPACE_MUTATION_CONFLICT_NOT_FOUND",
+        `Workspace mutation conflict '${conflictId}' was not found.`,
+      );
+    }
+    const transactions = await listTransactionDirectories(
+      this.workspaceDirectory,
+    );
+    for (const transactionDirectory of transactions) {
+      const manifest = await readManifest(transactionDirectory);
+      if (conflictIdFor(manifest) === conflictId) {
+        return transactionDirectory;
+      }
+    }
+    throw new WorkspaceMutationJournalError(
+      "WORKSPACE_MUTATION_CONFLICT_NOT_FOUND",
+      `Workspace mutation conflict '${conflictId}' was not found.`,
+    );
+  }
+
+  private async createConflictSnapshot(
+    transactionDirectory: string,
+    state: MutationJournalState,
+  ): Promise<WorkspaceMutationConflictSnapshot> {
+    const manifest = await readManifest(transactionDirectory);
+    if (
+      manifest.workspaceRoot !== this.workspaceRoot ||
+      manifest.workspaceSha256 !== hashText(this.workspaceRoot)
+    ) {
+      throw new WorkspaceMutationJournalError(
+        "WORKSPACE_MUTATION_JOURNAL_CORRUPT",
+        `Mutation journal '${transactionDirectory}' belongs to a different workspace.`,
+      );
+    }
+    await verifyBackups(transactionDirectory, manifest);
+    const changes: WorkspaceMutationConflictChange[] = [];
+    for (const change of manifest.changes) {
+      const source = await this.observeJournalFile(
+        this.resolveJournalPath(change.path),
+      );
+      const destinationState =
+        change.destination === undefined
+          ? undefined
+          : await this.observeJournalFile(
+              this.resolveJournalPath(change.destination),
+            );
+      const stagedState =
+        change.staged === undefined
+          ? undefined
+          : await this.observeJournalFile(
+              this.resolveJournalPath(change.staged),
+            );
+      const backup =
+        change.backup === undefined
+          ? undefined
+          : await readVerifiedBackup(transactionDirectory, change);
+      changes.push({
+        index: change.index,
+        operation: change.operation,
+        path: change.path,
+        ...(change.destination === undefined
+          ? {}
+          : { destination: change.destination }),
+        beforeSha256: change.beforeSha256,
+        afterSha256: change.afterSha256,
+        beforeMode: change.beforeMode,
+        afterMode: change.afterMode,
+        source: publicObservation(source),
+        ...(destinationState === undefined
+          ? {}
+          : { destinationState: publicObservation(destinationState) }),
+        ...(change.staged === undefined
+          ? {}
+          : {
+              stagedPath: change.staged,
+              stagedState: publicObservation(stagedState!),
+            }),
+        ...(backup === undefined
+          ? {}
+          : {
+              backup: {
+                bytes: backup.byteLength,
+                sha256: change.beforeSha256!,
+              },
+            }),
+      });
+    }
+    const stateToken = hashText(
+      JSON.stringify({
+        schemaVersion: JOURNAL_SCHEMA_VERSION,
+        workspaceSha256: manifest.workspaceSha256,
+        threadId: manifest.threadId,
+        turnId: manifest.turnId,
+        callId: manifest.callId,
+        planSha256: manifest.planSha256,
+        changes,
+      }),
+    );
+    return {
+      conflictId: conflictIdFor(manifest),
+      threadId: manifest.threadId,
+      turnId: manifest.turnId,
+      callId: manifest.callId,
+      toolName: manifest.toolName,
+      planSha256: manifest.planSha256,
+      createdAt: manifest.createdAt,
+      status: state.status as "conflicted" | "resolution_pending",
+      stateToken,
+      ...(state.status === "resolution_pending"
+        ? {
+            pendingResolution: {
+              resolution: state.resolution!,
+              stateToken: state.stateToken!,
+              resolvedAt: state.resolvedAt!,
+            },
+          }
+        : {}),
+      changes,
+    };
+  }
+
+  private async forceRestoreBefore(
+    transactionDirectory: string,
+    change: MutationJournalOperation,
+  ): Promise<void> {
+    if (change.operation === "create") {
+      await this.removeJournalEndpoint(change.path);
+      return;
+    }
+    const backup = await readVerifiedBackup(transactionDirectory, change);
+    const source = this.resolveJournalPath(change.path);
+    await this.assertSafeJournalParent(source);
+    await replaceFile(source, backup, change.beforeMode!);
+    if (change.operation === "move") {
+      await this.removeJournalEndpoint(change.destination!);
+    }
+  }
+
+  private async removeJournalEndpoint(workspacePath: string): Promise<void> {
+    const path = this.resolveJournalPath(workspacePath);
+    await this.assertSafeJournalParent(path);
+    await rm(path, { force: true });
+    await syncDirectory(dirname(path));
+  }
+
+  private async assertSafeJournalParent(path: string): Promise<void> {
+    const parent = dirname(path);
+    let canonicalParent: string;
+    try {
+      canonicalParent = await realpath(parent);
+    } catch (error) {
+      throw new WorkspaceMutationJournalError(
+        "WORKSPACE_MUTATION_CONFLICT_STALE",
+        `Workspace mutation conflict parent is no longer available for '${relative(this.workspaceRoot, path)}'.`,
+        { cause: error },
+      );
+    }
+    const relativeParent = relative(this.workspaceRoot, canonicalParent);
+    if (
+      canonicalParent !== parent ||
+      relativeParent === ".." ||
+      relativeParent.startsWith(`..${sep}`) ||
+      isAbsolute(relativeParent)
+    ) {
+      throw new WorkspaceMutationJournalError(
+        "WORKSPACE_MUTATION_CONFLICT_STALE",
+        `Workspace mutation conflict parent changed for '${relative(this.workspaceRoot, path)}'.`,
+      );
+    }
+  }
+
+  private async verifyOriginalState(
+    manifest: MutationJournalManifest,
+  ): Promise<void> {
+    const states = await Promise.all(
+      manifest.changes.map((change) => this.classifyOperation(change)),
+    );
+    const stagedStates = await Promise.all(
+      manifest.changes
+        .filter((change) => change.staged !== undefined)
+        .map((change) =>
+          this.observeJournalFile(this.resolveJournalPath(change.staged!)),
+        ),
+    );
+    if (
+      !states.every((state) => state === "before") ||
+      !stagedStates.every(matchesAbsent)
+    ) {
+      throw new WorkspaceMutationJournalError(
+        "WORKSPACE_MUTATION_RECOVERY_CONFLICT",
+        "The original workspace state could not be verified after explicit restoration.",
+      );
+    }
   }
 
   private async createManifest(
@@ -512,6 +1038,7 @@ export class WorkspaceMutationJournalStore {
       );
     }
     await verifyBackups(transactionDirectory, manifest);
+    const journalState = await readState(transactionDirectory);
 
     const states = await Promise.all(
       manifest.changes.map((change) => this.classifyOperation(change)),
@@ -532,6 +1059,22 @@ export class WorkspaceMutationJournalStore {
       changeCount: manifest.changes.length,
       journalDirectory: transactionDirectory,
     };
+    if (
+      journalState.status === "conflicted" ||
+      journalState.status === "resolution_pending"
+    ) {
+      if (journalState.resolution === "restored_original") {
+        await this.verifyOriginalState(manifest);
+      }
+      return {
+        ...resultBase,
+        status: "conflicted",
+        appliedCount: states.filter(
+          (state) => state === "after" || state === "intermediate",
+        ).length,
+        restoredPaths: [],
+      };
+    }
     const stagingConflicts = await this.cleanupStagedFiles(manifest);
     if (stagingConflicts.length > 0) {
       const conflictPaths = [...paths, ...stagingConflicts];
@@ -836,7 +1379,10 @@ export class WorkspaceMutationJournalStore {
     try {
       const parent = dirname(path);
       if ((await realpath(parent)) !== parent) {
-        return { kind: "divergent" };
+        return {
+          kind: "divergent",
+          fingerprint: hashText("PARENT_CANONICAL_PATH_CHANGED"),
+        };
       }
       const relativeParent = relative(this.workspaceRoot, parent);
       if (
@@ -844,11 +1390,17 @@ export class WorkspaceMutationJournalStore {
         relativeParent.startsWith(`..${sep}`) ||
         isAbsolute(relativeParent)
       ) {
-        return { kind: "divergent" };
+        return {
+          kind: "divergent",
+          fingerprint: hashText("PARENT_OUTSIDE_WORKSPACE"),
+        };
       }
       return observeFile(path);
-    } catch {
-      return { kind: "divergent" };
+    } catch (error) {
+      return {
+        kind: "divergent",
+        fingerprint: hashText(`OBSERVATION_FAILED:${errorCode(error)}`),
+      };
     }
   }
 }
@@ -946,6 +1498,29 @@ async function readManifest(
   }
 }
 
+async function readState(
+  transactionDirectory: string,
+): Promise<MutationJournalState> {
+  try {
+    const statePath = join(transactionDirectory, "state.json");
+    const stateStats = await lstat(statePath);
+    if (!stateStats.isFile() || stateStats.isSymbolicLink()) {
+      throw new Error("state is not a regular file");
+    }
+    const bytes = await readFile(statePath);
+    if (bytes.byteLength > 32_000) {
+      throw new Error("state exceeds 32000 bytes");
+    }
+    return mutationJournalStateSchema.parse(JSON.parse(bytes.toString("utf8")));
+  } catch (error) {
+    throw new WorkspaceMutationJournalError(
+      "WORKSPACE_MUTATION_JOURNAL_CORRUPT",
+      `Cannot read mutation journal state '${transactionDirectory}'.`,
+      { cause: error },
+    );
+  }
+}
+
 async function verifyBackups(
   transactionDirectory: string,
   manifest: MutationJournalManifest,
@@ -1012,18 +1587,40 @@ async function observeFile(path: string): Promise<ObservedFileState> {
     if (isNodeError(error, "ENOENT")) {
       return { kind: "absent" };
     }
-    return { kind: "divergent" };
+    return {
+      kind: "divergent",
+      fingerprint: hashText(`STAT_FAILED:${errorCode(error)}`),
+    };
   }
-  if (
-    stats.isSymbolicLink() ||
-    !stats.isFile() ||
-    stats.size > MAXIMUM_FILE_BYTES
-  ) {
-    return { kind: "divergent" };
+  if (stats.isSymbolicLink()) {
+    const target = await readlink(path).catch(() => "UNREADABLE");
+    return {
+      kind: "divergent",
+      fingerprint: hashText(`SYMLINK:${target}`),
+    };
+  }
+  if (!stats.isFile() || stats.size > MAXIMUM_FILE_BYTES) {
+    return {
+      kind: "divergent",
+      fingerprint: hashText(
+        JSON.stringify({
+          kind: stats.isDirectory() ? "directory" : "other",
+          size: stats.size,
+          mode: stats.mode & 0o777,
+          mtimeMs: stats.mtimeMs,
+          ctimeMs: stats.ctimeMs,
+          ino: stats.ino,
+          dev: stats.dev,
+        }),
+      ),
+    };
   }
   const bytes = await readFile(path).catch(() => undefined);
   return bytes === undefined
-    ? { kind: "divergent" }
+    ? {
+        kind: "divergent",
+        fingerprint: hashText("REGULAR_FILE_READ_FAILED"),
+      }
     : { kind: "file", sha256: hashBytes(bytes), mode: stats.mode & 0o777 };
 }
 
@@ -1144,6 +1741,84 @@ function hashText(value: string): string {
 
 function hashBytes(value: Buffer): string {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function conflictIdFor(manifest: MutationJournalManifest): string {
+  return `wmc_${hashText(
+    JSON.stringify({
+      workspaceSha256: manifest.workspaceSha256,
+      threadId: manifest.threadId,
+      callId: manifest.callId,
+      planSha256: manifest.planSha256,
+    }),
+  )}`;
+}
+
+function publicObservation(
+  state: ObservedFileState,
+): WorkspaceMutationConflictObservation {
+  if (state.kind === "file") {
+    return {
+      kind: "file",
+      sha256: state.sha256,
+      mode: state.mode,
+    };
+  }
+  if (state.kind === "divergent") {
+    return { kind: "divergent", fingerprint: state.fingerprint };
+  }
+  return { kind: "absent" };
+}
+
+function assertCurrentStateToken(
+  snapshot: WorkspaceMutationConflictSnapshot,
+  stateToken: string,
+): void {
+  if (
+    !sha256Schema.safeParse(stateToken).success ||
+    snapshot.stateToken !== stateToken
+  ) {
+    throw new WorkspaceMutationJournalError(
+      "WORKSPACE_MUTATION_CONFLICT_STALE",
+      `Workspace mutation conflict '${snapshot.conflictId}' changed after it was inspected. Inspect it again before continuing.`,
+    );
+  }
+}
+
+function createResolutionReceipt(
+  transactionDirectory: string,
+  manifest: MutationJournalManifest,
+  resolution: "restored_original" | "accepted_current",
+  stateToken: string,
+  resolvedAt: string,
+): WorkspaceMutationResolutionReceipt {
+  return {
+    conflictId: conflictIdFor(manifest),
+    threadId: manifest.threadId,
+    turnId: manifest.turnId,
+    callId: manifest.callId,
+    toolName: manifest.toolName,
+    planSha256: manifest.planSha256,
+    resolution,
+    stateToken,
+    resolvedAt,
+    paths: manifest.changes.flatMap((change) =>
+      change.destination === undefined
+        ? [change.path]
+        : [change.path, change.destination],
+    ),
+    changeCount: manifest.changes.length,
+    journalDirectory: transactionDirectory,
+  };
+}
+
+function errorCode(error: unknown): string {
+  return error !== null &&
+    typeof error === "object" &&
+    "code" in error &&
+    typeof error.code === "string"
+    ? error.code
+    : "UNKNOWN";
 }
 
 function isNodeError(

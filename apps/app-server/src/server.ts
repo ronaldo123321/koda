@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import {
   type ApplicationDiagnostic,
   type KodaApplication,
@@ -18,6 +20,8 @@ import {
   THREAD_CONTEXT_RESULT_BUDGET_BYTES,
   THREAD_EXTENSIONS_RESULT_BUDGET_BYTES,
   THREAD_SEARCH_RESULT_BUDGET_BYTES,
+  WORKSPACE_MUTATION_BACKUP_RESULT_BUDGET_BYTES,
+  WORKSPACE_MUTATION_CONFLICTS_RESULT_BUDGET_BYTES,
   approvalResolveParamsSchema,
   approvalResolveResultSchema,
   approvalGrantsListParamsSchema,
@@ -48,6 +52,14 @@ import {
   settingsGetResultSchema,
   settingsUpdateParamsSchema,
   settingsUpdateResultSchema,
+  workspaceMutationBackupExportParamsSchema,
+  workspaceMutationBackupExportResultSchema,
+  workspaceMutationConflictGetParamsSchema,
+  workspaceMutationConflictGetResultSchema,
+  workspaceMutationConflictResolveParamsSchema,
+  workspaceMutationConflictResolveResultSchema,
+  workspaceMutationConflictsListParamsSchema,
+  workspaceMutationConflictsListResultSchema,
   shutdownParamsSchema,
   shutdownResultSchema,
   threadEventsParamsSchema,
@@ -244,6 +256,14 @@ export class KodaAppServer {
         return this.getRuntimeSettings(request.params);
       case "settings/update":
         return this.updateRuntimeSettings(request.params);
+      case "workspace/mutation/conflicts":
+        return this.listWorkspaceMutationConflicts(request.params);
+      case "workspace/mutation/conflict/get":
+        return this.inspectWorkspaceMutationConflict(request.params);
+      case "workspace/mutation/backup/export":
+        return this.exportWorkspaceMutationBackup(request.params);
+      case "workspace/mutation/conflict/resolve":
+        return this.resolveWorkspaceMutationConflict(request.params);
       case "turn/start":
         return this.startTurn(request.params);
       case "turn/cancel":
@@ -319,6 +339,7 @@ export class KodaAppServer {
           commandTemplates: true,
           dynamicToolCatalog: true,
           plugins: true,
+          workspaceMutationRecovery: true,
         },
         providers: this.application.listProviders(),
       }),
@@ -684,6 +705,129 @@ export class KodaAppServer {
       );
       assertSettingsResultBudget(response);
       return response;
+    } catch (error) {
+      throw rpcError(
+        APP_SERVER_RPC_ERROR_CODE.APPLICATION,
+        errorMessage(error),
+        applicationErrorCode(error),
+      );
+    }
+  }
+
+  private async listWorkspaceMutationConflicts(
+    params: JsonValue | undefined,
+  ): Promise<JsonValue> {
+    const input = parseParams(
+      workspaceMutationConflictsListParamsSchema,
+      params,
+    );
+    try {
+      const response = jsonValueSchema.parse(
+        workspaceMutationConflictsListResultSchema.parse(
+          await this.application.listWorkspaceMutationConflicts(
+            input.workspace,
+          ),
+        ),
+      );
+      assertResultBudget(
+        response,
+        WORKSPACE_MUTATION_CONFLICTS_RESULT_BUDGET_BYTES,
+        "WORKSPACE_MUTATION_CONFLICTS_RESULT_TOO_LARGE",
+        "Workspace mutation conflict list",
+      );
+      return response;
+    } catch (error) {
+      throw rpcError(
+        APP_SERVER_RPC_ERROR_CODE.APPLICATION,
+        errorMessage(error),
+        applicationErrorCode(error),
+      );
+    }
+  }
+
+  private async inspectWorkspaceMutationConflict(
+    params: JsonValue | undefined,
+  ): Promise<JsonValue> {
+    const input = parseParams(workspaceMutationConflictGetParamsSchema, params);
+    try {
+      const response = jsonValueSchema.parse(
+        workspaceMutationConflictGetResultSchema.parse(
+          await this.application.inspectWorkspaceMutationConflict(input),
+        ),
+      );
+      assertResultBudget(
+        response,
+        WORKSPACE_MUTATION_CONFLICTS_RESULT_BUDGET_BYTES,
+        "WORKSPACE_MUTATION_CONFLICT_RESULT_TOO_LARGE",
+        "Workspace mutation conflict",
+      );
+      return response;
+    } catch (error) {
+      throw rpcError(
+        APP_SERVER_RPC_ERROR_CODE.APPLICATION,
+        errorMessage(error),
+        applicationErrorCode(error),
+      );
+    }
+  }
+
+  private async exportWorkspaceMutationBackup(
+    params: JsonValue | undefined,
+  ): Promise<JsonValue> {
+    const input = parseParams(
+      workspaceMutationBackupExportParamsSchema,
+      params,
+    );
+    try {
+      const result =
+        await this.application.exportWorkspaceMutationBackup(input);
+      const response = jsonValueSchema.parse(
+        workspaceMutationBackupExportResultSchema.parse({
+          workspace: result.workspace,
+          conflictId: result.conflictId,
+          operationIndex: result.operationIndex,
+          sha256: createHash("sha256").update(result.bytes).digest("hex"),
+          bytes: result.bytes.byteLength,
+          contentBase64: result.bytes.toString("base64"),
+        }),
+      );
+      assertResultBudget(
+        response,
+        WORKSPACE_MUTATION_BACKUP_RESULT_BUDGET_BYTES,
+        "WORKSPACE_MUTATION_BACKUP_RESULT_TOO_LARGE",
+        "Workspace mutation backup",
+      );
+      return response;
+    } catch (error) {
+      throw rpcError(
+        APP_SERVER_RPC_ERROR_CODE.APPLICATION,
+        errorMessage(error),
+        applicationErrorCode(error),
+      );
+    }
+  }
+
+  private async resolveWorkspaceMutationConflict(
+    params: JsonValue | undefined,
+  ): Promise<JsonValue> {
+    const input = parseParams(
+      workspaceMutationConflictResolveParamsSchema,
+      params,
+    );
+    try {
+      const result =
+        await this.application.resolveWorkspaceMutationConflict(input);
+      return jsonValueSchema.parse(
+        workspaceMutationConflictResolveResultSchema.parse({
+          workspace: result.workspace,
+          conflictId: result.receipt.conflictId,
+          resolution: result.receipt.resolution,
+          stateToken: result.receipt.stateToken,
+          resolvedAt: result.receipt.resolvedAt,
+          audit: result.audit,
+          acknowledged: result.acknowledged,
+        }),
+      );
     } catch (error) {
       throw rpcError(
         APP_SERVER_RPC_ERROR_CODE.APPLICATION,

@@ -11,6 +11,12 @@ import {
   runThreadListCommand,
   runThreadShowCommand,
 } from "./thread-command.js";
+import {
+  runWorkspaceMutationBackupExportCommand,
+  runWorkspaceMutationConflictInspectCommand,
+  runWorkspaceMutationConflictListCommand,
+  runWorkspaceMutationConflictResolveCommand,
+} from "./workspace-mutation-command.js";
 
 export interface ProgramRuntime {
   environment: NodeJS.ProcessEnv;
@@ -211,6 +217,93 @@ export function createProgram(runtime: ProgramRuntime): Command {
         }),
       );
     });
+
+  const recovery = program
+    .command("recovery")
+    .description(
+      "Inspect and explicitly resolve quarantined workspace changes",
+    );
+  recovery
+    .command("list")
+    .description("List quarantined workspace mutation conflicts")
+    .option("--workspace <directory>", "workspace directory", ".")
+    .action(async (options: { workspace?: string }) => {
+      runtime.setExitCode(
+        await runWorkspaceMutationConflictListCommand(options, runtime),
+      );
+    });
+  recovery
+    .command("inspect")
+    .description("Inspect one workspace mutation conflict")
+    .argument("<conflict-id>", "opaque workspace mutation conflict ID")
+    .option("--workspace <directory>", "workspace directory", ".")
+    .action(async (conflictId: string, options: { workspace?: string }) => {
+      runtime.setExitCode(
+        await runWorkspaceMutationConflictInspectCommand(
+          conflictId,
+          options,
+          runtime,
+        ),
+      );
+    });
+  recovery
+    .command("export")
+    .description(
+      "Export one verified original backup without overwriting a file",
+    )
+    .argument("<conflict-id>", "opaque workspace mutation conflict ID")
+    .argument("<operation-index>", "operation index containing a backup")
+    .requiredOption("--state-token <sha256>", "token returned by inspection")
+    .requiredOption(
+      "--output <file>",
+      "new output file; existing files are rejected",
+    )
+    .option("--workspace <directory>", "workspace directory", ".")
+    .action(
+      async (
+        conflictId: string,
+        operationIndex: string,
+        options: {
+          workspace?: string;
+          stateToken?: string;
+          output?: string;
+        },
+      ) => {
+        runtime.setExitCode(
+          await runWorkspaceMutationBackupExportCommand(
+            conflictId,
+            operationIndex,
+            options,
+            runtime,
+          ),
+        );
+      },
+    );
+  recovery
+    .command("resolve")
+    .description("Resolve one inspected conflict using its exact state token")
+    .argument("<conflict-id>", "opaque workspace mutation conflict ID")
+    .requiredOption("--state-token <sha256>", "token returned by inspection")
+    .addOption(
+      new Option("--action <action>", "explicit resolution action")
+        .choices(["restore-original", "accept-current"])
+        .makeOptionMandatory(),
+    )
+    .option("--workspace <directory>", "workspace directory", ".")
+    .action(
+      async (
+        conflictId: string,
+        options: { workspace?: string; stateToken?: string; action?: string },
+      ) => {
+        runtime.setExitCode(
+          await runWorkspaceMutationConflictResolveCommand(
+            conflictId,
+            options,
+            runtime,
+          ),
+        );
+      },
+    );
 
   return program;
 }

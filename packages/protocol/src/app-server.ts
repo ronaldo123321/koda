@@ -28,8 +28,9 @@ import {
   planSnapshotSchema,
   planStageIdSchema,
 } from "./plans.js";
+import { workspaceChangeSetResolutionSchema } from "./change-sets.js";
 
-export const APP_SERVER_PROTOCOL_VERSION = 12 as const;
+export const APP_SERVER_PROTOCOL_VERSION = 13 as const;
 
 export const THREAD_EVENTS_DEFAULT_LIMIT = 200;
 export const THREAD_EVENTS_MAXIMUM_LIMIT = 200;
@@ -64,6 +65,11 @@ export const CONTEXT_INSTRUCTION_READ_RESULT_BUDGET_BYTES = 80 * 1_024;
 export const CONTEXT_WORKSPACE_BUDGET_BYTES = 4_096;
 export const APPROVAL_GRANTS_RESULT_BUDGET_BYTES = 128 * 1_024;
 export const PLAN_GET_RESULT_BUDGET_BYTES = 384 * 1_024;
+export const WORKSPACE_MUTATION_BACKUP_MAXIMUM_BYTES = 1_000_000;
+export const WORKSPACE_MUTATION_CONFLICTS_MAXIMUM_COUNT = 128;
+export const WORKSPACE_MUTATION_CONFLICTS_RESULT_BUDGET_BYTES =
+  2 * 1_024 * 1_024;
+export const WORKSPACE_MUTATION_BACKUP_RESULT_BUDGET_BYTES = 1_400_000;
 
 export const APP_SERVER_RPC_ERROR_CODE = {
   PARSE: -32700,
@@ -189,6 +195,7 @@ export const initializeResultSchema = z
         commandTemplates: z.literal(true),
         dynamicToolCatalog: z.literal(true),
         plugins: z.literal(true),
+        workspaceMutationRecovery: z.literal(true),
       })
       .strict(),
     providers: z.array(runtimeProviderMetadataSchema).min(1),
@@ -204,6 +211,276 @@ const runtimeSettingsWorkspaceSchema = z
       RUNTIME_SETTINGS_WORKSPACE_BUDGET_BYTES,
     `Workspace must not exceed ${RUNTIME_SETTINGS_WORKSPACE_BUDGET_BYTES} UTF-8 bytes.`,
   );
+
+const workspaceMutationConflictIdSchema = z
+  .string()
+  .regex(/^wmc_[a-f0-9]{64}$/u);
+
+const workspaceMutationStateTokenSchema = artifactSha256Schema;
+
+export const workspaceMutationConflictObservationSchema = z
+  .object({
+    kind: z.enum(["absent", "file", "divergent"]),
+    sha256: artifactSha256Schema.optional(),
+    mode: z.number().int().min(0).max(0o777).optional(),
+    fingerprint: artifactSha256Schema.optional(),
+  })
+  .strict()
+  .superRefine((observation, context) => {
+    const valid =
+      (observation.kind === "absent" &&
+        observation.sha256 === undefined &&
+        observation.mode === undefined &&
+        observation.fingerprint === undefined) ||
+      (observation.kind === "file" &&
+        observation.sha256 !== undefined &&
+        observation.mode !== undefined &&
+        observation.fingerprint === undefined) ||
+      (observation.kind === "divergent" &&
+        observation.sha256 === undefined &&
+        observation.mode === undefined &&
+        observation.fingerprint !== undefined);
+    if (!valid) {
+      context.addIssue({
+        code: "custom",
+        message: "Workspace mutation observation evidence is inconsistent.",
+      });
+    }
+  });
+
+export const workspaceMutationConflictChangeSchema = z
+  .object({
+    index: z.number().int().min(0).max(15),
+    operation: z.enum(["create", "update", "move", "delete"]),
+    path: runtimeSettingsWorkspaceSchema,
+    destination: runtimeSettingsWorkspaceSchema.optional(),
+    beforeSha256: artifactSha256Schema.nullable(),
+    afterSha256: artifactSha256Schema.nullable(),
+    beforeMode: z.number().int().min(0).max(0o777).nullable(),
+    afterMode: z.number().int().min(0).max(0o777).nullable(),
+    source: workspaceMutationConflictObservationSchema,
+    destinationState: workspaceMutationConflictObservationSchema.optional(),
+    stagedPath: runtimeSettingsWorkspaceSchema.optional(),
+    stagedState: workspaceMutationConflictObservationSchema.optional(),
+    backup: z
+      .object({
+        bytes: z
+          .number()
+          .int()
+          .nonnegative()
+          .max(WORKSPACE_MUTATION_BACKUP_MAXIMUM_BYTES),
+        sha256: artifactSha256Schema,
+      })
+      .strict()
+      .optional(),
+  })
+  .strict()
+  .superRefine((change, context) => {
+    const hasStagedPair =
+      change.stagedPath !== undefined && change.stagedState !== undefined;
+    const valid =
+      (change.operation === "create" &&
+        change.destination === undefined &&
+        change.destinationState === undefined &&
+        change.beforeSha256 === null &&
+        change.beforeMode === null &&
+        change.afterSha256 !== null &&
+        change.afterMode !== null &&
+        change.backup === undefined &&
+        hasStagedPair) ||
+      (change.operation === "update" &&
+        change.destination === undefined &&
+        change.destinationState === undefined &&
+        change.beforeSha256 !== null &&
+        change.beforeMode !== null &&
+        change.afterSha256 !== null &&
+        change.afterMode === change.beforeMode &&
+        change.backup?.sha256 === change.beforeSha256 &&
+        hasStagedPair) ||
+      (change.operation === "move" &&
+        change.destination !== undefined &&
+        change.destinationState !== undefined &&
+        change.beforeSha256 !== null &&
+        change.beforeSha256 === change.afterSha256 &&
+        change.beforeMode !== null &&
+        change.afterMode === change.beforeMode &&
+        change.backup?.sha256 === change.beforeSha256 &&
+        change.stagedPath === undefined &&
+        change.stagedState === undefined) ||
+      (change.operation === "delete" &&
+        change.destination === undefined &&
+        change.destinationState === undefined &&
+        change.beforeSha256 !== null &&
+        change.beforeMode !== null &&
+        change.afterSha256 === null &&
+        change.afterMode === null &&
+        change.backup?.sha256 === change.beforeSha256 &&
+        change.stagedPath === undefined &&
+        change.stagedState === undefined);
+    if (!valid) {
+      context.addIssue({
+        code: "custom",
+        message:
+          "Workspace mutation conflict evidence does not match its operation semantics.",
+      });
+    }
+  });
+
+export const workspaceMutationConflictSchema = z
+  .object({
+    conflictId: workspaceMutationConflictIdSchema,
+    threadId: z.string().min(1).max(4_096),
+    turnId: z.string().min(1).max(4_096),
+    callId: z.string().min(1).max(4_096),
+    toolName: z.string().min(1).max(4_096),
+    planSha256: artifactSha256Schema,
+    createdAt: z.string().datetime({ offset: true }),
+    status: z.enum(["conflicted", "resolution_pending"]),
+    stateToken: workspaceMutationStateTokenSchema,
+    pendingResolution: z
+      .object({
+        resolution: workspaceChangeSetResolutionSchema,
+        stateToken: workspaceMutationStateTokenSchema,
+        resolvedAt: z.string().datetime({ offset: true }),
+      })
+      .strict()
+      .optional(),
+    changes: z.array(workspaceMutationConflictChangeSchema).min(1).max(16),
+  })
+  .strict()
+  .superRefine((conflict, context) => {
+    if (
+      (conflict.status === "resolution_pending") !==
+      (conflict.pendingResolution !== undefined)
+    ) {
+      context.addIssue({
+        code: "custom",
+        message:
+          "Only a pending workspace mutation resolution may contain resolution evidence.",
+        path: ["pendingResolution"],
+      });
+    }
+    const endpoints = new Set<string>();
+    for (const [index, change] of conflict.changes.entries()) {
+      if (change.index !== index) {
+        context.addIssue({
+          code: "custom",
+          message: "Conflict operation indexes must be contiguous and ordered.",
+          path: ["changes", index, "index"],
+        });
+      }
+      for (const endpoint of [change.path, change.destination]) {
+        if (endpoint === undefined) {
+          continue;
+        }
+        if (endpoints.has(endpoint)) {
+          context.addIssue({
+            code: "custom",
+            message: "Conflict operation endpoints must not overlap.",
+            path: ["changes", index],
+          });
+        }
+        endpoints.add(endpoint);
+      }
+    }
+  });
+
+export const workspaceMutationConflictsListParamsSchema = z
+  .object({ workspace: runtimeSettingsWorkspaceSchema })
+  .strict();
+
+export const workspaceMutationConflictsListResultSchema = z
+  .object({
+    workspace: runtimeSettingsWorkspaceSchema,
+    conflicts: z
+      .array(workspaceMutationConflictSchema)
+      .max(WORKSPACE_MUTATION_CONFLICTS_MAXIMUM_COUNT),
+  })
+  .strict();
+
+export const workspaceMutationConflictGetParamsSchema = z
+  .object({
+    workspace: runtimeSettingsWorkspaceSchema,
+    conflictId: workspaceMutationConflictIdSchema,
+  })
+  .strict();
+
+export const workspaceMutationConflictGetResultSchema = z
+  .object({
+    workspace: runtimeSettingsWorkspaceSchema,
+    conflict: workspaceMutationConflictSchema,
+  })
+  .strict();
+
+export const workspaceMutationBackupExportParamsSchema = z
+  .object({
+    workspace: runtimeSettingsWorkspaceSchema,
+    conflictId: workspaceMutationConflictIdSchema,
+    stateToken: workspaceMutationStateTokenSchema,
+    operationIndex: z.number().int().min(0).max(15),
+  })
+  .strict();
+
+export const workspaceMutationBackupExportResultSchema = z
+  .object({
+    workspace: runtimeSettingsWorkspaceSchema,
+    conflictId: workspaceMutationConflictIdSchema,
+    operationIndex: z.number().int().min(0).max(15),
+    sha256: artifactSha256Schema,
+    bytes: z
+      .number()
+      .int()
+      .nonnegative()
+      .max(WORKSPACE_MUTATION_BACKUP_MAXIMUM_BYTES),
+    contentBase64: z
+      .string()
+      .max(1_333_336)
+      .regex(
+        /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u,
+      ),
+  })
+  .strict()
+  .superRefine((result, context) => {
+    const padding = result.contentBase64.endsWith("==")
+      ? 2
+      : result.contentBase64.endsWith("=")
+        ? 1
+        : 0;
+    const decodedBytes = (result.contentBase64.length / 4) * 3 - padding;
+    if (decodedBytes !== result.bytes) {
+      context.addIssue({
+        code: "custom",
+        message: "Backup byte count does not match its Base64 payload.",
+        path: ["contentBase64"],
+      });
+    }
+  });
+
+export const workspaceMutationConflictResolveParamsSchema = z
+  .object({
+    workspace: runtimeSettingsWorkspaceSchema,
+    conflictId: workspaceMutationConflictIdSchema,
+    stateToken: workspaceMutationStateTokenSchema,
+    resolution: z.enum(["restore_original", "accept_current"]),
+  })
+  .strict();
+
+export const workspaceMutationConflictResolveResultSchema = z
+  .object({
+    workspace: runtimeSettingsWorkspaceSchema,
+    conflictId: workspaceMutationConflictIdSchema,
+    resolution: workspaceChangeSetResolutionSchema,
+    stateToken: workspaceMutationStateTokenSchema,
+    resolvedAt: z.string().datetime({ offset: true }),
+    audit: z
+      .object({
+        status: z.enum(["reconciled", "already_reconciled", "deferred"]),
+        message: z.string().max(4_096).optional(),
+      })
+      .strict(),
+    acknowledged: z.boolean(),
+  })
+  .strict();
 
 export const runtimeSettingsModelSchema = z
   .string()
@@ -1319,6 +1596,39 @@ export type SettingsGetParams = z.infer<typeof settingsGetParamsSchema>;
 export type SettingsGetResult = z.infer<typeof settingsGetResultSchema>;
 export type SettingsUpdateParams = z.infer<typeof settingsUpdateParamsSchema>;
 export type SettingsUpdateResult = z.infer<typeof settingsUpdateResultSchema>;
+export type WorkspaceMutationConflictObservation = z.infer<
+  typeof workspaceMutationConflictObservationSchema
+>;
+export type WorkspaceMutationConflictChange = z.infer<
+  typeof workspaceMutationConflictChangeSchema
+>;
+export type WorkspaceMutationConflict = z.infer<
+  typeof workspaceMutationConflictSchema
+>;
+export type WorkspaceMutationConflictsListParams = z.infer<
+  typeof workspaceMutationConflictsListParamsSchema
+>;
+export type WorkspaceMutationConflictsListResult = z.infer<
+  typeof workspaceMutationConflictsListResultSchema
+>;
+export type WorkspaceMutationConflictGetParams = z.infer<
+  typeof workspaceMutationConflictGetParamsSchema
+>;
+export type WorkspaceMutationConflictGetResult = z.infer<
+  typeof workspaceMutationConflictGetResultSchema
+>;
+export type WorkspaceMutationBackupExportParams = z.infer<
+  typeof workspaceMutationBackupExportParamsSchema
+>;
+export type WorkspaceMutationBackupExportResult = z.infer<
+  typeof workspaceMutationBackupExportResultSchema
+>;
+export type WorkspaceMutationConflictResolveParams = z.infer<
+  typeof workspaceMutationConflictResolveParamsSchema
+>;
+export type WorkspaceMutationConflictResolveResult = z.infer<
+  typeof workspaceMutationConflictResolveResultSchema
+>;
 export type ThreadArtifactDescriptor = z.infer<
   typeof threadArtifactDescriptorSchema
 >;

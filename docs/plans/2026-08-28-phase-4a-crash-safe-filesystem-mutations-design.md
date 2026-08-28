@@ -1,6 +1,6 @@
 # Koda Phase 4A: Crash-Safe Filesystem Mutation Recovery
 
-- Status: Phase 4A1 recovery core implemented and verified; Phase 4A2 resolution design accepted and implementation in progress
+- Status: Complete — Phase 4A1 recovery core and Phase 4A2 explicit resolution implemented and verified
 - Date: 2026-08-28
 - Depends on: Phase 2 durable recovery, Phase 3F1 change transactions, and the workspace mutation coordinator
 - Scope: durable local journals, bounded backups, orphan reconciliation, safe automatic rollback, conflict quarantine, and thread-audit reconciliation
@@ -114,7 +114,7 @@ If the originating thread log is missing, corrupt, or currently live, Koda does 
 
 ## 8. Conflict resolution boundary
 
-The first implementation exposes conflict inspection and write blocking. A follow-on Phase 4A client slice may add explicit `restore-original` and `accept-current` commands or RPCs. Those actions are never model-initiated implicit cleanup:
+Phase 4A1 first exposed conflict inspection and write blocking. Phase 4A2 adds explicit `restore-original` and `accept-current` control-plane commands and RPCs. Those actions are never model-initiated implicit cleanup:
 
 - `restore-original` must show the current-versus-backup evidence and receive user approval because it can overwrite an external edit;
 - `accept-current` preserves the workspace as-is, records that the user accepted a non-transactional outcome, and then removes retained recovery material;
@@ -128,7 +128,7 @@ Until one of those decisions is durably recorded, all Koda workspace mutations f
 - `@koda/protocol`: bounded recovery evidence and terminal audit event where required by implementation.
 - `@koda/agent-core`: forwarding for any new operational recovery event without filesystem knowledge.
 - `@koda/app`: startup/orphan reconciliation before tool registration and user-visible recovery diagnostics.
-- CLI, app-server, and TUI: bounded recovered/conflicted projections; explicit conflict resolution remains a separately accepted Phase 4A client slice.
+- CLI, app-server, and TUI: bounded recovered/conflicted projections, exact-token backup export, and explicit conflict resolution through the separately documented Phase 4A2 contract.
 - `@koda/testkit`: deterministic kill-point fixtures, corrupt-journal cases, recovery idempotency, and regression coverage.
 
 ## 10. Verification matrix
@@ -160,7 +160,7 @@ Automated tests cover at least:
 
 ## 12. Deliberate deferrals
 
-- Explicit conflict-resolution RPC and full CLI/TUI inspection workflow: next Phase 4A client slice after the recovery core proves stable.
+- Batch conflict resolution and in-Koda merge editing: deferred; Phase 4A2 resolves one exact inspected conflict at a time.
 - Crash-safe arbitrary command, plugin, or MCP side effects: their owning Phase 4 supervisor or remote subsystem.
 - Rust executor, PTY/background jobs, Windows Job Objects, sandboxing, network policy, and secrets: Phase 4B and 4C.
 - Remote audit/storage reconciliation and distributed mutation leases: Phase 4D.
@@ -175,4 +175,4 @@ Every application turn performs an orphan-recovery pass under the workspace muta
 
 Credential-free coverage includes secure backup publication, all-before cleanup, four-operation partial rollback, all-after recognition, move intermediate recovery, corrupt backups, divergent external edits, symlinked parents, staged-candidate cleanup, retained receipt acknowledgement, repeated recovery, coordinator write blocking, idempotent audit events, missing/conflicting audits, production tool integration, and an application-level restart that repairs files and appends the originating terminal event before a new turn.
 
-Phase 4A is not marked fully complete because the supported client surfaces cannot yet inspect and explicitly resolve a quarantined conflict. The accepted follow-on contract is documented in [Phase 4A2 explicit workspace conflict resolution](2026-08-28-phase-4a2-conflict-resolution-design.md) and is now the active implementation slice.
+Phase 4A2 completes the supported client boundary documented in [Phase 4A2 explicit workspace conflict resolution](2026-08-28-phase-4a2-conflict-resolution-design.md). Quarantined conflicts now expose metadata-only inspection and current-state tokens, verified per-operation backup export, explicit `restore-original` and `accept-current`, crash-replayable pending receipts, an idempotent `workspace.change_set_resolved` audit event, app-server protocol v13, direct CLI commands, and a two-step TUI confirmation flow. Once a journal becomes conflicted it remains quarantined even if endpoints later resemble an approved state; only an exact-token human decision can release it.

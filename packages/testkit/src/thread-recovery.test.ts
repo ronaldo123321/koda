@@ -487,6 +487,21 @@ describe("recoverThread", () => {
         paths: ["README.md"],
       },
     ]);
+
+    const resolved = recoverThread(
+      readResult([
+        ...events,
+        event(7, "workspace.change_set_resolved", {
+          callId,
+          name: "apply_changes",
+          planSha256: "b".repeat(64),
+          resolution: "accepted_current",
+          stateToken: "c".repeat(64),
+        }),
+      ]),
+      threadId,
+    );
+    expect(resolved.workspaceChangeSets).toEqual([]);
   });
 
   it("recovers an interrupted external MCP call without replaying it", () => {

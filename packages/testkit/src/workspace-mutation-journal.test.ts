@@ -217,6 +217,157 @@ describe("WorkspaceMutationJournalStore", () => {
     expect(ran).toBe(false);
   });
 
+  it("keeps an already quarantined journal conflicted even if endpoints later resemble an approved state", async () => {
+    const before = Buffer.from("before\n");
+    const after = Buffer.from("after\n");
+    await writeFile(join(workspaceRoot, "update.txt"), before);
+    await journal.begin({
+      identity: identity("sticky-conflict-call"),
+      planSha256: hash("sticky-conflict-plan"),
+      changes: [updateChange(0, "update.txt", before, after)],
+    });
+    await writeFile(join(workspaceRoot, "update.txt"), "external\n");
+    await journal.recoverPending();
+    await writeFile(join(workspaceRoot, "update.txt"), after);
+
+    await expect(journal.recoverPending()).resolves.toEqual([
+      expect.objectContaining({
+        callId: "sticky-conflict-call",
+        status: "conflicted",
+      }),
+    ]);
+    await expect(
+      readFile(join(workspaceRoot, "update.txt"), "utf8"),
+    ).resolves.toBe("after\n");
+    await expect(journal.listConflicts()).resolves.toHaveLength(1);
+  });
+
+  it("inspects bounded conflict evidence, protects backup export with a current state token, and accepts current files", async () => {
+    const before = Buffer.from("before\n");
+    const after = Buffer.from("after\n");
+    await writeFile(join(workspaceRoot, "update.txt"), before);
+    await journal.begin({
+      identity: identity("accept-call"),
+      planSha256: hash("accept-plan"),
+      changes: [updateChange(0, "update.txt", before, after)],
+    });
+    await writeFile(join(workspaceRoot, "update.txt"), "external one\n");
+    await journal.recoverPending();
+
+    const [first] = await journal.listConflicts();
+    expect(first).toMatchObject({
+      conflictId: expect.stringMatching(/^wmc_[a-f0-9]{64}$/u),
+      status: "conflicted",
+      changes: [
+        {
+          operation: "update",
+          path: "update.txt",
+          source: { kind: "file", sha256: hash("external one\n") },
+          backup: { bytes: before.byteLength, sha256: hash(before) },
+        },
+      ],
+    });
+    expect(JSON.stringify(first)).not.toContain("before\\n");
+    await expect(
+      journal.exportConflictBackup(first!.conflictId, first!.stateToken, 0),
+    ).resolves.toEqual(before);
+
+    await writeFile(join(workspaceRoot, "update.txt"), "external two\n");
+    await expect(
+      journal.exportConflictBackup(first!.conflictId, first!.stateToken, 0),
+    ).rejects.toMatchObject({
+      code: "WORKSPACE_MUTATION_CONFLICT_STALE",
+    });
+    const current = await journal.inspectConflict(first!.conflictId);
+    expect(current.stateToken).not.toBe(first!.stateToken);
+    const receipt = await journal.resolveConflict({
+      conflictId: current.conflictId,
+      stateToken: current.stateToken,
+      resolution: "accept_current",
+    });
+    expect(receipt).toMatchObject({
+      resolution: "accepted_current",
+      stateToken: current.stateToken,
+    });
+    await expect(
+      readFile(join(workspaceRoot, "update.txt"), "utf8"),
+    ).resolves.toBe("external two\n");
+    await expect(journal.listPendingResolutionReceipts()).resolves.toEqual([
+      receipt,
+    ]);
+    await expect(journal.recoverBeforeWrite()).rejects.toMatchObject({
+      code: "WORKSPACE_MUTATION_RECOVERY_CONFLICT",
+    });
+    await journal.acknowledgeResolution(receipt);
+    await expect(journal.listConflicts()).resolves.toEqual([]);
+    await expect(journal.recoverBeforeWrite()).resolves.toEqual([]);
+  });
+
+  it("explicitly restores the complete original create, update, move, and delete state without replaying the resolution", async () => {
+    const updateBefore = Buffer.from("update-before\n");
+    const updateAfter = Buffer.from("update-after\n");
+    const created = Buffer.from("created\n");
+    const moved = Buffer.from("moved\n");
+    const deleted = Buffer.from("deleted\n");
+    await writeFile(join(workspaceRoot, "update.txt"), updateBefore);
+    await writeFile(join(workspaceRoot, "move.txt"), moved);
+    await writeFile(join(workspaceRoot, "delete.txt"), deleted);
+    await journal.begin({
+      identity: identity("restore-call"),
+      planSha256: hash("restore-plan"),
+      changes: [
+        updateChange(0, "update.txt", updateBefore, updateAfter),
+        createChange(1, "created.txt", created),
+        moveChange(2, "move.txt", "moved.txt", moved),
+        deleteChange(3, "delete.txt", deleted),
+      ],
+    });
+    await writeFile(join(workspaceRoot, "update.txt"), "external update\n");
+    await writeFile(join(workspaceRoot, "created.txt"), "external create\n");
+    await rm(join(workspaceRoot, "move.txt"));
+    await writeFile(join(workspaceRoot, "moved.txt"), "external move\n");
+    await writeFile(join(workspaceRoot, "delete.txt"), "external delete\n");
+    await journal.recoverPending();
+
+    const [conflict] = await journal.listConflicts();
+    await expect(
+      journal.exportConflictBackup(
+        conflict!.conflictId,
+        conflict!.stateToken,
+        1,
+      ),
+    ).rejects.toMatchObject({
+      code: "WORKSPACE_MUTATION_BACKUP_NOT_FOUND",
+    });
+    const receipt = await journal.resolveConflict({
+      conflictId: conflict!.conflictId,
+      stateToken: conflict!.stateToken,
+      resolution: "restore_original",
+    });
+    expect(receipt.resolution).toBe("restored_original");
+    await expect(
+      readFile(join(workspaceRoot, "update.txt"), "utf8"),
+    ).resolves.toBe("update-before\n");
+    await expect(
+      readFile(join(workspaceRoot, "created.txt")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(
+      readFile(join(workspaceRoot, "move.txt"), "utf8"),
+    ).resolves.toBe("moved\n");
+    await expect(
+      readFile(join(workspaceRoot, "moved.txt")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(
+      readFile(join(workspaceRoot, "delete.txt"), "utf8"),
+    ).resolves.toBe("deleted\n");
+
+    await expect(journal.listPendingResolutionReceipts()).resolves.toEqual([
+      receipt,
+    ]);
+    await journal.acknowledgeResolution(receipt);
+    await expect(journal.listPendingResolutionReceipts()).resolves.toEqual([]);
+  });
+
   it("fails closed when a retained backup is corrupt", async () => {
     const before = Buffer.from("before\n");
     const after = Buffer.from("after\n");
@@ -299,6 +450,19 @@ describe("WorkspaceMutationJournalStore", () => {
     await expect(
       readFile(join(workspaceRoot, "safe-original", "file.txt"), "utf8"),
     ).resolves.toBe("before\n");
+    const [conflict] = await journal.listConflicts();
+    await expect(
+      journal.resolveConflict({
+        conflictId: conflict!.conflictId,
+        stateToken: conflict!.stateToken,
+        resolution: "restore_original",
+      }),
+    ).rejects.toMatchObject({
+      code: "WORKSPACE_MUTATION_CONFLICT_STALE",
+    });
+    await expect(
+      readFile(join(externalDirectory, "file.txt"), "utf8"),
+    ).resolves.toBe("external\n");
   });
 
   it("rejects a forged staged-candidate path before publishing a journal", async () => {

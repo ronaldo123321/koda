@@ -101,6 +101,7 @@ describe("KodaAppServer", () => {
         commandTemplates: true,
         dynamicToolCatalog: true,
         plugins: true,
+        workspaceMutationRecovery: true,
       },
       providers: [
         { id: "openai", defaultModel: "gpt-5.6-terra", configured: true },
@@ -162,6 +163,13 @@ describe("KodaAppServer", () => {
       expectedRevision: 1,
     });
     expect(errorDataCode(writer, 5)).toBe("PROVIDER_CREDENTIAL_MISSING");
+    await request(server, 6, "workspace/mutation/conflicts", {
+      workspace: fixture.workspaceRoot,
+    });
+    expect(responseResult(writer, 6)).toEqual({
+      workspace: canonicalWorkspace,
+      conflicts: [],
+    });
   });
 
   it("serves thread-authorized artifact lists and UTF-8 ranges", async () => {

@@ -1077,6 +1077,7 @@ interface WorkspaceChangeSetState {
         | "workspace.change_set_uncertain";
     }
   >;
+  resolved?: Extract<AgentEvent, { type: "workspace.change_set_resolved" }>;
 }
 
 const CHANGE_SET_TOOL_NAMES = new Set(["apply_changes", "apply_patchset"]);
@@ -1122,11 +1123,27 @@ function findWorkspaceChangeSets(
     if (
       event.type !== "workspace.change_set_committed" &&
       event.type !== "workspace.change_set_rolled_back" &&
-      event.type !== "workspace.change_set_uncertain"
+      event.type !== "workspace.change_set_uncertain" &&
+      event.type !== "workspace.change_set_resolved"
     ) {
       continue;
     }
     const state = states.get(event.payload.callId);
+    if (event.type === "workspace.change_set_resolved") {
+      if (
+        state === undefined ||
+        state.name !== event.payload.name ||
+        state.prepared.payload.planSha256 !== event.payload.planSha256 ||
+        state.terminal?.type !== "workspace.change_set_uncertain" ||
+        state.resolved !== undefined
+      ) {
+        throw invalidLog(
+          `Change set '${event.payload.callId}' has an invalid resolution event.`,
+        );
+      }
+      state.resolved = event;
+      continue;
+    }
     if (
       state === undefined ||
       state.name !== event.payload.name ||
@@ -1150,6 +1167,9 @@ function findWorkspaceChangeSets(
   }
 
   return [...states.entries()].flatMap(([callId, state]) => {
+    if (state.resolved !== undefined) {
+      return [];
+    }
     const status =
       state.terminal?.type === "workspace.change_set_committed"
         ? "committed"

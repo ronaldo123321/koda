@@ -1,6 +1,6 @@
 # Koda Phase 4 Hardening Roadmap
 
-- Status: In progress — Phase 4A recovery core implemented; client conflict resolution next
+- Status: In progress — Phase 4A complete; Phase 4B supervised execution next
 - Date: 2026-08-28
 - Depends on: completed Phase 3A through Phase 3I baseline
 
@@ -26,7 +26,7 @@ Phase 4 hardens these boundaries before Koda adds child-agent execution in Phase
 
 ### Phase 4A: crash-safe filesystem mutation recovery
 
-Status: Recovery core implemented and verified; explicit conflict-resolution clients pending
+Status: Complete — recovery core and explicit conflict-resolution clients implemented and verified
 
 - Persist bounded before-state backups and immutable change manifests beneath `KODA_HOME` before the first workspace mutation.
 - Make journal publication and terminal-state transitions crash durable with file and best-effort directory synchronization.
@@ -41,7 +41,7 @@ The recovery-core contract is in [Phase 4A crash-safe filesystem mutation recove
 Implementation status:
 
 - **Phase 4A1 complete:** private journals, synchronized backups and manifests, staged-candidate tracking, startup classification and repair, symlink/type/hash conflict quarantine, audit reconciliation, recovery receipts, write blocking, and deterministic crash-state tests.
-- **Phase 4A2 in progress:** read-only conflict inspection plus token-bound `restore-original`, `accept-current`, durable resolution audit, and backup-export RPC/CLI/TUI workflows.
+- **Phase 4A2 complete:** read-only conflict inspection, state-fingerprint tokens, token-bound `restore-original` and `accept-current`, verified backup export, crash-replayable resolution receipts, durable resolution audit, app-server protocol v13, and CLI/TUI workflows.
 
 ### Phase 4B: supervised native execution boundary
 

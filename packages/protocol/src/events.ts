@@ -19,6 +19,7 @@ import {
   workspaceChangeSetCommittedPayloadSchema,
   workspaceChangeSetPreparedPayloadSchema,
   workspaceChangeSetRolledBackPayloadSchema,
+  workspaceChangeSetResolvedPayloadSchema,
   workspaceChangeSetUncertainPayloadSchema,
 } from "./change-sets.js";
 import { tokenUsageSchema, turnUsageSchema } from "./usage.js";
@@ -239,6 +240,15 @@ export const agentEventSchema = z.discriminatedUnion("type", [
       callId: toolCallIdSchema,
       name: z.string().min(1),
       ...workspaceChangeSetUncertainPayloadSchema.shape,
+    }),
+  }),
+  z.object({
+    ...metadataShape,
+    type: z.literal("workspace.change_set_resolved"),
+    payload: z.object({
+      callId: toolCallIdSchema,
+      name: z.string().min(1),
+      ...workspaceChangeSetResolvedPayloadSchema.shape,
     }),
   }),
   z.object({

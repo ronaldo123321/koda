@@ -59,6 +59,14 @@ import {
   type TurnCancelResult,
   type TurnStartParams,
   type TurnStartResult,
+  type WorkspaceMutationBackupExportParams,
+  type WorkspaceMutationBackupExportResult,
+  type WorkspaceMutationConflictGetParams,
+  type WorkspaceMutationConflictGetResult,
+  type WorkspaceMutationConflictResolveParams,
+  type WorkspaceMutationConflictResolveResult,
+  type WorkspaceMutationConflictsListParams,
+  type WorkspaceMutationConflictsListResult,
 } from "@koda/protocol";
 import {
   TuiController,
@@ -1065,6 +1073,60 @@ describe("TuiController", () => {
         .transcript.map((entry) => entry.text)
         .join("\n"),
     ).toContain("No active session command approval grants.");
+  });
+
+  it("inspects token-bound workspace conflicts and confirms an explicit resolution", async () => {
+    const client = new FakeAppServerClient();
+    const conflict = workspaceMutationConflictFixture();
+    client.workspaceMutationConflictsResult = {
+      workspace: "/workspace",
+      conflicts: [conflict],
+    };
+    client.workspaceMutationConflictGetResult = {
+      workspace: "/workspace",
+      conflict,
+    };
+    client.workspaceMutationConflictResolveResult = {
+      workspace: "/workspace",
+      conflictId: conflict.conflictId,
+      resolution: "restored_original",
+      stateToken: conflict.stateToken,
+      resolvedAt: "2026-08-28T03:00:00.000Z",
+      audit: { status: "reconciled" },
+      acknowledged: true,
+    };
+    const controller = createController(client);
+
+    controller.setInput("/recovery");
+    await controller.submitInput();
+    controller.setInput(
+      `/recovery resolve ${conflict.conflictId} ${conflict.stateToken} restore-original`,
+    );
+    await controller.submitInput();
+    expect(client.workspaceMutationConflictResolveRequests).toEqual([]);
+    expect(controller.getSnapshot().transcript.at(-1)?.text).toContain(
+      "may overwrite current external edits",
+    );
+    controller.setInput("/recovery confirm");
+    await controller.submitInput();
+
+    expect(client.workspaceMutationConflictListRequests).toEqual([
+      { workspace: "/workspace" },
+    ]);
+    expect(client.workspaceMutationConflictGetRequests).toEqual([
+      { workspace: "/workspace", conflictId: conflict.conflictId },
+    ]);
+    expect(client.workspaceMutationConflictResolveRequests).toEqual([
+      {
+        workspace: "/workspace",
+        conflictId: conflict.conflictId,
+        stateToken: conflict.stateToken,
+        resolution: "restore_original",
+      },
+    ]);
+    expect(controller.getSnapshot().transcript.at(-1)?.text).toContain(
+      "workspace writes are unblocked",
+    );
   });
 
   it("projects change-set commit and uncertainty evidence into tool status", async () => {
@@ -2146,6 +2208,7 @@ class FakeAppServerClient implements AppServerClientApi {
         commandTemplates: true,
         dynamicToolCatalog: true,
         plugins: true,
+        workspaceMutationRecovery: true,
       },
       providers: [
         provider("openai", "OpenAI", "OPENAI_API_KEY", "gpt-5.6-terra"),
@@ -2176,6 +2239,14 @@ class FakeAppServerClient implements AppServerClientApi {
   public readonly threadSearchRequests: ThreadSearchParams[] = [];
   public readonly settingsGetRequests: SettingsGetParams[] = [];
   public readonly settingsUpdateRequests: SettingsUpdateParams[] = [];
+  public readonly workspaceMutationConflictListRequests: WorkspaceMutationConflictsListParams[] =
+    [];
+  public readonly workspaceMutationConflictGetRequests: WorkspaceMutationConflictGetParams[] =
+    [];
+  public readonly workspaceMutationBackupExportRequests: WorkspaceMutationBackupExportParams[] =
+    [];
+  public readonly workspaceMutationConflictResolveRequests: WorkspaceMutationConflictResolveParams[] =
+    [];
   public readonly threadArtifactRequests: ThreadArtifactsParams[] = [];
   public readonly artifactReadRequests: ArtifactReadParams[] = [];
   public readonly threadContextRequests: ThreadContextParams[] = [];
@@ -2237,6 +2308,17 @@ class FakeAppServerClient implements AppServerClientApi {
     plugins: [],
   };
   public planGetResult: PlanGetResult | undefined;
+  public workspaceMutationConflictsResult: WorkspaceMutationConflictsListResult =
+    {
+      workspace: "/workspace",
+      conflicts: [],
+    };
+  public workspaceMutationConflictGetResult:
+    WorkspaceMutationConflictGetResult | undefined;
+  public workspaceMutationBackupExportResult:
+    WorkspaceMutationBackupExportResult | undefined;
+  public workspaceMutationConflictResolveResult:
+    WorkspaceMutationConflictResolveResult | undefined;
   public threadListError: Error | undefined;
   public threadEventsError: Error | undefined;
   public threadSearchError: Error | undefined;
@@ -2436,6 +2518,46 @@ class FakeAppServerClient implements AppServerClientApi {
         diagnostics: [],
       },
     );
+  }
+
+  public listWorkspaceMutationConflicts(
+    params: WorkspaceMutationConflictsListParams,
+  ): Promise<WorkspaceMutationConflictsListResult> {
+    this.workspaceMutationConflictListRequests.push(params);
+    return Promise.resolve(this.workspaceMutationConflictsResult);
+  }
+
+  public inspectWorkspaceMutationConflict(
+    params: WorkspaceMutationConflictGetParams,
+  ): Promise<WorkspaceMutationConflictGetResult> {
+    this.workspaceMutationConflictGetRequests.push(params);
+    return this.workspaceMutationConflictGetResult === undefined
+      ? Promise.reject(
+          new Error("Workspace mutation conflict fixture is unavailable."),
+        )
+      : Promise.resolve(this.workspaceMutationConflictGetResult);
+  }
+
+  public exportWorkspaceMutationBackup(
+    params: WorkspaceMutationBackupExportParams,
+  ): Promise<WorkspaceMutationBackupExportResult> {
+    this.workspaceMutationBackupExportRequests.push(params);
+    return this.workspaceMutationBackupExportResult === undefined
+      ? Promise.reject(
+          new Error("Workspace mutation backup fixture is unavailable."),
+        )
+      : Promise.resolve(this.workspaceMutationBackupExportResult);
+  }
+
+  public resolveWorkspaceMutationConflict(
+    params: WorkspaceMutationConflictResolveParams,
+  ): Promise<WorkspaceMutationConflictResolveResult> {
+    this.workspaceMutationConflictResolveRequests.push(params);
+    return this.workspaceMutationConflictResolveResult === undefined
+      ? Promise.reject(
+          new Error("Workspace mutation resolution fixture is unavailable."),
+        )
+      : Promise.resolve(this.workspaceMutationConflictResolveResult);
   }
 
   public startTurn(params: TurnStartParams): Promise<TurnStartResult> {
@@ -2788,5 +2910,39 @@ function provider(
     credentialEnvironmentVariable,
     defaultModel,
     configured: true,
+  };
+}
+
+function workspaceMutationConflictFixture() {
+  return {
+    conflictId: `wmc_${"1".repeat(64)}`,
+    threadId: "recovery-thread",
+    turnId: "recovery-turn",
+    callId: "recovery-call",
+    toolName: "apply_changes",
+    planSha256: "2".repeat(64),
+    createdAt: "2026-08-28T02:00:00.000Z",
+    status: "conflicted" as const,
+    stateToken: "3".repeat(64),
+    changes: [
+      {
+        index: 0,
+        operation: "update" as const,
+        path: "README.md",
+        beforeSha256: "4".repeat(64),
+        afterSha256: "5".repeat(64),
+        beforeMode: 0o644,
+        afterMode: 0o644,
+        source: {
+          kind: "file" as const,
+          sha256: "6".repeat(64),
+          mode: 0o644,
+        },
+        stagedPath:
+          ".README.md.koda-change-00000000-0000-4000-8000-000000000000.tmp",
+        stagedState: { kind: "absent" as const },
+        backup: { bytes: 7, sha256: "4".repeat(64) },
+      },
+    ],
   };
 }

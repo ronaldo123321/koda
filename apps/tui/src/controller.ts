@@ -1,3 +1,7 @@
+import { createHash } from "node:crypto";
+import { open } from "node:fs/promises";
+import { resolve as resolvePath } from "node:path";
+
 import type {
   AppServerClientApi,
   AppServerNotification,
@@ -39,6 +43,7 @@ import {
   type ToolCallId,
   type TurnId,
   type TurnUsage,
+  type WorkspaceMutationConflict,
 } from "@koda/protocol";
 
 const MAXIMUM_INPUT_CHARACTERS = 32_768;
@@ -373,6 +378,13 @@ export class TuiController {
   private readonly notificationScheduler: TuiNotificationScheduler;
   private pendingStreamNotification: unknown | undefined;
   private streamNotificationDirty = false;
+  private pendingWorkspaceMutationResolution:
+    | {
+        conflictId: string;
+        stateToken: string;
+        resolution: "restore_original" | "accept_current";
+      }
+    | undefined;
 
   public constructor(
     private readonly client: AppServerClientApi,
@@ -490,6 +502,10 @@ export class TuiController {
       await this.handleApprovalsCommand(input);
       return "handled";
     }
+    if (input === "/recovery" || input.startsWith("/recovery ")) {
+      await this.handleWorkspaceMutationRecoveryCommand(input);
+      return "handled";
+    }
     switch (input) {
       case "/help":
         this.appendTranscript(
@@ -511,6 +527,11 @@ export class TuiController {
             "/approvals — list session command approval grants",
             "/approvals revoke <id> — revoke one session grant",
             "/approvals clear — revoke all workspace session grants",
+            "/recovery — list quarantined workspace changes",
+            "/recovery inspect <id> — inspect token-bound conflict evidence",
+            "/recovery export <id> <index> <token> <file> — export one original backup",
+            "/recovery resolve <id> <token> <restore-original|accept-current> — stage a resolution for confirmation",
+            "/recovery confirm — execute the staged resolution",
             "/new — detach so the next prompt creates a thread",
             "/exit — shut down Koda",
             "Ctrl+T — open the thread browser",
@@ -4288,6 +4309,160 @@ export class TuiController {
     }
   }
 
+  private async handleWorkspaceMutationRecoveryCommand(
+    input: string,
+  ): Promise<void> {
+    const argument = input.slice("/recovery".length).trim();
+    const parts = argument.length === 0 ? [] : argument.split(/\s+/u);
+    try {
+      if (parts.length === 0 || parts[0] === "list") {
+        this.pendingWorkspaceMutationResolution = undefined;
+        const result = await this.client.listWorkspaceMutationConflicts({
+          workspace: this.state.configuration.cwd,
+        });
+        this.appendTranscript(
+          "system",
+          result.conflicts.length === 0
+            ? "No quarantined workspace mutation conflicts."
+            : result.conflicts
+                .map(formatWorkspaceMutationConflict)
+                .join("\n\n"),
+        );
+        return;
+      }
+      if (parts[0] === "inspect" && parts.length === 2) {
+        this.pendingWorkspaceMutationResolution = undefined;
+        const result = await this.client.inspectWorkspaceMutationConflict({
+          workspace: this.state.configuration.cwd,
+          conflictId: parts[1]!,
+        });
+        this.appendTranscript(
+          "system",
+          formatWorkspaceMutationConflict(result.conflict),
+        );
+        return;
+      }
+      if (parts[0] === "export" && parts.length === 5) {
+        const operationIndex = Number(parts[2]);
+        if (
+          !Number.isInteger(operationIndex) ||
+          operationIndex < 0 ||
+          operationIndex > 15
+        ) {
+          throw new Error("Operation index must be an integer from 0 to 15.");
+        }
+        const result = await this.client.exportWorkspaceMutationBackup({
+          workspace: this.state.configuration.cwd,
+          conflictId: parts[1]!,
+          operationIndex,
+          stateToken: parts[3]!,
+        });
+        const bytes = Buffer.from(result.contentBase64, "base64");
+        if (
+          bytes.byteLength !== result.bytes ||
+          createHash("sha256").update(bytes).digest("hex") !== result.sha256
+        ) {
+          throw new Error(
+            "Exported backup failed local integrity verification.",
+          );
+        }
+        const outputPath = resolvePath(this.state.configuration.cwd, parts[4]!);
+        const handle = await open(outputPath, "wx", 0o600);
+        try {
+          await handle.chmod(0o600);
+          await handle.writeFile(bytes);
+          await handle.sync();
+        } finally {
+          await handle.close();
+        }
+        this.appendTranscript(
+          "system",
+          `Exported ${result.bytes} verified backup bytes to ${outputPath}.`,
+        );
+        return;
+      }
+      if (parts[0] === "resolve" && parts.length === 4) {
+        const resolution =
+          parts[3] === "restore-original"
+            ? "restore_original"
+            : parts[3] === "accept-current"
+              ? "accept_current"
+              : undefined;
+        if (resolution === undefined) {
+          throw new Error(
+            "Resolution must be 'restore-original' or 'accept-current'.",
+          );
+        }
+        const inspected = await this.client.inspectWorkspaceMutationConflict({
+          workspace: this.state.configuration.cwd,
+          conflictId: parts[1]!,
+        });
+        if (
+          inspected.conflict.status !== "conflicted" ||
+          inspected.conflict.stateToken !== parts[2]
+        ) {
+          throw new Error(
+            "The supplied state token is stale or this conflict already has a pending resolution.",
+          );
+        }
+        this.pendingWorkspaceMutationResolution = {
+          conflictId: inspected.conflict.conflictId,
+          stateToken: inspected.conflict.stateToken,
+          resolution,
+        };
+        this.appendTranscript(
+          "system",
+          [
+            formatWorkspaceMutationConflict(inspected.conflict),
+            "",
+            resolution === "restore_original"
+              ? "Pending action: restore the complete original state. This may overwrite current external edits."
+              : "Pending action: accept the current workspace exactly as displayed.",
+            "Run /recovery confirm to execute, or /recovery cancel to discard this confirmation.",
+          ].join("\n"),
+        );
+        return;
+      }
+      if (parts[0] === "confirm" && parts.length === 1) {
+        const pending = this.pendingWorkspaceMutationResolution;
+        if (pending === undefined) {
+          throw new Error(
+            "There is no staged workspace resolution to confirm.",
+          );
+        }
+        const result = await this.client.resolveWorkspaceMutationConflict({
+          workspace: this.state.configuration.cwd,
+          ...pending,
+        });
+        this.pendingWorkspaceMutationResolution = undefined;
+        this.appendTranscript(
+          result.acknowledged ? "system" : "error",
+          result.acknowledged
+            ? `Resolved ${result.conflictId} as ${result.resolution}; the audit is durable and workspace writes are unblocked.`
+            : `Resolved ${result.conflictId} as ${result.resolution}, but audit reconciliation is deferred and workspace writes remain blocked: ${result.audit.message ?? "unknown audit state"}`,
+        );
+        return;
+      }
+      if (parts[0] === "cancel" && parts.length === 1) {
+        this.pendingWorkspaceMutationResolution = undefined;
+        this.appendTranscript(
+          "system",
+          "Discarded the staged workspace resolution.",
+        );
+        return;
+      }
+      this.appendTranscript(
+        "error",
+        "Usage: /recovery [list], /recovery inspect <id>, /recovery export <id> <index> <token> <file>, /recovery resolve <id> <token> <restore-original|accept-current>, /recovery confirm, or /recovery cancel.",
+      );
+    } catch (error) {
+      this.appendTranscript(
+        "error",
+        `Workspace recovery operation failed: ${errorMessage(error)}`,
+      );
+    }
+  }
+
   public cancelActiveTurn(): Promise<void> {
     this.cancelPromise ??= this.cancelActiveTurnOnce().finally(() => {
       this.cancelPromise = undefined;
@@ -4549,6 +4724,13 @@ export class TuiController {
           status: "error",
           safetyRelevant: true,
           detail: `uncertain: ${event.payload.uncertainPaths.join(", ")}`,
+        });
+        break;
+      case "workspace.change_set_resolved":
+        next = updateTool(next, event.payload.callId, event.payload.name, {
+          status: "success",
+          safetyRelevant: true,
+          detail: `resolved: ${event.payload.resolution}`,
         });
         break;
       case "artifact.recorded":
@@ -5688,6 +5870,8 @@ function activityEventDetail(event: AgentEvent): string | undefined {
       return `${event.payload.name} · ${event.payload.appliedCount} rolled back · call ${event.payload.callId}`;
     case "workspace.change_set_uncertain":
       return `${event.payload.name} · ${event.payload.uncertainPaths.length} uncertain path(s) · call ${event.payload.callId}`;
+    case "workspace.change_set_resolved":
+      return `${event.payload.name} · ${event.payload.resolution} · call ${event.payload.callId}`;
     case "approval.requested":
       return `${event.payload.name} · ${event.payload.reason} · call ${event.payload.callId}`;
     case "approval.resolved":
@@ -5935,6 +6119,63 @@ function isExternalToolName(name: string): boolean {
 
 function toolStatusLabel(status: TuiToolStatus): string {
   return status.replaceAll("_", " ");
+}
+
+function formatWorkspaceMutationConflict(
+  conflict: WorkspaceMutationConflict,
+): string {
+  const lines = [
+    `${conflict.conflictId} · ${conflict.status} · ${conflict.toolName}`,
+    `thread ${conflict.threadId} · call ${conflict.callId}`,
+    `state token ${conflict.stateToken}`,
+  ];
+  if (conflict.pendingResolution !== undefined) {
+    lines.push(
+      `pending ${conflict.pendingResolution.resolution} since ${conflict.pendingResolution.resolvedAt}`,
+    );
+  }
+  for (const change of conflict.changes) {
+    lines.push(
+      `[${change.index}] ${change.operation} ${change.path}${
+        change.destination === undefined ? "" : ` -> ${change.destination}`
+      }`,
+      `  current source: ${formatWorkspaceMutationObservation(change.source)}`,
+    );
+    if (change.destinationState !== undefined) {
+      lines.push(
+        `  current destination: ${formatWorkspaceMutationObservation(change.destinationState)}`,
+      );
+    }
+    if (change.stagedState !== undefined) {
+      lines.push(
+        `  staged ${change.stagedPath}: ${formatWorkspaceMutationObservation(change.stagedState)}`,
+      );
+    }
+    lines.push(
+      `  approved before: ${change.beforeSha256 ?? "absent"}${
+        change.beforeMode === null
+          ? ""
+          : ` mode ${change.beforeMode.toString(8)}`
+      }`,
+      `  approved after: ${change.afterSha256 ?? "absent"}${
+        change.afterMode === null ? "" : ` mode ${change.afterMode.toString(8)}`
+      }`,
+      change.backup === undefined
+        ? "  original backup: none"
+        : `  original backup: ${change.backup.bytes} bytes · ${change.backup.sha256}`,
+    );
+  }
+  return lines.join("\n");
+}
+
+function formatWorkspaceMutationObservation(
+  observation: WorkspaceMutationConflict["changes"][number]["source"],
+): string {
+  return observation.kind === "absent"
+    ? "absent"
+    : observation.kind === "file"
+      ? `file ${observation.sha256} mode ${observation.mode?.toString(8)}`
+      : `divergent ${observation.fingerprint}`;
 }
 
 function boundText(

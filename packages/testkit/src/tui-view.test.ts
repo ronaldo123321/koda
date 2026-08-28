@@ -936,6 +936,7 @@ function baseState(): TuiState {
       commandTemplates: true,
       dynamicToolCatalog: true,
       plugins: true,
+      workspaceMutationRecovery: true,
     },
     providers: [
       {

@@ -114,6 +114,7 @@ const initialization = initializeResultSchema.parse({
     commandTemplates: true,
     dynamicToolCatalog: true,
     plugins: true,
+    workspaceMutationRecovery: true,
   },
   providers: [
     {
@@ -207,6 +208,16 @@ const client: AppServerClientApi = {
       },
       diagnostics: [],
     }),
+  listWorkspaceMutationConflicts: async (params) => ({
+    workspace: params.workspace,
+    conflicts: [],
+  }),
+  inspectWorkspaceMutationConflict: async () =>
+    Promise.reject(new Error("Not used by TTY fixture.")),
+  exportWorkspaceMutationBackup: async () =>
+    Promise.reject(new Error("Not used by TTY fixture.")),
+  resolveWorkspaceMutationConflict: async () =>
+    Promise.reject(new Error("Not used by TTY fixture.")),
   startTurn: async () => {
     setTimeout(() => {
       emitEvent(0, "tool.started", {

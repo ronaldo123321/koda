@@ -404,6 +404,298 @@ describe("KodaApplication", () => {
     await expect(journal.recoverPending()).resolves.toEqual([]);
   });
 
+  it("inspects, exports, and durably accepts a quarantined workspace conflict", async () => {
+    const fixture = await createFixture();
+    const threadId = threadIdSchema.parse("mutation-resolution-thread");
+    const turnId = turnIdSchema.parse("mutation-resolution-turn");
+    const callId = toolCallIdSchema.parse("mutation-resolution-call");
+    const planSha256 = sha256("mutation-resolution-plan");
+    const before = Buffer.from("before\n");
+    const after = Buffer.from("after\n");
+    await writeFile(join(fixture.workspaceRoot, "tracked.txt"), before);
+    const eventStore = new JsonlEventStore(
+      join(fixture.kodaHome, "threads", `${threadId}.jsonl`),
+    );
+    const events: AgentEvent[] = [
+      agentEventSchema.parse({
+        schemaVersion: 1,
+        sequence: 0,
+        timestamp: "2026-08-28T00:00:00.000Z",
+        threadId,
+        turnId,
+        type: "turn.started",
+        payload: {},
+      }),
+      agentEventSchema.parse({
+        schemaVersion: 1,
+        sequence: 1,
+        timestamp: "2026-08-28T00:00:01.000Z",
+        threadId,
+        turnId,
+        type: "tool.execution_started",
+        payload: { callId, name: "apply_changes", effect: "write" },
+      }),
+      agentEventSchema.parse({
+        schemaVersion: 1,
+        sequence: 2,
+        timestamp: "2026-08-28T00:00:02.000Z",
+        threadId,
+        turnId,
+        type: "workspace.change_set_prepared",
+        payload: {
+          callId,
+          name: "apply_changes",
+          planSha256,
+          changes: [
+            {
+              index: 0,
+              operation: "update",
+              path: "tracked.txt",
+              beforeSha256: sha256(before),
+              afterSha256: sha256(after),
+              bytes: after.byteLength,
+            },
+          ],
+        },
+      }),
+      agentEventSchema.parse({
+        schemaVersion: 1,
+        sequence: 3,
+        timestamp: "2026-08-28T00:00:03.000Z",
+        threadId,
+        turnId,
+        type: "workspace.change_set_uncertain",
+        payload: {
+          callId,
+          name: "apply_changes",
+          planSha256,
+          appliedCount: 0,
+          uncertainPaths: ["tracked.txt"],
+          errorCode: "PROCESS_INTERRUPTED",
+        },
+      }),
+    ];
+    for (const event of events) {
+      await eventStore.append(event);
+    }
+    const journal = await WorkspaceMutationJournalStore.open(
+      fixture.kodaHome,
+      fixture.workspaceRoot,
+    );
+    await journal.begin({
+      identity: {
+        threadId,
+        turnId,
+        callId,
+        toolName: "apply_changes",
+      },
+      planSha256,
+      changes: [
+        {
+          index: 0,
+          operation: "update",
+          path: "tracked.txt",
+          beforeSha256: sha256(before),
+          afterSha256: sha256(after),
+          bytes: after.byteLength,
+          beforeMode: 0o644,
+          afterMode: 0o644,
+          beforeBytes: before,
+          stagedPath:
+            ".tracked.txt.koda-change-00000000-0000-4000-8000-000000000000.tmp",
+        },
+      ],
+    });
+    await writeFile(join(fixture.workspaceRoot, "tracked.txt"), "external\n");
+    await journal.recoverPending();
+
+    const application = new KodaApplication({
+      environment: { KODA_HOME: fixture.kodaHome },
+      processDirectory: fixture.root,
+    });
+    const listed = await application.listWorkspaceMutationConflicts(
+      fixture.workspaceRoot,
+    );
+    expect(listed.conflicts).toHaveLength(1);
+    const conflict = listed.conflicts[0]!;
+    const exported = await application.exportWorkspaceMutationBackup({
+      workspace: fixture.workspaceRoot,
+      conflictId: conflict.conflictId,
+      stateToken: conflict.stateToken,
+      operationIndex: 0,
+    });
+    expect(exported.bytes).toEqual(before);
+    await expect(
+      application.resolveWorkspaceMutationConflict({
+        workspace: fixture.workspaceRoot,
+        conflictId: conflict.conflictId,
+        stateToken: conflict.stateToken,
+        resolution: "accept_current",
+      }),
+    ).resolves.toMatchObject({
+      receipt: { resolution: "accepted_current" },
+      audit: { status: "reconciled" },
+      acknowledged: true,
+    });
+    await expect(
+      readFile(join(fixture.workspaceRoot, "tracked.txt"), "utf8"),
+    ).resolves.toBe("external\n");
+    await expect(
+      application.listWorkspaceMutationConflicts(fixture.workspaceRoot),
+    ).resolves.toMatchObject({ conflicts: [] });
+    expect((await eventStore.readAllRequired()).events.at(-1)).toMatchObject({
+      type: "workspace.change_set_resolved",
+      payload: {
+        callId,
+        resolution: "accepted_current",
+        stateToken: conflict.stateToken,
+      },
+    });
+
+    const restartCallId = toolCallIdSchema.parse(
+      "mutation-resolution-restart-call",
+    );
+    const restartPlanSha256 = sha256("mutation-resolution-restart-plan");
+    const acceptedBefore = Buffer.from("external\n");
+    const acceptedAfter = Buffer.from("approved after restart\n");
+    await eventStore.append(
+      agentEventSchema.parse({
+        schemaVersion: 1,
+        sequence: 5,
+        timestamp: "2026-08-28T00:00:05.000Z",
+        threadId,
+        turnId,
+        type: "tool.execution_started",
+        payload: {
+          callId: restartCallId,
+          name: "apply_changes",
+          effect: "write",
+        },
+      }),
+    );
+    await eventStore.append(
+      agentEventSchema.parse({
+        schemaVersion: 1,
+        sequence: 6,
+        timestamp: "2026-08-28T00:00:06.000Z",
+        threadId,
+        turnId,
+        type: "workspace.change_set_prepared",
+        payload: {
+          callId: restartCallId,
+          name: "apply_changes",
+          planSha256: restartPlanSha256,
+          changes: [
+            {
+              index: 0,
+              operation: "update",
+              path: "tracked.txt",
+              beforeSha256: sha256(acceptedBefore),
+              afterSha256: sha256(acceptedAfter),
+              bytes: acceptedAfter.byteLength,
+            },
+          ],
+        },
+      }),
+    );
+    await eventStore.append(
+      agentEventSchema.parse({
+        schemaVersion: 1,
+        sequence: 7,
+        timestamp: "2026-08-28T00:00:07.000Z",
+        threadId,
+        turnId,
+        type: "workspace.change_set_uncertain",
+        payload: {
+          callId: restartCallId,
+          name: "apply_changes",
+          planSha256: restartPlanSha256,
+          appliedCount: 0,
+          uncertainPaths: ["tracked.txt"],
+          errorCode: "PROCESS_INTERRUPTED",
+        },
+      }),
+    );
+    await journal.begin({
+      identity: {
+        threadId,
+        turnId,
+        callId: restartCallId,
+        toolName: "apply_changes",
+      },
+      planSha256: restartPlanSha256,
+      changes: [
+        {
+          index: 0,
+          operation: "update",
+          path: "tracked.txt",
+          beforeSha256: sha256(acceptedBefore),
+          afterSha256: sha256(acceptedAfter),
+          bytes: acceptedAfter.byteLength,
+          beforeMode: 0o644,
+          afterMode: 0o644,
+          beforeBytes: acceptedBefore,
+          stagedPath:
+            ".tracked.txt.koda-change-00000000-0000-4000-8000-000000000001.tmp",
+        },
+      ],
+    });
+    await writeFile(
+      join(fixture.workspaceRoot, "tracked.txt"),
+      "second external\n",
+    );
+    await journal.recoverPending();
+    const [restartConflict] = await journal.listConflicts();
+    await journal.resolveConflict({
+      conflictId: restartConflict!.conflictId,
+      stateToken: restartConflict!.stateToken,
+      resolution: "accept_current",
+    });
+
+    const restartDiagnostics: string[] = [];
+    const restartApplication = new KodaApplication({
+      environment: {
+        KODA_HOME: fixture.kodaHome,
+        OPENAI_API_KEY: "offline-test-key",
+      },
+      processDirectory: fixture.root,
+      dependencies: dependencies(
+        new ScriptedModelProvider([
+          {
+            events: [
+              { type: "assistant_delta", text: "Pending receipt reconciled." },
+              { type: "completed", finishReason: "stop" },
+            ],
+          },
+        ]),
+        "mutation-resolution-restart",
+      ),
+    });
+    const restartHandle = restartApplication.startTurn(
+      { prompt: "Verify restart reconciliation.", cwd: fixture.workspaceRoot },
+      {
+        events: { append: async () => undefined },
+        approvals: rejectApprovals(),
+        diagnostic: (diagnostic) => restartDiagnostics.push(diagnostic.code),
+      },
+    );
+    await expect(restartHandle.completion).resolves.toMatchObject({
+      status: "completed",
+    });
+    expect(restartDiagnostics).toContain(
+      "WORKSPACE_MUTATION_CONFLICT_RESOLVED",
+    );
+    await expect(journal.listPendingResolutionReceipts()).resolves.toEqual([]);
+    expect((await eventStore.readAllRequired()).events.at(-1)).toMatchObject({
+      type: "workspace.change_set_resolved",
+      payload: {
+        callId: restartCallId,
+        resolution: "accepted_current",
+        stateToken: restartConflict!.stateToken,
+      },
+    });
+  });
+
   it("freezes project Skills, exposes read_skill, and persists activation evidence", async () => {
     const fixture = await createFixture();
     const skillDirectory = join(

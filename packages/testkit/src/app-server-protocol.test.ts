@@ -44,12 +44,15 @@ import {
   turnStartParamsSchema,
   turnFinishedNotificationParamsSchema,
   workspaceChangeSetPreparedPayloadSchema,
+  workspaceMutationBackupExportResultSchema,
+  workspaceMutationConflictResolveParamsSchema,
+  workspaceMutationConflictsListResultSchema,
 } from "@koda/protocol";
 import { describe, expect, it } from "vitest";
 
 describe("app-server protocol", () => {
   it("accepts strict versioned requests and safe JSON-RPC IDs", () => {
-    expect(APP_SERVER_PROTOCOL_VERSION).toBe(12);
+    expect(APP_SERVER_PROTOCOL_VERSION).toBe(13);
     expect(
       jsonRpcRequestSchema.parse({
         jsonrpc: "2.0",
@@ -113,6 +116,7 @@ describe("app-server protocol", () => {
           commandTemplates: true,
           dynamicToolCatalog: true,
           plugins: true,
+          workspaceMutationRecovery: true,
         },
         providers: [
           {
@@ -133,6 +137,7 @@ describe("app-server protocol", () => {
       commandTemplates: true,
       dynamicToolCatalog: true,
       plugins: true,
+      workspaceMutationRecovery: true,
     });
 
     expect(
@@ -188,6 +193,72 @@ describe("app-server protocol", () => {
         feedback: "Add a recovery test.",
       }),
     ).toHaveProperty("feedback", "Add a recovery test.");
+  });
+
+  it("validates bounded token-bound workspace mutation recovery messages", () => {
+    const conflict = {
+      conflictId: `wmc_${"a".repeat(64)}`,
+      threadId: "recovery-thread",
+      turnId: "recovery-turn",
+      callId: "recovery-call",
+      toolName: "apply_changes",
+      planSha256: "b".repeat(64),
+      createdAt: "2026-08-28T00:00:00.000Z",
+      status: "conflicted",
+      stateToken: "c".repeat(64),
+      changes: [
+        {
+          index: 0,
+          operation: "update",
+          path: "README.md",
+          beforeSha256: "d".repeat(64),
+          afterSha256: "e".repeat(64),
+          beforeMode: 0o644,
+          afterMode: 0o644,
+          source: {
+            kind: "file",
+            sha256: "f".repeat(64),
+            mode: 0o644,
+          },
+          stagedPath:
+            ".README.md.koda-change-00000000-0000-4000-8000-000000000000.tmp",
+          stagedState: { kind: "absent" },
+          backup: { bytes: 7, sha256: "d".repeat(64) },
+        },
+      ],
+    };
+    expect(
+      workspaceMutationConflictsListResultSchema.parse({
+        workspace: "/workspace",
+        conflicts: [conflict],
+      }),
+    ).toMatchObject({ conflicts: [{ stateToken: "c".repeat(64) }] });
+    expect(
+      workspaceMutationConflictResolveParamsSchema.parse({
+        workspace: "/workspace",
+        conflictId: conflict.conflictId,
+        stateToken: conflict.stateToken,
+        resolution: "restore_original",
+      }),
+    ).toMatchObject({ resolution: "restore_original" });
+    expect(
+      workspaceMutationBackupExportResultSchema.parse({
+        workspace: "/workspace",
+        conflictId: conflict.conflictId,
+        operationIndex: 0,
+        sha256: "d".repeat(64),
+        bytes: Buffer.byteLength("before"),
+        contentBase64: Buffer.from("before").toString("base64"),
+      }),
+    ).toMatchObject({ bytes: Buffer.byteLength("before") });
+    expect(() =>
+      workspaceMutationConflictResolveParamsSchema.parse({
+        workspace: "/workspace",
+        conflictId: conflict.conflictId,
+        stateToken: "0".repeat(64),
+        resolution: "restore-original",
+      }),
+    ).toThrow();
   });
 
   it("validates strict bounded extension catalogs, source reads, and historical snapshots", () => {

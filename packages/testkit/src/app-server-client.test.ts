@@ -144,7 +144,7 @@ describe("NodeAppServerClient", () => {
     await mkdir(skillDirectory, { recursive: true });
     await writeFile(
       join(skillDirectory, "SKILL.md"),
-      "---\nname: client-review\ndescription: Review through protocol v12.\n---\nReview the current client request.\n",
+      "---\nname: client-review\ndescription: Review through protocol v13.\n---\nReview the current client request.\n",
     );
     const materialized = await artifactStore.materializeText(
       "client artifact 中文 content",
@@ -274,6 +274,7 @@ describe("NodeAppServerClient", () => {
         commandTemplates: true,
         dynamicToolCatalog: true,
         plugins: true,
+        workspaceMutationRecovery: true,
       },
       providers: [
         { id: "openai", configured: true },
@@ -286,6 +287,9 @@ describe("NodeAppServerClient", () => {
     await expect(client.listThreads()).resolves.toMatchObject({
       threads: [{ threadId: "client-history" }],
     });
+    await expect(
+      client.listWorkspaceMutationConflicts({ workspace: canonicalRoot }),
+    ).resolves.toEqual({ workspace: canonicalRoot, conflicts: [] });
     await expect(
       client.getRuntimeSettings({ workspace: canonicalRoot }),
     ).resolves.toMatchObject({ revision: 0, diagnostics: [] });
@@ -600,6 +604,7 @@ function fixtureServerScript(options: {
       commandTemplates: true,
       dynamicToolCatalog: true,
       plugins: true,
+      workspaceMutationRecovery: true,
     },
     providers: [
       {

@@ -138,6 +138,19 @@ export const workspaceChangeSetUncertainPayloadSchema = z
   })
   .strict();
 
+export const workspaceChangeSetResolutionSchema = z.enum([
+  "restored_original",
+  "accepted_current",
+]);
+
+export const workspaceChangeSetResolvedPayloadSchema = z
+  .object({
+    ...planSha256Shape,
+    resolution: workspaceChangeSetResolutionSchema,
+    stateToken: artifactSha256Schema,
+  })
+  .strict();
+
 export const workspaceChangeSetRecoverySchema = z
   .object({
     planSha256: artifactSha256Schema,
@@ -163,6 +176,12 @@ export type WorkspaceChangeSetRolledBackPayload = z.infer<
 >;
 export type WorkspaceChangeSetUncertainPayload = z.infer<
   typeof workspaceChangeSetUncertainPayloadSchema
+>;
+export type WorkspaceChangeSetResolution = z.infer<
+  typeof workspaceChangeSetResolutionSchema
+>;
+export type WorkspaceChangeSetResolvedPayload = z.infer<
+  typeof workspaceChangeSetResolvedPayloadSchema
 >;
 export type WorkspaceChangeSetRecovery = z.infer<
   typeof workspaceChangeSetRecoverySchema

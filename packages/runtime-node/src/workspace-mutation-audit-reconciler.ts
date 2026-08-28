@@ -10,7 +10,10 @@ import {
 
 import { JsonlEventStore } from "./jsonl-event-store.js";
 import { ThreadLease } from "./thread-lease.js";
-import type { WorkspaceMutationRecoveryResult } from "./workspace-mutation-journal.js";
+import type {
+  WorkspaceMutationRecoveryResult,
+  WorkspaceMutationResolutionReceipt,
+} from "./workspace-mutation-journal.js";
 
 const SAFE_THREAD_FILE_NAME = /^[A-Za-z0-9._-]{1,200}$/u;
 
@@ -74,6 +77,8 @@ export async function reconcileWorkspaceMutationAudit(
     if (
       prepared === undefined ||
       prepared.type !== "workspace.change_set_prepared" ||
+      prepared.threadId !== recovery.threadId ||
+      prepared.turnId !== recovery.turnId ||
       prepared.payload.changes.length !== recovery.changeCount
     ) {
       return {
@@ -90,6 +95,8 @@ export async function reconcileWorkspaceMutationAudit(
     const expectedType = expectedTerminalType(recovery.status);
     if (terminal !== undefined) {
       return terminal.type === expectedType &&
+        terminal.threadId === recovery.threadId &&
+        terminal.turnId === recovery.turnId &&
         terminal.payload.name === recovery.toolName &&
         terminal.payload.planSha256 === recovery.planSha256
         ? { status: "already_reconciled" }
@@ -133,6 +140,116 @@ export async function reconcileWorkspaceMutationAudit(
         previous.sequence + 1,
         options.now?.() ?? new Date().toISOString(),
       ),
+    );
+    return { status: "reconciled" };
+  } finally {
+    await lease.release();
+  }
+}
+
+export async function reconcileWorkspaceMutationResolutionAudit(
+  kodaHome: string,
+  receipt: WorkspaceMutationResolutionReceipt,
+  options: WorkspaceMutationAuditReconcilerOptions = {},
+): Promise<WorkspaceMutationAuditReconciliation> {
+  if (!SAFE_THREAD_FILE_NAME.test(receipt.threadId)) {
+    return {
+      status: "deferred",
+      message:
+        "The originating thread ID is not safe to map to a local event log.",
+    };
+  }
+  const eventLogPath = join(
+    resolve(kodaHome),
+    "threads",
+    `${receipt.threadId}.jsonl`,
+  );
+  let lease: ThreadLease | undefined;
+  try {
+    lease = await ThreadLease.acquire(eventLogPath);
+  } catch (error) {
+    return {
+      status: "deferred",
+      message: `The originating thread audit is busy: ${errorMessage(error)}`,
+    };
+  }
+
+  try {
+    const eventStore = new JsonlEventStore(eventLogPath);
+    let events: readonly AgentEvent[];
+    try {
+      events = (await eventStore.readAllRequired()).events;
+    } catch (error) {
+      return {
+        status: "deferred",
+        message: `The originating thread audit is unavailable: ${errorMessage(error)}`,
+      };
+    }
+    const uncertain = events.find(
+      (event) =>
+        event.type === "workspace.change_set_uncertain" &&
+        event.payload.callId === receipt.callId,
+    );
+    if (
+      uncertain === undefined ||
+      uncertain.type !== "workspace.change_set_uncertain" ||
+      uncertain.threadId !== receipt.threadId ||
+      uncertain.turnId !== receipt.turnId ||
+      uncertain.payload.name !== receipt.toolName ||
+      uncertain.payload.planSha256 !== receipt.planSha256
+    ) {
+      return {
+        status: "deferred",
+        message:
+          "The originating thread audit has no matching uncertain change-set boundary.",
+      };
+    }
+
+    const resolutions = events.filter(
+      (event) =>
+        event.type === "workspace.change_set_resolved" &&
+        event.payload.callId === receipt.callId,
+    );
+    if (resolutions.length > 0) {
+      return resolutions.length === 1 &&
+        resolutions[0]?.type === "workspace.change_set_resolved" &&
+        resolutions[0].threadId === receipt.threadId &&
+        resolutions[0].turnId === receipt.turnId &&
+        resolutions[0].payload.name === receipt.toolName &&
+        resolutions[0].payload.planSha256 === receipt.planSha256 &&
+        resolutions[0].payload.resolution === receipt.resolution &&
+        resolutions[0].payload.stateToken === receipt.stateToken
+        ? { status: "already_reconciled" }
+        : {
+            status: "deferred",
+            message:
+              "The originating thread audit contains conflicting resolution evidence.",
+          };
+    }
+
+    const previous = events.at(-1);
+    if (previous === undefined) {
+      return {
+        status: "deferred",
+        message: "The originating thread audit is empty.",
+      };
+    }
+    await eventStore.append(
+      agentEventSchema.parse({
+        schemaVersion: 1,
+        sequence: previous.sequence + 1,
+        timestamp: options.now?.() ?? new Date().toISOString(),
+        threadId: threadIdSchema.parse(receipt.threadId),
+        turnId: turnIdSchema.parse(receipt.turnId),
+        type: "workspace.change_set_resolved",
+        payload: {
+          callId: toolCallIdSchema.parse(receipt.callId),
+          name: receipt.toolName,
+          planSha256: receipt.planSha256,
+          resolution: receipt.resolution,
+          stateToken: receipt.stateToken,
+        },
+      }),
     );
     return { status: "reconciled" };
   } finally {

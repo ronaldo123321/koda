@@ -1,6 +1,6 @@
 # Koda Phase 4A2: Explicit Workspace Conflict Resolution
 
-- Status: Accepted for implementation
+- Status: Implemented and verified
 - Date: 2026-08-28
 - Depends on: Phase 4A1 durable workspace mutation journals
 - Scope: read-only conflict inspection, backup export, explicit resolution, stale-confirmation protection, durable resolution audit, and CLI/app-server/TUI clients
@@ -118,3 +118,13 @@ Automated coverage includes:
 - Binary, directory, symlink, ACL, ownership, and extended-attribute recovery.
 - Remote multi-user authorization and distributed leases; Phase 4D owns that boundary.
 - Model-initiated conflict resolution; it remains intentionally unsupported.
+
+## 11. Implementation verification
+
+Phase 4A2 is implemented on `main`. The runtime emits opaque conflict IDs and SHA-256 state tokens over immutable transaction identity plus current source, destination, and staged-candidate evidence. An already conflicted journal never returns to automatic recovery. Backup bodies leave the private journal only through an explicit indexed export. `restore-original` revalidates canonical parents and complete before state; `accept-current` performs no endpoint mutation.
+
+Both actions persist `resolution_pending` before audit reconciliation. Restart verifies that receipt, appends or recognizes one matching `workspace.change_set_resolved` event after the uncertain boundary, and acknowledges the journal without replaying the destructive action. Thread recovery then removes the resolved change set from active uncertainty while retaining its append-only history.
+
+KodaApplication, app-server protocol v13, the strict Node client, CLI `recovery` commands, and Ink `/recovery` commands share this boundary. The TUI stages a resolution and requires a separate confirmation; CLI and TUI exports create a new mode-`0600` file and refuse replacement. Provider tools, MCP, plugins, Skills, and templates cannot invoke these operations.
+
+Verification passes formatting, build/typecheck, 60 offline test files with 478 tests, and all six deterministic reliability scenarios. Coverage includes stale tokens, backup privacy and integrity, four-operation restoration, accept-current preservation, sticky quarantine, symlinked parents, audit idempotency/conflicts, restart reconciliation after a pending receipt, protocol schemas and version negotiation, real app-server client queries, CLI no-overwrite export, and TUI two-step confirmation.
