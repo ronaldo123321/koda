@@ -1,6 +1,6 @@
 # Koda Phase 3G: Durable Planning and Harness Checkpoints
 
-- Status: Implementation in progress — Phase 3G1 through Phase 3G4 implemented and verified; Phase 3G5 next
+- Status: Complete — Phase 3G1 through Phase 3G5 implemented and verified
 - Date: 2026-08-28
 - Depends on: Phase 2 durable resume and compaction, Phase 3A app-server, Phase 3D Ink interaction, Phase 3E context inspection, and Phase 3F durable execution boundaries
 - Scope: thread-scoped Plan/Todo state, explicit model updates, safe long-task checkpoints, resumable paused turns, and human stage acceptance
@@ -384,10 +384,14 @@ Verification covers terminal acceptance, rejection, default-deny, EOF, and cance
 
 ### Phase 3G5: closure
 
-Status: **Next.**
+Status: **Implemented and verified (2026-08-28).**
 
 - Run all provider conformance, compaction/recovery, crash, reliability, app-server, client, CLI, Ink, and real TTY gates.
 - Update architecture and roadmap status only after every gate passes.
+
+Implemented with a real built app-server subprocess restart test that recovers an interrupted `awaiting_acceptance` Plan and its last safe checkpoint while proving that the process-local acceptance capability is not resurrected. The final provider sweep covers OpenAI Responses, Anthropic Messages, and the OpenAI-compatible path shared by DeepSeek, Kimi, and GLM, together with pinned Plan context, compaction, and conservative recovery.
+
+The real-TTY gate launches the compiled Ink client under an operating-system pseudo-terminal, drives a live Stage acceptance, opens the authoritative `/plan` view, verifies the Runtime-authored accepted revision and checkpoint, and confirms clean shutdown plus cursor restoration. Production app-server startup remains unchanged; the TTY fixture injects only the typed app-server client boundary. The repository format gate, full typecheck, 45-file/383-test offline suite, and six reliability scenarios pass without provider credentials.
 
 Each slice must pass format, typecheck, and its focused tests before the next slice begins.
 

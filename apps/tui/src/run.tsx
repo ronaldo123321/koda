@@ -2,6 +2,7 @@ import { realpath, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 
 import { NodeAppServerClient } from "@koda/app-server-client-node";
+import type { AppServerClientApi } from "@koda/app-server-client-node";
 import {
   modelProviderIdSchema,
   runtimeSettingsModelSchema,
@@ -29,6 +30,7 @@ export interface TuiRuntime {
   stdin: NodeJS.ReadStream;
   stdout: NodeJS.WriteStream;
   stderr: NodeJS.WriteStream;
+  connectAppServer?(): Promise<AppServerClientApi>;
 }
 
 export async function runTui(
@@ -41,7 +43,7 @@ export async function runTui(
     );
     return 2;
   }
-  let client: NodeAppServerClient | undefined;
+  let client: AppServerClientApi | undefined;
   let controller: TuiController | undefined;
   try {
     const workspace = await canonicalWorkspace(
@@ -53,12 +55,15 @@ export async function runTui(
         ? undefined
         : threadIdSchema.parse(options.resume);
     const approvalMode = selectedApprovalMode(options, runtime.environment);
-    client = await NodeAppServerClient.connect({
-      cwd: runtime.processDirectory,
-      environment: runtime.environment,
-      clientName: "koda-chat",
-      clientVersion: "0.1.0",
-    });
+    client =
+      runtime.connectAppServer === undefined
+        ? await NodeAppServerClient.connect({
+            cwd: runtime.processDirectory,
+            environment: runtime.environment,
+            clientName: "koda-chat",
+            clientVersion: "0.1.0",
+          })
+        : await runtime.connectAppServer();
     const settings = await loadRuntimeSettings(client, workspace);
     const selection = resolveTuiRuntimeSelection(
       options,
@@ -140,7 +145,7 @@ export function resolveTuiRuntimeSelection(
 }
 
 async function loadRuntimeSettings(
-  client: NodeAppServerClient,
+  client: AppServerClientApi,
   workspace: string,
 ): Promise<{
   revision: number;
