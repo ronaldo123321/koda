@@ -193,6 +193,7 @@ describe("AgentLoop", () => {
         repositoryInstructions: [],
         skills: [],
         commandTemplates: [],
+        plugins: [],
       },
     });
 

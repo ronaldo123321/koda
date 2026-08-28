@@ -63,6 +63,13 @@ export type ProjectCommandTemplateSource = Omit<
   body: string;
 };
 
+export interface ProjectCommandTemplateTextSource {
+  path: string;
+  scope: string;
+  name: string;
+  content: string;
+}
+
 export interface CommandTemplateInvocation {
   selector: string;
   arguments: Readonly<Record<string, string>>;
@@ -88,20 +95,42 @@ export class ProjectCommandTemplateCatalog {
   >;
 
   public constructor(sources: readonly ProjectCommandTemplateSource[]) {
-    this.sources = Object.freeze(
-      sources.map((source) =>
-        Object.freeze({
-          ...source,
-          parameters: Object.freeze(
-            source.parameters.map((parameter) => Object.freeze(parameter)),
-          ),
-        }),
-      ),
-    );
-    this.totalBytes = this.sources.reduce(
+    if (sources.length > MAX_PROJECT_COMMAND_TEMPLATES) {
+      throw new ProjectCommandTemplateError(
+        "COMMAND_TEMPLATE_TOO_MANY",
+        `Project contains more than ${MAX_PROJECT_COMMAND_TEMPLATES} command templates.`,
+      );
+    }
+    const totalBytes = sources.reduce(
       (total, source) => total + source.bytes,
       0,
     );
+    if (totalBytes > MAX_TOTAL_COMMAND_TEMPLATE_BYTES) {
+      throw new ProjectCommandTemplateError(
+        "COMMAND_TEMPLATE_TOO_LARGE",
+        `Project command templates exceed the ${MAX_TOTAL_COMMAND_TEMPLATE_BYTES}-byte combined limit.`,
+      );
+    }
+    assertNoDuplicateSelectors(sources);
+    this.sources = Object.freeze(
+      sources
+        .map((source) =>
+          Object.freeze({
+            ...source,
+            parameters: Object.freeze(
+              source.parameters.map((parameter) => Object.freeze(parameter)),
+            ),
+          }),
+        )
+        .sort((left, right) => {
+          const depth = scopeDepth(left.scope) - scopeDepth(right.scope);
+          if (depth !== 0) {
+            return depth;
+          }
+          return comparePortable(left.selector, right.selector);
+        }),
+    );
+    this.totalBytes = totalBytes;
     this.bySelector = new Map(
       this.sources.map((source) => [source.selector, source]),
     );
@@ -119,6 +148,55 @@ export class ProjectCommandTemplateCatalog {
       }),
     );
   }
+}
+
+export function createProjectCommandTemplateSourceFromText(
+  input: ProjectCommandTemplateTextSource,
+): ProjectCommandTemplateSource {
+  const name = commandTemplateNameSchema.safeParse(input.name);
+  if (!name.success) {
+    throw new ProjectCommandTemplateError(
+      "COMMAND_TEMPLATE_INVALID_LAYOUT",
+      `Project command-template source has an invalid name: ${input.path}`,
+    );
+  }
+  if (
+    input.path.length === 0 ||
+    input.scope.length === 0 ||
+    input.path.includes("\0") ||
+    input.scope.includes("\0")
+  ) {
+    throw new ProjectCommandTemplateError(
+      "COMMAND_TEMPLATE_INVALID_LAYOUT",
+      "Project command-template virtual path and scope must be non-empty and cannot contain null bytes.",
+    );
+  }
+  const bytes = Buffer.from(input.content, "utf8");
+  if (
+    bytes.toString("utf8") !== input.content ||
+    input.content.includes("\0")
+  ) {
+    throw new ProjectCommandTemplateError(
+      "COMMAND_TEMPLATE_INVALID_ENCODING",
+      `Project command template is not valid UTF-8 text: ${input.path}`,
+    );
+  }
+  if (bytes.byteLength > MAX_COMMAND_TEMPLATE_FILE_BYTES) {
+    throw commandTemplateTooLarge(input.path);
+  }
+  return buildCommandTemplateSource(
+    { path: input.path, scope: input.scope, fileName: name.data },
+    bytes,
+    input.content,
+  );
+}
+
+export function mergeProjectCommandTemplateCatalogs(
+  ...catalogs: readonly ProjectCommandTemplateCatalog[]
+): ProjectCommandTemplateCatalog {
+  return new ProjectCommandTemplateCatalog(
+    catalogs.flatMap((catalog) => [...catalog.sources]),
+  );
 }
 
 export async function loadProjectCommandTemplates(
@@ -154,7 +232,6 @@ export async function loadProjectCommandTemplates(
     }
     sources.push(source);
   }
-  assertNoDuplicateSelectors(sources);
   return new ProjectCommandTemplateCatalog(sources);
 }
 
@@ -620,39 +697,7 @@ async function readCommandTemplateSource(
         { cause: error },
       );
     }
-    const frontmatter = parseCommandTemplateFrontmatter(
-      candidate.path,
-      candidate.fileName,
-      content,
-    );
-    const selector =
-      candidate.scope === "."
-        ? frontmatter.name
-        : `${candidate.scope}/${frontmatter.name}`;
-    const selectorResult = commandTemplateSelectorSchema.safeParse(selector);
-    if (!selectorResult.success) {
-      throw new ProjectCommandTemplateError(
-        "COMMAND_TEMPLATE_INVALID_LAYOUT",
-        `Project command-template scope cannot form a portable selector: ${candidate.path}`,
-      );
-    }
-    const templateId = commandTemplateIdSchema.parse(
-      `command-template:${createHash("sha256")
-        .update(`${candidate.path}\0${candidate.scope}\0${frontmatter.name}`)
-        .digest("hex")}`,
-    );
-    const snapshot = commandTemplateSnapshotSchema.parse({
-      templateId,
-      name: frontmatter.name,
-      description: frontmatter.description,
-      selector: selectorResult.data,
-      path: candidate.path,
-      scope: candidate.scope,
-      bytes: bytes.byteLength,
-      sha256: createHash("sha256").update(bytes).digest("hex"),
-      parameters: frontmatter.parameters,
-    });
-    return { ...snapshot, content, body: frontmatter.body };
+    return buildCommandTemplateSource(candidate, bytes, content);
   } catch (error) {
     if (error instanceof ProjectCommandTemplateError) {
       throw error;
@@ -668,6 +713,46 @@ async function readCommandTemplateSource(
   } finally {
     await handle?.close();
   }
+}
+
+function buildCommandTemplateSource(
+  candidate: CommandTemplateCandidate,
+  bytes: Uint8Array,
+  content: string,
+): ProjectCommandTemplateSource {
+  const frontmatter = parseCommandTemplateFrontmatter(
+    candidate.path,
+    candidate.fileName,
+    content,
+  );
+  const selector =
+    candidate.scope === "."
+      ? frontmatter.name
+      : `${candidate.scope}/${frontmatter.name}`;
+  const selectorResult = commandTemplateSelectorSchema.safeParse(selector);
+  if (!selectorResult.success) {
+    throw new ProjectCommandTemplateError(
+      "COMMAND_TEMPLATE_INVALID_LAYOUT",
+      `Project command-template scope cannot form a portable selector: ${candidate.path}`,
+    );
+  }
+  const templateId = commandTemplateIdSchema.parse(
+    `command-template:${createHash("sha256")
+      .update(`${candidate.path}\0${candidate.scope}\0${frontmatter.name}`)
+      .digest("hex")}`,
+  );
+  const snapshot = commandTemplateSnapshotSchema.parse({
+    templateId,
+    name: frontmatter.name,
+    description: frontmatter.description,
+    selector: selectorResult.data,
+    path: candidate.path,
+    scope: candidate.scope,
+    bytes: bytes.byteLength,
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+    parameters: frontmatter.parameters,
+  });
+  return { ...snapshot, content, body: frontmatter.body };
 }
 
 function parseCommandTemplateFrontmatter(

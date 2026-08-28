@@ -1102,6 +1102,7 @@ function contextEvent(
     repositoryInstructions: [],
     skills: [],
     commandTemplates: [],
+    plugins: [],
     ...(toolCatalogGeneration === undefined ? {} : { toolCatalogGeneration }),
   });
 }

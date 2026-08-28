@@ -13,6 +13,7 @@ import {
   conversationItemTypeSchema,
 } from "./items.js";
 import { modelProviderIdSchema } from "./providers.js";
+import { MAX_PLUGINS, pluginSnapshotSchema } from "./plugins.js";
 import { MAX_PROJECT_SKILLS, skillSnapshotSchema } from "./skills.js";
 import {
   toolCatalogGenerationIdSchema,
@@ -39,6 +40,7 @@ export const turnContextSnapshotSchema = z.object({
     .max(MAX_PROJECT_COMMAND_TEMPLATES)
     .default([]),
   commandTemplateActivation: commandTemplateActivationSchema.optional(),
+  plugins: z.array(pluginSnapshotSchema).max(MAX_PLUGINS).default([]),
   toolCatalogGeneration: toolCatalogGenerationSnapshotSchema.optional(),
 });
 

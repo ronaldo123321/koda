@@ -632,6 +632,7 @@ async function runUncertainSideEffectScenario(): Promise<ScenarioCheck[]> {
         repositoryInstructions: [],
         skills: [],
         commandTemplates: [],
+        plugins: [],
       }),
       scenarioEvent(2, threadId, previousTurnId, "item.recorded", {
         item: {

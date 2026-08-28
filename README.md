@@ -6,7 +6,7 @@ The project is building the control plane around a coding model: typed conversat
 
 ## Current status
 
-Phase 3H is in progress. Phase 3H1 through Phase 3H3 add bounded scoped project Skills, reviewed declarative command templates, and atomic dynamic MCP tool generations with durable activation, refresh, and recovery evidence on top of the completed Phase 3G planning Harness. The isolated plugin lifecycle is next in Phase 3H4:
+Phase 3H is in progress. Phase 3H1 through Phase 3H4 add bounded scoped project Skills, reviewed declarative command templates, atomic dynamic MCP tool generations, and a transactional out-of-process plugin lifecycle with durable activation, refresh, and recovery evidence on top of the completed Phase 3G planning Harness. Protocol/client closure is next in Phase 3H5:
 
 - Versioned Thread, Turn, Item, and Agent Event schemas.
 - A provider-neutral streaming model interface.
@@ -69,6 +69,9 @@ Phase 3H is in progress. Phase 3H1 through Phase 3H3 add bounded scoped project 
 - Generation-bound prepared calls, durable catalog diffs, exact recovery-chain validation, and aggregate resume change evidence.
 - Fail-closed MCP effects: external tools require approval by default, and only explicitly reviewed `read` tools bypass approval.
 - MCP call timeouts, turn cancellation, reverse-order child cleanup, bounded binary/result normalization, artifact-backed large output, and conservative interrupted-call recovery.
+- Strict user-configured local plugins over NDJSON JSON-RPC, with one isolated owned process per active plugin and Turn.
+- Transactional required/optional plugin startup, capability allowlists, filtered named environments, bounded diagnostics, reverse shutdown, and process-tree cleanup.
+- Plugin tools behind normal policy and approval plus qualified, immutable plugin Skills and command templates validated by the existing parsers.
 - A bounded thread-scoped Plan/Stage/Todo state machine maintained through the built-in, provider-neutral `update_plan` control tool.
 - Durable safe checkpoints, Plan-aware step/time pauses, exact recovery validation, and pinned current-Plan context that survives compaction.
 - App-server v11 `plan/get` and exact live `plan/acceptance/resolve`, plus CLI and Ink `/plan`, acceptance, rejection-feedback, and recovery views.
@@ -248,7 +251,36 @@ Create `${KODA_HOME:-$HOME/.koda}/mcp.json` to start local stdio MCP servers for
 
 `command` and `args` are passed directly without a shell. `env` contains parent environment variable names, never secret values; each child receives only a small runtime baseline plus those allowlisted names. Missing variables, relative or nonexistent `cwd` values, malformed schemas, oversized catalogs, and stale read classifications fail the turn before the model sees a partial catalog.
 
-Every discovered tool defaults to effect `execute`. Under the default `on-request` mode it needs one approval per call; under `never` it is denied. Add `{ "effect": "read" }` only after reviewing that exact server tool. MCP annotations are treated as untrusted hints and cannot weaken this policy. Phase 3B supports MCP Tools over local stdio only; HTTP/OAuth, resources, prompts, sampling, elicitation, dynamic catalog refresh, and cross-turn shared sessions are intentionally deferred.
+Every discovered tool defaults to effect `execute`. Under the default `on-request` mode it needs one approval per call; under `never` it is denied. Add `{ "effect": "read" }` only after reviewing that exact server tool. MCP annotations are treated as untrusted hints and cannot weaken this policy. MCP Tools use local stdio and refresh complete catalogs only at safe model-step boundaries; HTTP/OAuth, resources, prompts, sampling, elicitation, notifications, and cross-turn shared sessions remain deferred.
+
+## Configure local plugins
+
+Create `${KODA_HOME:-$HOME/.koda}/plugins.json` to start reviewed local plugins for each Turn. An absent default file disables plugins. `KODA_PLUGIN_CONFIG` may explicitly select another file relative to the process directory or by absolute path.
+
+```json
+{
+  "version": 1,
+  "plugins": {
+    "reviewer": {
+      "command": "node",
+      "args": ["/absolute/path/to/reviewer-plugin.mjs"],
+      "required": true,
+      "capabilities": ["tools", "skills", "command_templates"],
+      "env": ["REVIEWER_TOKEN"],
+      "tools": {
+        "inspect": { "effect": "read" }
+      },
+      "startup_timeout_ms": 15000,
+      "call_timeout_ms": 60000,
+      "shutdown_timeout_ms": 5000
+    }
+  }
+}
+```
+
+Plugin stdout is strict NDJSON JSON-RPC 2.0 protocol traffic. Koda negotiates protocol version 1, copies and validates only requested `tools`, `skills`, and `command_templates`, qualifies all contributed identities, and publishes nothing until the complete required set is healthy. Optional failures are isolated and recorded without copying plugin stderr. Tool names become `plugin__<plugin-id>__<tool-name>` and default to `execute`; an exact manifest entry may review one as `read`. Plugin Skills and templates must contain the same complete Markdown/frontmatter accepted from project sources.
+
+Plugins are ordinary local executables running with the current user's operating-system permissions; process isolation and filtered environments are lifecycle guardrails, not an OS security sandbox. Koda never auto-discovers plugin executables from a repository, installs packages, restarts crashed plugins, or keeps them alive across Turns.
 
 Preview old unreferenced artifacts without provider credentials, then delete them only after reviewing the report:
 
@@ -269,7 +301,7 @@ The provider defaults to `openai`; select it with `--provider <provider>` or `KO
 
 Koda discovers `AGENTS.md` and `KODA.md` from the workspace root downward, excluding `.git`, `.koda`, `node_modules`, symlinked directories, and paths deeper than 20 levels. It loads broader scopes before deeper scopes and `AGENTS.md` before `KODA.md` within one directory. Each source applies only to its subtree, must be a regular UTF-8 file no larger than 64 KiB, and cannot override runtime policy or approvals. Discovery is capped at 32 files and 256 KiB total. If these files change between turns, resume records the exact added, removed, or changed paths and uses the current versions.
 
-When Koda proposes a patch or command, it prints the exact action and asks for approval. The line-oriented CLI remains one-shot with `Approve this action? [y/N]`. In one TUI/app-server process, an eligible built-in command can instead receive a 15-minute grant scoped to the canonical workspace, exact normalized `argv`, working directory, and timeout. Grants are memory-only, inspectable, revocable, capped at one hour, never apply to writes or MCP tools, and disappear on restart. A command is represented as a JSON `argv` array, never reconstructed as shell syntax. Use `--approval-mode never` or `KODA_APPROVAL_MODE=never` to deny all writes and process execution even when a matching grant exists.
+When Koda proposes a patch or command, it prints the exact action and asks for approval. The line-oriented CLI remains one-shot with `Approve this action? [y/N]`. In one TUI/app-server process, an eligible built-in command can instead receive a 15-minute grant scoped to the canonical workspace, exact normalized `argv`, working directory, and timeout. Grants are memory-only, inspectable, revocable, capped at one hour, never apply to writes, MCP tools, or plugin tools, and disappear on restart. A command is represented as a JSON `argv` array, never reconstructed as shell syntax. Use `--approval-mode never` or `KODA_APPROVAL_MODE=never` to deny all writes and process execution even when a matching grant exists.
 
 Commands run without stdin, have a 30-second default timeout, and retain at most 64 KiB from each output stream. On POSIX, each command owns a process group; timeout, cancellation, output failure, or unsupported surviving descendants trigger `SIGTERM`, a grace period, and then `SIGKILL` when needed. Windows uses tree-aware `taskkill` with explicit uncertainty when termination cannot be confirmed. This TypeScript runtime provides guardrails, not a security sandbox: an approved executable or repository script still runs with the current user's operating-system permissions.
 
@@ -299,6 +331,7 @@ pnpm eval:scenarios
 - `@koda/providers`: OpenAI Responses, Anthropic Messages, named OpenAI-compatible profiles, normalized provider errors, and deterministic scripted providers.
 - `@koda/runtime-node`: JSONL, artifact, and rebuildable SQLite metadata persistence plus constrained workspace, patch, and process tools.
 - `@koda/mcp-client-node`: strict local MCP configuration, official stdio client lifecycle, tool adaptation, policy metadata, and bounded result conversion.
+- `@koda/plugin-host-node`: strict local plugin manifests, NDJSON protocol, transactional capability validation, tool adaptation, diagnostics, and owned process lifecycle.
 - `@koda/app`: transport-neutral turn orchestration and credential-free thread metadata/history use cases.
 - `@koda/cli`: line-oriented command parsing, terminal approval, and console projection over `@koda/app`.
 - `@koda/app-server`: local stdio JSON-RPC transport, active-turn coordination, and interactive approval routing.

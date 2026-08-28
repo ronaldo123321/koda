@@ -8,6 +8,7 @@ import { itemIdSchema, toolCallIdSchema, turnIdSchema } from "./ids.js";
 import { jsonObjectSchema, jsonValueSchema } from "./json.js";
 import { modelProviderIdSchema, providerStateSchema } from "./providers.js";
 import { planCheckpointSchema, planSnapshotSchema } from "./plans.js";
+import { pluginChangeSchema } from "./plugins.js";
 import { skillChangeSchema } from "./skills.js";
 import {
   toolCatalogGenerationIdSchema,
@@ -153,6 +154,7 @@ export const recoveryItemSchema = z.object({
     .default([]),
   skillChanges: z.array(skillChangeSchema).default([]),
   commandTemplateChanges: z.array(commandTemplateChangeSchema).default([]),
+  pluginChanges: z.array(pluginChangeSchema).default([]),
   toolCatalogGenerationChange: toolCatalogResumeChangeSchema.optional(),
   uncertainToolCalls: z.array(
     z.object({

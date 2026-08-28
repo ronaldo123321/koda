@@ -27,6 +27,7 @@
     "@koda/app-server-client-node": "workspace:*",
     "@koda/cli": "workspace:*",
     "@koda/mcp-client-node": "workspace:*",
+    "@koda/plugin-host-node": "workspace:*",
     "@koda/providers": "workspace:*",
     "@koda/runtime-node": "workspace:*",
     "@koda/tui": "workspace:*",

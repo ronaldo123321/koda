@@ -21,6 +21,11 @@ import {
 } from "@koda/agent-core";
 import { McpClientError, McpTurnSession } from "@koda/mcp-client-node";
 import {
+  PluginHostError,
+  PluginTurnSession,
+  diffPluginSnapshots,
+} from "@koda/plugin-host-node";
+import {
   ARTIFACT_READ_DEFAULT_BYTES,
   CONTEXT_INSTRUCTION_READ_DEFAULT_BYTES,
   THREAD_CONTEXT_DEFAULT_LIMIT,
@@ -1018,6 +1023,7 @@ export class KodaApplication {
   ): Promise<TurnCompletion> {
     let lease: ThreadLease | undefined;
     let mcpSession: McpTurnSession | undefined;
+    let pluginSession: PluginTurnSession | undefined;
     let refreshMetadata = false;
     try {
       controller.signal.throwIfAborted();
@@ -1028,10 +1034,48 @@ export class KodaApplication {
       const repositoryInstructions = await loadRepositoryInstructions(
         workspace.root,
       );
-      const projectSkills = await loadProjectSkills(workspace.root);
-      const projectCommandTemplates = await loadProjectCommandTemplates(
+      let projectSkills = await loadProjectSkills(workspace.root);
+      let projectCommandTemplates = await loadProjectCommandTemplates(
         workspace.root,
       );
+      const eventLogPath = join(
+        configuration.kodaHome,
+        "threads",
+        `${ids.threadId}.jsonl`,
+      );
+      lease = await ThreadLease.acquire(eventLogPath);
+      refreshMetadata = true;
+      await ArtifactMaintenanceLease.assertInactive(
+        join(configuration.kodaHome, "artifacts"),
+      );
+      controller.signal.throwIfAborted();
+      const eventStore = new JsonlEventStore(eventLogPath);
+      const artifactStore = await ArtifactStore.open(
+        join(configuration.kodaHome, "artifacts"),
+      );
+      let recoveredTurn: ReturnType<typeof recoverThread> | undefined;
+      if (configuration.resumeThreadId !== undefined) {
+        recoveredTurn = recoverThread(await eventStore.readAll(), ids.threadId);
+        assertResumeWorkspace(recoveredTurn, workspace.root);
+        assertResumeProvider(
+          recoveredTurn.context.provider,
+          configuration.provider,
+        );
+      }
+      pluginSession = await PluginTurnSession.open({
+        environment: this.environment,
+        kodaHome: configuration.kodaHome,
+        processDirectory: this.processDirectory,
+        artifactStore,
+        projectSkills,
+        projectCommandTemplates,
+        signal: controller.signal,
+      });
+      for (const diagnostic of pluginSession.diagnostics) {
+        await emitDiagnostic(client, diagnostic);
+      }
+      projectSkills = pluginSession.skills;
+      projectCommandTemplates = pluginSession.commandTemplates;
       const expandedCommandTemplate = expandProjectCommandTemplatePrompt(
         prompt,
         projectCommandTemplates,
@@ -1052,21 +1096,7 @@ export class KodaApplication {
       );
       const skillSnapshots = projectSkills.snapshots();
       const commandTemplateSnapshots = projectCommandTemplates.snapshots();
-      const eventLogPath = join(
-        configuration.kodaHome,
-        "threads",
-        `${ids.threadId}.jsonl`,
-      );
-      lease = await ThreadLease.acquire(eventLogPath);
-      refreshMetadata = true;
-      await ArtifactMaintenanceLease.assertInactive(
-        join(configuration.kodaHome, "artifacts"),
-      );
-      controller.signal.throwIfAborted();
-      const eventStore = new JsonlEventStore(eventLogPath);
-      const artifactStore = await ArtifactStore.open(
-        join(configuration.kodaHome, "artifacts"),
-      );
+      const pluginSnapshots = [...pluginSession.snapshots];
       let history: ConversationItem[] = [];
       let prefaceItems: ConversationItem[] = [];
       let initialSequence = 0;
@@ -1075,14 +1105,8 @@ export class KodaApplication {
       let previousToolCatalogGeneration: TurnContextSnapshot["toolCatalogGeneration"];
       let planNeedsRevalidation = false;
 
-      if (configuration.resumeThreadId !== undefined) {
-        const readResult = await eventStore.readAll();
-        const recovered = recoverThread(readResult, ids.threadId);
-        assertResumeWorkspace(recovered, workspace.root);
-        assertResumeProvider(
-          recovered.context.provider,
-          configuration.provider,
-        );
+      if (recoveredTurn !== undefined) {
+        const recovered = recoveredTurn;
         history = recovered.history;
         recoveredPlan = recovered.plan;
         recoveredCheckpoint = recovered.checkpoint;
@@ -1110,6 +1134,10 @@ export class KodaApplication {
           recovered.context.commandTemplates,
           commandTemplateSnapshots,
         );
+        const pluginChanges = diffPluginSnapshots(
+          recovered.context.plugins,
+          pluginSnapshots,
+        );
         const recoveryParts = [recovered.message];
         if (unavailableArtifactIds.length > 0) {
           recoveryParts.push(
@@ -1131,6 +1159,11 @@ export class KodaApplication {
             `Project command templates changed since the previous turn: ${commandTemplateChanges.map((change) => `${change.change} ${change.selector} at ${change.path} (scope ${change.scope})`).join(", ")}. The current frozen command-template catalog applies to this resumed turn.`,
           );
         }
+        if (pluginChanges.length > 0) {
+          recoveryParts.push(
+            `Plugins changed since the previous turn: ${pluginChanges.map((change) => `${change.change} ${change.pluginId}`).join(", ")}. The current isolated plugin snapshot applies to this resumed turn.`,
+          );
+        }
         prefaceItems = [
           recoveryItemSchema.parse({
             type: "recovery",
@@ -1144,6 +1177,7 @@ export class KodaApplication {
             instructionChanges,
             skillChanges,
             commandTemplateChanges,
+            pluginChanges,
             uncertainToolCalls: recovered.uncertainToolCalls,
             workspaceChangeSets: recovered.workspaceChangeSets,
           }),
@@ -1183,6 +1217,7 @@ export class KodaApplication {
         artifactStore,
       });
       registerExecCommandTool(tools, commandRunner);
+      pluginSession.registerTools(tools);
       mcpSession = await McpTurnSession.open({
         environment: this.environment,
         kodaHome: configuration.kodaHome,
@@ -1255,6 +1290,7 @@ export class KodaApplication {
           repositoryInstructions: instructionSnapshots,
           skills: skillSnapshots,
           commandTemplates: commandTemplateSnapshots,
+          plugins: pluginSnapshots,
           ...(expandedCommandTemplate === undefined
             ? {}
             : {
@@ -1292,6 +1328,17 @@ export class KodaApplication {
           await emitDiagnostic(client, {
             level: "warning",
             code: "MCP_SESSION_CLEANUP_FAILED",
+            message: errorMessage(error),
+          });
+        }
+      }
+      if (pluginSession !== undefined) {
+        try {
+          await pluginSession.close();
+        } catch (error) {
+          await emitDiagnostic(client, {
+            level: "warning",
+            code: "PLUGIN_SESSION_CLEANUP_FAILED",
             message: errorMessage(error),
           });
         }
@@ -2217,6 +2264,7 @@ function applicationError(error: unknown): { code: string; message: string } {
     error instanceof ArtifactGarbageCollectionError ||
     error instanceof ConfigurationError ||
     error instanceof McpClientError ||
+    error instanceof PluginHostError ||
     error instanceof ProjectCommandTemplateError ||
     error instanceof ProjectSkillError
       ? error.code

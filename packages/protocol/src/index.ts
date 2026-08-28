@@ -9,6 +9,7 @@ export * from "./ids.js";
 export * from "./items.js";
 export * from "./json.js";
 export * from "./plans.js";
+export * from "./plugins.js";
 export * from "./providers.js";
 export * from "./skills.js";
 export * from "./tool-catalogs.js";

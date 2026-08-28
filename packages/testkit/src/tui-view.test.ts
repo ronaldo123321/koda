@@ -629,6 +629,7 @@ describe("Koda Ink view", () => {
             repositoryInstructions: [],
             skills: [],
             commandTemplates: [],
+            plugins: [],
           },
           telemetry: {
             step: 1,

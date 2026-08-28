@@ -1,6 +1,6 @@
 # Koda Phase 3H: Skills and Extension System
 
-- Status: Implementation in progress — Phase 3H1–3H3 implemented and verified; Phase 3H4 next
+- Status: Implementation in progress — Phase 3H1–3H4 implemented and verified; Phase 3H5 next
 - Date: 2026-08-28
 - Depends on: Phase 3B MCP lifecycle, Phase 3E context inspection, Phase 3F execution boundaries, and Phase 3G durable Plan/Harness
 - Scope: project Skills, reviewed command templates, safe dynamic tool-catalog refresh, bounded plugin lifecycle, inspection, and closure
@@ -143,6 +143,24 @@ Plugin startup is transactional: validate all manifests, start in deterministic 
 
 Skills and templates supplied by plugins are copied through the same validators and become immutable Turn snapshots. Plugin tools enter the same ToolRegistry, conservative effect policy, approval, cancellation, artifact, and recovery boundaries as MCP tools.
 
+### 9.1 Configuration and authority
+
+Phase 3H4 reads one optional version-1 JSON configuration from `$KODA_HOME/plugins.json`; `KODA_PLUGIN_CONFIG` may explicitly select another file relative to the Koda process directory. Repository traversal never discovers executables. The configuration contains at most eight deterministically ordered plugin records. Each record declares a portable ID, non-shell command plus bounded argv, optional absolute working directory, unique named environment references, `required`, the requested subset of `tools`, `skills`, and `command_templates`, per-tool reviewed `read` classifications, and bounded startup/call/shutdown timeouts. Unknown fields, stale read classifications, duplicate identities, invalid paths, NULs, excessive budgets, or malformed JSON fail configuration before any Provider request.
+
+The child receives only Koda's portable base process environment plus variables explicitly named by the manifest. Configuration stores names, never secret values. Plugins cannot request `control`, `write`, unrestricted filesystem callbacks, Provider credentials, approval grants, or Runtime objects. A contributed tool is exposed as `plugin__<plugin-id>__<tool-name>` and defaults to `execute`; only an exact manifest tool name may be reviewed as `read`. Plugin Skills use virtual `@plugin/<id>` scopes and plugin templates use qualified `@plugin/<id>/<name>` selectors, so they cannot shadow project sources.
+
+### 9.2 Protocol and transaction
+
+Each child speaks strict newline-delimited JSON-RPC 2.0 on stdout. Koda sends one version-1 `initialize` request containing the manifest ID and requested capabilities. The bounded response identifies the plugin name/version and may return only requested contribution arrays: object-schema tool definitions, complete `SKILL.md` strings, and complete command-template Markdown strings. Koda copies the response, validates every unknown field, name, schema, byte/count budget, placeholder, frontmatter, and virtual identity, and computes immutable contribution digests. Plugin self-reported effects or executable callbacks are not part of the protocol.
+
+All configured plugins are processed in ID order without publishing registrations. An optional plugin that cannot spawn, negotiate, or validate is terminated, recorded as disabled, and reduced to one bounded diagnostic without stderr content. A required failure closes every already-started child in reverse order and publishes nothing. Only after the complete candidate is healthy does Koda merge frozen Skill/template sources and atomically install the `plugin` ToolRegistry namespace. `turn.context` records active and disabled plugin snapshots; resume reports added, removed, and changed plugin states without replaying historical contributions.
+
+### 9.3 Calls, cancellation, and shutdown
+
+Tool execution uses a strict `tool/call` request with the captured exact tool definition and validated JSON arguments. Responses must contain one JSON value or a bounded JSON-RPC error. Koda materializes oversized successful JSON through the existing ArtifactStore before returning it to the model. Calls remain exclusive, generation-bound, policy-checked, approval-gated, time-bounded, and single-use. Protocol corruption, unexpected IDs, output overflow, child exit, timeout, or Turn cancellation fails the call conservatively and never retries it.
+
+Every plugin process is an owned POSIX process group or Windows tree. `close()` is idempotent and visits active plugins in reverse startup order. Koda first sends a bounded `shutdown` request and waits for normal exit; a silent, hostile, or stuck child is terminated through the existing graceful-to-force process-tree controller. Stdout is protocol-only. Stderr is drained into byte counts but never copied into model context, durable logs, or user diagnostics. Long-lived daemons, restart supervision, background notifications, package installation, remote transports, and operating-system sandbox claims remain Phase 4.
+
 ## 10. Client and protocol boundary
 
 Phase 3H reserves app-server protocol v12 for extension capabilities. Capability negotiation distinguishes `skills`, `commandTemplates`, `dynamicToolCatalog`, and `plugins`. Inspection methods are credential-free, workspace-authorized, bounded, and read authoritative snapshots; activation or refresh methods require exact generation identities.
@@ -210,10 +228,16 @@ Recovery validates generation chains, request bindings, and Tool Call bindings w
 
 ### Phase 3H4: isolated plugin lifecycle
 
-Status: **Planned.**
+Status: **Implemented and verified (2026-08-28).**
 
 - Add strict local manifests, out-of-process startup/health/shutdown, capability allowlists, isolation, and diagnostics.
 - Route contributed capabilities through the existing Skill/template/tool validators.
+
+Implemented in `@koda/plugin-host-node` with a strict optional `$KODA_HOME/plugins.json`, explicit `KODA_PLUGIN_CONFIG` override, deterministic plugin IDs, bounded non-shell argv, absolute canonical working directories, named environment references, required/optional policy, reviewed read-tool names, and startup/call/shutdown deadlines. Children receive only a portable base environment plus exact named values; repository traversal cannot discover or activate a plugin.
+
+Each active child is an owned process tree speaking strict NDJSON JSON-RPC 2.0 protocol version 1. Startup validates the complete negotiated contribution set before publication. Tool definitions receive qualified aliases, immutable source digests, conservative effects, normal approval/cancellation policy, exact call-definition identities, and ArtifactStore-backed output bounds. Full plugin Skill and template strings are reparsed by the existing frontmatter, placeholder, identity, count, and byte-budget validators under qualified `@plugin/<id>` virtual scopes.
+
+Optional spawn, version, protocol, capability, stale-policy, or contribution failures close and disable only that plugin, emit one bounded stderr-free diagnostic, and remain visible in the Turn plugin snapshot. A required failure closes every previously active child in reverse order and prevents Provider construction. Successful snapshots and resume changes are durable; shutdown is idempotent, reverse ordered, protocol-first, deadline bounded, and escalates through the existing process-tree controller. Verification covers configuration authority, deterministic snapshots, transaction rollback, exact policy metadata, real handshake/calls, environment filtering, hostile stdout, unsupported versions, cancellation, timeout, stuck shutdown, application tools/Skills/templates, optional isolation, required failure, restart/resume changes, invalid-resume preflight, legacy contexts, format, typecheck, the 54-file/435-test offline suite, and six reliability scenarios.
 
 ### Phase 3H5: clients and closure
 

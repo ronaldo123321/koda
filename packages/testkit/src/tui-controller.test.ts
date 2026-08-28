@@ -1358,6 +1358,7 @@ describe("TuiController", () => {
         repositoryInstructions: [],
         skills: [],
         commandTemplates: [],
+        plugins: [],
       },
       telemetry: {
         step: 1,
@@ -2219,6 +2220,7 @@ function legacyContextResult(threadIdInput: string): ContextReadResult {
       repositoryInstructions: [],
       skills: [],
       commandTemplates: [],
+      plugins: [],
     },
     instructions: {
       historicalEffectiveSha256: hash,

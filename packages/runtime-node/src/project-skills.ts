@@ -50,6 +50,13 @@ export interface ProjectSkillSource extends SkillSnapshot {
   content: string;
 }
 
+export interface ProjectSkillTextSource {
+  path: string;
+  scope: string;
+  name: string;
+  content: string;
+}
+
 interface SkillCandidate {
   path: string;
   scope: string;
@@ -62,13 +69,36 @@ export class ProjectSkillCatalog {
   private readonly byId: ReadonlyMap<SkillId, ProjectSkillSource>;
 
   public constructor(sources: readonly ProjectSkillSource[]) {
-    this.sources = Object.freeze(
-      sources.map((source) => Object.freeze(source)),
-    );
-    this.totalBytes = this.sources.reduce(
+    if (sources.length > MAX_PROJECT_SKILLS) {
+      throw new ProjectSkillError(
+        "SKILL_TOO_MANY",
+        `Project contains more than ${MAX_PROJECT_SKILLS} Skills.`,
+      );
+    }
+    const totalBytes = sources.reduce(
       (total, source) => total + source.bytes,
       0,
     );
+    if (totalBytes > MAX_TOTAL_SKILL_BYTES) {
+      throw new ProjectSkillError(
+        "SKILL_TOO_LARGE",
+        `Project Skills exceed the ${MAX_TOTAL_SKILL_BYTES}-byte combined limit.`,
+      );
+    }
+    assertNoDuplicateScopeNames(sources);
+    this.sources = Object.freeze(
+      sources
+        .map((source) => Object.freeze(source))
+        .sort((left, right) => {
+          const depth = scopeDepth(left.scope) - scopeDepth(right.scope);
+          if (depth !== 0) {
+            return depth;
+          }
+          const scope = comparePortable(left.scope, right.scope);
+          return scope !== 0 ? scope : comparePortable(left.path, right.path);
+        }),
+    );
+    this.totalBytes = totalBytes;
     this.byId = new Map(this.sources.map((source) => [source.skillId, source]));
   }
 
@@ -79,6 +109,55 @@ export class ProjectSkillCatalog {
   public snapshots(): SkillSnapshot[] {
     return this.sources.map(({ content: _content, ...snapshot }) => snapshot);
   }
+}
+
+export function createProjectSkillSourceFromText(
+  input: ProjectSkillTextSource,
+): ProjectSkillSource {
+  const name = skillNameSchema.safeParse(input.name);
+  if (!name.success) {
+    throw new ProjectSkillError(
+      "SKILL_INVALID_LAYOUT",
+      `Project Skill source has an invalid name: ${input.path}`,
+    );
+  }
+  if (
+    input.path.length === 0 ||
+    input.scope.length === 0 ||
+    input.path.includes("\0") ||
+    input.scope.includes("\0")
+  ) {
+    throw new ProjectSkillError(
+      "SKILL_INVALID_LAYOUT",
+      "Project Skill virtual path and scope must be non-empty and cannot contain null bytes.",
+    );
+  }
+  const bytes = Buffer.from(input.content, "utf8");
+  if (
+    bytes.toString("utf8") !== input.content ||
+    input.content.includes("\0")
+  ) {
+    throw new ProjectSkillError(
+      "SKILL_INVALID_ENCODING",
+      `Project Skill is not valid UTF-8 text: ${input.path}`,
+    );
+  }
+  if (bytes.byteLength > MAX_SKILL_FILE_BYTES) {
+    throw skillTooLarge(input.path);
+  }
+  return buildSkillSource(
+    { path: input.path, scope: input.scope, directoryName: name.data },
+    bytes,
+    input.content,
+  );
+}
+
+export function mergeProjectSkillCatalogs(
+  ...catalogs: readonly ProjectSkillCatalog[]
+): ProjectSkillCatalog {
+  return new ProjectSkillCatalog(
+    catalogs.flatMap((catalog) => [...catalog.sources]),
+  );
 }
 
 export async function loadProjectSkills(
@@ -114,7 +193,6 @@ export async function loadProjectSkills(
     }
     sources.push(source);
   }
-  assertNoDuplicateScopeNames(sources);
   return new ProjectSkillCatalog(sources);
 }
 
@@ -428,26 +506,7 @@ async function readSkillSource(
         { cause: error },
       );
     }
-    const frontmatter = parseSkillFrontmatter(
-      candidate.path,
-      candidate.directoryName,
-      content,
-    );
-    const skillId = skillIdSchema.parse(
-      `skill:${createHash("sha256")
-        .update(`${candidate.path}\0${candidate.scope}\0${frontmatter.name}`)
-        .digest("hex")}`,
-    );
-    const snapshot = skillSnapshotSchema.parse({
-      skillId,
-      name: frontmatter.name,
-      description: frontmatter.description,
-      path: candidate.path,
-      scope: candidate.scope,
-      bytes: bytes.byteLength,
-      sha256: createHash("sha256").update(bytes).digest("hex"),
-    });
-    return { ...snapshot, content };
+    return buildSkillSource(candidate, bytes, content);
   } catch (error) {
     if (error instanceof ProjectSkillError) {
       throw error;
@@ -463,6 +522,33 @@ async function readSkillSource(
   } finally {
     await handle?.close();
   }
+}
+
+function buildSkillSource(
+  candidate: SkillCandidate,
+  bytes: Uint8Array,
+  content: string,
+): ProjectSkillSource {
+  const frontmatter = parseSkillFrontmatter(
+    candidate.path,
+    candidate.directoryName,
+    content,
+  );
+  const skillId = skillIdSchema.parse(
+    `skill:${createHash("sha256")
+      .update(`${candidate.path}\0${candidate.scope}\0${frontmatter.name}`)
+      .digest("hex")}`,
+  );
+  const snapshot = skillSnapshotSchema.parse({
+    skillId,
+    name: frontmatter.name,
+    description: frontmatter.description,
+    path: candidate.path,
+    scope: candidate.scope,
+    bytes: bytes.byteLength,
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+  });
+  return { ...snapshot, content };
 }
 
 function parseSkillFrontmatter(
