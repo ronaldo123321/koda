@@ -246,6 +246,8 @@ Status: **Planned.**
 - Complete protocol v12/client inspection and control surfaces, CLI/Ink views, subprocess/crash/provider matrices, and real-TTY gates.
 - Mark Phase 3 complete only after the entire verification matrix passes.
 
+The accepted H5 boundary is inspection-first: current workspace discovery never starts a Provider, MCP server, or plugin, while runtime-only contributions are read only from validated Thread history. Protocol v12, the exact application/client methods, CLI and Ink views, failure rules, gates, and deliberate deferrals are specified in the [Phase 3H5 extension protocol and client closure design](2026-08-28-phase-3h5-extension-client-closure-design.md).
+
 ## 14. Deliberate deferrals
 
 - Remote extension registries, package download/install/update, signatures, provenance, and marketplace UX: Phase 4 distribution/security.
