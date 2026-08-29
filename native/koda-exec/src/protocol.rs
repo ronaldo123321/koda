@@ -13,8 +13,17 @@ pub const MAX_ENVIRONMENT_BYTES: usize = 65_536;
 pub const MAX_OUTPUT_LIMIT_BYTES: u64 = 67_108_864;
 pub const MAX_OUTPUT_READ_BYTES: u32 = 65_536;
 pub const MAX_TIMEOUT_MS: u64 = 120_000;
+pub const MAX_BACKGROUND_TIMEOUT_MS: u64 = 24 * 60 * 60 * 1_000;
 pub const MAX_TERMINATION_GRACE_MS: u64 = 10_000;
 pub const MAX_TERMINATION_CONFIRMATION_MS: u64 = 30_000;
+pub const DEFAULT_PTY_OUTPUT_LIMIT_BYTES: u64 = 4 * 1_048_576;
+pub const MIN_PTY_OUTPUT_LIMIT_BYTES: u64 = 65_536;
+pub const MAX_PTY_OUTPUT_LIMIT_BYTES: u64 = 64 * 1_048_576;
+pub const MAX_PTY_DIMENSION: u16 = 500;
+pub const DEFAULT_INPUT_LEASE_MS: u64 = 15_000;
+pub const MAX_ATTACHMENT_READ_BYTES: u32 = 65_536;
+pub const MAX_PTY_INPUT_BYTES: usize = 16_384;
+pub const MAX_PENDING_PTY_INPUT_BYTES: u64 = 65_536;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -100,6 +109,54 @@ pub struct StartParams {
     pub output_limit_bytes: u64,
     pub termination_grace_ms: u64,
     pub termination_confirmation_ms: u64,
+    #[serde(default, skip_serializing_if = "IoMode::is_default")]
+    pub io_mode: IoMode,
+    #[serde(default, skip_serializing_if = "JobLifecycle::is_default")]
+    pub lifecycle: JobLifecycle,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pty: Option<PtyStartConfig>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum IoMode {
+    #[default]
+    Pipe,
+    Pty,
+}
+
+impl IoMode {
+    fn is_default(value: &Self) -> bool {
+        *value == Self::Pipe
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum JobLifecycle {
+    #[default]
+    Foreground,
+    Background,
+}
+
+impl JobLifecycle {
+    fn is_default(value: &Self) -> bool {
+        *value == Self::Foreground
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PtyStartConfig {
+    pub rows: u16,
+    pub cols: u16,
+    pub term: String,
+    #[serde(default = "default_pty_output_limit_bytes")]
+    pub output_limit_bytes: u64,
+}
+
+fn default_pty_output_limit_bytes() -> u64 {
+    DEFAULT_PTY_OUTPUT_LIMIT_BYTES
 }
 
 #[derive(Debug, Deserialize)]
@@ -129,6 +186,73 @@ pub struct TerminateParams {
 pub struct ListJobsParams {
     pub limit: Option<u32>,
     pub cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttachmentOpenParams {
+    pub job_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttachmentCredentials {
+    pub job_id: String,
+    pub attachment_id: String,
+    pub capability_token: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttachmentReadParams {
+    pub job_id: String,
+    pub attachment_id: String,
+    pub capability_token: String,
+    pub cursor: u64,
+    pub max_bytes: u32,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttachmentAcquireInputParams {
+    pub job_id: String,
+    pub attachment_id: String,
+    pub capability_token: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttachmentRenewParams {
+    pub job_id: String,
+    pub attachment_id: String,
+    pub capability_token: String,
+    pub lease_token: String,
+    pub fence: u64,
+}
+
+pub type AttachmentDetachParams = AttachmentCredentials;
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct InputWriteParams {
+    pub job_id: String,
+    pub attachment_id: String,
+    pub capability_token: String,
+    pub lease_token: String,
+    pub fence: u64,
+    pub data_base64: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TerminalResizeParams {
+    pub job_id: String,
+    pub attachment_id: String,
+    pub capability_token: String,
+    pub lease_token: String,
+    pub fence: u64,
+    pub rows: u16,
+    pub cols: u16,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -205,6 +329,8 @@ pub struct JobFailure {
 pub struct JobSnapshot {
     pub job_id: String,
     pub state: JobState,
+    pub io_mode: IoMode,
+    pub lifecycle: JobLifecycle,
     pub pid: Option<u32>,
     pub exit_code: Option<i32>,
     pub signal: Option<String>,
@@ -224,6 +350,8 @@ pub struct JobSnapshot {
 pub struct JobSummary {
     pub job_id: String,
     pub state: JobState,
+    pub io_mode: IoMode,
+    pub lifecycle: JobLifecycle,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
     pub pid: Option<u32>,
@@ -246,6 +374,55 @@ pub struct OutputReadResult {
     pub complete: bool,
     pub truncated: bool,
     pub data_base64: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct InputLeaseResult {
+    pub job_id: String,
+    pub attachment_id: String,
+    pub lease_token: String,
+    pub fence: u64,
+    pub expires_at_ms: u64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct InputWriteResult {
+    pub job_id: String,
+    pub accepted_bytes: u32,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct TerminalResizeResult {
+    pub job_id: String,
+    pub rows: u16,
+    pub cols: u16,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct AttachmentDetachResult {
+    pub job_id: String,
+    pub detached: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum AttachmentReadResult {
+    Ok {
+        job_id: String,
+        cursor: u64,
+        next_cursor: u64,
+        earliest_cursor: u64,
+        latest_cursor: u64,
+        complete: bool,
+        data_base64: String,
+    },
+    CursorExpired {
+        job_id: String,
+        cursor: u64,
+        earliest_cursor: u64,
+        latest_cursor: u64,
+        complete: bool,
+    },
 }
 
 pub fn parse_params<T>(value: Value) -> Result<T, ProtocolError>
@@ -382,7 +559,11 @@ pub fn validate_start(params: &StartParams) -> Result<(), ProtocolError> {
             format!("environment must total at most {MAX_ENVIRONMENT_BYTES} bytes."),
         ));
     }
-    if !(100..=MAX_TIMEOUT_MS).contains(&params.timeout_ms)
+    let maximum_timeout = match params.lifecycle {
+        JobLifecycle::Foreground => MAX_TIMEOUT_MS,
+        JobLifecycle::Background => MAX_BACKGROUND_TIMEOUT_MS,
+    };
+    if !(100..=maximum_timeout).contains(&params.timeout_ms)
         || !(1..=MAX_OUTPUT_LIMIT_BYTES).contains(&params.output_limit_bytes)
         || params.termination_grace_ms > MAX_TERMINATION_GRACE_MS
         || !(100..=MAX_TERMINATION_CONFIRMATION_MS).contains(&params.termination_confirmation_ms)
@@ -390,6 +571,103 @@ pub fn validate_start(params: &StartParams) -> Result<(), ProtocolError> {
         return Err(ProtocolError::new(
             "INVALID_REQUEST",
             "Execution limits are outside the supported ranges.",
+        ));
+    }
+    match (params.io_mode, &params.pty) {
+        (IoMode::Pipe, None) => {}
+        (IoMode::Pipe, Some(_)) => {
+            return Err(ProtocolError::new(
+                "INVALID_REQUEST",
+                "pty configuration is valid only when io_mode is pty.",
+            ));
+        }
+        (IoMode::Pty, None) => {
+            return Err(ProtocolError::new(
+                "INVALID_REQUEST",
+                "pty configuration is required when io_mode is pty.",
+            ));
+        }
+        (IoMode::Pty, Some(pty)) => validate_pty_config(pty)?,
+    }
+    Ok(())
+}
+
+pub fn validate_pty_config(params: &PtyStartConfig) -> Result<(), ProtocolError> {
+    if !(1..=MAX_PTY_DIMENSION).contains(&params.rows)
+        || !(1..=MAX_PTY_DIMENSION).contains(&params.cols)
+        || !(MIN_PTY_OUTPUT_LIMIT_BYTES..=MAX_PTY_OUTPUT_LIMIT_BYTES)
+            .contains(&params.output_limit_bytes)
+        || params.term.is_empty()
+        || params.term.len() > 64
+        || !params
+            .term
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'+' | b'-'))
+    {
+        return Err(ProtocolError::new(
+            "INVALID_REQUEST",
+            "PTY dimensions, TERM, or output retention are outside supported ranges.",
+        ));
+    }
+    Ok(())
+}
+
+pub fn validate_attachment_credentials(
+    job_id: &str,
+    attachment_id: &str,
+    capability_token: &str,
+) -> Result<(), ProtocolError> {
+    validate_identifier(job_id, "job_id")?;
+    validate_identifier(attachment_id, "attachment_id")?;
+    validate_opaque_token(capability_token, "capability_token")
+}
+
+pub fn validate_lease(lease_token: &str, fence: u64) -> Result<(), ProtocolError> {
+    validate_opaque_token(lease_token, "lease_token")?;
+    if fence == 0 {
+        return Err(ProtocolError::new(
+            "INVALID_REQUEST",
+            "fence must be a positive integer.",
+        ));
+    }
+    Ok(())
+}
+
+pub fn validate_attachment_read(params: &AttachmentReadParams) -> Result<(), ProtocolError> {
+    validate_attachment_credentials(
+        &params.job_id,
+        &params.attachment_id,
+        &params.capability_token,
+    )?;
+    if params.max_bytes == 0 || params.max_bytes > MAX_ATTACHMENT_READ_BYTES {
+        return Err(ProtocolError::new(
+            "INVALID_REQUEST",
+            format!("max_bytes must be between 1 and {MAX_ATTACHMENT_READ_BYTES}."),
+        ));
+    }
+    Ok(())
+}
+
+pub fn validate_terminal_size(rows: u16, cols: u16) -> Result<(), ProtocolError> {
+    if !(1..=MAX_PTY_DIMENSION).contains(&rows) || !(1..=MAX_PTY_DIMENSION).contains(&cols) {
+        return Err(ProtocolError::new(
+            "INVALID_REQUEST",
+            format!("rows and cols must be between 1 and {MAX_PTY_DIMENSION}."),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_opaque_token(value: &str, name: &str) -> Result<(), ProtocolError> {
+    if value.is_empty()
+        || value.len() > 128
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'='))
+    {
+        return Err(ProtocolError::new(
+            "INVALID_REQUEST",
+            format!("{name} must be bounded canonical Base64."),
         ));
     }
     Ok(())
@@ -420,6 +698,9 @@ mod tests {
             output_limit_bytes: 1_024,
             termination_grace_ms: 100,
             termination_confirmation_ms: 1_000,
+            io_mode: IoMode::Pipe,
+            lifecycle: JobLifecycle::Foreground,
+            pty: None,
         };
 
         assert_eq!(
@@ -428,6 +709,50 @@ mod tests {
                 .code,
             "INVALID_REQUEST"
         );
+    }
+
+    #[test]
+    fn legacy_start_defaults_to_pipe_foreground() {
+        let params: StartParams = serde_json::from_value(serde_json::json!({
+            "argv": ["/usr/bin/true"],
+            "cwd": std::env::current_dir().expect("cwd"),
+            "environment": {},
+            "timeout_ms": 1_000,
+            "output_limit_bytes": 1_024,
+            "termination_grace_ms": 100,
+            "termination_confirmation_ms": 1_000
+        }))
+        .expect("legacy start");
+
+        assert_eq!(params.io_mode, IoMode::Pipe);
+        assert_eq!(params.lifecycle, JobLifecycle::Foreground);
+        assert!(params.pty.is_none());
+        let encoded = serde_json::to_value(params).expect("legacy encoding");
+        assert!(encoded.get("io_mode").is_none());
+        assert!(encoded.get("lifecycle").is_none());
+    }
+
+    #[test]
+    fn pty_requires_strict_configuration() {
+        let params = StartParams {
+            argv: vec!["/usr/bin/true".to_owned()],
+            cwd: std::env::current_dir().expect("cwd").display().to_string(),
+            environment: BTreeMap::new(),
+            timeout_ms: 1_000,
+            output_limit_bytes: 1_024,
+            termination_grace_ms: 100,
+            termination_confirmation_ms: 1_000,
+            io_mode: IoMode::Pty,
+            lifecycle: JobLifecycle::Foreground,
+            pty: Some(PtyStartConfig {
+                rows: 24,
+                cols: 80,
+                term: "xterm-256color".to_owned(),
+                output_limit_bytes: DEFAULT_PTY_OUTPUT_LIMIT_BYTES,
+            }),
+        };
+
+        validate_start(&params).expect("valid pty start");
     }
 
     #[test]

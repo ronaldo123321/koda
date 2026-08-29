@@ -14,6 +14,7 @@ use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, mpsc, watch};
 use tokio::time::{sleep, timeout};
 
+use crate::attachment::AttachmentRegistry;
 use crate::durable::{JobLock, JobRecord, JobStore, StoredJobState, sha256_hex};
 use crate::framing::{bind_private_socket, read_json_frame, verify_peer, write_json_frame};
 use crate::internal_protocol::{
@@ -23,11 +24,17 @@ use crate::internal_protocol::{
 };
 use crate::process_identity::current_process_identity;
 use crate::protocol::{
-    JobFailure, JobSnapshot, JobState, ProtocolError, TerminationAttempt, TerminationReason,
+    AttachmentAcquireInputParams, AttachmentCredentials, AttachmentDetachParams,
+    AttachmentDetachResult, AttachmentReadParams, AttachmentReadResult, AttachmentRenewParams,
+    InputLeaseResult, InputWriteParams, InputWriteResult, IoMode, JobFailure, JobSnapshot,
+    JobState, MAX_PENDING_PTY_INPUT_BYTES, MAX_PTY_INPUT_BYTES, ProtocolError,
+    TerminalResizeParams, TerminalResizeResult, TerminationAttempt, TerminationReason,
     TerminationSnapshot,
 };
+use crate::pty_output::PtyOutputStore;
 
 const OUTPUT_BUFFER_BYTES: usize = 16_384;
+const PTY_COMMAND_QUEUE_DEPTH: usize = 64;
 
 pub async fn run_worker(job_directory: &Path, token_fd: RawFd) -> Result<(), ProtocolError> {
     let token = read_inherited_token(token_fd)?;
@@ -55,7 +62,7 @@ pub async fn run_worker(job_directory: &Path, token_fd: RawFd) -> Result<(), Pro
     let listener = bind_private_socket(&record.worker_socket_path())
         .await
         .map_err(worker_socket_error)?;
-    let runtime = Arc::new(WorkerRuntime::new(record, current));
+    let runtime = Arc::new(WorkerRuntime::new(record, current, token.clone())?);
     runtime.publish_worker_ready(&worker_identity).await?;
     fault_point("after_worker_ready");
 
@@ -93,12 +100,33 @@ struct WorkerRuntime {
     stderr_complete: AtomicBool,
     terminate_sender: mpsc::Sender<TerminationReason>,
     terminate_receiver: Mutex<Option<mpsc::Receiver<TerminationReason>>>,
+    pty: Option<PtyRuntime>,
 }
 
 impl WorkerRuntime {
-    fn new(record: JobRecord, state: StoredJobState) -> Self {
+    fn new(
+        record: JobRecord,
+        state: StoredJobState,
+        token: Vec<u8>,
+    ) -> Result<Self, ProtocolError> {
         let (terminate_sender, terminate_receiver) = mpsc::channel(1);
-        Self {
+        let pty = if record.manifest.start.io_mode == IoMode::Pty {
+            let output_limit = record
+                .manifest
+                .start
+                .pty
+                .as_ref()
+                .ok_or_else(|| ProtocolError::new("INVALID_WORKER_STATE", "PTY config is absent."))?
+                .output_limit_bytes;
+            Some(PtyRuntime::new(
+                &record.manifest.job_id,
+                token,
+                PtyOutputStore::open(&record.pty_output_path(), output_limit)?,
+            ))
+        } else {
+            None
+        };
+        Ok(Self {
             record,
             stdout_total: AtomicU64::new(state.stdout_bytes),
             stderr_total: AtomicU64::new(state.stderr_bytes),
@@ -110,7 +138,8 @@ impl WorkerRuntime {
             stderr_complete: AtomicBool::new(false),
             terminate_sender,
             terminate_receiver: Mutex::new(Some(terminate_receiver)),
-        }
+            pty,
+        })
     }
 
     async fn publish_worker_ready(&self, identity: &str) -> Result<(), ProtocolError> {
@@ -152,6 +181,9 @@ impl WorkerRuntime {
     async fn publish_start_failed(&self, error: io::Error) -> Result<(), ProtocolError> {
         self.stdout_complete.store(true, Ordering::Release);
         self.stderr_complete.store(true, Ordering::Release);
+        if let Some(pty) = &self.pty {
+            pty.complete.store(true, Ordering::Release);
+        }
         let mut guard = self.state.lock().await;
         let mut next = guard.clone();
         next.state = JobState::StartFailed;
@@ -177,6 +209,10 @@ impl WorkerRuntime {
         failure: Option<JobFailure>,
     ) -> Result<(), ProtocolError> {
         let mut guard = self.state.lock().await;
+        if let Some(pty) = &self.pty {
+            pty.complete.store(true, Ordering::Release);
+            pty.output.lock().await.sync()?;
+        }
         let mut next = guard.clone();
         next.state = state;
         next.timed_out = timed_out;
@@ -204,7 +240,7 @@ impl WorkerRuntime {
             state.stdout_retained_bytes = self.stdout_retained.load(Ordering::Acquire);
             state.stderr_retained_bytes = self.stderr_retained.load(Ordering::Acquire);
         }
-        state.snapshot()
+        state.snapshot(&self.record.manifest.start)
     }
 
     async fn request_termination(&self, reason: TerminationReason) -> Result<(), String> {
@@ -237,10 +273,218 @@ impl WorkerRuntime {
     }
 
     async fn sync_output(&self) -> Result<JobSnapshot, String> {
+        if let Some(pty) = &self.pty {
+            pty.output
+                .lock()
+                .await
+                .sync()
+                .map_err(|error| error.message)?;
+        }
         sync_file(&self.record.stdout_path()).await?;
         sync_file(&self.record.stderr_path()).await?;
         Ok(self.snapshot().await)
     }
+
+    fn require_pty(&self) -> Result<&PtyRuntime, ProtocolError> {
+        self.pty.as_ref().ok_or_else(|| {
+            ProtocolError::new(
+                "PTY_NOT_SUPPORTED_FOR_JOB",
+                "This job was not started in PTY mode.",
+            )
+        })
+    }
+
+    async fn ensure_live(&self) -> Result<(), ProtocolError> {
+        if self.state.lock().await.state.is_terminal() {
+            Err(ProtocolError::new(
+                "JOB_TERMINAL",
+                "The PTY job is already terminal.",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn open_attachment(&self) -> Result<AttachmentCredentials, ProtocolError> {
+        self.require_pty()?.attachments.lock().await.open()
+    }
+
+    async fn read_attachment(
+        &self,
+        params: &AttachmentReadParams,
+    ) -> Result<AttachmentReadResult, ProtocolError> {
+        let pty = self.require_pty()?;
+        pty.attachments
+            .lock()
+            .await
+            .verify(&params.attachment_id, &params.capability_token)?;
+        let complete = pty.complete.load(Ordering::Acquire);
+        pty.output
+            .lock()
+            .await
+            .read(&params.job_id, params.cursor, params.max_bytes, complete)
+    }
+
+    async fn acquire_input(
+        &self,
+        params: &AttachmentAcquireInputParams,
+    ) -> Result<InputLeaseResult, ProtocolError> {
+        self.ensure_live().await?;
+        self.require_pty()?
+            .attachments
+            .lock()
+            .await
+            .acquire_input(&params.attachment_id, &params.capability_token)
+    }
+
+    async fn renew_input(
+        &self,
+        params: &AttachmentRenewParams,
+    ) -> Result<InputLeaseResult, ProtocolError> {
+        self.ensure_live().await?;
+        self.require_pty()?.attachments.lock().await.renew_input(
+            &params.attachment_id,
+            &params.capability_token,
+            &params.lease_token,
+            params.fence,
+        )
+    }
+
+    async fn write_input(
+        &self,
+        params: &InputWriteParams,
+    ) -> Result<InputWriteResult, ProtocolError> {
+        self.ensure_live().await?;
+        let pty = self.require_pty()?;
+        pty.attachments.lock().await.validate_input(
+            &params.attachment_id,
+            &params.capability_token,
+            &params.lease_token,
+            params.fence,
+        )?;
+        let bytes = decode_base64(&params.data_base64)
+            .map_err(|error| ProtocolError::new("INVALID_REQUEST", error))?;
+        if bytes.is_empty() || bytes.len() > MAX_PTY_INPUT_BYTES {
+            return Err(ProtocolError::new(
+                "INVALID_REQUEST",
+                format!("PTY input must contain 1-{MAX_PTY_INPUT_BYTES} bytes."),
+            ));
+        }
+        let accepted_bytes = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
+        pty.enqueue_input(bytes)?;
+        Ok(InputWriteResult {
+            job_id: params.job_id.clone(),
+            accepted_bytes,
+        })
+    }
+
+    async fn resize_terminal(
+        &self,
+        params: &TerminalResizeParams,
+    ) -> Result<TerminalResizeResult, ProtocolError> {
+        self.ensure_live().await?;
+        let pty = self.require_pty()?;
+        pty.attachments.lock().await.validate_input(
+            &params.attachment_id,
+            &params.capability_token,
+            &params.lease_token,
+            params.fence,
+        )?;
+        pty.enqueue_resize(params.rows, params.cols)?;
+        Ok(TerminalResizeResult {
+            job_id: params.job_id.clone(),
+            rows: params.rows,
+            cols: params.cols,
+        })
+    }
+
+    async fn detach_attachment(
+        &self,
+        params: &AttachmentDetachParams,
+    ) -> Result<AttachmentDetachResult, ProtocolError> {
+        let detached = self
+            .require_pty()?
+            .attachments
+            .lock()
+            .await
+            .detach(&params.attachment_id, &params.capability_token)?;
+        Ok(AttachmentDetachResult {
+            job_id: params.job_id.clone(),
+            detached,
+        })
+    }
+}
+
+struct PtyRuntime {
+    output: Mutex<PtyOutputStore>,
+    attachments: Mutex<AttachmentRegistry>,
+    command_sender: mpsc::Sender<PtyCommand>,
+    command_receiver: Mutex<Option<mpsc::Receiver<PtyCommand>>>,
+    pending_input_bytes: AtomicU64,
+    complete: AtomicBool,
+}
+
+impl PtyRuntime {
+    fn new(job_id: &str, token: Vec<u8>, output: PtyOutputStore) -> Self {
+        let (command_sender, command_receiver) = mpsc::channel(PTY_COMMAND_QUEUE_DEPTH);
+        Self {
+            output: Mutex::new(output),
+            attachments: Mutex::new(AttachmentRegistry::new(job_id.to_owned(), token)),
+            command_sender,
+            command_receiver: Mutex::new(Some(command_receiver)),
+            pending_input_bytes: AtomicU64::new(0),
+            complete: AtomicBool::new(false),
+        }
+    }
+
+    fn enqueue_input(&self, bytes: Vec<u8>) -> Result<(), ProtocolError> {
+        let count = bytes.len() as u64;
+        self.pending_input_bytes
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
+                pending
+                    .checked_add(count)
+                    .filter(|next| *next <= MAX_PENDING_PTY_INPUT_BYTES)
+            })
+            .map_err(|_| {
+                ProtocolError::new(
+                    "PTY_INPUT_BACKPRESSURE",
+                    "The PTY input queue has reached its 64 KiB byte limit.",
+                )
+            })?;
+        if self
+            .command_sender
+            .try_send(PtyCommand::Input(bytes))
+            .is_err()
+        {
+            self.pending_input_bytes.fetch_sub(count, Ordering::AcqRel);
+            return Err(ProtocolError::new(
+                "PTY_INPUT_BACKPRESSURE",
+                "The PTY input queue is full.",
+            ));
+        }
+        Ok(())
+    }
+
+    fn enqueue_resize(&self, rows: u16, cols: u16) -> Result<(), ProtocolError> {
+        self.command_sender
+            .try_send(PtyCommand::Resize { rows, cols })
+            .map_err(|_| {
+                ProtocolError::new("PTY_INPUT_BACKPRESSURE", "The PTY command queue is full.")
+            })
+    }
+
+    async fn take_command_receiver(&self) -> Result<mpsc::Receiver<PtyCommand>, ProtocolError> {
+        self.command_receiver
+            .lock()
+            .await
+            .take()
+            .ok_or_else(|| ProtocolError::new("INTERNAL_ERROR", "PTY command receiver was reused."))
+    }
+}
+
+enum PtyCommand {
+    Input(Vec<u8>),
+    Resize { rows: u16, cols: u16 },
 }
 
 async fn serve_worker(
@@ -346,6 +590,63 @@ async fn handle_worker_connection(
                     },
                     Err(error) => WorkerResponse::failure(request_id, "INVALID_REQUEST", error),
                 },
+                "worker/attach/open" => match parse_params::<EmptyParams>(request.params) {
+                    Ok(_) => {
+                        worker_operation_response(request_id, runtime.open_attachment().await)?
+                    }
+                    Err(error) => WorkerResponse::failure(request_id, "INVALID_REQUEST", error),
+                },
+                "worker/attach/read" => {
+                    match parse_params::<AttachmentReadParams>(request.params) {
+                        Ok(params) => worker_operation_response(
+                            request_id,
+                            runtime.read_attachment(&params).await,
+                        )?,
+                        Err(error) => WorkerResponse::failure(request_id, "INVALID_REQUEST", error),
+                    }
+                }
+                "worker/attach/acquire-input" => {
+                    match parse_params::<AttachmentAcquireInputParams>(request.params) {
+                        Ok(params) => worker_operation_response(
+                            request_id,
+                            runtime.acquire_input(&params).await,
+                        )?,
+                        Err(error) => WorkerResponse::failure(request_id, "INVALID_REQUEST", error),
+                    }
+                }
+                "worker/attach/renew" => {
+                    match parse_params::<AttachmentRenewParams>(request.params) {
+                        Ok(params) => worker_operation_response(
+                            request_id,
+                            runtime.renew_input(&params).await,
+                        )?,
+                        Err(error) => WorkerResponse::failure(request_id, "INVALID_REQUEST", error),
+                    }
+                }
+                "worker/input/write" => match parse_params::<InputWriteParams>(request.params) {
+                    Ok(params) => {
+                        worker_operation_response(request_id, runtime.write_input(&params).await)?
+                    }
+                    Err(error) => WorkerResponse::failure(request_id, "INVALID_REQUEST", error),
+                },
+                "worker/terminal/resize" => {
+                    match parse_params::<TerminalResizeParams>(request.params) {
+                        Ok(params) => worker_operation_response(
+                            request_id,
+                            runtime.resize_terminal(&params).await,
+                        )?,
+                        Err(error) => WorkerResponse::failure(request_id, "INVALID_REQUEST", error),
+                    }
+                }
+                "worker/attach/detach" => {
+                    match parse_params::<AttachmentDetachParams>(request.params) {
+                        Ok(params) => worker_operation_response(
+                            request_id,
+                            runtime.detach_attachment(&params).await,
+                        )?,
+                        Err(error) => WorkerResponse::failure(request_id, "INVALID_REQUEST", error),
+                    }
+                }
                 _ => WorkerResponse::failure(
                     request_id,
                     "METHOD_NOT_FOUND",
@@ -354,6 +655,26 @@ async fn handle_worker_connection(
             }
         };
         write_json_frame(&mut stream, &response).await?;
+    }
+}
+
+fn worker_operation_response<T>(
+    request_id: String,
+    result: Result<T, ProtocolError>,
+) -> io::Result<WorkerResponse>
+where
+    T: serde::Serialize,
+{
+    match result {
+        Ok(value) => Ok(WorkerResponse::success(
+            request_id,
+            serde_json::to_value(value).map_err(json_io_error)?,
+        )),
+        Err(error) => Ok(WorkerResponse::failure(
+            request_id,
+            error.code,
+            error.message,
+        )),
     }
 }
 
@@ -381,6 +702,409 @@ fn worker_hello(
 }
 
 async fn execute_job(runtime: Arc<WorkerRuntime>) -> Result<(), ProtocolError> {
+    match runtime.record.manifest.start.io_mode {
+        IoMode::Pipe => execute_pipe_job(runtime).await,
+        IoMode::Pty => execute_pty_job(runtime).await,
+    }
+}
+
+async fn execute_pty_job(runtime: Arc<WorkerRuntime>) -> Result<(), ProtocolError> {
+    runtime.publish_command_starting().await?;
+    fault_point("after_command_starting");
+    let params = runtime.record.manifest.start.clone();
+    let pty_config = params
+        .pty
+        .clone()
+        .ok_or_else(|| ProtocolError::new("INVALID_WORKER_STATE", "PTY config is absent."))?;
+    let (master, slave) = open_pty(pty_config.rows, pty_config.cols).map_err(|error| {
+        ProtocolError::new(
+            "COMMAND_START_FAILED",
+            format!("Could not create a PTY: {error}"),
+        )
+    })?;
+    let (gate_read, gate_write) = create_command_gate().map_err(|error| {
+        ProtocolError::new(
+            "COMMAND_START_FAILED",
+            format!("Could not create the command start gate: {error}"),
+        )
+    })?;
+    let master_fd = master.as_raw_fd();
+    let slave_fd = slave.as_raw_fd();
+    let gate_read_fd = gate_read.as_raw_fd();
+    let gate_write_fd = gate_write.as_raw_fd();
+    let bootstrap = std::env::current_exe().map_err(|error| {
+        ProtocolError::new(
+            "COMMAND_START_FAILED",
+            format!("Could not locate the command bootstrap: {error}"),
+        )
+    })?;
+    let mut command = Command::new(bootstrap);
+    command
+        .arg("command-bootstrap")
+        .arg("--gate-fd")
+        .arg(gate_read_fd.to_string())
+        .arg("--")
+        .args(&params.argv)
+        .current_dir(&params.cwd)
+        .env_clear()
+        .envs(&params.environment)
+        .env("TERM", &pty_config.term)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(false);
+    // SAFETY: the closure performs only async-signal-safe session, ioctl, and
+    // descriptor operations before exec. All descriptors are Worker-owned.
+    unsafe {
+        std::os::unix::process::CommandExt::pre_exec(command.as_std_mut(), move || {
+            libc::close(gate_write_fd);
+            libc::close(master_fd);
+            if libc::setsid() < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if libc::ioctl(slave_fd, libc::TIOCSCTTY as _, 0) < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            for target in [libc::STDIN_FILENO, libc::STDOUT_FILENO, libc::STDERR_FILENO] {
+                if slave_fd != target && libc::dup2(slave_fd, target) < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+            }
+            if slave_fd > libc::STDERR_FILENO {
+                libc::close(slave_fd);
+            }
+            let flags = libc::fcntl(gate_read_fd, libc::F_GETFD);
+            if flags < 0 || libc::fcntl(gate_read_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => return runtime.publish_start_failed(error).await,
+    };
+    drop(gate_read);
+    drop(slave);
+    fault_point("after_command_spawn");
+    let Some(pid) = child.id() else {
+        return runtime
+            .publish_start_failed(io::Error::other("operating system returned no process ID"))
+            .await;
+    };
+    let command_identity = crate::process_identity::process_start_identity(pid)
+        .map_err(identity_error)?
+        .ok_or_else(|| ProtocolError::new("COMMAND_START_FAILED", "Process identity vanished."))?;
+    let reader = duplicate_fd(master.as_raw_fd()).map_err(|error| {
+        ProtocolError::new(
+            "COMMAND_START_FAILED",
+            format!("Could not duplicate the PTY master: {error}"),
+        )
+    })?;
+    if let Err(error) = runtime.publish_running(pid, command_identity).await {
+        drop(gate_write);
+        let _ = terminate_child(
+            &mut child,
+            pid,
+            TerminationReason::OutputFailure,
+            params.termination_grace_ms,
+            params.termination_confirmation_ms,
+        )
+        .await;
+        return Err(error);
+    }
+    if let Err(error) = release_command_gate(gate_write) {
+        let _ = terminate_child(
+            &mut child,
+            pid,
+            TerminationReason::OutputFailure,
+            params.termination_grace_ms,
+            params.termination_confirmation_ms,
+        )
+        .await;
+        return Err(ProtocolError::new(
+            "COMMAND_START_FAILED",
+            format!("Could not release the command start gate: {error}"),
+        ));
+    }
+    fault_point("after_running");
+
+    let (output_failure_sender, mut output_failure_receiver) = mpsc::channel(2);
+    let reader_runtime = Arc::clone(&runtime);
+    let reader_failure_sender = output_failure_sender.clone();
+    let mut reader_task = tokio::spawn(async move {
+        let file = tokio::fs::File::from_std(std::fs::File::from(reader));
+        if let Err(error) = capture_pty_output(file, &reader_runtime).await {
+            let _ = reader_failure_sender.send(error.to_string()).await;
+        }
+    });
+    let pty = runtime.require_pty()?;
+    let command_receiver = pty.take_command_receiver().await?;
+    let writer_failure_sender = output_failure_sender;
+    let writer_runtime = Arc::clone(&runtime);
+    let writer_task = tokio::spawn(async move {
+        let file = tokio::fs::File::from_std(std::fs::File::from(master));
+        if let Err(error) = write_pty_commands(file, command_receiver, &writer_runtime).await {
+            let _ = writer_failure_sender.send(error.to_string()).await;
+        }
+    });
+
+    let mut terminate_receiver = runtime.take_termination_receiver().await?;
+    let trigger = tokio::select! {
+        status = child.wait() => JobTrigger::Exited(status),
+        reason = terminate_receiver.recv() => JobTrigger::Terminate(
+            reason.unwrap_or(TerminationReason::Cancellation)
+        ),
+        Some(failure) = output_failure_receiver.recv() => JobTrigger::OutputFailed(failure),
+        _ = sleep(Duration::from_millis(params.timeout_ms)) => {
+            JobTrigger::Terminate(TerminationReason::Timeout)
+        }
+    };
+
+    let mut failure = None;
+    let (status, termination, state, timed_out) = match trigger {
+        JobTrigger::Exited(Ok(status)) => {
+            if process_group_exists(pid) {
+                let termination = terminate_group_after_root(
+                    pid,
+                    TerminationReason::OrphanCleanup,
+                    params.termination_grace_ms,
+                    params.termination_confirmation_ms,
+                )
+                .await;
+                let state = if termination.outcome == "uncertain" {
+                    JobState::TerminationUncertain
+                } else {
+                    JobState::Exited
+                };
+                (Some(status), Some(termination), state, false)
+            } else {
+                (Some(status), None, JobState::Exited, false)
+            }
+        }
+        JobTrigger::Exited(Err(error)) => {
+            failure = Some(JobFailure {
+                code: "COMMAND_WAIT_FAILED".to_owned(),
+                message: format!("Could not wait for the command: {error}"),
+            });
+            let termination = terminate_group_after_root(
+                pid,
+                TerminationReason::OutputFailure,
+                params.termination_grace_ms,
+                params.termination_confirmation_ms,
+            )
+            .await;
+            let state = if termination.outcome == "uncertain" {
+                JobState::TerminationUncertain
+            } else {
+                JobState::Exited
+            };
+            (None, Some(termination), state, false)
+        }
+        JobTrigger::Terminate(reason) => {
+            if let Err(error) = runtime.publish_terminating().await {
+                let _ = terminate_child(
+                    &mut child,
+                    pid,
+                    TerminationReason::OutputFailure,
+                    params.termination_grace_ms,
+                    params.termination_confirmation_ms,
+                )
+                .await;
+                return Err(error);
+            }
+            fault_point("after_terminating");
+            let terminated = terminate_child(
+                &mut child,
+                pid,
+                reason,
+                params.termination_grace_ms,
+                params.termination_confirmation_ms,
+            )
+            .await;
+            let state = if terminated.snapshot.outcome == "uncertain" {
+                JobState::TerminationUncertain
+            } else {
+                JobState::Exited
+            };
+            (
+                terminated.status,
+                Some(terminated.snapshot),
+                state,
+                reason == TerminationReason::Timeout,
+            )
+        }
+        JobTrigger::OutputFailed(message) => {
+            runtime.publish_terminating().await?;
+            failure = Some(JobFailure {
+                code: "PTY_IO_FAILED".to_owned(),
+                message,
+            });
+            let terminated = terminate_child(
+                &mut child,
+                pid,
+                TerminationReason::OutputFailure,
+                params.termination_grace_ms,
+                params.termination_confirmation_ms,
+            )
+            .await;
+            let state = if terminated.snapshot.outcome == "uncertain" {
+                JobState::TerminationUncertain
+            } else {
+                JobState::Exited
+            };
+            (terminated.status, Some(terminated.snapshot), state, false)
+        }
+    };
+
+    writer_task.abort();
+    let _ = writer_task.await;
+    if timeout(Duration::from_secs(2), &mut reader_task)
+        .await
+        .is_err()
+    {
+        reader_task.abort();
+        let _ = reader_task.await;
+        failure.get_or_insert(JobFailure {
+            code: "PTY_OUTPUT_DRAIN_TIMEOUT".to_owned(),
+            message: "PTY output did not reach EOF after the command exited.".to_owned(),
+        });
+    }
+    runtime
+        .publish_terminal(state, status, timed_out, termination, failure)
+        .await?;
+    fault_point("after_terminal");
+    Ok(())
+}
+
+fn open_pty(rows: u16, cols: u16) -> io::Result<(OwnedFd, OwnedFd)> {
+    let mut master = -1;
+    let mut slave = -1;
+    let mut size = libc::winsize {
+        ws_row: rows,
+        ws_col: cols,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: openpty initializes both descriptors on success and only reads
+    // the supplied window-size value during this call.
+    if unsafe {
+        libc::openpty(
+            &mut master,
+            &mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut size,
+        )
+    } != 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: successful openpty returned two distinct owned descriptors.
+    let master = unsafe { OwnedFd::from_raw_fd(master) };
+    // SAFETY: successful openpty returned two distinct owned descriptors.
+    let slave = unsafe { OwnedFd::from_raw_fd(slave) };
+    set_close_on_exec(master.as_raw_fd())?;
+    set_close_on_exec(slave.as_raw_fd())?;
+    Ok((master, slave))
+}
+
+fn duplicate_fd(descriptor: RawFd) -> io::Result<OwnedFd> {
+    // SAFETY: dup creates a new descriptor referring to the same open file.
+    let duplicated = unsafe { libc::dup(descriptor) };
+    if duplicated < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: successful dup returned a new owned descriptor.
+    let duplicated = unsafe { OwnedFd::from_raw_fd(duplicated) };
+    set_close_on_exec(duplicated.as_raw_fd())?;
+    Ok(duplicated)
+}
+
+async fn capture_pty_output(
+    mut source: tokio::fs::File,
+    runtime: &WorkerRuntime,
+) -> io::Result<()> {
+    let mut buffer = vec![0u8; OUTPUT_BUFFER_BYTES];
+    loop {
+        let count = match source.read(&mut buffer).await {
+            Ok(count) => count,
+            Err(error) if error.raw_os_error() == Some(libc::EIO) => 0,
+            Err(error) => return Err(error),
+        };
+        if count == 0 {
+            runtime
+                .require_pty()
+                .map_err(protocol_io_error)?
+                .output
+                .lock()
+                .await
+                .sync()
+                .map_err(protocol_io_error)?;
+            return Ok(());
+        }
+        runtime
+            .require_pty()
+            .map_err(protocol_io_error)?
+            .output
+            .lock()
+            .await
+            .append(&buffer[..count])
+            .map_err(protocol_io_error)?;
+    }
+}
+
+async fn write_pty_commands(
+    mut destination: tokio::fs::File,
+    mut receiver: mpsc::Receiver<PtyCommand>,
+    runtime: &WorkerRuntime,
+) -> io::Result<()> {
+    while let Some(command) = receiver.recv().await {
+        match command {
+            PtyCommand::Input(bytes) => {
+                let count = bytes.len() as u64;
+                let result = async {
+                    destination.write_all(&bytes).await?;
+                    destination.flush().await
+                }
+                .await;
+                runtime
+                    .require_pty()
+                    .map_err(protocol_io_error)?
+                    .pending_input_bytes
+                    .fetch_sub(count, Ordering::AcqRel);
+                result?;
+            }
+            PtyCommand::Resize { rows, cols } => {
+                set_terminal_size(destination.as_raw_fd(), rows, cols)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn set_terminal_size(descriptor: RawFd, rows: u16, cols: u16) -> io::Result<()> {
+    let size = libc::winsize {
+        ws_row: rows,
+        ws_col: cols,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: ioctl reads the supplied winsize and applies it to a valid PTY master.
+    if unsafe { libc::ioctl(descriptor, libc::TIOCSWINSZ as _, &size) } < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+fn protocol_io_error(error: ProtocolError) -> io::Error {
+    io::Error::other(format!("{}: {}", error.code, error.message))
+}
+
+async fn execute_pipe_job(runtime: Arc<WorkerRuntime>) -> Result<(), ProtocolError> {
     runtime.publish_command_starting().await?;
     fault_point("after_command_starting");
     let params = runtime.record.manifest.start.clone();
@@ -954,4 +1678,31 @@ fn json_io_error(error: serde_json::Error) -> io::Error {
 
 fn string_io_error(error: String) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, error)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uuid::Uuid;
+
+    #[test]
+    fn pty_input_queue_enforces_its_byte_budget_before_admission() {
+        let root = std::env::temp_dir().join(format!("koda-pty-input-{}", Uuid::new_v4().simple()));
+        let output = PtyOutputStore::open(&root, 65_536).expect("output store");
+        let runtime = PtyRuntime::new("job", vec![7; 32], output);
+        for _ in 0..4 {
+            runtime
+                .enqueue_input(vec![7; MAX_PTY_INPUT_BYTES])
+                .expect("bounded input");
+        }
+
+        assert_eq!(
+            runtime
+                .enqueue_input(vec![7])
+                .expect_err("queue byte limit")
+                .code,
+            "PTY_INPUT_BACKPRESSURE"
+        );
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
 }

@@ -3,11 +3,13 @@
 #[cfg(not(unix))]
 compile_error!("Phase 4B2 koda-exec currently supports POSIX systems only.");
 
+mod attachment;
 mod durable;
 mod framing;
 mod internal_protocol;
 mod process_identity;
 mod protocol;
+mod pty_output;
 mod supervisor;
 mod worker;
 
@@ -221,14 +223,17 @@ async fn handle_connection(mut stream: UnixStream, supervisor: Arc<Supervisor>) 
                                 "capabilities": {
                                     "process_group": true,
                                     "job_object": false,
-                                    "pty": false,
+                                    "pty": true,
                                     "reattach": true,
                                     "durable_restart_recovery": true
                                 },
                                 "limits": {
                                     "max_frame_bytes": MAX_FRAME_BYTES,
                                     "max_output_read_bytes": protocol::MAX_OUTPUT_READ_BYTES,
-                                    "max_output_limit_bytes": protocol::MAX_OUTPUT_LIMIT_BYTES
+                                    "max_output_limit_bytes": protocol::MAX_OUTPUT_LIMIT_BYTES,
+                                    "max_background_timeout_ms": protocol::MAX_BACKGROUND_TIMEOUT_MS,
+                                    "max_pty_input_bytes": protocol::MAX_PTY_INPUT_BYTES,
+                                    "max_pending_pty_input_bytes": protocol::MAX_PENDING_PTY_INPUT_BYTES
                                 }
                             }),
                         )

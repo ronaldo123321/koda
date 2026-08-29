@@ -136,6 +136,20 @@ pub fn worker_proof(
     Ok(mac.finalize().into_bytes().to_vec())
 }
 
+pub fn attachment_proof(
+    token: &[u8],
+    job_id: &str,
+    attachment_id: &str,
+) -> Result<Vec<u8>, String> {
+    let mut mac = Hmac::<Sha256>::new_from_slice(token)
+        .map_err(|_| "worker token length is invalid".to_owned())?;
+    mac.update(b"koda-exec-attachment-v1\0");
+    mac.update(job_id.as_bytes());
+    mac.update(b"\0");
+    mac.update(attachment_id.as_bytes());
+    Ok(mac.finalize().into_bytes().to_vec())
+}
+
 pub fn parse_params<T>(value: Value) -> Result<T, String>
 where
     T: for<'de> Deserialize<'de>,
@@ -164,6 +178,20 @@ mod tests {
         assert_eq!(
             decode_base64(&encode_base64(&proof)).expect("base64"),
             proof
+        );
+    }
+
+    #[test]
+    fn attachment_proof_binds_job_and_attachment() {
+        let token = vec![7; 32];
+        let proof = attachment_proof(&token, "job", "attachment").expect("proof");
+        assert_ne!(
+            proof,
+            attachment_proof(&token, "other", "attachment").expect("proof")
+        );
+        assert_ne!(
+            proof,
+            attachment_proof(&token, "job", "other").expect("proof")
         );
     }
 }

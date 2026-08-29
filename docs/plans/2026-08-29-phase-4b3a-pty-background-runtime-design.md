@@ -1,6 +1,6 @@
 # Koda Phase 4B3A PTY and Background Runtime Design
 
-- Status: Accepted — implementation next
+- Status: Complete — runtime, Node API, and deterministic acceptance implemented
 - Date: 2026-08-29
 - Depends on: Phase 4B2 crash-durable per-job Workers
 
@@ -235,3 +235,23 @@ Phase 4B3A is complete when deterministic tests prove:
 TUI process panes, user key routing, visual attachment state, and app-server
 interactive workflow are Phase 4B3B. Windows ConPTY and Job Objects are Phase
 4B4. OS sandboxing, network policy, and secret injection remain Phase 4C.
+
+## Implementation result
+
+Phase 4B3A is implemented on `main`. Protocol v1 preserves legacy
+`pipe + foreground` serialization while adding explicit PTY/background starts,
+PTY job metadata, strict attachment methods, stable lease/cursor errors, and
+capability/limit negotiation. Each Worker owns its controlling PTY, same-PID
+gated command, serialized input/resize queue, attachment registry, fenced
+15-second input lease, timeout, process-group termination, and 64 KiB segmented
+tail log.
+
+`@koda/runtime-node` exposes `startPty`, strict attachment primitives, and
+`NativePtyAttachment` without automatic input retries. Deterministic tests use
+real local PTYs to verify TTY visibility, initial and resized dimensions,
+`SIGWINCH`, single-writer fencing, independent readers, input delivery, detach
+survival, Supervisor restart attachment, terminal reads, and absolute cursor
+expiry after rotation while preserving the pipe and Worker recovery suite.
+
+Phase 4B3B remains separate: it will add the TUI/app-server process pane and
+user key-routing product workflow on top of these primitives.

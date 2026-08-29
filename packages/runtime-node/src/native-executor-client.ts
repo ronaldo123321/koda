@@ -12,6 +12,7 @@ const MAX_FRAME_BYTES = 1_048_576;
 const DEFAULT_STARTUP_TIMEOUT_MS = 5_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 const MAX_OUTPUT_READ_BYTES = 65_536;
+const MAX_PTY_INPUT_BYTES = 16_384;
 
 export type NativeExecutorErrorCode =
   | "NATIVE_EXECUTOR_UNAVAILABLE"
@@ -25,6 +26,17 @@ export type NativeExecutorErrorCode =
   | "OUTPUT_READ_FAILED"
   | "COMMAND_NOT_FOUND"
   | "COMMAND_START_FAILED"
+  | "ATTACHMENT_NOT_FOUND"
+  | "ATTACHMENT_LIMIT_EXCEEDED"
+  | "INPUT_LEASE_HELD"
+  | "INPUT_LEASE_EXPIRED"
+  | "STALE_INPUT_FENCE"
+  | "PTY_INPUT_BACKPRESSURE"
+  | "PTY_NOT_SUPPORTED_FOR_JOB"
+  | "JOB_TERMINAL"
+  | "CURSOR_INVALID"
+  | "PTY_OUTPUT_FAILED"
+  | "PTY_OUTPUT_CORRUPT"
   | "INTERNAL_ERROR";
 
 export class NativeExecutorError extends Error {
@@ -57,6 +69,16 @@ export interface NativeExecutorStartInput {
   requestId?: string;
 }
 
+export interface NativeExecutorPtyStartInput extends NativeExecutorStartInput {
+  rows: number;
+  cols: number;
+  term?: string;
+  lifecycle?: "foreground" | "background";
+}
+
+export type NativeIoMode = "pipe" | "pty";
+export type NativeJobLifecycle = "foreground" | "background";
+
 export type NativeJobState =
   | "accepted"
   | "worker_ready"
@@ -86,6 +108,8 @@ export interface NativeTerminationSnapshot {
 export interface NativeJobSnapshot {
   job_id: string;
   state: NativeJobState;
+  io_mode: NativeIoMode;
+  lifecycle: NativeJobLifecycle;
   pid: number | null;
   exit_code: number | null;
   signal: string | null;
@@ -116,6 +140,8 @@ export interface NativeOutputReadResult {
 export interface NativeJobSummary {
   job_id: string;
   state: NativeJobState;
+  io_mode: NativeIoMode;
+  lifecycle: NativeJobLifecycle;
   created_at_ms: number;
   updated_at_ms: number;
   pid: number | null;
@@ -125,6 +151,40 @@ export interface NativeJobListResult {
   jobs: NativeJobSummary[];
   next_cursor: string | null;
 }
+
+export interface NativeAttachmentCredentials {
+  job_id: string;
+  attachment_id: string;
+  capability_token: string;
+}
+
+export interface NativeInputLease {
+  job_id: string;
+  attachment_id: string;
+  lease_token: string;
+  fence: number;
+  expires_at_ms: number;
+}
+
+export type NativeAttachmentReadResult =
+  | {
+      status: "ok";
+      job_id: string;
+      cursor: number;
+      next_cursor: number;
+      earliest_cursor: number;
+      latest_cursor: number;
+      complete: boolean;
+      data: Buffer;
+    }
+  | {
+      status: "cursor_expired";
+      job_id: string;
+      cursor: number;
+      earliest_cursor: number;
+      latest_cursor: number;
+      complete: boolean;
+    };
 
 const safeInteger = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const positiveSafeInteger = safeInteger.refine((value) => value > 0);
@@ -141,6 +201,16 @@ const jobStateSchema = z.enum([
   "termination_uncertain",
   "quarantined",
 ]);
+const ioModeSchema = z.enum(["pipe", "pty"]);
+const jobLifecycleSchema = z.enum(["foreground", "background"]);
+const canonicalBase64Schema = z
+  .string()
+  .max(100_000)
+  .regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u);
+const opaqueBase64Schema = canonicalBase64Schema.refine(
+  (value) => value.length > 0,
+  "Capability and lease tokens must not be empty.",
+);
 
 const terminationAttemptSchema = z
   .object({
@@ -170,6 +240,8 @@ const jobSnapshotSchema = z
   .object({
     job_id: identifier,
     state: jobStateSchema,
+    io_mode: ioModeSchema,
+    lifecycle: jobLifecycleSchema,
     pid: positiveSafeInteger.nullable(),
     exit_code: z.number().int().nullable(),
     signal: z.string().min(1).max(64).nullable(),
@@ -222,6 +294,8 @@ const jobSummarySchema = z
   .object({
     job_id: identifier,
     state: jobStateSchema,
+    io_mode: ioModeSchema,
+    lifecycle: jobLifecycleSchema,
     created_at_ms: safeInteger,
     updated_at_ms: safeInteger,
     pid: positiveSafeInteger.nullable(),
@@ -261,6 +335,88 @@ const outputReadSchema = z
     }
   });
 
+const attachmentCredentialsSchema = z
+  .object({
+    job_id: identifier,
+    attachment_id: identifier,
+    capability_token: opaqueBase64Schema,
+  })
+  .strict();
+
+const inputLeaseSchema = z
+  .object({
+    job_id: identifier,
+    attachment_id: identifier,
+    lease_token: opaqueBase64Schema,
+    fence: positiveSafeInteger,
+    expires_at_ms: positiveSafeInteger,
+  })
+  .strict();
+
+const attachmentReadSchema = z.discriminatedUnion("status", [
+  z
+    .object({
+      status: z.literal("ok"),
+      job_id: identifier,
+      cursor: safeInteger,
+      next_cursor: safeInteger,
+      earliest_cursor: safeInteger,
+      latest_cursor: safeInteger,
+      complete: z.boolean(),
+      data_base64: canonicalBase64Schema,
+    })
+    .strict()
+    .superRefine((value, context) => {
+      if (
+        value.earliest_cursor > value.cursor ||
+        value.cursor > value.next_cursor ||
+        value.next_cursor > value.latest_cursor
+      ) {
+        context.addIssue({
+          code: "custom",
+          message: "PTY output cursors are inconsistent.",
+        });
+      }
+    }),
+  z
+    .object({
+      status: z.literal("cursor_expired"),
+      job_id: identifier,
+      cursor: safeInteger,
+      earliest_cursor: safeInteger,
+      latest_cursor: safeInteger,
+      complete: z.boolean(),
+    })
+    .strict()
+    .superRefine((value, context) => {
+      if (
+        value.cursor >= value.earliest_cursor ||
+        value.earliest_cursor > value.latest_cursor
+      ) {
+        context.addIssue({
+          code: "custom",
+          message: "Expired PTY cursor bounds are inconsistent.",
+        });
+      }
+    }),
+]);
+
+const inputWriteResultSchema = z
+  .object({ job_id: identifier, accepted_bytes: positiveSafeInteger })
+  .strict();
+
+const terminalResizeResultSchema = z
+  .object({
+    job_id: identifier,
+    rows: z.number().int().min(1).max(500),
+    cols: z.number().int().min(1).max(500),
+  })
+  .strict();
+
+const attachmentDetachResultSchema = z
+  .object({ job_id: identifier, detached: z.boolean() })
+  .strict();
+
 const helloResultSchema = z
   .object({
     protocol_version: z.literal(PROTOCOL_VERSION),
@@ -280,6 +436,9 @@ const helloResultSchema = z
         max_frame_bytes: positiveSafeInteger,
         max_output_read_bytes: positiveSafeInteger,
         max_output_limit_bytes: positiveSafeInteger,
+        max_background_timeout_ms: positiveSafeInteger,
+        max_pty_input_bytes: positiveSafeInteger,
+        max_pending_pty_input_bytes: positiveSafeInteger,
       })
       .strict(),
   })
@@ -403,20 +562,48 @@ export class NativeExecutorClient {
     input: NativeExecutorStartInput,
   ): Promise<NativeJobSnapshot> {
     const requestId = input.requestId ?? randomUUID();
-    const environment = Object.fromEntries(
-      Object.entries(input.environment).flatMap(([name, value]) =>
-        value === undefined ? [] : [[name, value]],
-      ),
-    );
     const params = {
       argv: input.argv,
       cwd: input.cwd,
-      environment,
+      environment: definedEnvironment(input.environment),
       timeout_ms: input.timeoutMs,
       output_limit_bytes: input.outputLimitBytes,
       termination_grace_ms: input.terminationGraceMs,
       termination_confirmation_ms: input.terminationConfirmationMs,
+      io_mode: "pipe",
+      lifecycle: "foreground",
     };
+    return this.startRequest(params, requestId);
+  }
+
+  public async startPty(
+    input: NativeExecutorPtyStartInput,
+  ): Promise<NativeJobSnapshot> {
+    const requestId = input.requestId ?? randomUUID();
+    const params = {
+      argv: input.argv,
+      cwd: input.cwd,
+      environment: definedEnvironment(input.environment),
+      timeout_ms: input.timeoutMs,
+      output_limit_bytes: input.outputLimitBytes,
+      termination_grace_ms: input.terminationGraceMs,
+      termination_confirmation_ms: input.terminationConfirmationMs,
+      io_mode: "pty",
+      lifecycle: input.lifecycle ?? "foreground",
+      pty: {
+        rows: input.rows,
+        cols: input.cols,
+        term: input.term ?? "xterm-256color",
+        output_limit_bytes: input.outputLimitBytes,
+      },
+    };
+    return this.startRequest(params, requestId);
+  }
+
+  private async startRequest(
+    params: object,
+    requestId: string,
+  ): Promise<NativeJobSnapshot> {
     try {
       return parseProtocolValue(
         jobSnapshotSchema,
@@ -507,6 +694,140 @@ export class NativeExecutorClient {
       ),
       "job/list result",
     );
+  }
+
+  public async openAttachment(
+    jobId: string,
+    cursor = 0,
+  ): Promise<NativePtyAttachment> {
+    const credentials = parseProtocolValue(
+      attachmentCredentialsSchema,
+      await this.call("attach/open", { job_id: jobId }, randomUUID()),
+      "attach/open result",
+    );
+    return new NativePtyAttachment(this, credentials, cursor);
+  }
+
+  public async readAttachment(
+    attachment: NativeAttachmentCredentials,
+    cursor: number,
+    maxBytes = MAX_OUTPUT_READ_BYTES,
+  ): Promise<NativeAttachmentReadResult> {
+    const parsed = parseProtocolValue(
+      attachmentReadSchema,
+      await this.call(
+        "attach/read",
+        {
+          ...attachment,
+          cursor,
+          max_bytes: maxBytes,
+        },
+        randomUUID(),
+      ),
+      "attach/read result",
+    );
+    if (parsed.status === "cursor_expired") {
+      return parsed;
+    }
+    const data = decodeCanonicalBase64(parsed.data_base64);
+    if (parsed.next_cursor - parsed.cursor !== data.byteLength) {
+      throw protocolError(
+        "Executor PTY cursors do not match the decoded payload length.",
+      );
+    }
+    return {
+      status: parsed.status,
+      job_id: parsed.job_id,
+      cursor: parsed.cursor,
+      next_cursor: parsed.next_cursor,
+      earliest_cursor: parsed.earliest_cursor,
+      latest_cursor: parsed.latest_cursor,
+      complete: parsed.complete,
+      data,
+    };
+  }
+
+  public async acquireInput(
+    attachment: NativeAttachmentCredentials,
+  ): Promise<NativeInputLease> {
+    return parseProtocolValue(
+      inputLeaseSchema,
+      await this.call("attach/acquire-input", attachment, randomUUID()),
+      "attach/acquire-input result",
+    );
+  }
+
+  public async renewInput(
+    attachment: NativeAttachmentCredentials,
+    lease: NativeInputLease,
+  ): Promise<NativeInputLease> {
+    return parseProtocolValue(
+      inputLeaseSchema,
+      await this.call(
+        "attach/renew",
+        leaseParams(attachment, lease),
+        randomUUID(),
+      ),
+      "attach/renew result",
+    );
+  }
+
+  public async writeInput(
+    attachment: NativeAttachmentCredentials,
+    lease: NativeInputLease,
+    input: Uint8Array,
+  ): Promise<number> {
+    const data = Buffer.from(input);
+    if (data.byteLength < 1 || data.byteLength > MAX_PTY_INPUT_BYTES) {
+      throw new NativeExecutorError(
+        "INVALID_REQUEST",
+        `PTY input must contain 1-${MAX_PTY_INPUT_BYTES} bytes.`,
+      );
+    }
+    const result = parseProtocolValue(
+      inputWriteResultSchema,
+      await this.call(
+        "input/write",
+        {
+          ...leaseParams(attachment, lease),
+          data_base64: data.toString("base64"),
+        },
+        randomUUID(),
+      ),
+      "input/write result",
+    );
+    if (result.accepted_bytes !== data.byteLength) {
+      throw protocolError("Executor accepted an ambiguous PTY input length.");
+    }
+    return result.accepted_bytes;
+  }
+
+  public async resizeTerminal(
+    attachment: NativeAttachmentCredentials,
+    lease: NativeInputLease,
+    rows: number,
+    cols: number,
+  ): Promise<{ rows: number; cols: number }> {
+    const result = parseProtocolValue(
+      terminalResizeResultSchema,
+      await this.call(
+        "terminal/resize",
+        { ...leaseParams(attachment, lease), rows, cols },
+        randomUUID(),
+      ),
+      "terminal/resize result",
+    );
+    return { rows: result.rows, cols: result.cols };
+  }
+
+  public async detach(
+    attachment: NativeAttachmentCredentials,
+  ): Promise<boolean> {
+    return parseProtocolValue(
+      attachmentDetachResultSchema,
+      await this.call("attach/detach", attachment, randomUUID()),
+      "attach/detach result",
+    ).detached;
   }
 
   public async closeOwnedSupervisorForTests(): Promise<void> {
@@ -637,6 +958,78 @@ export class NativeExecutorClient {
   }
 }
 
+export class NativePtyAttachment {
+  private lease: NativeInputLease | undefined;
+
+  public constructor(
+    private readonly client: NativeExecutorClient,
+    public readonly credentials: NativeAttachmentCredentials,
+    public cursor: number,
+  ) {}
+
+  public async read(
+    maxBytes = MAX_OUTPUT_READ_BYTES,
+  ): Promise<NativeAttachmentReadResult> {
+    const result = await this.client.readAttachment(
+      this.credentials,
+      this.cursor,
+      maxBytes,
+    );
+    this.cursor =
+      result.status === "ok" ? result.next_cursor : result.earliest_cursor;
+    return result;
+  }
+
+  public async acquireInput(): Promise<NativeInputLease> {
+    this.lease = await this.client.acquireInput(this.credentials);
+    return this.lease;
+  }
+
+  public async renewInput(): Promise<NativeInputLease> {
+    this.lease = await this.client.renewInput(
+      this.credentials,
+      this.requireLease(),
+    );
+    return this.lease;
+  }
+
+  public async write(input: Uint8Array | string): Promise<number> {
+    return this.client.writeInput(
+      this.credentials,
+      this.requireLease(),
+      typeof input === "string" ? Buffer.from(input, "utf8") : input,
+    );
+  }
+
+  public async resize(
+    rows: number,
+    cols: number,
+  ): Promise<{ rows: number; cols: number }> {
+    return this.client.resizeTerminal(
+      this.credentials,
+      this.requireLease(),
+      rows,
+      cols,
+    );
+  }
+
+  public async close(): Promise<boolean> {
+    const detached = await this.client.detach(this.credentials);
+    this.lease = undefined;
+    return detached;
+  }
+
+  private requireLease(): NativeInputLease {
+    if (this.lease === undefined) {
+      throw new NativeExecutorError(
+        "INPUT_LEASE_EXPIRED",
+        "This PTY attachment does not hold an input lease.",
+      );
+    }
+    return this.lease;
+  }
+}
+
 function requestEnvelope(
   requestId: string,
   method: string,
@@ -647,6 +1040,36 @@ function requestEnvelope(
     request_id: requestId,
     method,
     params,
+  };
+}
+
+function definedEnvironment(
+  environment: NodeJS.ProcessEnv,
+): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(environment).flatMap(([name, value]) =>
+      value === undefined ? [] : [[name, value]],
+    ),
+  );
+}
+
+function leaseParams(
+  attachment: NativeAttachmentCredentials,
+  lease: NativeInputLease,
+): object {
+  if (
+    lease.job_id !== attachment.job_id ||
+    lease.attachment_id !== attachment.attachment_id
+  ) {
+    throw new NativeExecutorError(
+      "INPUT_LEASE_EXPIRED",
+      "The PTY input lease belongs to a different attachment.",
+    );
+  }
+  return {
+    ...attachment,
+    lease_token: lease.lease_token,
+    fence: lease.fence,
   };
 }
 
@@ -798,6 +1221,17 @@ function normalizeRemoteCode(
     case "OUTPUT_READ_FAILED":
     case "COMMAND_NOT_FOUND":
     case "COMMAND_START_FAILED":
+    case "ATTACHMENT_NOT_FOUND":
+    case "ATTACHMENT_LIMIT_EXCEEDED":
+    case "INPUT_LEASE_HELD":
+    case "INPUT_LEASE_EXPIRED":
+    case "STALE_INPUT_FENCE":
+    case "PTY_INPUT_BACKPRESSURE":
+    case "PTY_NOT_SUPPORTED_FOR_JOB":
+    case "JOB_TERMINAL":
+    case "CURSOR_INVALID":
+    case "PTY_OUTPUT_FAILED":
+    case "PTY_OUTPUT_CORRUPT":
     case "INTERNAL_ERROR":
       return code;
     default:

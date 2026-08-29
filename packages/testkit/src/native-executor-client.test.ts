@@ -2,6 +2,7 @@ import type { ToolOperationalEvent } from "@koda/agent-core";
 import {
   ArtifactStore,
   NativeExecutorClient,
+  type NativePtyAttachment,
   WorkspaceCommandRunner,
   type NativeJobSnapshot,
 } from "@koda/runtime-node";
@@ -41,11 +42,210 @@ describeNative("NativeExecutorClient", () => {
       capabilities: {
         process_group: true,
         job_object: false,
-        pty: false,
+        pty: true,
         reattach: true,
         durable_restart_recovery: true,
       },
     });
+  });
+
+  it("runs a real PTY with configured dimensions and fenced input", async () => {
+    const started = await client.startPty({
+      argv: [
+        process.execPath,
+        "-e",
+        [
+          "process.stdin.setEncoding('utf8');",
+          "console.log(JSON.stringify({stdin:process.stdin.isTTY,stdout:process.stdout.isTTY,rows:process.stdout.rows,cols:process.stdout.columns}));",
+          "process.stdin.once('data',(data)=>{console.log('INPUT:'+JSON.stringify(data));setTimeout(()=>process.exit(0),20)});",
+        ].join(""),
+      ],
+      cwd: root,
+      environment: { PATH: process.env.PATH },
+      timeoutMs: 3_000,
+      outputLimitBytes: 65_536,
+      terminationGraceMs: 25,
+      terminationConfirmationMs: 1_000,
+      rows: 24,
+      cols: 80,
+    });
+    const attachment = await client.openAttachment(started.job_id);
+    const lease = await attachment.acquireInput();
+    await attachment.write("hello\n");
+    const terminal = await waitTerminal(client, started.job_id);
+    const output = await readPtyToCompletion(attachment);
+
+    expect(started).toMatchObject({
+      io_mode: "pty",
+      lifecycle: "foreground",
+    });
+    expect(lease.fence).toBeGreaterThan(0);
+    expect(terminal).toMatchObject({ state: "exited", exit_code: 0 });
+    expect(output).toContain(
+      '{"stdin":true,"stdout":true,"rows":24,"cols":80}',
+    );
+    expect(output).toContain('INPUT:"hello\\n"');
+  });
+
+  it("allows many PTY readers but only one fenced resize and input owner", async () => {
+    const started = await client.startPty({
+      argv: [
+        process.execPath,
+        "-e",
+        [
+          "console.log('READY:'+process.stdout.rows+'x'+process.stdout.columns);",
+          "process.on('SIGWINCH',()=>console.log('RESIZE:'+process.stdout.rows+'x'+process.stdout.columns));",
+          "setInterval(()=>{},1000);",
+        ].join(""),
+      ],
+      cwd: root,
+      environment: { PATH: process.env.PATH },
+      timeoutMs: 3_000,
+      outputLimitBytes: 65_536,
+      terminationGraceMs: 25,
+      terminationConfirmationMs: 1_000,
+      rows: 20,
+      cols: 70,
+    });
+    const first = await client.openAttachment(started.job_id);
+    const second = await client.openAttachment(started.job_id);
+    const firstLease = await first.acquireInput();
+
+    await expect(second.acquireInput()).rejects.toMatchObject({
+      code: "INPUT_LEASE_HELD",
+    });
+    await expect(readPtyUntil(first, "READY:20x70")).resolves.toContain(
+      "READY:20x70",
+    );
+    await expect(readPtyUntil(second, "READY:20x70")).resolves.toContain(
+      "READY:20x70",
+    );
+    await first.resize(40, 100);
+    await expect(readPtyUntil(first, "RESIZE:40x100")).resolves.toContain(
+      "RESIZE:40x100",
+    );
+    await expect(readPtyUntil(second, "RESIZE:40x100")).resolves.toContain(
+      "RESIZE:40x100",
+    );
+
+    await first.close();
+    const secondLease = await second.acquireInput();
+    expect(secondLease.fence).toBeGreaterThan(firstLease.fence);
+    await expect(
+      client.writeInput(
+        second.credentials,
+        { ...secondLease, fence: firstLease.fence },
+        Buffer.from("stale\n"),
+      ),
+    ).rejects.toMatchObject({ code: "STALE_INPUT_FENCE" });
+    await client.terminate(started.job_id, "cancellation");
+    await waitTerminal(client, started.job_id);
+    await second.close();
+  });
+
+  it("keeps a detached background PTY alive across Supervisor restart", async () => {
+    const started = await client.startPty({
+      argv: [
+        process.execPath,
+        "-e",
+        "process.stdout.write('before-');setTimeout(()=>process.stdout.write('after'),400)",
+      ],
+      cwd: root,
+      environment: { PATH: process.env.PATH },
+      timeoutMs: 3_000,
+      outputLimitBytes: 65_536,
+      terminationGraceMs: 25,
+      terminationConfirmationMs: 1_000,
+      rows: 24,
+      cols: 80,
+      lifecycle: "background",
+    });
+    const original = await client.openAttachment(started.job_id);
+    await original.close();
+
+    await client.closeOwnedSupervisorForTests();
+    client = await NativeExecutorClient.open({
+      binaryPath: resolve("target/debug/koda-exec"),
+      stateDirectory: join(root, "state"),
+      socketPath: join(root, "exec.sock"),
+    });
+    const reattached = await client.openAttachment(started.job_id);
+    const terminal = await waitTerminal(client, started.job_id);
+    const output = await readPtyToCompletion(reattached);
+
+    expect(terminal).toMatchObject({
+      state: "exited",
+      exit_code: 0,
+      lifecycle: "background",
+    });
+    expect(output).toContain("before-after");
+  });
+
+  it("preserves an existing PTY input lease across Supervisor restart", async () => {
+    const started = await client.startPty({
+      argv: [
+        process.execPath,
+        "-e",
+        "process.stdin.setEncoding('utf8');console.log('ready');process.stdin.once('data',(data)=>{console.log('got:'+data.trim());process.exit(0)})",
+      ],
+      cwd: root,
+      environment: { PATH: process.env.PATH },
+      timeoutMs: 3_000,
+      outputLimitBytes: 65_536,
+      terminationGraceMs: 25,
+      terminationConfirmationMs: 1_000,
+      rows: 24,
+      cols: 80,
+    });
+    const attachment = await client.openAttachment(started.job_id);
+    const originalLease = await attachment.acquireInput();
+    await readPtyUntil(attachment, "ready");
+
+    await client.closeOwnedSupervisorForTests();
+    client = await NativeExecutorClient.open({
+      binaryPath: resolve("target/debug/koda-exec"),
+      stateDirectory: join(root, "state"),
+      socketPath: join(root, "exec.sock"),
+    });
+    const renewed = await attachment.renewInput();
+    await attachment.write("continued\n");
+    const terminal = await waitTerminal(client, started.job_id);
+    const output = await readPtyToCompletion(attachment);
+
+    expect(renewed.fence).toBe(originalLease.fence);
+    expect(terminal).toMatchObject({ state: "exited", exit_code: 0 });
+    expect(output).toContain("got:continued");
+  });
+
+  it("reports an expired absolute cursor after PTY tail rotation", async () => {
+    const started = await client.startPty({
+      argv: [process.execPath, "-e", "process.stdout.write('x'.repeat(70000))"],
+      cwd: root,
+      environment: { PATH: process.env.PATH },
+      timeoutMs: 3_000,
+      outputLimitBytes: 65_536,
+      terminationGraceMs: 25,
+      terminationConfirmationMs: 1_000,
+      rows: 24,
+      cols: 80,
+    });
+    await waitTerminal(client, started.job_id);
+    const attachment = await client.openAttachment(started.job_id);
+    const expired = await attachment.read();
+
+    expect(expired).toMatchObject({
+      status: "cursor_expired",
+      cursor: 0,
+      earliest_cursor: 65_536,
+      latest_cursor: 70_000,
+      complete: true,
+    });
+    const retained = await attachment.read();
+    expect(retained).toMatchObject({ status: "ok", complete: true });
+    if (retained.status !== "ok") {
+      throw new Error("Expected retained PTY output after cursor recovery.");
+    }
+    expect(retained.data.byteLength).toBe(70_000 - 65_536);
   });
 
   it("observes the same job after a Node client reconnect", async () => {
@@ -302,6 +502,38 @@ describeNative("NativeExecutorClient", () => {
     }
   });
 
+  it("never restarts a PTY command after its Worker crashes", async () => {
+    const faultRoot = await mkdtemp(join(tmpdir(), "koda-pty-worker-fault-"));
+    const faultClient = await openFaultClient(faultRoot, "after_running");
+
+    try {
+      const started = await faultClient.startPty({
+        argv: [process.execPath, "-e", "setInterval(()=>{},1000)"],
+        cwd: faultRoot,
+        environment: { PATH: process.env.PATH },
+        timeoutMs: 2_000,
+        outputLimitBytes: 65_536,
+        terminationGraceMs: 25,
+        terminationConfirmationMs: 1_000,
+        rows: 24,
+        cols: 80,
+      });
+      const terminal = await waitTerminal(faultClient, started.job_id);
+      const attachment = await faultClient.openAttachment(started.job_id);
+      const output = await attachment.read();
+
+      expect(terminal).toMatchObject({
+        state: "termination_uncertain",
+        io_mode: "pty",
+        failure: { code: "WORKER_LOST_AFTER_COMMAND_BOUNDARY" },
+      });
+      expect(output).toMatchObject({ status: "ok", complete: true });
+    } finally {
+      await faultClient.closeOwnedSupervisorForTests();
+      await rm(faultRoot, { recursive: true, force: true });
+    }
+  });
+
   it("does not execute the approved command when a Worker dies before gate release", async () => {
     const faultRoot = await mkdtemp(join(tmpdir(), "koda-worker-gate-"));
     const marker = join(faultRoot, "command-executed");
@@ -430,6 +662,52 @@ async function waitTerminal(
     await new Promise<void>((resolvePromise) => setTimeout(resolvePromise, 10));
   }
   throw new Error(`Native job '${jobId}' did not reach a terminal state.`);
+}
+
+async function readPtyToCompletion(
+  attachment: NativePtyAttachment,
+): Promise<string> {
+  const chunks: Buffer[] = [];
+  for (let attempt = 0; attempt < 300; attempt += 1) {
+    const result = await attachment.read();
+    if (result.status === "cursor_expired") {
+      continue;
+    }
+    chunks.push(result.data);
+    if (result.complete) {
+      return Buffer.concat(chunks).toString("utf8");
+    }
+    await new Promise<void>((resolvePromise) => setTimeout(resolvePromise, 10));
+  }
+  throw new Error(
+    `PTY attachment '${attachment.credentials.attachment_id}' did not complete.`,
+  );
+}
+
+async function readPtyUntil(
+  attachment: NativePtyAttachment,
+  expected: string,
+): Promise<string> {
+  const chunks: Buffer[] = [];
+  for (let attempt = 0; attempt < 300; attempt += 1) {
+    const result = await attachment.read();
+    if (result.status === "cursor_expired") {
+      chunks.length = 0;
+      continue;
+    }
+    chunks.push(result.data);
+    const output = Buffer.concat(chunks).toString("utf8");
+    if (output.includes(expected)) {
+      return output;
+    }
+    if (result.complete) {
+      break;
+    }
+    await new Promise<void>((resolvePromise) => setTimeout(resolvePromise, 10));
+  }
+  throw new Error(
+    `PTY attachment '${attachment.credentials.attachment_id}' did not emit '${expected}'.`,
+  );
 }
 
 async function openFaultClient(

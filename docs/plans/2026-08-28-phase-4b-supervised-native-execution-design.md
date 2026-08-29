@@ -1,6 +1,6 @@
 # Koda Phase 4B Supervised Native Execution Design
 
-- Status: In progress — Phase 4B2 implemented; Phase 4B3 next
+- Status: In progress — Phase 4B3A runtime implemented; Phase 4B3B UX next
 - Date: 2026-08-28
 - Depends on: Phase 4A complete
 
@@ -29,7 +29,8 @@ provider, approval, or product policy into Rust.
 6. A supervisor restart never automatically repeats a job whose start or exit
    is uncertain.
 7. Structured argument vectors remain mandatory. Shell strings, pipelines,
-   redirection, command substitution, and arbitrary stdin remain unsupported.
+   redirection, and command substitution remain unsupported; PTY input is
+   explicit, bounded, capability-protected, and single-owner fenced.
 8. The existing TypeScript runner remains an explicit compatibility backend
    during migration. Failure to reach Rust never causes a silent fallback.
 
@@ -178,8 +179,10 @@ contract is in [Phase 4B3A PTY and background runtime](2026-08-29-phase-4b3a-pty
 
 ### Phase 4B3: interactive and background jobs
 
-- Add PTY-backed foreground jobs, managed background jobs, attach/detach,
-  resize, bounded input ownership, and reconnect cursors.
+- **Phase 4B3A complete:** add PTY-backed foreground jobs, managed background
+  jobs, attach/detach, resize, bounded input ownership, and reconnect cursors.
+- **Phase 4B3B next:** expose those runtime primitives through the TUI and
+  app-server interactive process workflow.
 
 ### Phase 4B4: platform completion
 
@@ -245,5 +248,26 @@ running, verify continued output, timeout, cancellation, and idempotency after
 restart, kill Workers on both sides of the command gate, verify uncertain
 cleanup, reject rollback/symlink/wrong-permission state, and preserve the full
 TypeScript runner contract. Capability negotiation now reports
-`durable_restart_recovery: true`; `pty` and `job_object` remain false until
-Phase 4B3 and Phase 4B4 respectively.
+`durable_restart_recovery: true`; `job_object` remains false until Phase 4B4.
+
+## Phase 4B3A implementation result
+
+Phase 4B3A keeps PTY ownership inside each detached Worker. The Worker creates
+the controlling terminal, persists the command identity before releasing the
+same-PID execution gate, drains one raw PTY stream into fixed 64 KiB segments,
+and serializes input and resize operations. Retention uses absolute cursors and
+whole-segment rotation, so a stale reader receives an explicit recoverable
+`cursor_expired` result instead of ambiguous data.
+
+Attachments use HMAC capabilities bound to the job and attachment identity.
+Readers are independent; one renewable 15-second lease owns both input and
+terminal geometry, and every grant advances a fencing number. Detach and lease
+expiry never terminate the command. A restarted Supervisor reconnects to the
+original Worker; terminal jobs remain readable directly from their bounded
+durable PTY segments.
+
+The strict Node API includes `startPty`, raw attachment operations, and
+`NativePtyAttachment`. Real-PTY tests cover TTY/dimension observation, input,
+resize and `SIGWINCH`, competing readers/writers, stale fencing, detached
+background execution across Supervisor restart, terminal reads, and cursor
+rotation while the existing pipe and Worker recovery suite remains intact.

@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::protocol::{
-    JobFailure, JobSnapshot, JobState, ProtocolError, StartParams, TerminationSnapshot,
+    IoMode, JobFailure, JobSnapshot, JobState, ProtocolError, StartParams, TerminationSnapshot,
 };
 
 pub const STORE_FORMAT_VERSION: u32 = 1;
@@ -130,6 +130,9 @@ impl JobStore {
         create_new_private_file(&directory.join("worker.lock"))?;
         create_new_private_file(&directory.join("stdout.bin"))?;
         create_new_private_file(&directory.join("stderr.bin"))?;
+        if start.io_mode == IoMode::Pty {
+            create_private_directory(&directory.join("pty-output"))?;
+        }
 
         let request_bytes = serde_json::to_vec(&start).map_err(json_encode_error)?;
         let mut manifest = JobManifest {
@@ -209,6 +212,9 @@ impl JobStore {
         validate_private_file(&directory.join("worker.lock"), None)?;
         validate_private_file(&directory.join("stdout.bin"), None)?;
         validate_private_file(&directory.join("stderr.bin"), None)?;
+        if manifest.start.io_mode == IoMode::Pty {
+            crate::pty_output::validate_directory(&directory.join("pty-output"))?;
+        }
         validate_private_file(&directory.join("state.head"), None)?;
         let record = JobRecord {
             directory: directory.to_owned(),
@@ -288,6 +294,10 @@ impl JobRecord {
 
     pub fn stderr_path(&self) -> PathBuf {
         self.directory.join("stderr.bin")
+    }
+
+    pub fn pty_output_path(&self) -> PathBuf {
+        self.directory.join("pty-output")
     }
 
     pub fn lock_path(&self) -> PathBuf {
@@ -410,10 +420,12 @@ impl StoredJobState {
         }
     }
 
-    pub fn snapshot(&self) -> JobSnapshot {
+    pub fn snapshot(&self, start: &StartParams) -> JobSnapshot {
         JobSnapshot {
             job_id: self.job_id.clone(),
             state: self.state,
+            io_mode: start.io_mode,
+            lifecycle: start.lifecycle,
             pid: self.command_pid,
             exit_code: self.exit_code,
             signal: self.signal.clone(),
@@ -693,7 +705,7 @@ fn create_new_private_file(path: &Path) -> Result<(), ProtocolError> {
     write_new_private_file(path, &[])
 }
 
-fn create_private_directory(path: &Path) -> Result<(), ProtocolError> {
+pub(crate) fn create_private_directory(path: &Path) -> Result<(), ProtocolError> {
     if let Ok(metadata) = std::fs::symlink_metadata(path) {
         if metadata.file_type().is_symlink() || !metadata.is_dir() {
             return Err(corrupt(format!(
@@ -707,7 +719,7 @@ fn create_private_directory(path: &Path) -> Result<(), ProtocolError> {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).map_err(state_io_error)
 }
 
-fn validate_private_directory(path: &Path) -> Result<(), ProtocolError> {
+pub(crate) fn validate_private_directory(path: &Path) -> Result<(), ProtocolError> {
     let metadata = std::fs::symlink_metadata(path).map_err(state_io_error)?;
     // SAFETY: geteuid reads process credentials and has no preconditions.
     let expected_uid = unsafe { libc::geteuid() };
@@ -724,7 +736,10 @@ fn validate_private_directory(path: &Path) -> Result<(), ProtocolError> {
     Ok(())
 }
 
-fn validate_private_file(path: &Path, exact_size: Option<u64>) -> Result<(), ProtocolError> {
+pub(crate) fn validate_private_file(
+    path: &Path,
+    exact_size: Option<u64>,
+) -> Result<(), ProtocolError> {
     let metadata = std::fs::symlink_metadata(path).map_err(state_io_error)?;
     // SAFETY: geteuid reads process credentials and has no preconditions.
     let expected_uid = unsafe { libc::geteuid() };
@@ -742,7 +757,7 @@ fn validate_private_file(path: &Path, exact_size: Option<u64>) -> Result<(), Pro
     Ok(())
 }
 
-fn sync_directory(path: &Path) {
+pub(crate) fn sync_directory(path: &Path) {
     if let Ok(directory) = File::open(path) {
         let _ = directory.sync_all();
     }
@@ -792,6 +807,9 @@ mod tests {
             output_limit_bytes: 1_024,
             termination_grace_ms: 25,
             termination_confirmation_ms: 1_000,
+            io_mode: crate::protocol::IoMode::Pipe,
+            lifecycle: crate::protocol::JobLifecycle::Foreground,
+            pty: None,
         }
     }
 

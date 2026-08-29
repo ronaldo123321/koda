@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
+use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::net::UnixStream;
@@ -17,6 +18,7 @@ use tokio::sync::Mutex;
 use tokio::time::sleep;
 use uuid::Uuid;
 
+use crate::attachment::{create_stateless_attachment, verify_capability};
 use crate::durable::{JobRecord, JobStore};
 use crate::framing::{read_json_frame, verify_peer, write_json_frame};
 use crate::internal_protocol::{
@@ -25,11 +27,17 @@ use crate::internal_protocol::{
 };
 use crate::process_identity::process_identity_matches;
 use crate::protocol::{
+    AttachmentAcquireInputParams, AttachmentCredentials, AttachmentDetachParams,
+    AttachmentDetachResult, AttachmentOpenParams, AttachmentReadParams, AttachmentReadResult,
+    AttachmentRenewParams, InputLeaseResult, InputWriteParams, InputWriteResult, IoMode,
     JobFailure, JobSnapshot, JobState, JobSummary, ListJobsParams, ListJobsResult,
-    OutputReadResult, OutputStream, ProtocolError, ReadOutputParams, StartParams, TerminateParams,
-    TerminationAttempt, TerminationReason, TerminationSnapshot, validate_identifier,
-    validate_output_read, validate_start,
+    MAX_PTY_INPUT_BYTES, OutputReadResult, OutputStream, ProtocolError, ReadOutputParams,
+    StartParams, TerminalResizeParams, TerminalResizeResult, TerminateParams, TerminationAttempt,
+    TerminationReason, TerminationSnapshot, validate_attachment_credentials,
+    validate_attachment_read, validate_identifier, validate_lease, validate_output_read,
+    validate_start, validate_terminal_size,
 };
+use crate::pty_output::PtyOutputStore;
 
 const MAX_SCANNED_JOBS: usize = 10_000;
 const MAX_LIST_JOBS: u32 = 100;
@@ -118,6 +126,34 @@ impl Supervisor {
                 let params = crate::protocol::parse_params(params)?;
                 encode(self.list(params).await?)
             }
+            "attach/open" => {
+                let params = crate::protocol::parse_params(params)?;
+                encode(self.open_attachment(params).await?)
+            }
+            "attach/read" => {
+                let params = crate::protocol::parse_params(params)?;
+                encode(self.read_attachment(params).await?)
+            }
+            "attach/acquire-input" => {
+                let params = crate::protocol::parse_params(params)?;
+                encode(self.acquire_input(params).await?)
+            }
+            "attach/renew" => {
+                let params = crate::protocol::parse_params(params)?;
+                encode(self.renew_input(params).await?)
+            }
+            "attach/detach" => {
+                let params = crate::protocol::parse_params(params)?;
+                encode(self.detach_attachment(params).await?)
+            }
+            "input/write" => {
+                let params = crate::protocol::parse_params(params)?;
+                encode(self.write_input(params).await?)
+            }
+            "terminal/resize" => {
+                let params = crate::protocol::parse_params(params)?;
+                encode(self.resize_terminal(params).await?)
+            }
             _ => Err(ProtocolError::new(
                 "METHOD_NOT_FOUND",
                 format!("Unknown executor method: {method}"),
@@ -168,7 +204,7 @@ impl Supervisor {
         let record = self.find_job(job_id).await?;
         let state = record.read_state()?;
         if state.state.is_terminal() {
-            return Ok(state.snapshot());
+            return Ok(state.snapshot(&record.manifest.start));
         }
         match worker_snapshot(&record, "worker/status", json!({})).await {
             Ok(snapshot) => Ok(snapshot),
@@ -194,7 +230,7 @@ impl Supervisor {
         let record = self.find_job(&params.job_id).await?;
         let current = record.read_state()?;
         if current.state.is_terminal() {
-            return Ok(current.snapshot());
+            return Ok(current.snapshot(&record.manifest.start));
         }
         let request = serde_json::to_value(WorkerTerminateParams {
             reason: params.reason,
@@ -228,7 +264,7 @@ impl Supervisor {
     ) -> Result<OutputReadResult, ProtocolError> {
         validate_output_read(&params)?;
         let record = self.find_job(&params.job_id).await?;
-        let mut snapshot = record.read_state()?.snapshot();
+        let mut snapshot = record.read_state()?.snapshot(&record.manifest.start);
         if !snapshot.state.is_terminal() {
             snapshot = match worker_snapshot(&record, "worker/output/sync", json!({})).await {
                 Ok(snapshot) => snapshot,
@@ -317,6 +353,8 @@ impl Supervisor {
                 Ok(JobSummary {
                     job_id: record.manifest.job_id,
                     state: state.state,
+                    io_mode: record.manifest.start.io_mode,
+                    lifecycle: record.manifest.start.lifecycle,
                     created_at_ms: record.manifest.created_at_ms,
                     updated_at_ms: state.updated_at_ms,
                     pid: state.command_pid,
@@ -345,6 +383,193 @@ impl Supervisor {
             None
         };
         Ok(ListJobsResult { jobs, next_cursor })
+    }
+
+    pub async fn open_attachment(
+        self: &Arc<Self>,
+        params: AttachmentOpenParams,
+    ) -> Result<AttachmentCredentials, ProtocolError> {
+        validate_identifier(&params.job_id, "job_id")?;
+        let record = self.find_job(&params.job_id).await?;
+        ensure_pty_job(&record)?;
+        if record.read_state()?.state.is_terminal() {
+            return create_stateless_attachment(&record.read_token()?, &params.job_id);
+        }
+        match self
+            .call_live_worker::<AttachmentCredentials>(&record, "worker/attach/open", json!({}))
+            .await
+        {
+            Ok(result) => Ok(result),
+            Err(error) if error.code == "JOB_TERMINAL" => {
+                create_stateless_attachment(&record.read_token()?, &params.job_id)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    pub async fn read_attachment(
+        self: &Arc<Self>,
+        params: AttachmentReadParams,
+    ) -> Result<AttachmentReadResult, ProtocolError> {
+        validate_attachment_read(&params)?;
+        let record = self.find_job(&params.job_id).await?;
+        ensure_pty_job(&record)?;
+        if record.read_state()?.state.is_terminal() {
+            return read_terminal_attachment(&record, &params);
+        }
+        let value = serde_json::to_value(&params).map_err(internal_json_error)?;
+        match self
+            .call_live_worker::<AttachmentReadResult>(&record, "worker/attach/read", value)
+            .await
+        {
+            Ok(result) => Ok(result),
+            Err(error) if error.code == "JOB_TERMINAL" => {
+                read_terminal_attachment(&record, &params)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    pub async fn acquire_input(
+        self: &Arc<Self>,
+        params: AttachmentAcquireInputParams,
+    ) -> Result<InputLeaseResult, ProtocolError> {
+        validate_attachment_credentials(
+            &params.job_id,
+            &params.attachment_id,
+            &params.capability_token,
+        )?;
+        let record = self.find_job(&params.job_id).await?;
+        ensure_pty_job(&record)?;
+        let value = serde_json::to_value(&params).map_err(internal_json_error)?;
+        self.call_live_worker(&record, "worker/attach/acquire-input", value)
+            .await
+    }
+
+    pub async fn renew_input(
+        self: &Arc<Self>,
+        params: AttachmentRenewParams,
+    ) -> Result<InputLeaseResult, ProtocolError> {
+        validate_attachment_credentials(
+            &params.job_id,
+            &params.attachment_id,
+            &params.capability_token,
+        )?;
+        validate_lease(&params.lease_token, params.fence)?;
+        let record = self.find_job(&params.job_id).await?;
+        ensure_pty_job(&record)?;
+        let value = serde_json::to_value(&params).map_err(internal_json_error)?;
+        self.call_live_worker(&record, "worker/attach/renew", value)
+            .await
+    }
+
+    pub async fn write_input(
+        self: &Arc<Self>,
+        params: InputWriteParams,
+    ) -> Result<InputWriteResult, ProtocolError> {
+        validate_attachment_credentials(
+            &params.job_id,
+            &params.attachment_id,
+            &params.capability_token,
+        )?;
+        validate_lease(&params.lease_token, params.fence)?;
+        let bytes = decode_base64(&params.data_base64)
+            .map_err(|error| ProtocolError::new("INVALID_REQUEST", error))?;
+        if bytes.is_empty() || bytes.len() > MAX_PTY_INPUT_BYTES {
+            return Err(ProtocolError::new(
+                "INVALID_REQUEST",
+                format!("PTY input must contain 1-{MAX_PTY_INPUT_BYTES} bytes."),
+            ));
+        }
+        let record = self.find_job(&params.job_id).await?;
+        ensure_pty_job(&record)?;
+        let value = serde_json::to_value(&params).map_err(internal_json_error)?;
+        self.call_live_worker(&record, "worker/input/write", value)
+            .await
+    }
+
+    pub async fn resize_terminal(
+        self: &Arc<Self>,
+        params: TerminalResizeParams,
+    ) -> Result<TerminalResizeResult, ProtocolError> {
+        validate_attachment_credentials(
+            &params.job_id,
+            &params.attachment_id,
+            &params.capability_token,
+        )?;
+        validate_lease(&params.lease_token, params.fence)?;
+        validate_terminal_size(params.rows, params.cols)?;
+        let record = self.find_job(&params.job_id).await?;
+        ensure_pty_job(&record)?;
+        let value = serde_json::to_value(&params).map_err(internal_json_error)?;
+        self.call_live_worker(&record, "worker/terminal/resize", value)
+            .await
+    }
+
+    pub async fn detach_attachment(
+        self: &Arc<Self>,
+        params: AttachmentDetachParams,
+    ) -> Result<AttachmentDetachResult, ProtocolError> {
+        validate_attachment_credentials(
+            &params.job_id,
+            &params.attachment_id,
+            &params.capability_token,
+        )?;
+        let record = self.find_job(&params.job_id).await?;
+        ensure_pty_job(&record)?;
+        if record.read_state()?.state.is_terminal() {
+            ensure_terminal_capability(&record, &params)?;
+            return Ok(AttachmentDetachResult {
+                job_id: params.job_id,
+                detached: true,
+            });
+        }
+        let value = serde_json::to_value(&params).map_err(internal_json_error)?;
+        match self
+            .call_live_worker(&record, "worker/attach/detach", value)
+            .await
+        {
+            Ok(result) => Ok(result),
+            Err(error) if error.code == "JOB_TERMINAL" => {
+                ensure_terminal_capability(&record, &params)?;
+                Ok(AttachmentDetachResult {
+                    job_id: params.job_id,
+                    detached: true,
+                })
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn call_live_worker<T>(
+        self: &Arc<Self>,
+        record: &JobRecord,
+        method: &str,
+        params: Value,
+    ) -> Result<T, ProtocolError>
+    where
+        T: DeserializeOwned,
+    {
+        if record.read_state()?.state.is_terminal() {
+            return Err(ProtocolError::new(
+                "JOB_TERMINAL",
+                "The PTY job is already terminal.",
+            ));
+        }
+        match worker_value(record, method, params.clone()).await {
+            Ok(value) => decode_worker_value(value),
+            Err(error) if error.code == "WORKER_UNAVAILABLE" => {
+                let snapshot = self.reconcile(record).await?;
+                if snapshot.state.is_terminal() {
+                    return Err(ProtocolError::new(
+                        "JOB_TERMINAL",
+                        "The PTY job became terminal while routing the request.",
+                    ));
+                }
+                decode_worker_value(worker_value(record, method, params).await?)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     async fn find_job(&self, job_id: &str) -> Result<JobRecord, ProtocolError> {
@@ -405,7 +630,7 @@ impl Supervisor {
             {
                 return Ok(snapshot);
             }
-            let snapshot = record.read_state()?.snapshot();
+            let snapshot = record.read_state()?.snapshot(&record.manifest.start);
             if snapshot.state.is_terminal()
                 || !matches!(snapshot.state, JobState::Accepted | JobState::WorkerReady)
             {
@@ -413,7 +638,7 @@ impl Supervisor {
             }
             sleep(Duration::from_millis(20)).await;
         }
-        Ok(record.read_state()?.snapshot())
+        Ok(record.read_state()?.snapshot(&record.manifest.start))
     }
 
     async fn recover_all(self: &Arc<Self>) {
@@ -438,14 +663,14 @@ impl Supervisor {
     async fn reconcile(self: &Arc<Self>, record: &JobRecord) -> Result<JobSnapshot, ProtocolError> {
         let current = record.read_state()?;
         if current.state.is_terminal() {
-            return Ok(current.snapshot());
+            return Ok(current.snapshot(&record.manifest.start));
         }
         let Some(lock) = record.try_lock()? else {
-            return Ok(current.snapshot());
+            return Ok(current.snapshot(&record.manifest.start));
         };
         let current = record.read_state()?;
         if current.state.is_terminal() {
-            return Ok(current.snapshot());
+            return Ok(current.snapshot(&record.manifest.start));
         }
         remove_stale_worker_socket(record)?;
         if matches!(current.state, JobState::Accepted | JobState::WorkerReady) {
@@ -499,7 +724,7 @@ impl Supervisor {
         });
         let state = record.transition(&current, next)?;
         drop(lock);
-        Ok(state.snapshot())
+        Ok(state.snapshot(&record.manifest.start))
     }
 }
 
@@ -610,6 +835,86 @@ async fn worker_snapshot(
     })
 }
 
+async fn worker_value(
+    record: &JobRecord,
+    method: &str,
+    params: Value,
+) -> Result<Value, ProtocolError> {
+    let mut connection = WorkerConnection::connect(record).await?;
+    connection.call(method, params).await
+}
+
+fn decode_worker_value<T>(value: Value) -> Result<T, ProtocolError>
+where
+    T: DeserializeOwned,
+{
+    serde_json::from_value(value).map_err(|error| {
+        ProtocolError::new(
+            "WORKER_PROTOCOL_ERROR",
+            format!("Worker result is invalid: {error}"),
+        )
+    })
+}
+
+fn ensure_pty_job(record: &JobRecord) -> Result<(), ProtocolError> {
+    if record.manifest.start.io_mode != IoMode::Pty {
+        return Err(ProtocolError::new(
+            "PTY_NOT_SUPPORTED_FOR_JOB",
+            "This job was not started in PTY mode.",
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_terminal_capability(
+    record: &JobRecord,
+    params: &AttachmentCredentials,
+) -> Result<(), ProtocolError> {
+    if verify_capability(
+        &record.read_token()?,
+        &params.job_id,
+        &params.attachment_id,
+        &params.capability_token,
+    ) {
+        Ok(())
+    } else {
+        Err(ProtocolError::new(
+            "ATTACHMENT_NOT_FOUND",
+            "The PTY attachment does not exist or its capability is invalid.",
+        ))
+    }
+}
+
+fn read_terminal_attachment(
+    record: &JobRecord,
+    params: &AttachmentReadParams,
+) -> Result<AttachmentReadResult, ProtocolError> {
+    if !verify_capability(
+        &record.read_token()?,
+        &params.job_id,
+        &params.attachment_id,
+        &params.capability_token,
+    ) {
+        return Err(ProtocolError::new(
+            "ATTACHMENT_NOT_FOUND",
+            "The PTY attachment does not exist or its capability is invalid.",
+        ));
+    }
+    let limit = record
+        .manifest
+        .start
+        .pty
+        .as_ref()
+        .ok_or_else(|| ProtocolError::new("JOB_STATE_CORRUPT", "PTY config is absent."))?
+        .output_limit_bytes;
+    PtyOutputStore::open(&record.pty_output_path(), limit)?.read(
+        &params.job_id,
+        params.cursor,
+        params.max_bytes,
+        true,
+    )
+}
+
 async fn read_worker_response(
     stream: &mut UnixStream,
     request_id: &str,
@@ -625,13 +930,38 @@ async fn read_worker_response(
         ));
     }
     if !response.ok {
-        let error = response.error.map_or_else(
-            || "Worker request failed without an error body.".to_owned(),
-            |error| format!("{}: {}", error.code, error.message),
-        );
-        return Err(ProtocolError::new("WORKER_REQUEST_FAILED", error));
+        let Some(error) = response.error else {
+            return Err(ProtocolError::new(
+                "WORKER_PROTOCOL_ERROR",
+                "Worker request failed without an error body.",
+            ));
+        };
+        return Err(ProtocolError::new(
+            worker_error_code(&error.code),
+            error.message,
+        ));
     }
     Ok(response)
+}
+
+fn worker_error_code(code: &str) -> &'static str {
+    match code {
+        "INVALID_REQUEST" => "INVALID_REQUEST",
+        "ATTACHMENT_NOT_FOUND" => "ATTACHMENT_NOT_FOUND",
+        "ATTACHMENT_LIMIT_EXCEEDED" => "ATTACHMENT_LIMIT_EXCEEDED",
+        "INPUT_LEASE_HELD" => "INPUT_LEASE_HELD",
+        "INPUT_LEASE_EXPIRED" => "INPUT_LEASE_EXPIRED",
+        "STALE_INPUT_FENCE" => "STALE_INPUT_FENCE",
+        "PTY_INPUT_BACKPRESSURE" => "PTY_INPUT_BACKPRESSURE",
+        "PTY_NOT_SUPPORTED_FOR_JOB" => "PTY_NOT_SUPPORTED_FOR_JOB",
+        "JOB_TERMINAL" => "JOB_TERMINAL",
+        "CURSOR_INVALID" => "CURSOR_INVALID",
+        "PTY_OUTPUT_FAILED" => "PTY_OUTPUT_FAILED",
+        "PTY_OUTPUT_CORRUPT" => "PTY_OUTPUT_CORRUPT",
+        "WORKER_TERMINATION_FAILED" => "WORKER_TERMINATION_FAILED",
+        "WORKER_OUTPUT_SYNC_FAILED" => "WORKER_OUTPUT_SYNC_FAILED",
+        _ => "WORKER_REQUEST_FAILED",
+    }
 }
 
 fn apply_retention(store: &JobStore, records: &mut Vec<JobRecord>) -> Result<(), ProtocolError> {
@@ -826,6 +1156,9 @@ mod tests {
                     output_limit_bytes: 1_024,
                     termination_grace_ms: 25,
                     termination_confirmation_ms: 1_000,
+                    io_mode: crate::protocol::IoMode::Pipe,
+                    lifecycle: crate::protocol::JobLifecycle::Foreground,
+                    pty: None,
                 },
             )
             .expect("job")
