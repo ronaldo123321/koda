@@ -176,6 +176,8 @@ The accepted Worker ownership, durable state, restart authentication, retention,
 and fault-injection contract is in [Phase 4B2 Worker recovery](2026-08-29-phase-4b2-worker-recovery-design.md).
 The accepted PTY, background lifecycle, attachment, cursor, and input ownership
 contract is in [Phase 4B3A PTY and background runtime](2026-08-29-phase-4b3a-pty-background-runtime-design.md).
+The accepted Agent Tool, app-server process session, TUI pane, and bounded
+terminal projection contract is in [Phase 4B3B interactive process UI](2026-08-29-phase-4b3b-interactive-process-ui-design.md).
 
 ### Phase 4B3: interactive and background jobs
 
