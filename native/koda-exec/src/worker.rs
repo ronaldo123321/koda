@@ -1,6 +1,5 @@
-use std::io::{self, Read};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-use std::os::unix::process::ExitStatusExt;
+use std::io;
+use std::os::fd::RawFd;
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -9,20 +8,30 @@ use std::time::{Duration, Instant};
 
 use tokio::fs::OpenOptions;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
-use tokio::net::{UnixListener, UnixStream};
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, mpsc, watch};
 use tokio::time::{sleep, timeout};
 
 use crate::attachment::AttachmentRegistry;
 use crate::durable::{JobLock, JobRecord, JobStore, StoredJobState, sha256_hex};
-use crate::framing::{bind_private_socket, read_json_frame, verify_peer, write_json_frame};
+use crate::framing::{read_json_frame, write_json_frame};
 use crate::internal_protocol::{
     EmptyParams, WORKER_PROTOCOL_VERSION, WorkerHelloParams, WorkerHelloResult, WorkerRequest,
     WorkerResponse, WorkerTerminateParams, decode_base64, encode_base64, parse_params,
     status_value, worker_proof,
 };
-use crate::process_identity::current_process_identity;
+use crate::platform::bootstrap::{
+    await_gate_and_exec, configure_pipe_command, configure_pty_command, create_bootstrap_channel,
+    raw_handle, read_inherited_secret, release_gate,
+};
+use crate::platform::identity::current_process_identity;
+use crate::platform::process::{
+    ProcessTreeSignal, exit_signal_name, process_group_exists, signal_process_group,
+};
+use crate::platform::terminal::{
+    duplicate_terminal, is_terminal_eof, open_terminal, set_terminal_size,
+};
+use crate::platform::{LocalListener, LocalStream, bind_local_endpoint, verify_local_peer};
 use crate::protocol::{
     AttachmentAcquireInputParams, AttachmentCredentials, AttachmentDetachParams,
     AttachmentDetachResult, AttachmentReadParams, AttachmentReadResult, AttachmentRenewParams,
@@ -59,7 +68,7 @@ pub async fn run_worker(job_directory: &Path, token_fd: RawFd) -> Result<(), Pro
         ));
     }
     let worker_identity = current_process_identity().map_err(identity_error)?;
-    let listener = bind_private_socket(&record.worker_socket_path())
+    let listener = bind_local_endpoint(&record.worker_socket_path())
         .await
         .map_err(worker_socket_error)?;
     let runtime = Arc::new(WorkerRuntime::new(record, current, token.clone())?);
@@ -84,7 +93,7 @@ pub async fn run_worker(job_directory: &Path, token_fd: RawFd) -> Result<(), Pro
     let execution = execute_job(Arc::clone(&runtime)).await;
     let _ = shutdown_sender.send(true);
     let _ = server.await;
-    let _ = std::fs::remove_file(runtime.record.worker_socket_path());
+    let _ = crate::platform::remove_local_endpoint(&runtime.record.worker_socket_path());
     execution
 }
 
@@ -225,7 +234,7 @@ impl WorkerRuntime {
         next.stderr_retained_bytes = self.stderr_retained.load(Ordering::Acquire);
         if let Some(status) = status {
             next.exit_code = status.code();
-            next.signal = status.signal().map(signal_name);
+            next.signal = exit_signal_name(&status);
         }
         *guard = self.record.transition(&guard, next)?;
         Ok(())
@@ -488,7 +497,7 @@ enum PtyCommand {
 }
 
 async fn serve_worker(
-    listener: UnixListener,
+    listener: LocalListener,
     runtime: Arc<WorkerRuntime>,
     token: Vec<u8>,
     worker_identity: String,
@@ -498,7 +507,7 @@ async fn serve_worker(
         tokio::select! {
             accepted = listener.accept() => {
                 let (stream, _) = accepted?;
-                verify_peer(&stream)?;
+                verify_local_peer(&stream)?;
                 let connection_runtime = Arc::clone(&runtime);
                 let connection_token = token.clone();
                 let connection_identity = worker_identity.clone();
@@ -521,7 +530,7 @@ async fn serve_worker(
 }
 
 async fn handle_worker_connection(
-    mut stream: UnixStream,
+    mut stream: LocalStream,
     runtime: Arc<WorkerRuntime>,
     token: Vec<u8>,
     worker_identity: String,
@@ -716,22 +725,19 @@ async fn execute_pty_job(runtime: Arc<WorkerRuntime>) -> Result<(), ProtocolErro
         .pty
         .clone()
         .ok_or_else(|| ProtocolError::new("INVALID_WORKER_STATE", "PTY config is absent."))?;
-    let (master, slave) = open_pty(pty_config.rows, pty_config.cols).map_err(|error| {
+    let (master, slave) = open_terminal(pty_config.rows, pty_config.cols).map_err(|error| {
         ProtocolError::new(
             "COMMAND_START_FAILED",
             format!("Could not create a PTY: {error}"),
         )
     })?;
-    let (gate_read, gate_write) = create_command_gate().map_err(|error| {
+    let (gate_read, gate_write) = create_bootstrap_channel().map_err(|error| {
         ProtocolError::new(
             "COMMAND_START_FAILED",
             format!("Could not create the command start gate: {error}"),
         )
     })?;
-    let master_fd = master.as_raw_fd();
-    let slave_fd = slave.as_raw_fd();
-    let gate_read_fd = gate_read.as_raw_fd();
-    let gate_write_fd = gate_write.as_raw_fd();
+    let gate_read_fd = raw_handle(&gate_read);
     let bootstrap = std::env::current_exe().map_err(|error| {
         ProtocolError::new(
             "COMMAND_START_FAILED",
@@ -753,34 +759,7 @@ async fn execute_pty_job(runtime: Arc<WorkerRuntime>) -> Result<(), ProtocolErro
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .kill_on_drop(false);
-    // SAFETY: the closure performs only async-signal-safe session, ioctl, and
-    // descriptor operations before exec. All descriptors are Worker-owned.
-    unsafe {
-        std::os::unix::process::CommandExt::pre_exec(command.as_std_mut(), move || {
-            libc::close(gate_write_fd);
-            libc::close(master_fd);
-            if libc::setsid() < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            if libc::ioctl(slave_fd, libc::TIOCSCTTY as _, 0) < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            for target in [libc::STDIN_FILENO, libc::STDOUT_FILENO, libc::STDERR_FILENO] {
-                if slave_fd != target && libc::dup2(slave_fd, target) < 0 {
-                    return Err(io::Error::last_os_error());
-                }
-            }
-            if slave_fd > libc::STDERR_FILENO {
-                libc::close(slave_fd);
-            }
-            let flags = libc::fcntl(gate_read_fd, libc::F_GETFD);
-            if flags < 0 || libc::fcntl(gate_read_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0
-            {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
+    configure_pty_command(&mut command, &gate_read, &gate_write, &master, &slave);
 
     let mut child = match command.spawn() {
         Ok(child) => child,
@@ -794,10 +773,10 @@ async fn execute_pty_job(runtime: Arc<WorkerRuntime>) -> Result<(), ProtocolErro
             .publish_start_failed(io::Error::other("operating system returned no process ID"))
             .await;
     };
-    let command_identity = crate::process_identity::process_start_identity(pid)
+    let command_identity = crate::platform::identity::process_start_identity(pid)
         .map_err(identity_error)?
         .ok_or_else(|| ProtocolError::new("COMMAND_START_FAILED", "Process identity vanished."))?;
-    let reader = duplicate_fd(master.as_raw_fd()).map_err(|error| {
+    let reader = duplicate_terminal(&master).map_err(|error| {
         ProtocolError::new(
             "COMMAND_START_FAILED",
             format!("Could not duplicate the PTY master: {error}"),
@@ -815,7 +794,7 @@ async fn execute_pty_job(runtime: Arc<WorkerRuntime>) -> Result<(), ProtocolErro
         .await;
         return Err(error);
     }
-    if let Err(error) = release_command_gate(gate_write) {
+    if let Err(error) = release_gate(gate_write) {
         let _ = terminate_child(
             &mut child,
             pid,
@@ -979,50 +958,6 @@ async fn execute_pty_job(runtime: Arc<WorkerRuntime>) -> Result<(), ProtocolErro
     Ok(())
 }
 
-fn open_pty(rows: u16, cols: u16) -> io::Result<(OwnedFd, OwnedFd)> {
-    let mut master = -1;
-    let mut slave = -1;
-    let mut size = libc::winsize {
-        ws_row: rows,
-        ws_col: cols,
-        ws_xpixel: 0,
-        ws_ypixel: 0,
-    };
-    // SAFETY: openpty initializes both descriptors on success and only reads
-    // the supplied window-size value during this call.
-    if unsafe {
-        libc::openpty(
-            &mut master,
-            &mut slave,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            &mut size,
-        )
-    } != 0
-    {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: successful openpty returned two distinct owned descriptors.
-    let master = unsafe { OwnedFd::from_raw_fd(master) };
-    // SAFETY: successful openpty returned two distinct owned descriptors.
-    let slave = unsafe { OwnedFd::from_raw_fd(slave) };
-    set_close_on_exec(master.as_raw_fd())?;
-    set_close_on_exec(slave.as_raw_fd())?;
-    Ok((master, slave))
-}
-
-fn duplicate_fd(descriptor: RawFd) -> io::Result<OwnedFd> {
-    // SAFETY: dup creates a new descriptor referring to the same open file.
-    let duplicated = unsafe { libc::dup(descriptor) };
-    if duplicated < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: successful dup returned a new owned descriptor.
-    let duplicated = unsafe { OwnedFd::from_raw_fd(duplicated) };
-    set_close_on_exec(duplicated.as_raw_fd())?;
-    Ok(duplicated)
-}
-
 async fn capture_pty_output(
     mut source: tokio::fs::File,
     runtime: &WorkerRuntime,
@@ -1031,7 +966,7 @@ async fn capture_pty_output(
     loop {
         let count = match source.read(&mut buffer).await {
             Ok(count) => count,
-            Err(error) if error.raw_os_error() == Some(libc::EIO) => 0,
+            Err(error) if is_terminal_eof(&error) => 0,
             Err(error) => return Err(error),
         };
         if count == 0 {
@@ -1078,26 +1013,11 @@ async fn write_pty_commands(
                 result?;
             }
             PtyCommand::Resize { rows, cols } => {
-                set_terminal_size(destination.as_raw_fd(), rows, cols)?;
+                set_terminal_size(&destination, rows, cols)?;
             }
         }
     }
     Ok(())
-}
-
-fn set_terminal_size(descriptor: RawFd, rows: u16, cols: u16) -> io::Result<()> {
-    let size = libc::winsize {
-        ws_row: rows,
-        ws_col: cols,
-        ws_xpixel: 0,
-        ws_ypixel: 0,
-    };
-    // SAFETY: ioctl reads the supplied winsize and applies it to a valid PTY master.
-    if unsafe { libc::ioctl(descriptor, libc::TIOCSWINSZ as _, &size) } < 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
 }
 
 fn protocol_io_error(error: ProtocolError) -> io::Error {
@@ -1108,14 +1028,12 @@ async fn execute_pipe_job(runtime: Arc<WorkerRuntime>) -> Result<(), ProtocolErr
     runtime.publish_command_starting().await?;
     fault_point("after_command_starting");
     let params = runtime.record.manifest.start.clone();
-    let (gate_read, gate_write) = create_command_gate().map_err(|error| {
+    let (gate_read, gate_write) = create_bootstrap_channel().map_err(|error| {
         ProtocolError::new(
             "COMMAND_START_FAILED",
             format!("Could not create the command start gate: {error}"),
         )
     })?;
-    let gate_read_fd = gate_read.as_raw_fd();
-    let gate_write_fd = gate_write.as_raw_fd();
     let bootstrap = std::env::current_exe().map_err(|error| {
         ProtocolError::new(
             "COMMAND_START_FAILED",
@@ -1136,26 +1054,7 @@ async fn execute_pipe_job(runtime: Arc<WorkerRuntime>) -> Result<(), ProtocolErr
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(false);
-    std::os::unix::process::CommandExt::process_group(command.as_std_mut(), 0);
-    // SAFETY: the bootstrap receives only the dedicated gate descriptor. The
-    // closure performs async-signal-safe descriptor operations before exec.
-    unsafe {
-        std::os::unix::process::CommandExt::pre_exec(command.as_std_mut(), move || {
-            libc::close(gate_write_fd);
-            if gate_read_fd != 3 {
-                if libc::dup2(gate_read_fd, 3) < 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                libc::close(gate_read_fd);
-            } else {
-                let flags = libc::fcntl(3, libc::F_GETFD);
-                if flags < 0 || libc::fcntl(3, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
-                    return Err(io::Error::last_os_error());
-                }
-            }
-            Ok(())
-        });
-    }
+    configure_pipe_command(&mut command, &gate_read, &gate_write, 3);
 
     let mut child = match command.spawn() {
         Ok(child) => child,
@@ -1168,17 +1067,17 @@ async fn execute_pipe_job(runtime: Arc<WorkerRuntime>) -> Result<(), ProtocolErr
             .publish_start_failed(io::Error::other("operating system returned no process ID"))
             .await;
     };
-    let command_identity = crate::process_identity::process_start_identity(pid)
+    let command_identity = crate::platform::identity::process_start_identity(pid)
         .map_err(identity_error)?
         .ok_or_else(|| ProtocolError::new("COMMAND_START_FAILED", "Process identity vanished."))?;
     let Some(stdout) = child.stdout.take() else {
-        let _ = signal_process_group(pid, libc::SIGKILL);
+        let _ = signal_process_group(pid, ProcessTreeSignal::Force);
         return runtime
             .publish_start_failed(io::Error::other("stdout was not captured"))
             .await;
     };
     let Some(stderr) = child.stderr.take() else {
-        let _ = signal_process_group(pid, libc::SIGKILL);
+        let _ = signal_process_group(pid, ProcessTreeSignal::Force);
         return runtime
             .publish_start_failed(io::Error::other("stderr was not captured"))
             .await;
@@ -1195,7 +1094,7 @@ async fn execute_pipe_job(runtime: Arc<WorkerRuntime>) -> Result<(), ProtocolErr
         .await;
         return Err(error);
     }
-    if let Err(error) = release_command_gate(gate_write) {
+    if let Err(error) = release_gate(gate_write) {
         let _ = terminate_child(
             &mut child,
             pid,
@@ -1361,69 +1260,7 @@ async fn execute_pipe_job(runtime: Arc<WorkerRuntime>) -> Result<(), ProtocolErr
 }
 
 pub fn run_command_bootstrap(gate_fd: RawFd, argv: Vec<String>) -> io::Result<()> {
-    if argv.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "command bootstrap argv is empty",
-        ));
-    }
-    // SAFETY: the Worker transfers ownership of this dedicated descriptor.
-    let mut gate = unsafe { std::fs::File::from_raw_fd(gate_fd) };
-    let mut byte = [0u8; 1];
-    gate.read_exact(&mut byte)?;
-    if byte[0] != 1 {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "command bootstrap gate value is invalid",
-        ));
-    }
-    drop(gate);
-    let error = std::os::unix::process::CommandExt::exec(
-        std::process::Command::new(&argv[0]).args(&argv[1..]),
-    );
-    Err(error)
-}
-
-fn create_command_gate() -> io::Result<(OwnedFd, OwnedFd)> {
-    let mut descriptors = [-1, -1];
-    // SAFETY: pipe initializes both descriptors on success.
-    if unsafe { libc::pipe(descriptors.as_mut_ptr()) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: successful pipe returned two owned descriptors.
-    let read = unsafe { OwnedFd::from_raw_fd(descriptors[0]) };
-    // SAFETY: successful pipe returned two distinct owned descriptors.
-    let write = unsafe { OwnedFd::from_raw_fd(descriptors[1]) };
-    set_close_on_exec(read.as_raw_fd())?;
-    set_close_on_exec(write.as_raw_fd())?;
-    Ok((read, write))
-}
-
-fn set_close_on_exec(descriptor: RawFd) -> io::Result<()> {
-    // SAFETY: fcntl reads and updates flags on a valid owned descriptor.
-    let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFD) };
-    if flags < 0 || unsafe { libc::fcntl(descriptor, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0
-    {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-fn release_command_gate(write: OwnedFd) -> io::Result<()> {
-    let descriptor = write.as_raw_fd();
-    let byte = 1u8;
-    loop {
-        // SAFETY: write consumes one byte from valid memory on a valid pipe descriptor.
-        let result =
-            unsafe { libc::write(descriptor, &byte as *const u8 as *const libc::c_void, 1) };
-        if result == 1 {
-            return Ok(());
-        }
-        let error = io::Error::last_os_error();
-        if error.kind() != io::ErrorKind::Interrupted {
-            return Err(error);
-        }
-    }
+    await_gate_and_exec(gate_fd, argv)
 }
 
 enum JobTrigger {
@@ -1488,7 +1325,7 @@ async fn terminate_child(
         attempt: "graceful".to_owned(),
         mechanism: "posix_process_group_signal".to_owned(),
     }];
-    let _ = signal_process_group(pid, libc::SIGTERM);
+    let _ = signal_process_group(pid, ProcessTreeSignal::Graceful);
     if let Ok(status) = timeout(Duration::from_millis(grace_ms), child.wait()).await {
         return TerminationResult {
             status: status.ok(),
@@ -1503,7 +1340,7 @@ async fn terminate_child(
         attempt: "force".to_owned(),
         mechanism: "posix_process_group_signal".to_owned(),
     });
-    let _ = signal_process_group(pid, libc::SIGKILL);
+    let _ = signal_process_group(pid, ProcessTreeSignal::Force);
     match timeout(Duration::from_millis(confirmation_ms), child.wait()).await {
         Ok(Ok(status)) => TerminationResult {
             status: Some(status),
@@ -1534,7 +1371,7 @@ async fn terminate_group_after_root(
         attempt: "graceful".to_owned(),
         mechanism: "posix_process_group_signal".to_owned(),
     }];
-    let _ = signal_process_group(pid, libc::SIGTERM);
+    let _ = signal_process_group(pid, ProcessTreeSignal::Graceful);
     if wait_for_group_exit(pid, grace_ms).await {
         return TerminationSnapshot {
             reason: reason.as_str().to_owned(),
@@ -1546,7 +1383,7 @@ async fn terminate_group_after_root(
         attempt: "force".to_owned(),
         mechanism: "posix_process_group_signal".to_owned(),
     });
-    let _ = signal_process_group(pid, libc::SIGKILL);
+    let _ = signal_process_group(pid, ProcessTreeSignal::Force);
     TerminationSnapshot {
         reason: reason.as_str().to_owned(),
         outcome: if wait_for_group_exit(pid, confirmation_ms).await {
@@ -1586,71 +1423,23 @@ async fn wait_for_group_exit(pid: u32, milliseconds: u64) -> bool {
     !process_group_exists(pid)
 }
 
-fn signal_process_group(pid: u32, signal: i32) -> io::Result<()> {
-    let process_group = i32::try_from(pid)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "process ID exceeds i32"))?;
-    // SAFETY: kill is called with a validated positive process-group ID and a platform signal.
-    let result = unsafe { libc::kill(-process_group, signal) };
-    if result == 0 {
-        Ok(())
-    } else {
-        let error = io::Error::last_os_error();
-        if error.raw_os_error() == Some(libc::ESRCH) {
-            Ok(())
-        } else {
-            Err(error)
-        }
-    }
-}
-
-fn process_group_exists(pid: u32) -> bool {
-    let Ok(process_group) = i32::try_from(pid) else {
-        return true;
-    };
-    // SAFETY: signal 0 performs an existence/permission check without delivering a signal.
-    let result = unsafe { libc::kill(-process_group, 0) };
-    result == 0 || io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
-}
-
 fn read_inherited_token(token_fd: RawFd) -> Result<Vec<u8>, ProtocolError> {
-    if token_fd < 3 {
-        return Err(ProtocolError::new(
-            "INVALID_WORKER_ARGUMENT",
-            "Worker token descriptor must not overlap standard streams.",
-        ));
-    }
-    // SAFETY: the Supervisor passes ownership of this dedicated descriptor to the Worker.
-    let file = unsafe { std::fs::File::from_raw_fd(token_fd) };
-    let mut token = Vec::new();
-    file.take(33).read_to_end(&mut token).map_err(|error| {
+    read_inherited_secret(token_fd, 32).map_err(|error| {
+        let code = if error.kind() == io::ErrorKind::InvalidInput {
+            "INVALID_WORKER_ARGUMENT"
+        } else {
+            "WORKER_AUTHENTICATION_FAILED"
+        };
         ProtocolError::new(
-            "WORKER_AUTHENTICATION_FAILED",
+            code,
             format!("Could not read inherited Worker token: {error}"),
         )
-    })?;
-    if token.len() != 32 {
-        return Err(ProtocolError::new(
-            "WORKER_AUTHENTICATION_FAILED",
-            "Inherited Worker token must contain exactly 32 bytes.",
-        ));
-    }
-    Ok(token)
+    })
 }
 
 fn fault_point(name: &str) {
     if std::env::var("KODA_EXEC_TEST_FAULT_POINT").as_deref() == Ok(name) {
         std::process::abort();
-    }
-}
-
-fn signal_name(signal: i32) -> String {
-    match signal {
-        libc::SIGHUP => "SIGHUP".to_owned(),
-        libc::SIGINT => "SIGINT".to_owned(),
-        libc::SIGQUIT => "SIGQUIT".to_owned(),
-        libc::SIGKILL => "SIGKILL".to_owned(),
-        libc::SIGTERM => "SIGTERM".to_owned(),
-        other => format!("SIG{other}"),
     }
 }
 

@@ -862,7 +862,7 @@ export class NativeExecutorClient {
       this.binaryPath,
       [
         "serve",
-        "--socket",
+        "--endpoint",
         this.socketPath,
         "--state-dir",
         this.stateDirectory,

@@ -7,15 +7,14 @@ mod attachment;
 mod durable;
 mod framing;
 mod internal_protocol;
-mod process_identity;
+mod platform;
 mod protocol;
 mod pty_output;
 mod supervisor;
 mod worker;
 
 use std::io;
-use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use protocol::{
@@ -24,7 +23,8 @@ use protocol::{
 };
 use serde_json::json;
 use supervisor::Supervisor;
-use tokio::net::UnixStream;
+
+use crate::platform::{LocalStream, capabilities};
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
@@ -36,7 +36,10 @@ async fn main() {
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     match parse_arguments(std::env::args().skip(1))? {
-        Arguments::Serve { socket, state_dir } => serve(socket, state_dir).await,
+        Arguments::Serve {
+            endpoint,
+            state_dir,
+        } => serve(endpoint, state_dir).await,
         Arguments::Worker { job_dir, token_fd } => worker::run_worker(&job_dir, token_fd)
             .await
             .map_err(|error| format!("{}: {}", error.code, error.message).into()),
@@ -47,10 +50,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-async fn serve(socket: PathBuf, state_dir: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
-    prepare_socket_parent(&socket)?;
+async fn serve(endpoint: PathBuf, state_dir: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    platform::prepare_local_endpoint_parent(&endpoint)?;
     // Binding first serializes recovery: only one Supervisor may inspect and adopt Workers.
-    let listener = framing::bind_private_socket(&socket).await?;
+    let listener = platform::bind_local_endpoint(&endpoint).await?;
     let binary_path = std::env::current_exe()?;
     let supervisor = Supervisor::open(&state_dir, binary_path)
         .await
@@ -58,7 +61,7 @@ async fn serve(socket: PathBuf, state_dir: PathBuf) -> Result<(), Box<dyn std::e
 
     loop {
         let (stream, _) = listener.accept().await?;
-        if let Err(error) = framing::verify_peer(&stream) {
+        if let Err(error) = platform::verify_local_peer(&stream) {
             eprintln!("koda-exec: rejected local peer: {error}");
             continue;
         }
@@ -80,9 +83,18 @@ async fn serve(socket: PathBuf, state_dir: PathBuf) -> Result<(), Box<dyn std::e
 }
 
 enum Arguments {
-    Serve { socket: PathBuf, state_dir: PathBuf },
-    Worker { job_dir: PathBuf, token_fd: i32 },
-    CommandBootstrap { gate_fd: i32, argv: Vec<String> },
+    Serve {
+        endpoint: PathBuf,
+        state_dir: PathBuf,
+    },
+    Worker {
+        job_dir: PathBuf,
+        token_fd: i32,
+    },
+    CommandBootstrap {
+        gate_fd: i32,
+        argv: Vec<String>,
+    },
 }
 
 fn parse_arguments(
@@ -91,12 +103,16 @@ fn parse_arguments(
     match arguments.next().as_deref() {
         Some("serve") => {
             let values = parse_named_arguments(arguments)?;
-            let socket = required_path(&values, "--socket")?;
+            let endpoint = local_endpoint_argument(&values)?;
             let state_dir = required_path(&values, "--state-dir")?;
-            if !socket.is_absolute() || !state_dir.is_absolute() {
-                return Err("--socket and --state-dir must be absolute paths".into());
+            platform::validate_local_endpoint(&endpoint)?;
+            if !state_dir.is_absolute() {
+                return Err("--state-dir must be an absolute path".into());
             }
-            Ok(Arguments::Serve { socket, state_dir })
+            Ok(Arguments::Serve {
+                endpoint,
+                state_dir,
+            })
         }
         Some("worker") => {
             let values = parse_named_arguments(arguments)?;
@@ -131,7 +147,7 @@ fn parse_arguments(
             Ok(Arguments::CommandBootstrap { gate_fd, argv })
         }
         _ => Err(
-            "usage: koda-exec serve --socket PATH --state-dir PATH | koda-exec worker --job-dir PATH --token-fd FD"
+            "usage: koda-exec serve --endpoint ENDPOINT --state-dir PATH | koda-exec worker --job-dir PATH --token-fd FD"
                 .into(),
         ),
     }
@@ -163,24 +179,17 @@ fn required_path(
         .ok_or_else(|| format!("{name} is required").into())
 }
 
-fn prepare_socket_parent(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let parent = path.parent().ok_or("socket path has no parent directory")?;
-    if let Ok(metadata) = std::fs::symlink_metadata(parent) {
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(format!(
-                "executor runtime path '{}' must be a real directory",
-                parent.display()
-            )
-            .into());
-        }
-    } else {
-        std::fs::create_dir_all(parent)?;
+fn local_endpoint_argument(
+    values: &std::collections::HashMap<String, String>,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    match (values.get("--endpoint"), values.get("--socket")) {
+        (Some(endpoint), None) | (None, Some(endpoint)) => Ok(PathBuf::from(endpoint)),
+        (Some(_), Some(_)) => Err("--endpoint and --socket cannot be used together".into()),
+        (None, None) => Err("--endpoint is required".into()),
     }
-    std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
-    Ok(())
 }
 
-async fn handle_connection(mut stream: UnixStream, supervisor: Arc<Supervisor>) -> io::Result<()> {
+async fn handle_connection(mut stream: LocalStream, supervisor: Arc<Supervisor>) -> io::Result<()> {
     let mut handshaken = false;
     loop {
         let payload = match framing::read_frame(&mut stream).await? {
@@ -221,11 +230,11 @@ async fn handle_connection(mut stream: UnixStream, supervisor: Arc<Supervisor>) 
                                 "supervisor_version": env!("CARGO_PKG_VERSION"),
                                 "platform": std::env::consts::OS,
                                 "capabilities": {
-                                    "process_group": true,
-                                    "job_object": false,
-                                    "pty": true,
-                                    "reattach": true,
-                                    "durable_restart_recovery": true
+                                    "process_group": capabilities().process_group,
+                                    "job_object": capabilities().job_object,
+                                    "pty": capabilities().pty,
+                                    "reattach": capabilities().reattach,
+                                    "durable_restart_recovery": capabilities().durable_restart_recovery
                                 },
                                 "limits": {
                                     "max_frame_bytes": MAX_FRAME_BYTES,
@@ -278,6 +287,39 @@ mod tests {
             .map(str::to_owned),
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn endpoint_argument_replaces_socket_with_a_compatibility_alias() {
+        for name in ["--endpoint", "--socket"] {
+            let result = parse_arguments(
+                [
+                    "serve",
+                    name,
+                    "/tmp/koda.sock",
+                    "--state-dir",
+                    "/tmp/koda-exec",
+                ]
+                .into_iter()
+                .map(str::to_owned),
+            );
+            assert!(matches!(result, Ok(Arguments::Serve { .. })));
+        }
+
+        let duplicate = parse_arguments(
+            [
+                "serve",
+                "--endpoint",
+                "/tmp/koda.sock",
+                "--socket",
+                "/tmp/legacy.sock",
+                "--state-dir",
+                "/tmp/koda-exec",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        );
+        assert!(duplicate.is_err());
     }
 
     #[test]

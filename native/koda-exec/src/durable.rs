@@ -1,7 +1,5 @@
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{Read, Write};
-use std::os::fd::AsRawFd;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -9,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use crate::platform::state_security;
 use crate::protocol::{
     IoMode, JobFailure, JobSnapshot, JobState, ProtocolError, StartParams, TerminationSnapshot,
 };
@@ -86,7 +85,7 @@ pub struct JobLock {
 impl JobStore {
     pub fn open(root: &Path) -> Result<Self, ProtocolError> {
         create_private_directory(root)?;
-        create_private_directory(&worker_socket_root())?;
+        create_private_directory(&state_security::worker_control_root())?;
         let jobs_root = root.join("jobs");
         let quarantine_root = root.join("quarantine");
         let trash_root = root.join("trash");
@@ -121,8 +120,7 @@ impl JobStore {
                 ),
             )
         })?;
-        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
-            .map_err(state_io_error)?;
+        state_security::secure_private_directory(&directory).map_err(state_io_error)?;
         sync_directory(&self.jobs_root);
 
         let token = random_token();
@@ -285,7 +283,7 @@ impl JobRecord {
     }
 
     pub fn worker_socket_path(&self) -> PathBuf {
-        worker_socket_root().join(format!("{}.sock", self.manifest.job_id))
+        state_security::worker_control_root().join(format!("{}.sock", self.manifest.job_id))
     }
 
     pub fn stdout_path(&self) -> PathBuf {
@@ -467,26 +465,9 @@ impl JobLock {
 
     pub fn try_acquire(path: &Path) -> Result<Option<Self>, ProtocolError> {
         validate_private_file(path, None)?;
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(path)
-            .map_err(state_io_error)?;
-        // SAFETY: flock operates on this valid open descriptor and does not outlive it.
-        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        if result == 0 {
-            Ok(Some(Self { _file: file }))
-        } else {
-            let error = std::io::Error::last_os_error();
-            if matches!(
-                error.raw_os_error(),
-                Some(code) if code == libc::EWOULDBLOCK || code == libc::EAGAIN
-            ) {
-                Ok(None)
-            } else {
-                Err(state_io_error(error))
-            }
-        }
+        state_security::open_exclusive_lock(path)
+            .map(|file| file.map(|_file| Self { _file }))
+            .map_err(state_io_error)
     }
 }
 
@@ -616,15 +597,6 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     output
 }
 
-fn worker_socket_root() -> PathBuf {
-    // `/tmp` keeps the sockaddr path safely below macOS SUN_LEN even when the
-    // durable state directory itself is deeply nested. The per-UID directory
-    // is mode 0700; the socket is additionally same-UID and HMAC authenticated.
-    // SAFETY: geteuid reads process credentials and has no preconditions.
-    let uid = unsafe { libc::geteuid() };
-    PathBuf::from("/tmp").join(format!("koda-exec-{uid}"))
-}
-
 fn random_token() -> Vec<u8> {
     let mut bytes = Vec::with_capacity(TOKEN_BYTES);
     bytes.extend_from_slice(Uuid::new_v4().as_bytes());
@@ -687,12 +659,7 @@ where
 }
 
 fn write_new_private_file(path: &Path, bytes: &[u8]) -> Result<(), ProtocolError> {
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)
-        .map_err(state_io_error)?;
+    let mut file = state_security::open_new_private_file(path).map_err(state_io_error)?;
     file.write_all(bytes).map_err(state_io_error)?;
     file.sync_all().map_err(state_io_error)?;
     if let Some(parent) = path.parent() {
@@ -716,51 +683,40 @@ pub(crate) fn create_private_directory(path: &Path) -> Result<(), ProtocolError>
     } else {
         std::fs::create_dir_all(path).map_err(state_io_error)?;
     }
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).map_err(state_io_error)
+    state_security::secure_private_directory(path).map_err(state_io_error)
 }
 
 pub(crate) fn validate_private_directory(path: &Path) -> Result<(), ProtocolError> {
-    let metadata = std::fs::symlink_metadata(path).map_err(state_io_error)?;
-    // SAFETY: geteuid reads process credentials and has no preconditions.
-    let expected_uid = unsafe { libc::geteuid() };
-    if metadata.file_type().is_symlink()
-        || !metadata.is_dir()
-        || metadata.uid() != expected_uid
-        || metadata.mode() & 0o777 != 0o700
-    {
-        return Err(corrupt(format!(
-            "Private directory '{}' has unsafe type, owner, or permissions.",
-            path.display()
-        )));
+    match state_security::validate_private_directory(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            Err(corrupt(format!(
+                "Private directory '{}' has unsafe type, owner, or permissions.",
+                path.display()
+            )))
+        }
+        Err(error) => Err(state_io_error(error)),
     }
-    Ok(())
 }
 
 pub(crate) fn validate_private_file(
     path: &Path,
     exact_size: Option<u64>,
 ) -> Result<(), ProtocolError> {
-    let metadata = std::fs::symlink_metadata(path).map_err(state_io_error)?;
-    // SAFETY: geteuid reads process credentials and has no preconditions.
-    let expected_uid = unsafe { libc::geteuid() };
-    if metadata.file_type().is_symlink()
-        || !metadata.is_file()
-        || metadata.uid() != expected_uid
-        || metadata.mode() & 0o777 != 0o600
-        || exact_size.is_some_and(|size| metadata.len() != size)
-    {
-        return Err(corrupt(format!(
-            "Private file '{}' has unsafe type, owner, permissions, or size.",
-            path.display()
-        )));
+    match state_security::validate_private_file(path, exact_size) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            Err(corrupt(format!(
+                "Private file '{}' has unsafe type, owner, permissions, or size.",
+                path.display()
+            )))
+        }
+        Err(error) => Err(state_io_error(error)),
     }
-    Ok(())
 }
 
 pub(crate) fn sync_directory(path: &Path) {
-    if let Ok(directory) = File::open(path) {
-        let _ = directory.sync_all();
-    }
+    state_security::sync_directory(path);
 }
 
 fn unix_millis() -> u64 {
@@ -795,6 +751,7 @@ fn json_encode_error(error: serde_json::Error) -> ProtocolError {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::os::unix::fs::PermissionsExt;
 
     use super::*;
 
