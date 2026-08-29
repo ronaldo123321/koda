@@ -461,6 +461,12 @@ async function runNativeForegroundCommand(
       `Koda could not confirm that native process tree ${pid} terminated.`,
     );
   }
+  if (snapshot.state === "quarantined") {
+    throw new CommandError(
+      "NATIVE_EXECUTOR_PROTOCOL_ERROR",
+      `Native job ${snapshot.job_id} was quarantined because its durable state could not be trusted.`,
+    );
+  }
   if (cancelled) {
     throw abortError(options.signal.reason);
   }
@@ -524,6 +530,12 @@ async function reportNativeCompletion(
   pid: number,
 ): Promise<void> {
   for (const attempt of snapshot.termination?.attempts ?? []) {
+    if (
+      attempt.attempt === "identity_check" ||
+      attempt.mechanism !== "posix_process_group_signal"
+    ) {
+      continue;
+    }
     await report?.({
       type: "process.termination_requested",
       payload: {
@@ -620,7 +632,8 @@ function isNativeTerminal(state: NativeJobSnapshot["state"]): boolean {
   return (
     state === "exited" ||
     state === "start_failed" ||
-    state === "termination_uncertain"
+    state === "termination_uncertain" ||
+    state === "quarantined"
   );
 }
 

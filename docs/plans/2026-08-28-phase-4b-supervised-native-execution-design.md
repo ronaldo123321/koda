@@ -1,6 +1,6 @@
 # Koda Phase 4B Supervised Native Execution Design
 
-- Status: In progress — Phase 4B1 implemented; Phase 4B2 next
+- Status: In progress — Phase 4B2 implemented; Phase 4B3 next
 - Date: 2026-08-28
 - Depends on: Phase 4A complete
 
@@ -222,9 +222,26 @@ existing approval, result, Artifact, and audit contracts when the native backend
 is explicitly selected with `KODA_EXEC_PATH`; native failures never trigger a
 silent TypeScript fallback.
 
-The deterministic suite covers strict request parsing, bounds, idempotency
-conflicts, timeout escalation, a second Node client's reconnect to the same
-job, output integrity and Artifact materialization, cancellation, and the
-existing TypeScript compatibility backend. Capability negotiation truthfully
-reports `durable_restart_recovery: false`, `pty: false`, and `job_object: false`
-until their owning delivery slices land.
+The Phase 4B1 deterministic suite covers strict request parsing, bounds,
+idempotency conflicts, timeout escalation, a second Node client's reconnect to
+the same job, output integrity and Artifact materialization, cancellation, and
+the existing TypeScript compatibility backend.
+
+## Phase 4B2 implementation result
+
+Phase 4B2 moves command ownership into one detached Worker per durable job. A
+replacement Supervisor authenticates a live Worker with same-UID peer checks,
+an HMAC nonce proof, and stored process-start identity. Durable state uses an
+atomic `state.json` plus `state.head`: an exact head match is accepted, a
+provable one-step interrupted head update is repaired, and rollback or invalid
+structure is quarantined. A same-PID command bootstrap blocks approved command
+execution until its identity is durable. `job/list` is bounded and paginated;
+retention deletes only verified `exited` or `start_failed` records.
+
+Tests kill the Supervisor before Worker launch and while multiple commands are
+running, verify continued output, timeout, cancellation, and idempotency after
+restart, kill Workers on both sides of the command gate, verify uncertain
+cleanup, reject rollback/symlink/wrong-permission state, and preserve the full
+TypeScript runner contract. Capability negotiation now reports
+`durable_restart_recovery: true`; `pty` and `job_object` remain false until
+Phase 4B3 and Phase 4B4 respectively.

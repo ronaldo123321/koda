@@ -340,14 +340,14 @@ When Koda proposes a patch or command, it prints the exact action and asks for a
 
 Commands run without stdin, have a 30-second default timeout, and retain at most 64 KiB from each output stream. On POSIX, each command owns a process group; timeout, cancellation, output failure, or unsupported surviving descendants trigger `SIGTERM`, a grace period, and then `SIGKILL` when needed. Windows uses tree-aware `taskkill` with explicit uncertainty when termination cannot be confirmed. This TypeScript runtime provides guardrails, not a security sandbox: an approved executable or repository script still runs with the current user's operating-system permissions.
 
-Phase 4B1 also provides the Rust supervisor on macOS and Linux. `pnpm build` builds `target/debug/koda-exec`; set its absolute path to select the native backend explicitly:
+Phase 4B2 provides the Rust Supervisor and per-job Workers on macOS and Linux. `pnpm build` builds `target/debug/koda-exec`; set its absolute path to select the native backend explicitly:
 
 ```bash
 export KODA_EXEC_PATH="$PWD/target/debug/koda-exec"
 node apps/cli/dist/main.js run "run the tests" --cwd .
 ```
 
-When selected, Koda starts or reconnects to the private Supervisor beneath `KODA_HOME/executor`, performs a mandatory version/capability handshake, and keeps job ownership independent of one Node client. Removing `KODA_EXEC_PATH` selects the existing TypeScript compatibility backend during the migration. Koda never silently falls back after a native startup or protocol failure. Phase 4B1 can reconnect while the same Supervisor remains alive; durable recovery after the Supervisor itself crashes is Phase 4B2.
+When selected, Koda starts or reconnects to the private Supervisor beneath `KODA_HOME/executor`, performs a mandatory version/capability handshake, and delegates each accepted command to an independently detached Worker. Durable manifests, state heads, bounded output files, HMAC-authenticated Worker control, and PID start identities let a replacement Supervisor reconnect without restarting a running command. Pre-command jobs resume safely; loss after the command boundary becomes `termination_uncertain` and never guesses success. Removing `KODA_EXEC_PATH` selects the existing TypeScript compatibility backend during the migration. Koda never silently falls back after a native startup or protocol failure. PTY/background jobs remain Phase 4B3 and Windows Job Objects remain Phase 4B4.
 
 When the provider reports usage, Koda persists normalized input, cached, cache-write, output, reasoning, and total token counts and prints a turn summary. Missing provider usage is reported as unmeasured rather than treated as zero billable usage.
 

@@ -422,9 +422,9 @@ Status: **Complete; Phase 3A through Phase 3I are implemented and verified.**
 
 ### Phase 4: hardening
 
-Status: **In progress; Phase 4A is complete and Phase 4B1 native foreground supervision is implemented and verified, with Phase 4B2 restart reconciliation next.**
+Status: **In progress; Phase 4A and Phase 4B2 crash-durable native supervision are complete, with Phase 4B3 interactive/background jobs next.**
 
-- Rust execution Supervisor. **Phase 4B1 implements the versioned local protocol, POSIX foreground ownership, bounded output, and live-Supervisor reconnect; restart reconciliation, PTY/background jobs, and Windows Job Objects remain later Phase 4B slices.**
+- Rust execution Supervisor. **Phase 4B2 implements detached per-job Workers, crash-durable state heads, authenticated restart attachment, POSIX foreground ownership, bounded output, reconciliation, quarantine, and retention; PTY/background jobs and Windows Job Objects remain Phase 4B3/4B4.**
 - OS-specific sandboxing and network policy.
 - Secret handling and signed cross-platform releases.
 - High-risk shell-string execution, if retained after sandbox evaluation.

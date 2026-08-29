@@ -124,6 +124,13 @@ pub struct TerminateParams {
     pub reason: TerminationReason,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ListJobsParams {
+    pub limit: Option<u32>,
+    pub cursor: Option<String>,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OutputStream {
@@ -151,46 +158,50 @@ impl TerminationReason {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum JobState {
+    Accepted,
+    WorkerReady,
+    CommandStarting,
     Starting,
     Running,
     Terminating,
     Exited,
     StartFailed,
     TerminationUncertain,
+    Quarantined,
 }
 
 impl JobState {
     pub fn is_terminal(self) -> bool {
         matches!(
             self,
-            Self::Exited | Self::StartFailed | Self::TerminationUncertain
+            Self::Exited | Self::StartFailed | Self::TerminationUncertain | Self::Quarantined
         )
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct TerminationAttempt {
-    pub attempt: &'static str,
-    pub mechanism: &'static str,
+    pub attempt: String,
+    pub mechanism: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct TerminationSnapshot {
-    pub reason: &'static str,
-    pub outcome: &'static str,
+    pub reason: String,
+    pub outcome: String,
     pub attempts: Vec<TerminationAttempt>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct JobFailure {
-    pub code: &'static str,
+    pub code: String,
     pub message: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct JobSnapshot {
     pub job_id: String,
     pub state: JobState,
@@ -207,6 +218,21 @@ pub struct JobSnapshot {
     pub stderr_truncated: bool,
     pub termination: Option<TerminationSnapshot>,
     pub failure: Option<JobFailure>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct JobSummary {
+    pub job_id: String,
+    pub state: JobState,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+    pub pid: Option<u32>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ListJobsResult {
+    pub jobs: Vec<JobSummary>,
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

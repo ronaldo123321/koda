@@ -1,6 +1,6 @@
 # Koda Phase 4B2 Worker Recovery Design
 
-- Status: Accepted — implementation next
+- Status: Complete — implemented and verified
 - Date: 2026-08-29
 - Depends on: Phase 4B1 native foreground supervision
 
@@ -65,23 +65,26 @@ pipe.
 
 ## Private task layout
 
-Each job has a private mode-`0700` directory beneath
-`KODA_HOME/executor/jobs`:
+Each job has a deterministic private mode-`0700` directory beneath
+`KODA_HOME/executor/jobs`, keyed by the external request digest:
 
 ```text
-jobs/<job-id>/
+jobs/<request-digest>/
   manifest.json
   state.json
+  state.head
   control.token
   worker.lock
-  worker.sock
   stdout.bin
   stderr.bin
 ```
 
 Files are regular, non-symlink entries. Manifest and state files are bounded,
 strictly parsed, versioned JSON. `control.token`, output, and lock files use
-mode `0600`; the Worker Socket uses mode `0600`.
+mode `0600`. To stay below the macOS Unix Socket path limit even when
+`KODA_HOME` is deeply nested, Worker Sockets use the short private path
+`/tmp/koda-exec-<uid>/<job-id>.sock`; the directory is mode `0700`, the Socket
+is mode `0600`, and both same-UID and HMAC authentication remain mandatory.
 
 The immutable manifest contains the public job ID, external request ID,
 canonical start parameters, their SHA-256 digest, token SHA-256, creation time,
@@ -109,7 +112,9 @@ Each state contains a strictly increasing revision, previous-state digest,
 timestamp, Worker identity when known, command identity when known, byte counts,
 and applicable termination or failure evidence. Updates use a same-directory
 temporary file, file sync, atomic rename, and best-effort directory sync.
-Terminal states are immutable.
+`state.head` advances only after the state rename. On restart an exact match is
+accepted, a single linked state-ahead/head-behind commit is repaired, and any
+other rollback or divergence is quarantined. Terminal states are immutable.
 
 The Worker holds `worker.lock` for its entire lifetime. It writes
 `worker_ready` before the command boundary, then writes `command_starting`
@@ -117,6 +122,12 @@ before calling the operating system. A crash in `accepted` with an unlocked job
 is safe to resume by starting a Worker. A crash in `command_starting` without a
 live Worker is uncertain even if no PID was recorded, because process creation
 may already have occurred.
+
+The operating-system child initially execs an internal same-PID bootstrap that
+waits on an inherited one-byte gate. The Worker persists the child PID and start
+identity before releasing that gate to exec the approved executable. If the
+Worker dies before release, descriptor EOF terminates the bootstrap without
+executing the approved command.
 
 ## Worker authentication and process identity
 
@@ -191,9 +202,9 @@ or absolute host paths.
 
 ## Fault injection and acceptance
 
-Tests use explicit test-only fault points at manifest publication, Worker
-launch, `worker_ready`, `command_starting`, command start, `running`,
-`terminating`, and terminal publication. Phase 4B2 is complete when tests prove:
+Tests use explicit test-only fault points after durable acceptance, Worker
+readiness, `command_starting`, bootstrap spawn, gate release/`running`,
+`terminating`, and terminal publication. Phase 4B2 completion is proven by:
 
 1. Killing only the Supervisor does not kill a running Worker or command.
 2. A new Supervisor authenticates the original Worker and observes the same job

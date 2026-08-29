@@ -1,14 +1,18 @@
 #![cfg_attr(not(unix), allow(dead_code, unused_imports))]
 
 #[cfg(not(unix))]
-compile_error!("Phase 4B1 koda-exec currently supports POSIX systems only.");
+compile_error!("Phase 4B2 koda-exec currently supports POSIX systems only.");
 
+mod durable;
+mod framing;
+mod internal_protocol;
+mod process_identity;
 mod protocol;
 mod supervisor;
+mod worker;
 
 use std::io;
-use std::os::fd::AsRawFd;
-use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -18,8 +22,7 @@ use protocol::{
 };
 use serde_json::json;
 use supervisor::Supervisor;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::net::UnixStream;
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
@@ -30,14 +33,30 @@ async fn main() {
 }
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let arguments = parse_arguments(std::env::args().skip(1))?;
-    let supervisor = Supervisor::open(&arguments.state_dir)
+    match parse_arguments(std::env::args().skip(1))? {
+        Arguments::Serve { socket, state_dir } => serve(socket, state_dir).await,
+        Arguments::Worker { job_dir, token_fd } => worker::run_worker(&job_dir, token_fd)
+            .await
+            .map_err(|error| format!("{}: {}", error.code, error.message).into()),
+        Arguments::CommandBootstrap { gate_fd, argv } => {
+            worker::run_command_bootstrap(gate_fd, argv)?;
+            Ok(())
+        }
+    }
+}
+
+async fn serve(socket: PathBuf, state_dir: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    prepare_socket_parent(&socket)?;
+    // Binding first serializes recovery: only one Supervisor may inspect and adopt Workers.
+    let listener = framing::bind_private_socket(&socket).await?;
+    let binary_path = std::env::current_exe()?;
+    let supervisor = Supervisor::open(&state_dir, binary_path)
+        .await
         .map_err(|error| format!("{}: {}", error.code, error.message))?;
-    let listener = bind_private_socket(&arguments.socket).await?;
 
     loop {
         let (stream, _) = listener.accept().await?;
-        if let Err(error) = verify_peer(&stream) {
+        if let Err(error) = framing::verify_peer(&stream) {
             eprintln!("koda-exec: rejected local peer: {error}");
             continue;
         }
@@ -58,85 +77,118 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-struct Arguments {
-    socket: PathBuf,
-    state_dir: PathBuf,
+enum Arguments {
+    Serve { socket: PathBuf, state_dir: PathBuf },
+    Worker { job_dir: PathBuf, token_fd: i32 },
+    CommandBootstrap { gate_fd: i32, argv: Vec<String> },
 }
 
 fn parse_arguments(
     mut arguments: impl Iterator<Item = String>,
 ) -> Result<Arguments, Box<dyn std::error::Error>> {
-    if arguments.next().as_deref() != Some("serve") {
-        return Err("usage: koda-exec serve --socket PATH --state-dir PATH".into());
+    match arguments.next().as_deref() {
+        Some("serve") => {
+            let values = parse_named_arguments(arguments)?;
+            let socket = required_path(&values, "--socket")?;
+            let state_dir = required_path(&values, "--state-dir")?;
+            if !socket.is_absolute() || !state_dir.is_absolute() {
+                return Err("--socket and --state-dir must be absolute paths".into());
+            }
+            Ok(Arguments::Serve { socket, state_dir })
+        }
+        Some("worker") => {
+            let values = parse_named_arguments(arguments)?;
+            let job_dir = required_path(&values, "--job-dir")?;
+            if !job_dir.is_absolute() {
+                return Err("--job-dir must be an absolute path".into());
+            }
+            let token_fd = values
+                .get("--token-fd")
+                .ok_or("--token-fd is required")?
+                .parse::<i32>()?;
+            if token_fd < 3 {
+                return Err("--token-fd must be a non-standard descriptor".into());
+            }
+            Ok(Arguments::Worker { job_dir, token_fd })
+        }
+        Some("command-bootstrap") => {
+            if arguments.next().as_deref() != Some("--gate-fd") {
+                return Err("command bootstrap requires --gate-fd".into());
+            }
+            let gate_fd = arguments
+                .next()
+                .ok_or("--gate-fd is required")?
+                .parse::<i32>()?;
+            if gate_fd < 3 || arguments.next().as_deref() != Some("--") {
+                return Err("command bootstrap descriptor or separator is invalid".into());
+            }
+            let argv = arguments.collect::<Vec<_>>();
+            if argv.is_empty() {
+                return Err("command bootstrap argv is required".into());
+            }
+            Ok(Arguments::CommandBootstrap { gate_fd, argv })
+        }
+        _ => Err(
+            "usage: koda-exec serve --socket PATH --state-dir PATH | koda-exec worker --job-dir PATH --token-fd FD"
+                .into(),
+        ),
     }
-    let mut socket = None;
-    let mut state_dir = None;
-    while let Some(argument) = arguments.next() {
+}
+
+fn parse_named_arguments(
+    mut arguments: impl Iterator<Item = String>,
+) -> Result<std::collections::HashMap<String, String>, Box<dyn std::error::Error>> {
+    let mut values = std::collections::HashMap::new();
+    while let Some(name) = arguments.next() {
+        if !name.starts_with("--") || values.contains_key(&name) {
+            return Err(format!("unknown or duplicate argument: {name}").into());
+        }
         let value = arguments
             .next()
-            .ok_or_else(|| format!("missing value for {argument}"))?;
-        match argument.as_str() {
-            "--socket" => socket = Some(PathBuf::from(value)),
-            "--state-dir" => state_dir = Some(PathBuf::from(value)),
-            _ => return Err(format!("unknown argument: {argument}").into()),
-        }
+            .ok_or_else(|| format!("missing value for {name}"))?;
+        values.insert(name, value);
     }
-    let socket = socket.ok_or("--socket is required")?;
-    let state_dir = state_dir.ok_or("--state-dir is required")?;
-    if !socket.is_absolute() || !state_dir.is_absolute() {
-        return Err("--socket and --state-dir must be absolute paths".into());
-    }
-    Ok(Arguments { socket, state_dir })
+    Ok(values)
 }
 
-async fn bind_private_socket(path: &Path) -> Result<UnixListener, Box<dyn std::error::Error>> {
+fn required_path(
+    values: &std::collections::HashMap<String, String>,
+    name: &str,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    values
+        .get(name)
+        .map(PathBuf::from)
+        .ok_or_else(|| format!("{name} is required").into())
+}
+
+fn prepare_socket_parent(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let parent = path.parent().ok_or("socket path has no parent directory")?;
-    create_private_directory(parent)?;
-    if let Ok(metadata) = std::fs::symlink_metadata(path) {
-        if !metadata.file_type().is_socket() {
-            return Err(format!(
-                "refusing to replace non-socket executor endpoint '{}'",
-                path.display()
-            )
-            .into());
-        }
-        if UnixStream::connect(path).await.is_ok() {
-            return Err(format!("an executor is already listening at '{}'", path.display()).into());
-        }
-        std::fs::remove_file(path)?;
-    }
-    let listener = UnixListener::bind(path)?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    Ok(listener)
-}
-
-fn create_private_directory(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    if let Ok(metadata) = std::fs::symlink_metadata(path) {
+    if let Ok(metadata) = std::fs::symlink_metadata(parent) {
         if metadata.file_type().is_symlink() || !metadata.is_dir() {
             return Err(format!(
                 "executor runtime path '{}' must be a real directory",
-                path.display()
+                parent.display()
             )
             .into());
         }
     } else {
-        std::fs::create_dir_all(path)?;
+        std::fs::create_dir_all(parent)?;
     }
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
     Ok(())
 }
 
 async fn handle_connection(mut stream: UnixStream, supervisor: Arc<Supervisor>) -> io::Result<()> {
     let mut handshaken = false;
     loop {
-        let payload = match read_frame(&mut stream).await? {
+        let payload = match framing::read_frame(&mut stream).await? {
             Some(payload) => payload,
             None => return Ok(()),
         };
         let request = match serde_json::from_slice::<Request>(&payload) {
             Ok(request) => request,
             Err(error) => {
-                write_response(
+                framing::write_json_frame(
                     &mut stream,
                     &Response::failure(
                         "invalid".to_owned(),
@@ -171,7 +223,7 @@ async fn handle_connection(mut stream: UnixStream, supervisor: Arc<Supervisor>) 
                                     "job_object": false,
                                     "pty": false,
                                     "reattach": true,
-                                    "durable_restart_recovery": false
+                                    "durable_restart_recovery": true
                                 },
                                 "limits": {
                                     "max_frame_bytes": MAX_FRAME_BYTES,
@@ -199,102 +251,8 @@ async fn handle_connection(mut stream: UnixStream, supervisor: Arc<Supervisor>) 
                 Err(error) => Response::failure(request_id, error),
             },
         };
-        write_response(&mut stream, &response).await?;
+        framing::write_json_frame(&mut stream, &response).await?;
     }
-}
-
-async fn read_frame(stream: &mut UnixStream) -> io::Result<Option<Vec<u8>>> {
-    let mut header = [0u8; 4];
-    match stream.read_exact(&mut header).await {
-        Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
-        Err(error) => return Err(error),
-    }
-    let length = u32::from_be_bytes(header) as usize;
-    if length == 0 || length > MAX_FRAME_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("frame length {length} is outside the supported range"),
-        ));
-    }
-    let mut payload = vec![0u8; length];
-    stream.read_exact(&mut payload).await?;
-    Ok(Some(payload))
-}
-
-async fn write_response(stream: &mut UnixStream, response: &Response) -> io::Result<()> {
-    let payload = serde_json::to_vec(response)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    if payload.is_empty() || payload.len() > MAX_FRAME_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "executor response exceeded the frame limit",
-        ));
-    }
-    stream
-        .write_all(&(payload.len() as u32).to_be_bytes())
-        .await?;
-    stream.write_all(&payload).await?;
-    stream.flush().await
-}
-
-#[cfg(target_os = "macos")]
-fn verify_peer(stream: &UnixStream) -> io::Result<()> {
-    let mut effective_uid = 0;
-    let mut effective_gid = 0;
-    // SAFETY: getpeereid only writes the supplied uid/gid values for this valid socket fd.
-    let result =
-        unsafe { libc::getpeereid(stream.as_raw_fd(), &mut effective_uid, &mut effective_gid) };
-    if result != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: geteuid reads process credentials and has no preconditions.
-    if effective_uid != unsafe { libc::geteuid() } {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "executor peer belongs to a different user",
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-fn verify_peer(stream: &UnixStream) -> io::Result<()> {
-    let mut credentials = libc::ucred {
-        pid: 0,
-        uid: 0,
-        gid: 0,
-    };
-    let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
-    // SAFETY: getsockopt writes at most `length` bytes into a correctly sized ucred value.
-    let result = unsafe {
-        libc::getsockopt(
-            stream.as_raw_fd(),
-            libc::SOL_SOCKET,
-            libc::SO_PEERCRED,
-            &mut credentials as *mut _ as *mut libc::c_void,
-            &mut length,
-        )
-    };
-    if result != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: geteuid reads process credentials and has no preconditions.
-    if credentials.uid != unsafe { libc::geteuid() } {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "executor peer belongs to a different user",
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
-fn verify_peer(_stream: &UnixStream) -> io::Result<()> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "peer credential verification is not implemented on this POSIX platform",
-    ))
 }
 
 #[cfg(test)]
@@ -313,6 +271,16 @@ mod tests {
             ]
             .into_iter()
             .map(str::to_owned),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn worker_requires_inherited_descriptor() {
+        let result = parse_arguments(
+            ["worker", "--job-dir", "/tmp/job", "--token-fd", "2"]
+                .into_iter()
+                .map(str::to_owned),
         );
         assert!(result.is_err());
     }

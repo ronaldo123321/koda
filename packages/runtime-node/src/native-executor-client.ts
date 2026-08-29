@@ -58,16 +58,23 @@ export interface NativeExecutorStartInput {
 }
 
 export type NativeJobState =
+  | "accepted"
+  | "worker_ready"
+  | "command_starting"
   | "starting"
   | "running"
   | "terminating"
   | "exited"
   | "start_failed"
-  | "termination_uncertain";
+  | "termination_uncertain"
+  | "quarantined";
 
 export interface NativeTerminationAttempt {
-  attempt: "graceful" | "force";
-  mechanism: "posix_process_group_signal";
+  attempt: "graceful" | "force" | "identity_check";
+  mechanism:
+    | "posix_process_group_signal"
+    | "process_start_identity_mismatch"
+    | "command_identity_not_persisted";
 }
 
 export interface NativeTerminationSnapshot {
@@ -106,14 +113,43 @@ export interface NativeOutputReadResult {
   data: Buffer;
 }
 
+export interface NativeJobSummary {
+  job_id: string;
+  state: NativeJobState;
+  created_at_ms: number;
+  updated_at_ms: number;
+  pid: number | null;
+}
+
+export interface NativeJobListResult {
+  jobs: NativeJobSummary[];
+  next_cursor: string | null;
+}
+
 const safeInteger = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const positiveSafeInteger = safeInteger.refine((value) => value > 0);
 const identifier = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u);
+const jobStateSchema = z.enum([
+  "accepted",
+  "worker_ready",
+  "command_starting",
+  "starting",
+  "running",
+  "terminating",
+  "exited",
+  "start_failed",
+  "termination_uncertain",
+  "quarantined",
+]);
 
 const terminationAttemptSchema = z
   .object({
-    attempt: z.enum(["graceful", "force"]),
-    mechanism: z.literal("posix_process_group_signal"),
+    attempt: z.enum(["graceful", "force", "identity_check"]),
+    mechanism: z.enum([
+      "posix_process_group_signal",
+      "process_start_identity_mismatch",
+      "command_identity_not_persisted",
+    ]),
   })
   .strict();
 
@@ -133,14 +169,7 @@ const terminationSchema = z
 const jobSnapshotSchema = z
   .object({
     job_id: identifier,
-    state: z.enum([
-      "starting",
-      "running",
-      "terminating",
-      "exited",
-      "start_failed",
-      "termination_uncertain",
-    ]),
+    state: jobStateSchema,
     pid: positiveSafeInteger.nullable(),
     exit_code: z.number().int().nullable(),
     signal: z.string().min(1).max(64).nullable(),
@@ -179,18 +208,32 @@ const jobSnapshotSchema = z
       "exited",
       "start_failed",
       "termination_uncertain",
+      "quarantined",
     ].includes(snapshot.state);
-    if (
-      terminal &&
-      snapshot.state !== "start_failed" &&
-      snapshot.pid === null
-    ) {
+    if (terminal && snapshot.state === "exited" && snapshot.pid === null) {
       context.addIssue({
         code: "custom",
         message: "A started terminal job must include its process ID.",
       });
     }
   });
+
+const jobSummarySchema = z
+  .object({
+    job_id: identifier,
+    state: jobStateSchema,
+    created_at_ms: safeInteger,
+    updated_at_ms: safeInteger,
+    pid: positiveSafeInteger.nullable(),
+  })
+  .strict();
+
+const jobListSchema = z
+  .object({
+    jobs: z.array(jobSummarySchema).max(100),
+    next_cursor: identifier.nullable(),
+  })
+  .strict();
 
 const outputReadSchema = z
   .object({
@@ -446,12 +489,35 @@ export class NativeExecutorClient {
     };
   }
 
+  public async list(
+    input: {
+      limit?: number;
+      cursor?: string;
+    } = {},
+  ): Promise<NativeJobListResult> {
+    return parseProtocolValue(
+      jobListSchema,
+      await this.call(
+        "job/list",
+        {
+          ...(input.limit === undefined ? {} : { limit: input.limit }),
+          ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+        },
+        randomUUID(),
+      ),
+      "job/list result",
+    );
+  }
+
   public async closeOwnedSupervisorForTests(): Promise<void> {
     const child = this.ownedSupervisor;
     this.ownedSupervisor = undefined;
     if (child?.pid === undefined || child.exitCode !== null) {
       return;
     }
+    const exited = new Promise<void>((resolvePromise) => {
+      child.once("exit", () => resolvePromise());
+    });
     try {
       process.kill(child.pid, "SIGTERM");
     } catch (error) {
@@ -459,6 +525,7 @@ export class NativeExecutorClient {
         throw error;
       }
     }
+    await Promise.race([exited, delay(1_000)]);
   }
 
   private async startSupervisor(startupTimeoutMs: number): Promise<void> {

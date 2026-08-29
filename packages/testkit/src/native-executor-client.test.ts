@@ -6,7 +6,7 @@ import {
   type NativeJobSnapshot,
 } from "@koda/runtime-node";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { access, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -43,7 +43,7 @@ describeNative("NativeExecutorClient", () => {
         job_object: false,
         pty: false,
         reattach: true,
-        durable_restart_recovery: false,
+        durable_restart_recovery: true,
       },
     });
   });
@@ -78,6 +78,144 @@ describeNative("NativeExecutorClient", () => {
     });
     expect(output.data.toString("utf8")).toBe("reconnected");
     expect(output.complete).toBe(true);
+  });
+
+  it("keeps a running job alive across a Supervisor restart", async () => {
+    const requestId = `restart-${randomUUID()}`;
+    const input = {
+      argv: [
+        process.execPath,
+        "-e",
+        "process.stdout.write('before-'); setTimeout(() => process.stdout.write('after'), 400)",
+      ],
+      cwd: root,
+      environment: { PATH: process.env.PATH },
+      timeoutMs: 2_000,
+      outputLimitBytes: 1_024,
+      terminationGraceMs: 25,
+      terminationConfirmationMs: 1_000,
+      requestId,
+    };
+    const started = await client.start(input);
+
+    await client.closeOwnedSupervisorForTests();
+    client = await NativeExecutorClient.open({
+      binaryPath: resolve("target/debug/koda-exec"),
+      stateDirectory: join(root, "state"),
+      socketPath: join(root, "exec.sock"),
+    });
+
+    const duplicate = await client.start(input);
+    const terminal = await waitTerminal(client, started.job_id);
+    const output = await client.readOutput(terminal.job_id, "stdout", 0);
+
+    expect(duplicate.job_id).toBe(started.job_id);
+    expect(terminal).toMatchObject({ state: "exited", exit_code: 0 });
+    expect(output.data.toString("utf8")).toBe("before-after");
+  });
+
+  it("preserves timeout and cancellation ownership after a Supervisor restart", async () => {
+    const timeoutJob = await client.start({
+      argv: [
+        process.execPath,
+        "-e",
+        "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)",
+      ],
+      cwd: root,
+      environment: { PATH: process.env.PATH },
+      timeoutMs: 300,
+      outputLimitBytes: 1_024,
+      terminationGraceMs: 25,
+      terminationConfirmationMs: 1_000,
+    });
+    const cancellationJob = await client.start({
+      argv: [process.execPath, "-e", "setInterval(() => {}, 1000)"],
+      cwd: root,
+      environment: { PATH: process.env.PATH },
+      timeoutMs: 2_000,
+      outputLimitBytes: 1_024,
+      terminationGraceMs: 25,
+      terminationConfirmationMs: 1_000,
+    });
+
+    await client.closeOwnedSupervisorForTests();
+    client = await NativeExecutorClient.open({
+      binaryPath: resolve("target/debug/koda-exec"),
+      stateDirectory: join(root, "state"),
+      socketPath: join(root, "exec.sock"),
+    });
+    await client.terminate(cancellationJob.job_id, "cancellation");
+    const [timedOut, cancelled] = await Promise.all([
+      waitTerminal(client, timeoutJob.job_id),
+      waitTerminal(client, cancellationJob.job_id),
+    ]);
+
+    expect(timedOut).toMatchObject({
+      state: "exited",
+      timed_out: true,
+      termination: { reason: "timeout", outcome: "terminated" },
+    });
+    expect(cancelled).toMatchObject({
+      state: "exited",
+      timed_out: false,
+      termination: { reason: "cancellation", outcome: "terminated" },
+    });
+  });
+
+  it("lists durable jobs with bounded cursor pagination", async () => {
+    const first = await client.list({ limit: 1 });
+
+    expect(first.jobs).toHaveLength(1);
+    expect(first.next_cursor).not.toBeNull();
+    if (first.next_cursor === null) {
+      throw new Error("Expected a second durable-job page.");
+    }
+    const second = await client.list({
+      limit: 1,
+      cursor: first.next_cursor,
+    });
+    expect(second.jobs.map((job) => job.job_id)).not.toContain(
+      first.jobs[0]?.job_id,
+    );
+  });
+
+  it("resumes an accepted job after the Supervisor dies before Worker launch", async () => {
+    const faultRoot = await mkdtemp(join(tmpdir(), "koda-accepted-fault-"));
+    const faultClient = await openFaultClient(faultRoot, "after_accepted");
+    const requestId = `accepted-${randomUUID()}`;
+    const input = {
+      argv: [process.execPath, "-e", "process.stdout.write('resumed-once')"],
+      cwd: faultRoot,
+      environment: { PATH: process.env.PATH },
+      timeoutMs: 2_000,
+      outputLimitBytes: 1_024,
+      terminationGraceMs: 25,
+      terminationConfirmationMs: 1_000,
+      requestId,
+    };
+    try {
+      await expect(faultClient.start(input)).rejects.toMatchObject({
+        code: "NATIVE_EXECUTOR_UNAVAILABLE",
+      });
+      const recovered = await NativeExecutorClient.open({
+        binaryPath: resolve("target/debug/koda-exec"),
+        stateDirectory: join(faultRoot, "state"),
+        socketPath: join(faultRoot, "exec.sock"),
+      });
+      try {
+        const resumed = await recovered.start(input);
+        const terminal = await waitTerminal(recovered, resumed.job_id);
+        const output = await recovered.readOutput(terminal.job_id, "stdout", 0);
+
+        expect(terminal).toMatchObject({ state: "exited", exit_code: 0 });
+        expect(output.data.toString("utf8")).toBe("resumed-once");
+      } finally {
+        await recovered.closeOwnedSupervisorForTests();
+      }
+    } finally {
+      await faultClient.closeOwnedSupervisorForTests();
+      await rm(faultRoot, { recursive: true, force: true });
+    }
   });
 
   it("deduplicates exact starts and rejects conflicting request reuse", async () => {
@@ -132,6 +270,79 @@ describeNative("NativeExecutorClient", () => {
         attempts: [{ attempt: "graceful" }, { attempt: "force" }],
       },
     });
+  });
+
+  it("reconciles a Worker crash after the command boundary without guessing success", async () => {
+    const faultRoot = await mkdtemp(join(tmpdir(), "koda-worker-fault-"));
+    const faultClient = await openFaultClient(faultRoot, "after_running");
+
+    try {
+      const started = await faultClient.start({
+        argv: [process.execPath, "-e", "setInterval(() => {}, 1000)"],
+        cwd: faultRoot,
+        environment: { PATH: process.env.PATH },
+        timeoutMs: 2_000,
+        outputLimitBytes: 1_024,
+        terminationGraceMs: 25,
+        terminationConfirmationMs: 1_000,
+      });
+      const terminal = await waitTerminal(faultClient, started.job_id);
+
+      expect(terminal).toMatchObject({
+        state: "termination_uncertain",
+        termination: {
+          reason: "orphan_cleanup",
+          outcome: "uncertain",
+        },
+        failure: { code: "WORKER_LOST_AFTER_COMMAND_BOUNDARY" },
+      });
+    } finally {
+      await faultClient.closeOwnedSupervisorForTests();
+      await rm(faultRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("does not execute the approved command when a Worker dies before gate release", async () => {
+    const faultRoot = await mkdtemp(join(tmpdir(), "koda-worker-gate-"));
+    const marker = join(faultRoot, "command-executed");
+    const faultClient = await openFaultClient(faultRoot, "after_command_spawn");
+    try {
+      const started = await faultClient.start({
+        argv: [
+          process.execPath,
+          "-e",
+          `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'bad')`,
+        ],
+        cwd: faultRoot,
+        environment: { PATH: process.env.PATH },
+        timeoutMs: 2_000,
+        outputLimitBytes: 1_024,
+        terminationGraceMs: 25,
+        terminationConfirmationMs: 1_000,
+      });
+      const terminal = await waitTerminal(faultClient, started.job_id);
+
+      expect(terminal).toMatchObject({
+        state: "termination_uncertain",
+        termination: {
+          reason: "orphan_cleanup",
+          outcome: "uncertain",
+          attempts: [
+            {
+              attempt: "identity_check",
+              mechanism: "command_identity_not_persisted",
+            },
+          ],
+        },
+      });
+      await new Promise<void>((resolvePromise) =>
+        setTimeout(resolvePromise, 100),
+      );
+      await expect(access(marker)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await faultClient.closeOwnedSupervisorForTests();
+      await rm(faultRoot, { recursive: true, force: true });
+    }
   });
 
   it("preserves the WorkspaceCommandRunner result and lifecycle contract", async () => {
@@ -211,11 +422,33 @@ async function waitTerminal(
     if (
       snapshot.state === "exited" ||
       snapshot.state === "start_failed" ||
-      snapshot.state === "termination_uncertain"
+      snapshot.state === "termination_uncertain" ||
+      snapshot.state === "quarantined"
     ) {
       return snapshot;
     }
     await new Promise<void>((resolvePromise) => setTimeout(resolvePromise, 10));
   }
   throw new Error(`Native job '${jobId}' did not reach a terminal state.`);
+}
+
+async function openFaultClient(
+  root: string,
+  faultPoint: string,
+): Promise<NativeExecutorClient> {
+  const previousFaultPoint = process.env.KODA_EXEC_TEST_FAULT_POINT;
+  try {
+    process.env.KODA_EXEC_TEST_FAULT_POINT = faultPoint;
+    return await NativeExecutorClient.open({
+      binaryPath: resolve("target/debug/koda-exec"),
+      stateDirectory: join(root, "state"),
+      socketPath: join(root, "exec.sock"),
+    });
+  } finally {
+    if (previousFaultPoint === undefined) {
+      delete process.env.KODA_EXEC_TEST_FAULT_POINT;
+    } else {
+      process.env.KODA_EXEC_TEST_FAULT_POINT = previousFaultPoint;
+    }
+  }
 }
