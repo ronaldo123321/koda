@@ -45,7 +45,7 @@ Implementation status:
 
 ### Phase 4B: supervised native execution boundary
 
-Status: In progress — Phase 4B1 complete; Phase 4B2 next
+Status: In progress — Phase 4B1 complete; Phase 4B2 design accepted and implementation next
 
 - Define a versioned local executor protocol independent of providers and clients.
 - Add the Rust `koda-exec` sidecar for durable process ownership and bounded shutdown.
@@ -60,6 +60,8 @@ Implementation status:
 
 - **Phase 4B1 complete:** Cargo workspace and `koda-exec`, private same-user Unix Socket, strict length-prefixed protocol v1, capability handshake, idempotent foreground starts, POSIX process groups, timeout/cancellation escalation, bounded file-backed stdout/stderr, reconnectable live job status and output, strict Node client validation, explicit `KODA_EXEC_PATH` selection, existing exec-tool result/audit compatibility, and cross-language tests.
 - **Phase 4B2 next:** crash-durable job records, Supervisor-restart reconciliation using platform process identity, job listing/retention, orphan policy, and kill-point testing.
+
+The accepted Phase 4B2 contract is in [Phase 4B2 Worker recovery](2026-08-29-phase-4b2-worker-recovery-design.md).
 
 ### Phase 4C: sandbox, network, and secret policy
 

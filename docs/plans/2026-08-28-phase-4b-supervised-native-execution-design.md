@@ -171,6 +171,9 @@ than approximated with an unproven portable claim.
 - Add kill-point tests around accepted, started, running, terminating, and exit
   persistence boundaries.
 
+The accepted Worker ownership, durable state, restart authentication, retention,
+and fault-injection contract is in [Phase 4B2 Worker recovery](2026-08-29-phase-4b2-worker-recovery-design.md).
+
 ### Phase 4B3: interactive and background jobs
 
 - Add PTY-backed foreground jobs, managed background jobs, attach/detach,
