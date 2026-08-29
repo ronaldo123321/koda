@@ -173,6 +173,8 @@ than approximated with an unproven portable claim.
 
 The accepted Worker ownership, durable state, restart authentication, retention,
 and fault-injection contract is in [Phase 4B2 Worker recovery](2026-08-29-phase-4b2-worker-recovery-design.md).
+The accepted PTY, background lifecycle, attachment, cursor, and input ownership
+contract is in [Phase 4B3A PTY and background runtime](2026-08-29-phase-4b3a-pty-background-runtime-design.md).
 
 ### Phase 4B3: interactive and background jobs
 

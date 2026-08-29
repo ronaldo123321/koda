@@ -1,6 +1,6 @@
 # Koda Phase 4 Hardening Roadmap
 
-- Status: In progress — Phase 4B2 complete; Phase 4B3 interactive/background jobs next
+- Status: In progress — Phase 4B2 complete; Phase 4B3A runtime design accepted
 - Date: 2026-08-28
 - Depends on: completed Phase 3A through Phase 3I baseline
 
@@ -45,7 +45,7 @@ Implementation status:
 
 ### Phase 4B: supervised native execution boundary
 
-Status: In progress — Phase 4B2 complete; Phase 4B3 next
+Status: In progress — Phase 4B2 complete; Phase 4B3A implementation next
 
 - Define a versioned local executor protocol independent of providers and clients.
 - Add the Rust `koda-exec` sidecar for durable process ownership and bounded shutdown.
@@ -63,6 +63,7 @@ Implementation status:
 - **Phase 4B3 next:** PTY-backed foreground work, managed background jobs, attach/detach, resize, bounded input ownership, and reconnect cursors.
 
 The accepted Phase 4B2 contract is in [Phase 4B2 Worker recovery](2026-08-29-phase-4b2-worker-recovery-design.md).
+The accepted runtime-first Phase 4B3A contract is in [Phase 4B3A PTY and background runtime](2026-08-29-phase-4b3a-pty-background-runtime-design.md).
 
 ### Phase 4C: sandbox, network, and secret policy
 
