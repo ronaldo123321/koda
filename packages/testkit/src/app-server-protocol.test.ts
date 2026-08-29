@@ -27,6 +27,9 @@ import {
   planAcceptanceResolveParamsSchema,
   planGetParamsSchema,
   planGetResultSchema,
+  processAttachResultSchema,
+  processInputParamsSchema,
+  processReadResultSchema,
   settingsGetResultSchema,
   settingsUpdateParamsSchema,
   settingsUpdateResultSchema,
@@ -52,7 +55,7 @@ import { describe, expect, it } from "vitest";
 
 describe("app-server protocol", () => {
   it("accepts strict versioned requests and safe JSON-RPC IDs", () => {
-    expect(APP_SERVER_PROTOCOL_VERSION).toBe(13);
+    expect(APP_SERVER_PROTOCOL_VERSION).toBe(14);
     expect(
       jsonRpcRequestSchema.parse({
         jsonrpc: "2.0",
@@ -117,6 +120,7 @@ describe("app-server protocol", () => {
           dynamicToolCatalog: true,
           plugins: true,
           workspaceMutationRecovery: true,
+          interactiveProcesses: false,
         },
         providers: [
           {
@@ -138,6 +142,7 @@ describe("app-server protocol", () => {
       dynamicToolCatalog: true,
       plugins: true,
       workspaceMutationRecovery: true,
+      interactiveProcesses: false,
     });
 
     expect(
@@ -413,6 +418,80 @@ describe("app-server protocol", () => {
         turnId: "turn",
         callId: "call",
         decision: "always",
+      }),
+    ).toThrow();
+  });
+
+  it("validates bounded process sessions without native credentials", () => {
+    const processSessionId = "00000000-0000-4000-8000-000000000001";
+    expect(
+      processAttachResultSchema.parse({
+        processSessionId,
+        process: {
+          jobId: "job-1",
+          displayName: "Dev server",
+          cwd: "/workspace",
+          state: "running",
+          lifecycle: "background",
+          createdAtMs: 1,
+          updatedAtMs: 2,
+          pid: 42,
+        },
+        inputState: "owned",
+        rows: 24,
+        cols: 80,
+        cursor: 10,
+        earliestCursor: 5,
+        latestCursor: 20,
+        complete: false,
+      }),
+    ).not.toHaveProperty("capabilityToken");
+    expect(() =>
+      processAttachResultSchema.parse({
+        processSessionId,
+        process: {
+          jobId: "job-1",
+          displayName: "Dev server",
+          cwd: "/workspace",
+          state: "running",
+          lifecycle: "background",
+          createdAtMs: 1,
+          updatedAtMs: 2,
+          pid: 42,
+        },
+        inputState: "owned",
+        rows: 24,
+        cols: 80,
+        cursor: 4,
+        earliestCursor: 5,
+        latestCursor: 20,
+        complete: false,
+      }),
+    ).toThrow();
+    expect(
+      processReadResultSchema.parse({
+        status: "ok",
+        processSessionId,
+        inputState: "read_only",
+        cursor: 5,
+        nextCursor: 8,
+        earliestCursor: 5,
+        latestCursor: 8,
+        complete: true,
+        dataBase64: Buffer.from("abc").toString("base64"),
+      }),
+    ).toMatchObject({ inputState: "read_only" });
+    expect(() =>
+      processInputParamsSchema.parse({
+        processSessionId,
+        dataBase64: Buffer.alloc(16_385).toString("base64"),
+      }),
+    ).toThrow();
+    expect(() =>
+      processInputParamsSchema.parse({
+        processSessionId,
+        dataBase64: "YWJj",
+        leaseToken: "must-stay-server-side",
       }),
     ).toThrow();
   });

@@ -394,6 +394,72 @@ describe("Koda Ink view", () => {
     expect(requestExit).toHaveBeenCalledOnce();
   });
 
+  it("renders process sessions and routes PTY keys without leaking into chat", () => {
+    const controller = fakeInputController();
+    const state = baseState();
+    const process = {
+      jobId: "process-job-1",
+      displayName: "Dev server",
+      cwd: "/workspace",
+      state: "running" as const,
+      lifecycle: "background" as const,
+      createdAtMs: 1,
+      updatedAtMs: 2,
+      pid: 42,
+    };
+    state.mode = "process_view";
+    state.processNavigation = {
+      processes: [process],
+      selectedIndex: 0,
+      scrollOffset: 0,
+      loading: false,
+      viewportHeight: 12,
+      viewportWidth: 80,
+      nextCursor: null,
+      session: {
+        processSessionId: "00000000-0000-4000-8000-000000000001",
+        process,
+        inputState: "owned",
+        rows: 12,
+        cols: 80,
+        cursor: 5,
+        earliestCursor: 0,
+        latestCursor: 5,
+        complete: false,
+        screenRows: ["server ready"],
+        terminating: false,
+      },
+    };
+
+    const frame = renderToString(createElement(KodaView, { state }));
+    expect(frame).toContain("Dev server · process-");
+    expect(frame).toContain("server ready");
+    expect(frame).toContain("Ctrl+C interrupt");
+
+    const requestExit = vi.fn();
+    routeTuiInput(controller, state, "c", key({ ctrl: true }), requestExit);
+    routeTuiInput(controller, state, "k", key(), requestExit);
+    routeTuiInput(controller, state, "k", key({ ctrl: true }), requestExit);
+    routeTuiInput(controller, state, "]", key({ ctrl: true }), requestExit);
+    routeTuiInput(controller, state, "\u001d", key(), requestExit);
+    expect(controller.sendProcessInput).toHaveBeenNthCalledWith(1, "\u0003");
+    expect(controller.sendProcessInput).toHaveBeenNthCalledWith(2, "k");
+    expect(controller.beginProcessTermination).toHaveBeenCalledOnce();
+    expect(controller.detachProcessSession).toHaveBeenCalledTimes(2);
+    expect(requestExit).not.toHaveBeenCalled();
+
+    const processSession = state.processNavigation.session;
+    expect(processSession).toBeDefined();
+    if (processSession === undefined)
+      throw new Error("Expected process session");
+    state.processNavigation.session = {
+      ...processSession,
+      inputState: "read_only",
+    };
+    routeTuiInput(controller, state, "w", key(), requestExit);
+    expect(controller.retryProcessInput).toHaveBeenCalledOnce();
+  });
+
   it("renders and routes thread list and preview modes", () => {
     const controller = fakeInputController();
     const state = baseState();
@@ -937,6 +1003,7 @@ function baseState(): TuiState {
       dynamicToolCatalog: true,
       plugins: true,
       workspaceMutationRecovery: true,
+      interactiveProcesses: false,
     },
     providers: [
       {
@@ -979,6 +1046,7 @@ function baseState(): TuiState {
     planNavigation: undefined,
     extensionNavigation: undefined,
     activityNavigation: undefined,
+    processNavigation: undefined,
   };
 }
 
@@ -1034,6 +1102,17 @@ function fakeInputController() {
     openCurrentActivity: vi.fn(() => Promise.resolve()),
     navigateActivity: vi.fn(() => Promise.resolve()),
     closeActivity: vi.fn(),
+    openProcesses: vi.fn(() => Promise.resolve()),
+    refreshProcesses: vi.fn(() => Promise.resolve()),
+    navigateProcessList: vi.fn(),
+    attachSelectedProcess: vi.fn(() => Promise.resolve()),
+    retryProcessInput: vi.fn(() => Promise.resolve()),
+    sendProcessInput: vi.fn(),
+    beginProcessTermination: vi.fn(),
+    cancelProcessTermination: vi.fn(),
+    confirmProcessTermination: vi.fn(() => Promise.resolve()),
+    detachProcessSession: vi.fn(() => Promise.resolve()),
+    closeProcessLevel: vi.fn(),
     enterPlanAcceptanceFeedback: vi.fn(),
     setPlanAcceptanceFeedback: vi.fn(),
     cancelPlanAcceptanceFeedback: vi.fn(),

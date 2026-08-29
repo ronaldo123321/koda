@@ -21,6 +21,10 @@ import {
   NativeExecutorError,
   type NativeJobSnapshot,
 } from "./native-executor-client.js";
+import type {
+  InteractiveProcessService,
+  InteractiveTerminalStartResult,
+} from "./interactive-process-service.js";
 
 export type CommandErrorCode =
   | "INVALID_COMMAND"
@@ -47,6 +51,14 @@ export interface WorkspaceCommandOptions {
   argv: string[];
   cwd?: string;
   timeoutMs?: number;
+}
+
+export interface WorkspaceTerminalOptions {
+  argv: string[];
+  cwd?: string;
+  timeoutMs: number;
+  lifecycle: "foreground" | "background";
+  displayName?: string;
 }
 
 export interface ExecCommandResult {
@@ -80,6 +92,18 @@ export interface PreparedWorkspaceCommand {
   ): Promise<ExecCommandResult>;
 }
 
+export interface PreparedWorkspaceTerminal {
+  argv: string[];
+  cwd: string;
+  timeoutMs: number;
+  lifecycle: "foreground" | "background";
+  displayName: string;
+  title: string;
+  summary: string;
+  preview: string;
+  execute(signal: AbortSignal): Promise<InteractiveTerminalStartResult>;
+}
+
 export interface WorkspaceCommandRunnerOptions {
   environment?: NodeJS.ProcessEnv;
   maxOutputBytes?: number;
@@ -87,6 +111,7 @@ export interface WorkspaceCommandRunnerOptions {
   terminationGraceMs?: number;
   terminationConfirmationMs?: number;
   nativeExecutor?: NativeExecutorClient;
+  interactiveProcessService?: InteractiveProcessService;
 }
 
 interface WorkingDirectorySnapshot {
@@ -99,6 +124,9 @@ interface WorkingDirectorySnapshot {
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MIN_TIMEOUT_MS = 100;
 const MAX_TIMEOUT_MS = 120_000;
+const MAX_TERMINAL_TIMEOUT_MS = 24 * 60 * 60 * 1_000;
+const DEFAULT_PTY_OUTPUT_BYTES = 4 * 1_048_576;
+const MAX_DISPLAY_NAME_BYTES = 128;
 const DEFAULT_MAX_OUTPUT_BYTES = 65_536;
 const DEFAULT_TERMINATION_GRACE_MS = 500;
 const DEFAULT_TERMINATION_CONFIRMATION_MS = 2_000;
@@ -153,6 +181,7 @@ export class WorkspaceCommandRunner {
     private readonly terminationConfirmationMs: number,
     private readonly artifactStore?: ArtifactStore,
     private readonly nativeExecutor?: NativeExecutorClient,
+    private readonly interactiveProcessService?: InteractiveProcessService,
   ) {}
 
   public static async open(
@@ -188,7 +217,12 @@ export class WorkspaceCommandRunner {
       terminationConfirmationMs,
       options.artifactStore,
       options.nativeExecutor,
+      options.interactiveProcessService,
     );
+  }
+
+  public get supportsInteractiveProcesses(): boolean {
+    return this.interactiveProcessService !== undefined;
   }
 
   public async prepare(
@@ -246,6 +280,82 @@ export class WorkspaceCommandRunner {
         return this.nativeExecutor === undefined
           ? runForegroundCommand(executionOptions)
           : runNativeForegroundCommand(this.nativeExecutor, executionOptions);
+      },
+    };
+  }
+
+  public async prepareTerminal(
+    options: WorkspaceTerminalOptions,
+  ): Promise<PreparedWorkspaceTerminal> {
+    const service = this.interactiveProcessService;
+    if (service === undefined) {
+      throw new CommandError(
+        "NATIVE_EXECUTOR_UNAVAILABLE",
+        "Interactive terminal execution requires the native executor service.",
+      );
+    }
+    const argv = validateArguments(options.argv);
+    const requestedCwd = options.cwd ?? ".";
+    assertIntegerInRange(
+      options.timeoutMs,
+      MIN_TIMEOUT_MS,
+      MAX_TERMINAL_TIMEOUT_MS,
+      "timeout_ms",
+    );
+    const cwd = await this.resolveWorkingDirectory(requestedCwd);
+    const executable = argv[0] ?? "terminal";
+    const defaultDisplayName = basename(executable) || executable;
+    const displayName = options.displayName ?? defaultDisplayName;
+    if (
+      displayName.trim().length === 0 ||
+      Buffer.byteLength(displayName, "utf8") > MAX_DISPLAY_NAME_BYTES ||
+      /[\u0000-\u001F\u007F]/u.test(displayName)
+    ) {
+      throw new CommandError(
+        "INVALID_COMMAND",
+        `Terminal display name must contain 1-${MAX_DISPLAY_NAME_BYTES} UTF-8 bytes without control characters.`,
+      );
+    }
+    let executed = false;
+    return {
+      argv: [...argv],
+      cwd: cwd.workspacePath,
+      timeoutMs: options.timeoutMs,
+      lifecycle: options.lifecycle,
+      displayName,
+      title: `Start terminal ${JSON.stringify(displayName)}`,
+      summary: `Start an interactive ${options.lifecycle} process in ${JSON.stringify(cwd.workspacePath)}.`,
+      preview: [
+        `name: ${JSON.stringify(displayName)}`,
+        `cwd: ${JSON.stringify(cwd.workspacePath)}`,
+        `lifecycle: ${options.lifecycle}`,
+        `timeout: ${options.timeoutMs} ms`,
+        `argv: ${JSON.stringify(argv)}`,
+      ].join("\n"),
+      execute: async (signal) => {
+        if (executed) {
+          throw new CommandError(
+            "INVALID_COMMAND",
+            "A prepared terminal command can execute only once.",
+          );
+        }
+        executed = true;
+        signal.throwIfAborted();
+        await this.revalidateWorkingDirectory(requestedCwd, cwd);
+        return service.startTerminal({
+          argv,
+          cwd: cwd.absolutePath,
+          environment: this.environment,
+          timeoutMs: options.timeoutMs,
+          outputLimitBytes: DEFAULT_PTY_OUTPUT_BYTES,
+          terminationGraceMs: this.terminationGraceMs,
+          terminationConfirmationMs: this.terminationConfirmationMs,
+          rows: 24,
+          cols: 80,
+          term: "xterm-256color",
+          lifecycle: options.lifecycle,
+          displayName,
+        });
       },
     };
   }

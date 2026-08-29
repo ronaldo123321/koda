@@ -802,6 +802,7 @@ mod tests {
         StartParams {
             argv: vec!["/usr/bin/true".to_owned()],
             cwd: std::env::current_dir().expect("cwd").display().to_string(),
+            display_name: None,
             environment: BTreeMap::new(),
             timeout_ms: 1_000,
             output_limit_bytes: 1_024,

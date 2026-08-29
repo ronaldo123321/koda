@@ -10,6 +10,8 @@ import {
   ARTIFACT_READ_DEFAULT_BYTES,
   CONTEXT_INSTRUCTION_READ_DEFAULT_BYTES,
   PLAN_DETAIL_BUDGET_BYTES,
+  PROCESS_LIST_DEFAULT_LIMIT,
+  PROCESS_READ_DEFAULT_BYTES,
   RUNTIME_SETTINGS_MODEL_BUDGET_BYTES,
   artifactIdSchema,
   approvalGrantIdSchema,
@@ -25,6 +27,7 @@ import {
   type ContextRequestDescriptor,
   type ExtensionCatalogResult,
   type ModelProviderId,
+  type InteractiveProcessSummary,
   type PlanCheckpoint,
   type PlanEvidenceReference,
   type PlanGetResult,
@@ -46,6 +49,8 @@ import {
   type WorkspaceMutationConflict,
 } from "@koda/protocol";
 
+import { TerminalScreenProjector } from "./terminal-screen-projector.js";
+
 const MAXIMUM_INPUT_CHARACTERS = 32_768;
 const MAXIMUM_PRESENTATION_CHARACTERS = 8_192;
 const MAXIMUM_HISTORY_ROWS = 200;
@@ -60,6 +65,7 @@ const DEFAULT_VIEWPORT_WIDTH = 80;
 const MINIMUM_VIEWPORT_WIDTH = 20;
 const MAXIMUM_VIEWPORT_WIDTH = 240;
 const DEFAULT_STREAM_FRAME_MS = 32;
+const PROCESS_READ_POLL_MS = 50;
 
 export type TuiConnectionStatus = "ready" | "closing" | "closed" | "error";
 export type TuiMode =
@@ -77,7 +83,10 @@ export type TuiMode =
   | "thread_list"
   | "thread_search_input"
   | "thread_search_results"
-  | "thread_preview";
+  | "thread_preview"
+  | "process_list"
+  | "process_view"
+  | "process_terminate_confirm";
 export type TuiTurnStatus =
   | "starting"
   | "running"
@@ -332,6 +341,31 @@ export interface TuiThreadBrowserState {
   preview?: TuiThreadPreviewState;
 }
 
+export interface TuiProcessSessionState {
+  processSessionId: string;
+  process: InteractiveProcessSummary;
+  inputState: "owned" | "read_only";
+  rows: number;
+  cols: number;
+  cursor: number;
+  earliestCursor: number;
+  latestCursor: number;
+  complete: boolean;
+  screenRows: readonly string[];
+  terminating: boolean;
+}
+
+export interface TuiProcessNavigationState {
+  processes: readonly InteractiveProcessSummary[];
+  selectedIndex: number;
+  scrollOffset: number;
+  loading: boolean;
+  viewportHeight: number;
+  viewportWidth: number;
+  nextCursor: string | null;
+  session?: TuiProcessSessionState;
+}
+
 export interface TuiState {
   connection: TuiConnectionStatus;
   mode: TuiMode;
@@ -355,6 +389,7 @@ export interface TuiState {
   planNavigation: TuiPlanNavigationState | undefined;
   extensionNavigation: TuiExtensionNavigationState | undefined;
   activityNavigation: TuiActivityNavigationState | undefined;
+  processNavigation: TuiProcessNavigationState | undefined;
 }
 
 export type TuiSubmitResult = "handled" | "exit";
@@ -377,6 +412,10 @@ export class TuiController {
   private readonly streamFrameMs: number;
   private readonly notificationScheduler: TuiNotificationScheduler;
   private pendingStreamNotification: unknown | undefined;
+  private processPollHandle: unknown | undefined;
+  private processReadInFlight = false;
+  private processInputQueue: Promise<void> = Promise.resolve();
+  private terminalProjector: TerminalScreenProjector | undefined;
   private streamNotificationDirty = false;
   private pendingWorkspaceMutationResolution:
     | {
@@ -444,6 +483,7 @@ export class TuiController {
       planNavigation: undefined,
       extensionNavigation: undefined,
       activityNavigation: undefined,
+      processNavigation: undefined,
     };
     this.unsubscribeNotification = client.onNotification((notification) => {
       this.receiveNotification(notification);
@@ -516,6 +556,7 @@ export class TuiController {
             "/plan — inspect the durable Plan and latest checkpoint",
             "/extensions — inspect current and durable extension catalogs",
             "/activity — inspect the complete durable execution trace",
+            "/processes — inspect and attach to durable terminal jobs",
             "/clear — clear displayed history only",
             "/threads — browse threads in this workspace",
             "/search <query> — search durable history in this workspace",
@@ -552,6 +593,9 @@ export class TuiController {
       case "/activity":
         await this.openCurrentActivity();
         return "handled";
+      case "/processes":
+        await this.openProcesses();
+        return "handled";
       case "/clear":
         this.update({ transcript: [], notice: "Display history cleared." });
         return "handled";
@@ -578,6 +622,430 @@ export class TuiController {
           `Unknown command '${boundText(input, 256)}'. Use /help.`,
         );
         return "handled";
+    }
+  }
+
+  public async openProcesses(): Promise<void> {
+    if (!this.client.initialization.capabilities.interactiveProcesses) {
+      this.update({
+        notice:
+          "Interactive processes are unavailable. Configure KODA_EXEC_PATH with the native executor.",
+      });
+      return;
+    }
+    if (!this.canEditInput() || this.navigationBusy) {
+      this.update({
+        notice: "Processes are available only while chat is idle.",
+      });
+      return;
+    }
+    const generation = this.beginNavigation();
+    this.navigationBusy = true;
+    this.update({
+      mode: "process_list",
+      processNavigation: {
+        processes: [],
+        selectedIndex: 0,
+        scrollOffset: 0,
+        loading: true,
+        viewportHeight: this.viewportHeight,
+        viewportWidth: this.viewportWidth,
+        nextCursor: null,
+      },
+      notice: "Loading durable terminal jobs…",
+    });
+    try {
+      const result = await this.client.listProcesses({
+        workspace: this.state.configuration.cwd,
+        limit: PROCESS_LIST_DEFAULT_LIMIT,
+      });
+      if (
+        !this.isCurrentNavigation(generation) ||
+        this.state.mode !== "process_list"
+      ) {
+        return;
+      }
+      const current = this.state.processNavigation;
+      if (current === undefined) return;
+      this.update({
+        processNavigation: {
+          ...current,
+          processes: result.processes,
+          selectedIndex: 0,
+          scrollOffset: 0,
+          loading: false,
+          nextCursor: result.nextCursor,
+        },
+        notice:
+          result.processes.length === 0
+            ? "No durable terminal jobs exist in this workspace."
+            : undefined,
+      });
+    } catch (error) {
+      if (!this.isCurrentNavigation(generation)) return;
+      this.update({
+        mode: "chat",
+        processNavigation: undefined,
+        notice: `Could not list terminal jobs: ${errorMessage(error)}`,
+      });
+    } finally {
+      if (this.isCurrentNavigation(generation)) this.navigationBusy = false;
+    }
+  }
+
+  public async refreshProcesses(): Promise<void> {
+    const navigation = this.state.processNavigation;
+    if (
+      this.state.mode !== "process_list" ||
+      navigation === undefined ||
+      navigation.loading ||
+      this.navigationBusy
+    ) {
+      return;
+    }
+    const selectedId = navigation.processes[navigation.selectedIndex]?.jobId;
+    const generation = this.beginNavigation();
+    this.navigationBusy = true;
+    this.update({
+      processNavigation: { ...navigation, loading: true },
+      notice: "Refreshing terminal jobs…",
+    });
+    try {
+      const result = await this.client.listProcesses({
+        workspace: this.state.configuration.cwd,
+        limit: PROCESS_LIST_DEFAULT_LIMIT,
+      });
+      if (!this.isCurrentNavigation(generation)) return;
+      const selectedIndex = Math.max(
+        0,
+        selectedId === undefined
+          ? 0
+          : result.processes.findIndex(
+              (process) => process.jobId === selectedId,
+            ),
+      );
+      this.update({
+        processNavigation: {
+          ...navigation,
+          processes: result.processes,
+          selectedIndex,
+          scrollOffset: keepSelectionVisible(
+            selectedIndex,
+            navigation.scrollOffset,
+            navigation.viewportHeight,
+            result.processes.length,
+          ),
+          loading: false,
+          nextCursor: result.nextCursor,
+        },
+        notice: undefined,
+      });
+    } catch (error) {
+      if (!this.isCurrentNavigation(generation)) return;
+      this.update({
+        processNavigation: { ...navigation, loading: false },
+        notice: `Could not refresh terminal jobs: ${errorMessage(error)}`,
+      });
+    } finally {
+      if (this.isCurrentNavigation(generation)) this.navigationBusy = false;
+    }
+  }
+
+  public navigateProcessList(
+    action: "up" | "down" | "page_up" | "page_down" | "home" | "end",
+  ): void {
+    const navigation = this.state.processNavigation;
+    if (
+      this.state.mode !== "process_list" ||
+      navigation === undefined ||
+      navigation.loading ||
+      navigation.processes.length === 0
+    ) {
+      return;
+    }
+    const amount =
+      action === "page_up" || action === "page_down"
+        ? navigation.viewportHeight
+        : 1;
+    const selectedIndex =
+      action === "home"
+        ? 0
+        : action === "end"
+          ? navigation.processes.length - 1
+          : Math.min(
+              navigation.processes.length - 1,
+              Math.max(
+                0,
+                navigation.selectedIndex +
+                  (action === "up" || action === "page_up" ? -amount : amount),
+              ),
+            );
+    this.update({
+      processNavigation: {
+        ...navigation,
+        selectedIndex,
+        scrollOffset: keepSelectionVisible(
+          selectedIndex,
+          navigation.scrollOffset,
+          navigation.viewportHeight,
+          navigation.processes.length,
+        ),
+      },
+      notice: undefined,
+    });
+  }
+
+  public async attachSelectedProcess(): Promise<void> {
+    const navigation = this.state.processNavigation;
+    const process = navigation?.processes[navigation.selectedIndex];
+    if (
+      this.state.mode !== "process_list" ||
+      navigation === undefined ||
+      process === undefined ||
+      navigation.loading ||
+      this.navigationBusy
+    ) {
+      return;
+    }
+    const generation = this.beginNavigation();
+    this.navigationBusy = true;
+    this.update({
+      processNavigation: { ...navigation, loading: true },
+      notice: `Attaching to ${process.displayName}…`,
+    });
+    try {
+      const attached = await this.client.attachProcess({
+        workspace: this.state.configuration.cwd,
+        jobId: process.jobId,
+        rows: navigation.viewportHeight,
+        cols: navigation.viewportWidth,
+      });
+      if (!this.isCurrentNavigation(generation)) {
+        await this.client
+          .detachProcess({ processSessionId: attached.processSessionId })
+          .catch(() => undefined);
+        return;
+      }
+      this.terminalProjector = new TerminalScreenProjector({
+        width: attached.cols,
+      });
+      this.update({
+        mode: "process_view",
+        processNavigation: {
+          ...navigation,
+          loading: false,
+          session: {
+            processSessionId: attached.processSessionId,
+            process: attached.process,
+            inputState: attached.inputState,
+            rows: attached.rows,
+            cols: attached.cols,
+            cursor: attached.cursor,
+            earliestCursor: attached.earliestCursor,
+            latestCursor: attached.latestCursor,
+            complete: attached.complete,
+            screenRows: [],
+            terminating: false,
+          },
+        },
+        notice:
+          attached.inputState === "owned"
+            ? undefined
+            : "Attached read-only because another client owns terminal input.",
+      });
+      this.scheduleProcessRead();
+    } catch (error) {
+      if (!this.isCurrentNavigation(generation)) return;
+      this.update({
+        processNavigation: { ...navigation, loading: false },
+        notice: `Could not attach to terminal job: ${errorMessage(error)}`,
+      });
+    } finally {
+      if (this.isCurrentNavigation(generation)) this.navigationBusy = false;
+    }
+  }
+
+  public async retryProcessInput(): Promise<void> {
+    const session = this.state.processNavigation?.session;
+    if (this.state.mode !== "process_view" || session === undefined) return;
+    try {
+      const result = await this.client.acquireProcessInput({
+        processSessionId: session.processSessionId,
+      });
+      if (result.inputState === "owned") {
+        await this.client.resizeProcess({
+          processSessionId: session.processSessionId,
+          rows: this.viewportHeight,
+          cols: this.viewportWidth,
+        });
+      }
+      const current = this.state.processNavigation;
+      if (current?.session?.processSessionId !== session.processSessionId)
+        return;
+      this.update({
+        processNavigation: {
+          ...current,
+          session: {
+            ...current.session,
+            inputState: result.inputState,
+            rows: this.viewportHeight,
+            cols: this.viewportWidth,
+          },
+        },
+        notice:
+          result.inputState === "owned"
+            ? "Terminal input acquired."
+            : "Terminal input is still owned by another attachment.",
+      });
+    } catch (error) {
+      this.update({
+        notice: `Could not acquire terminal input: ${errorMessage(error)}`,
+      });
+    }
+  }
+
+  public sendProcessInput(data: string): void {
+    const session = this.state.processNavigation?.session;
+    if (
+      this.state.mode !== "process_view" ||
+      session === undefined ||
+      session.inputState !== "owned" ||
+      data.length === 0
+    ) {
+      return;
+    }
+    const bytes = Buffer.from(data, "utf8");
+    if (bytes.byteLength === 0 || bytes.byteLength > 16_384) return;
+    const processSessionId = session.processSessionId;
+    this.processInputQueue = this.processInputQueue
+      .then(async () => {
+        const current = this.state.processNavigation?.session;
+        if (
+          current?.processSessionId !== processSessionId ||
+          current.inputState !== "owned"
+        ) {
+          return;
+        }
+        await this.client.writeProcessInput({
+          processSessionId,
+          dataBase64: bytes.toString("base64"),
+        });
+      })
+      .catch((error: unknown) => {
+        const current = this.state.processNavigation;
+        if (current?.session?.processSessionId !== processSessionId) return;
+        const leaseLost = [
+          "INPUT_LEASE_EXPIRED",
+          "STALE_INPUT_FENCE",
+          "PROCESS_INPUT_READ_ONLY",
+        ].includes(structuredErrorCode(error) ?? "");
+        this.update({
+          processNavigation: {
+            ...current,
+            session: {
+              ...current.session,
+              ...(leaseLost ? { inputState: "read_only" as const } : {}),
+            },
+          },
+          notice: `Terminal input failed: ${errorMessage(error)}`,
+        });
+      });
+  }
+
+  public beginProcessTermination(): void {
+    const session = this.state.processNavigation?.session;
+    if (this.state.mode !== "process_view" || session === undefined) return;
+    this.update({ mode: "process_terminate_confirm", notice: undefined });
+  }
+
+  public cancelProcessTermination(): void {
+    if (this.state.mode === "process_terminate_confirm") {
+      this.update({ mode: "process_view", notice: undefined });
+    }
+  }
+
+  public async confirmProcessTermination(): Promise<void> {
+    const navigation = this.state.processNavigation;
+    const session = navigation?.session;
+    if (
+      this.state.mode !== "process_terminate_confirm" ||
+      navigation === undefined ||
+      session === undefined ||
+      session.terminating
+    ) {
+      return;
+    }
+    this.cancelProcessPoll();
+    this.update({
+      processNavigation: {
+        ...navigation,
+        session: { ...session, terminating: true },
+      },
+      notice: `Terminating ${session.process.displayName}…`,
+    });
+    try {
+      await this.client.terminateProcess({
+        workspace: this.state.configuration.cwd,
+        jobId: session.process.jobId,
+      });
+      await this.detachProcessSession(false);
+      this.update({ notice: `Terminated ${session.process.displayName}.` });
+      await this.refreshProcesses();
+    } catch (error) {
+      const current = this.state.processNavigation;
+      if (current?.session?.processSessionId === session.processSessionId) {
+        this.update({
+          mode: "process_view",
+          processNavigation: {
+            ...current,
+            session: { ...current.session, terminating: false },
+          },
+          notice: `Could not terminate process: ${errorMessage(error)}`,
+        });
+        this.scheduleProcessRead();
+      }
+    }
+  }
+
+  public async detachProcessSession(refresh = true): Promise<void> {
+    const navigation = this.state.processNavigation;
+    const session = navigation?.session;
+    if (navigation === undefined || session === undefined) return;
+    this.cancelProcessPoll();
+    this.terminalProjector = undefined;
+    const { session: _detachedSession, ...listNavigation } = navigation;
+    this.update({
+      mode: "process_list",
+      processNavigation: listNavigation,
+      notice: "Detached; the durable process continues running.",
+    });
+    try {
+      await this.client.detachProcess({
+        processSessionId: session.processSessionId,
+      });
+      if (refresh) await this.refreshProcesses();
+    } catch (error) {
+      this.update({
+        notice: `Process session detached locally: ${errorMessage(error)}`,
+      });
+    }
+  }
+
+  public closeProcessLevel(): void {
+    if (
+      this.state.mode === "process_view" ||
+      this.state.mode === "process_terminate_confirm"
+    ) {
+      void this.detachProcessSession();
+      return;
+    }
+    if (this.state.mode === "process_list") {
+      this.cancelNavigation();
+      this.update({
+        mode: "chat",
+        processNavigation: undefined,
+        notice: undefined,
+      });
     }
   }
 
@@ -2768,6 +3236,7 @@ export class TuiController {
     const planNavigation = this.state.planNavigation;
     const extensionNavigation = this.state.extensionNavigation;
     const activityNavigation = this.state.activityNavigation;
+    const processNavigation = this.state.processNavigation;
     if (!Number.isFinite(height) || !Number.isFinite(width)) {
       return;
     }
@@ -2787,7 +3256,8 @@ export class TuiController {
       contextNavigation === undefined &&
       planNavigation === undefined &&
       extensionNavigation === undefined &&
-      activityNavigation === undefined
+      activityNavigation === undefined &&
+      processNavigation === undefined
     ) {
       return;
     }
@@ -2798,6 +3268,9 @@ export class TuiController {
     const contextList = contextNavigation?.list;
     const contextDetail = contextNavigation?.detail;
     const contextView = contextNavigation?.instructionView;
+    if (processNavigation?.session !== undefined) {
+      this.terminalProjector?.resize(viewportWidth);
+    }
     this.update({
       ...(browser === undefined
         ? {}
@@ -2993,7 +3466,59 @@ export class TuiController {
               ),
             },
           }),
+      ...(processNavigation === undefined
+        ? {}
+        : {
+            processNavigation: {
+              ...processNavigation,
+              viewportHeight,
+              viewportWidth,
+              scrollOffset: keepSelectionVisible(
+                processNavigation.selectedIndex,
+                processNavigation.scrollOffset,
+                viewportHeight,
+                processNavigation.processes.length,
+              ),
+              ...(processNavigation.session === undefined
+                ? {}
+                : {
+                    session: {
+                      ...processNavigation.session,
+                      rows: viewportHeight,
+                      cols: viewportWidth,
+                      screenRows:
+                        this.terminalProjector?.renderRows(viewportHeight) ??
+                        processNavigation.session.screenRows,
+                    },
+                  }),
+            },
+          }),
     });
+    const processSession = processNavigation?.session;
+    if (
+      processSession !== undefined &&
+      processSession.inputState === "owned" &&
+      (processSession.rows !== viewportHeight ||
+        processSession.cols !== viewportWidth)
+    ) {
+      void this.client
+        .resizeProcess({
+          processSessionId: processSession.processSessionId,
+          rows: viewportHeight,
+          cols: viewportWidth,
+        })
+        .catch((error: unknown) => {
+          const current = this.state.processNavigation;
+          if (
+            current?.session?.processSessionId ===
+            processSession.processSessionId
+          ) {
+            this.update({
+              notice: `Terminal resize failed: ${errorMessage(error)}`,
+            });
+          }
+        });
+    }
   }
 
   public async scrollPreview(
@@ -4479,7 +5004,120 @@ export class TuiController {
     this.unsubscribeNotification();
     this.unsubscribeDisconnect();
     this.cancelPendingStreamNotification();
+    this.cancelProcessPoll();
+    const sessionId = this.state.processNavigation?.session?.processSessionId;
+    if (sessionId !== undefined) {
+      void this.client
+        .detachProcess({ processSessionId: sessionId })
+        .catch(() => undefined);
+    }
     this.listeners.clear();
+  }
+
+  private scheduleProcessRead(): void {
+    if (this.processPollHandle !== undefined || this.processReadInFlight)
+      return;
+    const session = this.state.processNavigation?.session;
+    if (
+      session === undefined ||
+      session.complete ||
+      (this.state.mode !== "process_view" &&
+        this.state.mode !== "process_terminate_confirm")
+    ) {
+      return;
+    }
+    this.processPollHandle = this.notificationScheduler.schedule(() => {
+      this.processPollHandle = undefined;
+      void this.readProcessOnce();
+    }, PROCESS_READ_POLL_MS);
+  }
+
+  private cancelProcessPoll(): void {
+    if (this.processPollHandle !== undefined) {
+      this.notificationScheduler.cancel(this.processPollHandle);
+      this.processPollHandle = undefined;
+    }
+  }
+
+  private async readProcessOnce(): Promise<void> {
+    const navigation = this.state.processNavigation;
+    const session = navigation?.session;
+    if (
+      this.processReadInFlight ||
+      navigation === undefined ||
+      session === undefined ||
+      (this.state.mode !== "process_view" &&
+        this.state.mode !== "process_terminate_confirm")
+    ) {
+      return;
+    }
+    this.processReadInFlight = true;
+    try {
+      const result = await this.client.readProcess({
+        processSessionId: session.processSessionId,
+        maxBytes: PROCESS_READ_DEFAULT_BYTES,
+      });
+      const current = this.state.processNavigation;
+      if (current?.session?.processSessionId !== session.processSessionId)
+        return;
+      if (result.status === "cursor_expired") {
+        this.terminalProjector?.clear();
+        this.update({
+          processNavigation: {
+            ...current,
+            session: {
+              ...current.session,
+              inputState: result.inputState,
+              cursor: result.earliestCursor,
+              earliestCursor: result.earliestCursor,
+              latestCursor: result.latestCursor,
+              complete: result.complete,
+              screenRows: [],
+            },
+          },
+          notice:
+            "Older terminal output rotated away; resumed at the retained tail.",
+        });
+      } else {
+        const bytes = Buffer.from(result.dataBase64, "base64");
+        this.terminalProjector?.push(bytes);
+        if (result.complete) this.terminalProjector?.finish();
+        this.update(
+          {
+            processNavigation: {
+              ...current,
+              session: {
+                ...current.session,
+                inputState: result.inputState,
+                cursor: result.nextCursor,
+                earliestCursor: result.earliestCursor,
+                latestCursor: result.latestCursor,
+                complete: result.complete,
+                screenRows:
+                  this.terminalProjector?.renderRows(current.viewportHeight) ??
+                  [],
+              },
+            },
+          },
+          "stream",
+        );
+      }
+    } catch (error) {
+      const current = this.state.processNavigation;
+      if (current?.session?.processSessionId !== session.processSessionId)
+        return;
+      this.cancelProcessPoll();
+      this.terminalProjector = undefined;
+      const { session: _endedSession, ...listNavigation } = current;
+      this.update({
+        mode: "process_list",
+        processNavigation: listNavigation,
+        notice: `Terminal attachment ended: ${errorMessage(error)}`,
+      });
+    } finally {
+      this.processReadInFlight = false;
+      this.scheduleProcessRead();
+    }
   }
 
   private async cancelActiveTurnOnce(): Promise<void> {
@@ -4516,8 +5154,16 @@ export class TuiController {
       return;
     }
     this.cancelNavigation();
+    const processSessionId =
+      this.state.processNavigation?.session?.processSessionId;
+    this.cancelProcessPoll();
     this.update({ connection: "closing", notice: "Shutting down…" });
     try {
+      if (processSessionId !== undefined) {
+        await this.client
+          .detachProcess({ processSessionId })
+          .catch(() => undefined);
+      }
       await this.client.shutdown();
       this.update({
         connection: "closed",
@@ -4532,6 +5178,7 @@ export class TuiController {
         planNavigation: undefined,
         extensionNavigation: undefined,
         activityNavigation: undefined,
+        processNavigation: undefined,
         notice: undefined,
       });
     } catch (error) {
@@ -4548,6 +5195,7 @@ export class TuiController {
         planNavigation: undefined,
         extensionNavigation: undefined,
         activityNavigation: undefined,
+        processNavigation: undefined,
         notice: `Shutdown failed: ${errorMessage(error)}`,
       });
     }
@@ -4945,6 +5593,8 @@ export class TuiController {
       return;
     }
     this.cancelNavigation();
+    this.cancelProcessPoll();
+    this.terminalProjector = undefined;
     const message =
       error === undefined
         ? "The app-server connection closed."
@@ -4965,6 +5615,8 @@ export class TuiController {
       contextNavigation: undefined,
       planNavigation: undefined,
       extensionNavigation: undefined,
+      activityNavigation: undefined,
+      processNavigation: undefined,
       transcript: [
         ...this.state.transcript,
         ...activeEntries.map((entry) =>

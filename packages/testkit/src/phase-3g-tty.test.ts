@@ -76,6 +76,9 @@ describeRealTty("Phase 3I real TTY closure", () => {
     expect(stripTerminalControl(output)).toContain(
       "#0 tool.started · update_plan · call phase-3g-tty-call",
     );
+    expect(stripTerminalControl(output)).toContain("Durable terminal jobs");
+    expect(stripTerminalControl(output)).toContain("pty-ready");
+    expect(stripTerminalControl(output)).toContain("pty-input:03");
     expect(stripTerminalControl(output)).toContain("[phase-3g-tty] exit 0");
     expect(output).toContain("\u001b[?25h");
     expect(output).not.toContain("An interactive TTY is required");

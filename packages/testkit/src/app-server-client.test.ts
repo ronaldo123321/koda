@@ -275,6 +275,7 @@ describe("NodeAppServerClient", () => {
         dynamicToolCatalog: true,
         plugins: true,
         workspaceMutationRecovery: true,
+        interactiveProcesses: false,
       },
       providers: [
         { id: "openai", configured: true },
@@ -605,6 +606,7 @@ function fixtureServerScript(options: {
       dynamicToolCatalog: true,
       plugins: true,
       workspaceMutationRecovery: true,
+      interactiveProcesses: false,
     },
     providers: [
       {

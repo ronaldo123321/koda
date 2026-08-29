@@ -103,6 +103,7 @@ import {
   ArtifactMaintenanceLease,
   ArtifactStore,
   JsonlEventStore,
+  type InteractiveProcessService,
   NativeExecutorClient,
   ProjectCommandTemplateError,
   ProjectSkillError,
@@ -132,6 +133,7 @@ import {
   registerArtifactTools,
   registerChangeSetTool,
   registerExecCommandTool,
+  registerExecTerminalTool,
   registerPatchSetTool,
   registerProjectSkillTool,
   registerReadOnlyWorkspaceTools,
@@ -349,6 +351,7 @@ export interface KodaApplicationOptions {
   processDirectory: string;
   dependencies?: KodaApplicationDependencies;
   approvalGrantRegistry?: ApprovalGrantRegistry;
+  interactiveProcessService?: InteractiveProcessService;
 }
 
 export interface KodaApplicationDependencies {
@@ -386,6 +389,8 @@ export class KodaApplication {
   private readonly processDirectory: string;
   private readonly dependencies: KodaApplicationDependencies;
   private readonly approvalGrantRegistry: ApprovalGrantRegistry;
+  private readonly interactiveProcessService:
+    InteractiveProcessService | undefined;
 
   public constructor(options: KodaApplicationOptions) {
     this.environment = options.environment;
@@ -393,6 +398,7 @@ export class KodaApplication {
     this.dependencies = options.dependencies ?? productionDependencies;
     this.approvalGrantRegistry =
       options.approvalGrantRegistry ?? new ApprovalGrantRegistry();
+    this.interactiveProcessService = options.interactiveProcessService;
   }
 
   public startTurn(input: StartTurnInput, client: TurnClient): TurnHandle {
@@ -1596,18 +1602,23 @@ export class KodaApplication {
       );
       const nativeExecutorPath = this.environment.KODA_EXEC_PATH?.trim();
       const nativeExecutor =
-        nativeExecutorPath === undefined || nativeExecutorPath.length === 0
+        this.interactiveProcessService?.nativeExecutor ??
+        (nativeExecutorPath === undefined || nativeExecutorPath.length === 0
           ? undefined
           : await NativeExecutorClient.open({
               binaryPath: nativeExecutorPath,
               stateDirectory: join(configuration.kodaHome, "executor"),
-            });
+            }));
       const commandRunner = await WorkspaceCommandRunner.open(workspace.root, {
         environment: this.environment,
         artifactStore,
         ...(nativeExecutor === undefined ? {} : { nativeExecutor }),
+        ...(this.interactiveProcessService === undefined
+          ? {}
+          : { interactiveProcessService: this.interactiveProcessService }),
       });
       registerExecCommandTool(tools, commandRunner);
+      registerExecTerminalTool(tools, commandRunner);
       pluginSession.registerTools(tools);
       mcpSession = await McpTurnSession.open({
         environment: this.environment,
@@ -2658,7 +2669,8 @@ function buildInstructions(
     "Prefer apply_patchset for compact line-oriented multi-hunk coding edits. Use one strict Koda Patch v1 envelope with Add, Update, Move, or Delete sections; update context is exact, and Git unified-diff headers or fuzzy matching are not supported.",
     "Use apply_changes when two or more paths must change together, one file needs several exact edits, or a regular UTF-8 text file must move or be deleted. Change-set paths cannot overlap, parents must already exist, and moves must remain on one filesystem.",
     "Every patch or change set is controlled by runtime policy and may require user approval. A rejection means no file was changed. Never automatically repeat an incomplete or uncertain write; inspect every affected path first.",
-    "Use exec_command for focused, non-interactive validation. Pass the executable and each argument as separate argv strings; direct shell interpreters, shell syntax, pipelines, redirection, background sessions, and stdin are unavailable.",
+    "Use exec_command for focused, non-interactive validation. Pass the executable and each argument as separate argv strings; direct shell interpreters, shell syntax, pipelines, redirection, background sessions, and stdin are unavailable to exec_command.",
+    "When exec_terminal is available, use it only for commands that genuinely require a durable PTY, stdin, or background lifetime. It returns a process handle after separate user approval; terminal output is not model context.",
     "Every command requires runtime authorization because repository scripts may have arbitrary side effects. Treat rejection as meaning no process was started.",
     "Prefer the narrowest relevant check, inspect failures before changing code again, and explain completed work concisely with relevant file paths.",
   ];

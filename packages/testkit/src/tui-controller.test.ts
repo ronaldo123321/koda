@@ -73,9 +73,133 @@ import {
   projectThreadHistory,
   type TuiNotificationScheduler,
 } from "@koda/tui";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 describe("TuiController", () => {
+  it("lists, attaches, projects, writes, reacquires, and detaches terminal sessions", async () => {
+    const client = new FakeAppServerClient();
+    client.initialization.capabilities.interactiveProcesses = true;
+    const process = {
+      jobId: "process-job-1",
+      displayName: "Dev server",
+      cwd: "/workspace",
+      state: "running" as const,
+      lifecycle: "background" as const,
+      createdAtMs: 1,
+      updatedAtMs: 2,
+      pid: 42,
+    };
+    const listProcesses = vi.spyOn(client, "listProcesses").mockResolvedValue({
+      workspace: "/workspace",
+      processes: [process],
+      nextCursor: null,
+    });
+    const attachProcess = vi.spyOn(client, "attachProcess").mockResolvedValue({
+      processSessionId: "00000000-0000-4000-8000-000000000001",
+      process,
+      inputState: "owned",
+      rows: 12,
+      cols: 80,
+      cursor: 0,
+      earliestCursor: 0,
+      latestCursor: 0,
+      complete: false,
+    });
+    const readProcess = vi.spyOn(client, "readProcess").mockResolvedValue({
+      status: "ok",
+      processSessionId: "00000000-0000-4000-8000-000000000001",
+      inputState: "read_only",
+      cursor: 0,
+      nextCursor: 18,
+      earliestCursor: 0,
+      latestCursor: 18,
+      complete: true,
+      dataBase64: Buffer.from("\u001b[31mserver ready\u001b[0m").toString(
+        "base64",
+      ),
+    });
+    const writeProcessInput = vi
+      .spyOn(client, "writeProcessInput")
+      .mockResolvedValue({
+        processSessionId: "00000000-0000-4000-8000-000000000001",
+        acceptedBytes: 2,
+      });
+    vi.spyOn(client, "acquireProcessInput").mockResolvedValue({
+      processSessionId: "00000000-0000-4000-8000-000000000001",
+      inputState: "owned",
+    });
+    const resizeProcess = vi.spyOn(client, "resizeProcess").mockResolvedValue({
+      processSessionId: "00000000-0000-4000-8000-000000000001",
+      rows: 12,
+      cols: 80,
+    });
+    const detachProcess = vi.spyOn(client, "detachProcess").mockResolvedValue({
+      detached: true,
+    });
+    const scheduler = new ManualNotificationScheduler();
+    const controller = new TuiController(
+      client,
+      { cwd: "/workspace", provider: "openai" },
+      { notificationScheduler: scheduler },
+    );
+
+    controller.setInput("/processes");
+    await controller.submitInput();
+    expect(listProcesses).toHaveBeenCalledWith({
+      workspace: "/workspace",
+      limit: 50,
+    });
+    expect(controller.getSnapshot()).toMatchObject({
+      mode: "process_list",
+      processNavigation: { processes: [process] },
+    });
+
+    await controller.attachSelectedProcess();
+    expect(attachProcess).toHaveBeenCalledWith({
+      workspace: "/workspace",
+      jobId: process.jobId,
+      rows: 12,
+      cols: 80,
+    });
+    controller.sendProcessInput("x\r");
+    await Promise.resolve();
+    expect(writeProcessInput).toHaveBeenCalledWith({
+      processSessionId: "00000000-0000-4000-8000-000000000001",
+      dataBase64: Buffer.from("x\r").toString("base64"),
+    });
+
+    scheduler.flushAll();
+    await Promise.resolve();
+    expect(readProcess).toHaveBeenCalledOnce();
+    expect(controller.getSnapshot()).toMatchObject({
+      mode: "process_view",
+      processNavigation: {
+        session: {
+          inputState: "read_only",
+          screenRows: ["server ready"],
+          complete: true,
+        },
+      },
+    });
+    await controller.retryProcessInput();
+    expect(resizeProcess).toHaveBeenCalledWith({
+      processSessionId: "00000000-0000-4000-8000-000000000001",
+      rows: 12,
+      cols: 80,
+    });
+    expect(
+      controller.getSnapshot().processNavigation?.session?.inputState,
+    ).toBe("owned");
+
+    await controller.detachProcessSession(false);
+    expect(detachProcess).toHaveBeenCalledWith({
+      processSessionId: "00000000-0000-4000-8000-000000000001",
+    });
+    expect(controller.getSnapshot().mode).toBe("process_list");
+    expect(controller.getSnapshot().processNavigation?.session).toBeUndefined();
+    controller.dispose();
+  });
+
   it("edits and applies workspace runtime settings for a new thread", async () => {
     const client = new FakeAppServerClient();
     const controller = createController(client);
@@ -2209,6 +2333,7 @@ class FakeAppServerClient implements AppServerClientApi {
         dynamicToolCatalog: true,
         plugins: true,
         workspaceMutationRecovery: true,
+        interactiveProcesses: false,
       },
       providers: [
         provider("openai", "OpenAI", "OPENAI_API_KEY", "gpt-5.6-terra"),
@@ -2613,6 +2738,54 @@ class FakeAppServerClient implements AppServerClientApi {
   ): Promise<ApprovalGrantsRevokeAllResult> {
     this.approvalGrantRevokeAllRequests.push(params);
     return Promise.resolve({ revokedCount: 0 });
+  }
+
+  public listProcesses(
+    ..._args: Parameters<AppServerClientApi["listProcesses"]>
+  ): ReturnType<AppServerClientApi["listProcesses"]> {
+    return Promise.reject(new Error("Process fixture is unavailable."));
+  }
+
+  public attachProcess(
+    ..._args: Parameters<AppServerClientApi["attachProcess"]>
+  ): ReturnType<AppServerClientApi["attachProcess"]> {
+    return Promise.reject(new Error("Process fixture is unavailable."));
+  }
+
+  public readProcess(
+    ..._args: Parameters<AppServerClientApi["readProcess"]>
+  ): ReturnType<AppServerClientApi["readProcess"]> {
+    return Promise.reject(new Error("Process fixture is unavailable."));
+  }
+
+  public acquireProcessInput(
+    ..._args: Parameters<AppServerClientApi["acquireProcessInput"]>
+  ): ReturnType<AppServerClientApi["acquireProcessInput"]> {
+    return Promise.reject(new Error("Process fixture is unavailable."));
+  }
+
+  public writeProcessInput(
+    ..._args: Parameters<AppServerClientApi["writeProcessInput"]>
+  ): ReturnType<AppServerClientApi["writeProcessInput"]> {
+    return Promise.reject(new Error("Process fixture is unavailable."));
+  }
+
+  public resizeProcess(
+    ..._args: Parameters<AppServerClientApi["resizeProcess"]>
+  ): ReturnType<AppServerClientApi["resizeProcess"]> {
+    return Promise.reject(new Error("Process fixture is unavailable."));
+  }
+
+  public detachProcess(
+    ..._args: Parameters<AppServerClientApi["detachProcess"]>
+  ): ReturnType<AppServerClientApi["detachProcess"]> {
+    return Promise.reject(new Error("Process fixture is unavailable."));
+  }
+
+  public terminateProcess(
+    ..._args: Parameters<AppServerClientApi["terminateProcess"]>
+  ): ReturnType<AppServerClientApi["terminateProcess"]> {
+    return Promise.reject(new Error("Process fixture is unavailable."));
   }
 
   public onNotification(

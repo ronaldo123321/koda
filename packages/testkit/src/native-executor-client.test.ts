@@ -1,13 +1,16 @@
-import type { ToolOperationalEvent } from "@koda/agent-core";
+import { ToolRegistry, type ToolOperationalEvent } from "@koda/agent-core";
+import { threadIdSchema, toolCallIdSchema, turnIdSchema } from "@koda/protocol";
 import {
   ArtifactStore,
+  InteractiveProcessService,
   NativeExecutorClient,
   type NativePtyAttachment,
   WorkspaceCommandRunner,
+  registerExecTerminalTool,
   type NativeJobSnapshot,
 } from "@koda/runtime-node";
 import { randomUUID } from "node:crypto";
-import { access, mkdtemp, rm } from "node:fs/promises";
+import { access, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -85,6 +88,99 @@ describeNative("NativeExecutorClient", () => {
       '{"stdin":true,"stdout":true,"rows":24,"cols":80}',
     );
     expect(output).toContain('INPUT:"hello\\n"');
+  });
+
+  it("starts an approved exec_terminal handle and exposes only app process sessions", async () => {
+    const service = await InteractiveProcessService.open({
+      binaryPath: resolve("target/debug/koda-exec"),
+      stateDirectory: join(root, "state"),
+      socketPath: join(root, "exec.sock"),
+      leaseRenewalMs: 100,
+    });
+    try {
+      const runner = await WorkspaceCommandRunner.open(root, {
+        nativeExecutor: service.nativeExecutor,
+        interactiveProcessService: service,
+        terminationGraceMs: 25,
+      });
+      const registry = new ToolRegistry();
+      registerExecTerminalTool(registry, runner);
+      const prepared = await registry.prepare(
+        {
+          callId: toolCallIdSchema.parse("terminal-tool-call"),
+          name: "exec_terminal",
+          arguments: {
+            argv: [
+              process.execPath,
+              "-e",
+              "console.log('ready');process.stdin.once('data',(data)=>{console.log('echo:'+data.toString().trim());process.exit(0)})",
+            ],
+            timeout_ms: 3_000,
+            lifecycle: "background",
+            display_name: "Tool terminal",
+          },
+        },
+        {
+          threadId: threadIdSchema.parse("terminal-tool-thread"),
+          turnId: turnIdSchema.parse("terminal-tool-turn"),
+          signal: new AbortController().signal,
+        },
+      );
+      if (prepared.status !== "ready") {
+        throw new Error("exec_terminal did not prepare successfully.");
+      }
+      expect(prepared.invocation.approval).toMatchObject({
+        title: 'Start terminal "Tool terminal"',
+      });
+      expect(prepared.invocation.approval?.grantCandidate).toBeUndefined();
+      const execution = await prepared.invocation.execute();
+      expect(execution.status).toBe("success");
+      if (execution.status !== "success") {
+        throw new Error("exec_terminal did not return a durable handle.");
+      }
+      const jobId = (execution.output as { job_id?: string }).job_id;
+      if (jobId === undefined) throw new Error("Missing exec_terminal job ID.");
+
+      const listed = await service.listProcesses({ workspace: root });
+      const canonicalRoot = await realpath(root);
+      expect(listed.processes).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            jobId,
+            displayName: "Tool terminal",
+            cwd: canonicalRoot,
+          }),
+        ]),
+      );
+      expect(JSON.stringify(listed)).not.toContain("process.stdin.once");
+      const attached = await service.attach({
+        workspace: root,
+        jobId,
+        rows: 30,
+        cols: 100,
+      });
+      expect(attached).toMatchObject({ inputState: "owned" });
+      await service.writeInput(
+        attached.processSessionId,
+        Buffer.from("hello\n"),
+      );
+      let output = "";
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const chunk = await service.read(attached.processSessionId);
+        if (chunk.status === "ok") {
+          output += Buffer.from(chunk.dataBase64, "base64").toString("utf8");
+          if (output.includes("echo:hello")) break;
+        }
+        await new Promise<void>((resolvePromise) =>
+          setTimeout(resolvePromise, 10),
+        );
+      }
+      expect(output).toContain("ready");
+      expect(output).toContain("echo:hello");
+      await service.detach(attached.processSessionId);
+    } finally {
+      await service.close();
+    }
   });
 
   it("allows many PTY readers but only one fenced resize and input owner", async () => {

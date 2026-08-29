@@ -1,6 +1,6 @@
 # Koda Phase 4 Hardening Roadmap
 
-- Status: In progress — Phase 4B3A runtime complete; Phase 4B3B product UX next
+- Status: In progress — Phase 4B3 complete; Phase 4B4 platform completion next
 - Date: 2026-08-28
 - Depends on: completed Phase 3A through Phase 3I baseline
 
@@ -45,7 +45,7 @@ Implementation status:
 
 ### Phase 4B: supervised native execution boundary
 
-Status: In progress — Phase 4B3A runtime complete; Phase 4B3B product UX next
+Status: In progress — Phase 4B3 complete; Phase 4B4 platform completion next
 
 - Define a versioned local executor protocol independent of providers and clients.
 - Add the Rust `koda-exec` sidecar for durable process ownership and bounded shutdown.
@@ -61,7 +61,7 @@ Implementation status:
 - **Phase 4B1 complete:** Cargo workspace and `koda-exec`, private same-user Unix Socket, strict length-prefixed protocol v1, capability handshake, idempotent foreground starts, POSIX process groups, timeout/cancellation escalation, bounded file-backed stdout/stderr, reconnectable live job status and output, strict Node client validation, explicit `KODA_EXEC_PATH` selection, existing exec-tool result/audit compatibility, and cross-language tests.
 - **Phase 4B2 complete:** per-job detached Workers, crash-durable manifests/state heads, authenticated Supervisor restart attachment, start-identity reconciliation, command start gates, bounded job listing, conservative retention/quarantine, and deterministic Supervisor/Worker kill-point tests.
 - **Phase 4B3A complete:** POSIX PTY/background starts, Worker-owned controlling terminals, attach/detach, bounded segmented cursor logs, HMAC attachment capabilities, renewable fenced input ownership, resize, strict Node primitives, and real-PTY restart/failure tests.
-- **Phase 4B3B design accepted; implementation next:** approved `exec_terminal`, app-server process sessions, TUI process pane, safe key routing, visual attachment/lease state, and bounded terminal projection.
+- **Phase 4B3B complete:** approved `exec_terminal`, app-server protocol v14 process sessions, workspace-filtered discovery, TUI process pane, safe key routing, visible attachment/lease state, bounded terminal projection, and real-TTY acceptance.
 
 The accepted Phase 4B2 contract is in [Phase 4B2 Worker recovery](2026-08-29-phase-4b2-worker-recovery-design.md).
 The accepted runtime-first Phase 4B3A contract is in [Phase 4B3A PTY and background runtime](2026-08-29-phase-4b3a-pty-background-runtime-design.md).

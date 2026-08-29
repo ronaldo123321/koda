@@ -1,6 +1,6 @@
 # Koda Phase 4B3B Interactive Process UI Design
 
-- Status: Accepted — implementation next
+- Status: Complete — protocol, Tool, app-server sessions, TUI workflow, and acceptance implemented
 - Date: 2026-08-29
 - Depends on: Phase 4B3A PTY and background runtime complete
 
@@ -115,9 +115,11 @@ Attach enters `process_view`. The header shows job identity, state, lease mode,
 cursor range, and terminal dimensions. When input is owned, printable bytes,
 Enter, Tab, Backspace, arrows, and Ctrl combinations are encoded for the PTY.
 When read-only, keys do not reach the process and `w` retries ownership.
-`Ctrl+]` always detaches. `k` opens `process_terminate_confirm`; `y` terminates
-and `n` or Escape cancels. `Ctrl+C` in an owned PTY sends byte `0x03`; it does
-not cancel an Agent Turn or exit Koda.
+`Ctrl+]` always detaches. In an owned session, `Ctrl+K` opens
+`process_terminate_confirm` so an ordinary `k` can still reach the PTY; in a
+read-only session, `k` opens the same confirmation. `y` terminates and `n` or
+Escape cancels. `Ctrl+C` in an owned PTY sends byte `0x03`; it does not cancel
+an Agent Turn or exit Koda.
 
 The active process view polls bounded output approximately every 50 ms and
 resizes on host terminal resize. Terminal jobs remain viewable until detached.
@@ -202,3 +204,27 @@ Complete VT/xterm alternate-screen emulation, exact `vim/top/less` behavior,
 mouse protocols, clipboard integration, remote multi-client arbitration, and
 Windows ConPTY remain outside Phase 4B3B. Remote authenticated transport remains
 Phase 4D; Windows process ownership remains Phase 4B4.
+
+## Implementation result
+
+Phase 4B3B is implemented on `main`. App-server protocol v14 conditionally
+advertises interactive-process support and exposes bounded list, attach, read,
+input-acquisition, input, resize, detach, and terminate methods. A long-lived
+`InteractiveProcessService` retains native capabilities and fenced leases
+server-side, renews input ownership, filters discovery to canonical workspace
+PTY jobs, and returns only random process-session IDs to clients.
+
+The approved `exec_terminal` Tool reuses `WorkspaceCommandRunner` command
+preparation and safety policy, starts a durable PTY through the shared native
+executor, and returns after the Worker reaches a stable running or terminal
+state. The Ink TUI adds `/processes`, process list/view/termination modes,
+read-only ownership recovery, resize and bounded polling, PTY-specific keyboard
+routing, and a safe incremental projector that consumes terminal control
+sequences before rendering plain rows.
+
+Acceptance covers strict protocol parsing, Tool approval, workspace isolation,
+session credential containment, leases, cursor expiry, restart discovery,
+input/resize/detach/termination, split UTF-8 and control-sequence projection,
+controller and view behavior, and a real TTY path through attach, `Ctrl+C`
+delivery, `Ctrl+]` detach, and host-terminal restoration. Phase 4B3 is complete;
+Windows ownership and ConPTY remain Phase 4B4.

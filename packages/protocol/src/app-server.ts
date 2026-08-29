@@ -30,7 +30,7 @@ import {
 } from "./plans.js";
 import { workspaceChangeSetResolutionSchema } from "./change-sets.js";
 
-export const APP_SERVER_PROTOCOL_VERSION = 13 as const;
+export const APP_SERVER_PROTOCOL_VERSION = 14 as const;
 
 export const THREAD_EVENTS_DEFAULT_LIMIT = 200;
 export const THREAD_EVENTS_MAXIMUM_LIMIT = 200;
@@ -196,6 +196,7 @@ export const initializeResultSchema = z
         dynamicToolCatalog: z.literal(true),
         plugins: z.literal(true),
         workspaceMutationRecovery: z.literal(true),
+        interactiveProcesses: z.boolean(),
       })
       .strict(),
     providers: z.array(runtimeProviderMetadataSchema).min(1),
@@ -211,6 +212,242 @@ const runtimeSettingsWorkspaceSchema = z
       RUNTIME_SETTINGS_WORKSPACE_BUDGET_BYTES,
     `Workspace must not exceed ${RUNTIME_SETTINGS_WORKSPACE_BUDGET_BYTES} UTF-8 bytes.`,
   );
+
+export const PROCESS_LIST_DEFAULT_LIMIT = 50;
+export const PROCESS_LIST_MAXIMUM_LIMIT = 100;
+export const PROCESS_READ_DEFAULT_BYTES = 16 * 1_024;
+export const PROCESS_READ_MAXIMUM_BYTES = 64 * 1_024;
+export const PROCESS_INPUT_MAXIMUM_BYTES = 16 * 1_024;
+
+export const processJobIdSchema = z
+  .string()
+  .regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u);
+
+export const processSessionIdSchema = z.string().uuid();
+
+export const processStateSchema = z.enum([
+  "accepted",
+  "worker_ready",
+  "command_starting",
+  "starting",
+  "running",
+  "terminating",
+  "exited",
+  "start_failed",
+  "termination_uncertain",
+  "quarantined",
+]);
+
+export const interactiveProcessSummarySchema = z
+  .object({
+    jobId: processJobIdSchema,
+    displayName: z.string().min(1).max(128),
+    cwd: runtimeSettingsWorkspaceSchema,
+    state: processStateSchema,
+    lifecycle: z.enum(["foreground", "background"]),
+    createdAtMs: z.number().int().safe().nonnegative(),
+    updatedAtMs: z.number().int().safe().nonnegative(),
+    pid: z.number().int().safe().positive().nullable(),
+  })
+  .strict();
+
+export const processListParamsSchema = z
+  .object({
+    workspace: runtimeSettingsWorkspaceSchema,
+    cursor: processJobIdSchema.optional(),
+    limit: z.number().int().min(1).max(PROCESS_LIST_MAXIMUM_LIMIT).optional(),
+  })
+  .strict();
+
+export const processListResultSchema = z
+  .object({
+    workspace: runtimeSettingsWorkspaceSchema,
+    processes: z
+      .array(interactiveProcessSummarySchema)
+      .max(PROCESS_LIST_MAXIMUM_LIMIT),
+    nextCursor: processJobIdSchema.nullable(),
+  })
+  .strict();
+
+const terminalDimensionSchema = z.number().int().min(1).max(500);
+const processCursorSchema = z.number().int().safe().nonnegative();
+
+export const processAttachParamsSchema = z
+  .object({
+    workspace: runtimeSettingsWorkspaceSchema,
+    jobId: processJobIdSchema,
+    cursor: processCursorSchema.optional(),
+    rows: terminalDimensionSchema,
+    cols: terminalDimensionSchema,
+  })
+  .strict();
+
+export const processAttachResultSchema = z
+  .object({
+    processSessionId: processSessionIdSchema,
+    process: interactiveProcessSummarySchema,
+    inputState: z.enum(["owned", "read_only"]),
+    rows: terminalDimensionSchema,
+    cols: terminalDimensionSchema,
+    cursor: processCursorSchema,
+    earliestCursor: processCursorSchema,
+    latestCursor: processCursorSchema,
+    complete: z.boolean(),
+  })
+  .strict()
+  .superRefine((result, context) => {
+    if (
+      result.earliestCursor > result.cursor ||
+      result.cursor > result.latestCursor
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "Process attachment cursors are inconsistent.",
+      });
+    }
+  });
+
+export const processReadParamsSchema = z
+  .object({
+    processSessionId: processSessionIdSchema,
+    maxBytes: z
+      .number()
+      .int()
+      .min(1)
+      .max(PROCESS_READ_MAXIMUM_BYTES)
+      .optional(),
+  })
+  .strict();
+
+export const processReadResultSchema = z.discriminatedUnion("status", [
+  z
+    .object({
+      status: z.literal("ok"),
+      processSessionId: processSessionIdSchema,
+      inputState: z.enum(["owned", "read_only"]),
+      cursor: processCursorSchema,
+      nextCursor: processCursorSchema,
+      earliestCursor: processCursorSchema,
+      latestCursor: processCursorSchema,
+      complete: z.boolean(),
+      dataBase64: z
+        .string()
+        .max(100_000)
+        .regex(
+          /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u,
+        ),
+    })
+    .strict()
+    .superRefine((result, context) => {
+      if (
+        result.earliestCursor > result.cursor ||
+        result.cursor > result.nextCursor ||
+        result.nextCursor > result.latestCursor
+      ) {
+        context.addIssue({
+          code: "custom",
+          message: "Process read cursors are inconsistent.",
+        });
+      }
+    }),
+  z
+    .object({
+      status: z.literal("cursor_expired"),
+      processSessionId: processSessionIdSchema,
+      inputState: z.enum(["owned", "read_only"]),
+      cursor: processCursorSchema,
+      earliestCursor: processCursorSchema,
+      latestCursor: processCursorSchema,
+      complete: z.boolean(),
+    })
+    .strict()
+    .superRefine((result, context) => {
+      if (
+        result.cursor >= result.earliestCursor ||
+        result.earliestCursor > result.latestCursor
+      ) {
+        context.addIssue({
+          code: "custom",
+          message: "Expired process cursor bounds are inconsistent.",
+        });
+      }
+    }),
+]);
+
+export const processAcquireInputParamsSchema = z
+  .object({ processSessionId: processSessionIdSchema })
+  .strict();
+
+export const processAcquireInputResultSchema = z
+  .object({
+    processSessionId: processSessionIdSchema,
+    inputState: z.enum(["owned", "read_only"]),
+  })
+  .strict();
+
+export const processInputParamsSchema = z
+  .object({
+    processSessionId: processSessionIdSchema,
+    dataBase64: z
+      .string()
+      .min(4)
+      .max(21_848)
+      .regex(
+        /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u,
+      )
+      .refine(
+        (value) => decodedBase64Bytes(value) <= PROCESS_INPUT_MAXIMUM_BYTES,
+        `Decoded process input must not exceed ${PROCESS_INPUT_MAXIMUM_BYTES} bytes.`,
+      ),
+  })
+  .strict();
+
+export const processInputResultSchema = z
+  .object({
+    processSessionId: processSessionIdSchema,
+    acceptedBytes: z.number().int().min(1).max(PROCESS_INPUT_MAXIMUM_BYTES),
+  })
+  .strict();
+
+export const processResizeParamsSchema = z
+  .object({
+    processSessionId: processSessionIdSchema,
+    rows: terminalDimensionSchema,
+    cols: terminalDimensionSchema,
+  })
+  .strict();
+
+export const processResizeResultSchema = z
+  .object({
+    processSessionId: processSessionIdSchema,
+    rows: terminalDimensionSchema,
+    cols: terminalDimensionSchema,
+  })
+  .strict();
+
+export const processDetachParamsSchema = z
+  .object({ processSessionId: processSessionIdSchema })
+  .strict();
+
+export const processDetachResultSchema = z
+  .object({ detached: z.literal(true) })
+  .strict();
+
+export const processTerminateParamsSchema = z
+  .object({
+    workspace: runtimeSettingsWorkspaceSchema,
+    jobId: processJobIdSchema,
+  })
+  .strict();
+
+export const processTerminateResultSchema = z
+  .object({ process: interactiveProcessSummarySchema })
+  .strict();
+
+function decodedBase64Bytes(value: string): number {
+  const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
+  return (value.length / 4) * 3 - padding;
+}
 
 const workspaceMutationConflictIdSchema = z
   .string()
@@ -1584,6 +1821,33 @@ export type InitializeParams = z.infer<typeof initializeParamsSchema>;
 export type InitializeResult = z.infer<typeof initializeResultSchema>;
 export type RuntimeProviderMetadata = z.infer<
   typeof runtimeProviderMetadataSchema
+>;
+export type InteractiveProcessSummary = z.infer<
+  typeof interactiveProcessSummarySchema
+>;
+export type ProcessListParams = z.infer<typeof processListParamsSchema>;
+export type ProcessListResult = z.infer<typeof processListResultSchema>;
+export type ProcessAttachParams = z.infer<typeof processAttachParamsSchema>;
+export type ProcessAttachResult = z.infer<typeof processAttachResultSchema>;
+export type ProcessReadParams = z.infer<typeof processReadParamsSchema>;
+export type ProcessReadResult = z.infer<typeof processReadResultSchema>;
+export type ProcessAcquireInputParams = z.infer<
+  typeof processAcquireInputParamsSchema
+>;
+export type ProcessAcquireInputResult = z.infer<
+  typeof processAcquireInputResultSchema
+>;
+export type ProcessInputParams = z.infer<typeof processInputParamsSchema>;
+export type ProcessInputResult = z.infer<typeof processInputResultSchema>;
+export type ProcessResizeParams = z.infer<typeof processResizeParamsSchema>;
+export type ProcessResizeResult = z.infer<typeof processResizeResultSchema>;
+export type ProcessDetachParams = z.infer<typeof processDetachParamsSchema>;
+export type ProcessDetachResult = z.infer<typeof processDetachResultSchema>;
+export type ProcessTerminateParams = z.infer<
+  typeof processTerminateParamsSchema
+>;
+export type ProcessTerminateResult = z.infer<
+  typeof processTerminateResultSchema
 >;
 export type RuntimePreference = z.infer<typeof runtimePreferenceSchema>;
 export type RuntimeSettingsDiagnostic = z.infer<

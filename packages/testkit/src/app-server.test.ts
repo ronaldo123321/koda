@@ -8,7 +8,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 import { KodaApplication, type KodaApplicationDependencies } from "@koda/app";
 import {
@@ -32,6 +32,7 @@ import {
 import { ScriptedModelProvider } from "@koda/providers";
 import {
   ArtifactStore,
+  InteractiveProcessService,
   JsonlEventStore,
   ReadOnlyWorkspace,
 } from "@koda/runtime-node";
@@ -102,6 +103,7 @@ describe("KodaAppServer", () => {
         dynamicToolCatalog: true,
         plugins: true,
         workspaceMutationRecovery: true,
+        interactiveProcesses: false,
       },
       providers: [
         { id: "openai", defaultModel: "gpt-5.6-terra", configured: true },
@@ -170,6 +172,147 @@ describe("KodaAppServer", () => {
       workspace: canonicalWorkspace,
       conflicts: [],
     });
+  });
+
+  it("serves approved terminal sessions without exposing native attachment credentials", async () => {
+    const fixture = await createFixture();
+    const service = await InteractiveProcessService.open({
+      binaryPath: resolve("target/debug/koda-exec"),
+      stateDirectory: join(fixture.kodaHome, "executor"),
+      socketPath: join(fixture.root, "exec.sock"),
+      leaseRenewalMs: 100,
+    });
+    const provider = new ScriptedModelProvider([
+      {
+        events: [
+          {
+            type: "tool_call",
+            callId: toolCallIdSchema.parse("server-terminal-call"),
+            name: "exec_terminal",
+            arguments: {
+              argv: [
+                process.execPath,
+                "-e",
+                "console.log('ready');process.stdin.once('data',(data)=>{console.log('echo:'+data.toString().trim());process.exit(0)})",
+              ],
+              timeout_ms: 3_000,
+              lifecycle: "background",
+              display_name: "Server terminal",
+            },
+          },
+          { type: "completed", finishReason: "tool_calls" },
+        ],
+      },
+      { events: [{ type: "completed", finishReason: "stop" }] },
+    ]);
+    const writer = new MemoryProtocolWriter();
+    const application = new KodaApplication({
+      environment: {
+        OPENAI_API_KEY: "offline-test-key",
+        KODA_HOME: fixture.kodaHome,
+      },
+      processDirectory: fixture.root,
+      dependencies: dependencies(provider, "server-terminal"),
+      interactiveProcessService: service,
+    });
+    const server = new KodaAppServer({
+      application,
+      writer,
+      serverVersion: "test",
+      interactiveProcessService: service,
+    });
+    try {
+      await initialize(server, 1);
+      expect(responseResult(writer, 1)).toMatchObject({
+        capabilities: { interactiveProcesses: true },
+      });
+      await request(server, 2, "turn/start", {
+        prompt: "Start the interactive fixture.",
+        cwd: fixture.workspaceRoot,
+        approvalMode: "on-request",
+      });
+      const approval = await waitForMessage(
+        writer,
+        (message) =>
+          eventType(message) === "approval.requested" &&
+          eventCallId(message) === "server-terminal-call",
+      );
+      expect(approval).not.toHaveProperty(
+        "params.event.payload.grantCandidate",
+      );
+      await request(server, 3, "approval/resolve", {
+        turnId: "server-terminal-turn",
+        callId: "server-terminal-call",
+        decision: "approved",
+      });
+      await waitForMessage(
+        writer,
+        (message) => notificationMethod(message) === "turn/finished",
+      );
+
+      await request(server, 4, "process/list", {
+        workspace: fixture.workspaceRoot,
+      });
+      const listed = responseResult(writer, 4);
+      if (!isObject(listed) || !Array.isArray(listed.processes)) {
+        throw new Error("Process list response is invalid.");
+      }
+      const processSummary = listed.processes.find(
+        (value) => isObject(value) && value.displayName === "Server terminal",
+      );
+      if (
+        !isObject(processSummary) ||
+        typeof processSummary.jobId !== "string"
+      ) {
+        throw new Error("Started terminal was not discoverable.");
+      }
+      await request(server, 5, "process/attach", {
+        workspace: fixture.workspaceRoot,
+        jobId: processSummary.jobId,
+        rows: 30,
+        cols: 100,
+      });
+      const attached = responseResult(writer, 5);
+      expect(JSON.stringify(attached)).not.toMatch(
+        /capability|lease_token|leaseToken|fence/u,
+      );
+      if (
+        !isObject(attached) ||
+        typeof attached.processSessionId !== "string"
+      ) {
+        throw new Error("Process attachment response is invalid.");
+      }
+      await request(server, 6, "process/input", {
+        processSessionId: attached.processSessionId,
+        dataBase64: Buffer.from("hello\n").toString("base64"),
+      });
+      let terminalOutput = "";
+      for (let requestId = 7; requestId < 107; requestId += 1) {
+        await request(server, requestId, "process/read", {
+          processSessionId: attached.processSessionId,
+        });
+        const read = responseResult(writer, requestId);
+        if (isObject(read) && typeof read.dataBase64 === "string") {
+          terminalOutput += Buffer.from(read.dataBase64, "base64").toString(
+            "utf8",
+          );
+        }
+        if (terminalOutput.includes("echo:hello")) break;
+        await new Promise<void>((resolvePromise) =>
+          setTimeout(resolvePromise, 10),
+        );
+      }
+      expect(terminalOutput).toContain("ready");
+      expect(terminalOutput).toContain("echo:hello");
+      await request(server, 107, "process/detach", {
+        processSessionId: attached.processSessionId,
+      });
+      expect(responseResult(writer, 107)).toEqual({ detached: true });
+      await request(server, 108, "shutdown", {});
+    } finally {
+      await service.close();
+      await service.nativeExecutor.closeOwnedSupervisorForTests();
+    }
   });
 
   it("serves thread-authorized artifact lists and UTF-8 ranges", async () => {

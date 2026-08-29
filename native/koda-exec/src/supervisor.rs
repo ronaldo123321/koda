@@ -164,9 +164,21 @@ impl Supervisor {
     pub async fn start(
         self: &Arc<Self>,
         request_id: String,
-        params: StartParams,
+        mut params: StartParams,
     ) -> Result<JobSnapshot, ProtocolError> {
         validate_start(&params)?;
+        params.cwd = std::fs::canonicalize(&params.cwd)
+            .map_err(|error| {
+                ProtocolError::new(
+                    "INVALID_REQUEST",
+                    format!("Could not canonicalize cwd: {error}"),
+                )
+            })?
+            .into_os_string()
+            .into_string()
+            .map_err(|_| {
+                ProtocolError::new("INVALID_REQUEST", "Canonical cwd is not valid UTF-8.")
+            })?;
         let request_bytes = serde_json::to_vec(&params).map_err(internal_json_error)?;
         let request_digest = crate::durable::sha256_hex(&request_bytes);
 
@@ -352,6 +364,8 @@ impl Supervisor {
                 let state = record.read_state()?;
                 Ok(JobSummary {
                     job_id: record.manifest.job_id,
+                    display_name: record.manifest.start.display_name,
+                    cwd: record.manifest.start.cwd,
                     state: state.state,
                     io_mode: record.manifest.start.io_mode,
                     lifecycle: record.manifest.start.lifecycle,
@@ -1151,6 +1165,7 @@ mod tests {
                 StartParams {
                     argv: vec!["/usr/bin/true".to_owned()],
                     cwd: std::env::current_dir().expect("cwd").display().to_string(),
+                    display_name: None,
                     environment: BTreeMap::new(),
                     timeout_ms: 1_000,
                     output_limit_bytes: 1_024,

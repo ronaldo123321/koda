@@ -125,6 +125,19 @@ export interface TuiInputController {
     action: "up" | "down" | "page_up" | "page_down" | "home" | "end",
   ): Promise<void>;
   closeActivity(): void;
+  openProcesses(): Promise<void>;
+  refreshProcesses(): Promise<void>;
+  navigateProcessList(
+    action: "up" | "down" | "page_up" | "page_down" | "home" | "end",
+  ): void;
+  attachSelectedProcess(): Promise<void>;
+  retryProcessInput(): Promise<void>;
+  sendProcessInput(data: string): void;
+  beginProcessTermination(): void;
+  cancelProcessTermination(): void;
+  confirmProcessTermination(): Promise<void>;
+  detachProcessSession(refresh?: boolean): Promise<void>;
+  closeProcessLevel(): void;
   enterPlanAcceptanceFeedback(): void;
   setPlanAcceptanceFeedback(feedback: string): void;
   cancelPlanAcceptanceFeedback(): void;
@@ -175,6 +188,11 @@ export function KodaView({ state }: KodaViewProps) {
         <ExtensionsView state={state} />
       ) : null}
       {state.mode === "activity_view" ? <ActivityView state={state} /> : null}
+      {state.mode === "process_list" ? <ProcessList state={state} /> : null}
+      {state.mode === "process_view" ? <ProcessView state={state} /> : null}
+      {state.mode === "process_terminate_confirm" ? (
+        <ProcessTerminateConfirmation state={state} />
+      ) : null}
 
       {state.mode === "chat" ? (
         <>
@@ -236,6 +254,62 @@ export function routeTuiInput(
   key: Key,
   requestExit: () => void,
 ): void {
+  if (state.mode === "process_terminate_confirm") {
+    if (key.escape || input.toLowerCase() === "n") {
+      controller.cancelProcessTermination();
+    } else if (input.toLowerCase() === "y") {
+      void controller.confirmProcessTermination();
+    }
+    return;
+  }
+  if (state.mode === "process_list") {
+    if (key.escape) {
+      controller.closeProcessLevel();
+    } else if (key.upArrow) {
+      controller.navigateProcessList("up");
+    } else if (key.downArrow) {
+      controller.navigateProcessList("down");
+    } else if (key.pageUp) {
+      controller.navigateProcessList("page_up");
+    } else if (key.pageDown) {
+      controller.navigateProcessList("page_down");
+    } else if (key.home) {
+      controller.navigateProcessList("home");
+    } else if (key.end) {
+      controller.navigateProcessList("end");
+    } else if (key.return) {
+      void controller.attachSelectedProcess();
+    } else if (input.toLowerCase() === "r") {
+      void controller.refreshProcesses();
+    }
+    return;
+  }
+  if (state.mode === "process_view") {
+    const session = state.processNavigation?.session;
+    if (session === undefined) {
+      controller.closeProcessLevel();
+      return;
+    }
+    if ((key.ctrl && input === "]") || input === "\u001d") {
+      void controller.detachProcessSession();
+      return;
+    }
+    if (key.ctrl && input.toLowerCase() === "k") {
+      controller.beginProcessTermination();
+      return;
+    }
+    if (session.inputState === "read_only") {
+      if (input.toLowerCase() === "w") {
+        void controller.retryProcessInput();
+      } else if (input.toLowerCase() === "k") {
+        controller.beginProcessTermination();
+      }
+      return;
+    }
+    const terminalInput = processKeySequence(input, key);
+    if (terminalInput !== undefined) controller.sendProcessInput(terminalInput);
+    return;
+  }
   if (
     key.ctrl &&
     input.toLowerCase() === "t" &&
@@ -630,6 +704,32 @@ export function routeTuiInput(
   if (printable.length > 0) {
     controller.setInput(state.input + printable);
   }
+}
+
+function processKeySequence(input: string, key: Key): string | undefined {
+  if (key.return) return "\r";
+  if (key.tab) return "\t";
+  if (key.backspace) return "\u007f";
+  if (key.delete) return "\u001b[3~";
+  if (key.upArrow) return "\u001b[A";
+  if (key.downArrow) return "\u001b[B";
+  if (key.rightArrow) return "\u001b[C";
+  if (key.leftArrow) return "\u001b[D";
+  if (key.home) return "\u001b[H";
+  if (key.end) return "\u001b[F";
+  if (key.pageUp) return "\u001b[5~";
+  if (key.pageDown) return "\u001b[6~";
+  if (key.escape) return "\u001b";
+  if (key.ctrl && input.length === 1) {
+    const codePoint = input.toUpperCase().codePointAt(0);
+    if (codePoint !== undefined && codePoint >= 0x40 && codePoint <= 0x5f) {
+      return String.fromCharCode(codePoint & 0x1f);
+    }
+    return undefined;
+  }
+  if (key.meta) return undefined;
+  const printable = input.replace(/[\u0000-\u001f\u007f-\u009f]/gu, "");
+  return printable.length === 0 ? undefined : printable;
 }
 
 function ThreadList({ state }: { state: TuiState }) {
@@ -1102,6 +1202,105 @@ function ActivityView({ state }: { state: TuiState }) {
         {navigation.loading
           ? "Loading… · Esc back"
           : `${firstRow}–${lastRow} / ${navigation.rows.length} activity rows · ${navigation.hasEarlier ? "earlier available" : "earliest page"} · ${navigation.hasLater ? "later available" : "latest page"} · ↑/↓ scroll · PgUp/PgDn event page · Home/End boundary · Esc back`}
+      </Text>
+    </Box>
+  );
+}
+
+function ProcessList({ state }: { state: TuiState }) {
+  const navigation = state.processNavigation;
+  if (navigation === undefined) {
+    return <Text color="red">Process navigation state is unavailable.</Text>;
+  }
+  const visible = navigation.processes.slice(
+    navigation.scrollOffset,
+    navigation.scrollOffset + navigation.viewportHeight,
+  );
+  return (
+    <Box flexDirection="column" borderStyle="round" paddingX={1}>
+      <Text bold color="cyan">
+        Durable terminal jobs · {state.configuration.cwd}
+      </Text>
+      {navigation.loading ? (
+        <Text dimColor>Loading terminal jobs…</Text>
+      ) : visible.length === 0 ? (
+        <Text dimColor>No PTY jobs in this workspace.</Text>
+      ) : (
+        visible.map((process, visibleIndex) => {
+          const index = navigation.scrollOffset + visibleIndex;
+          return (
+            <Text
+              key={process.jobId}
+              bold={index === navigation.selectedIndex}
+              {...(index === navigation.selectedIndex ? { color: "cyan" } : {})}
+            >
+              {`${index === navigation.selectedIndex ? ">" : " "} ${boundPresentationText(process.displayName, 128)} · ${process.jobId.slice(0, 8)} · ${process.state} · ${process.lifecycle} · pid ${process.pid ?? "—"} · ${process.updatedAtMs}`}
+            </Text>
+          );
+        })
+      )}
+      <Text dimColor>
+        {navigation.loading
+          ? "Loading… · Esc back"
+          : "↑/↓ select · PgUp/PgDn page · Home/End · r refresh · Enter attach · Esc back"}
+      </Text>
+    </Box>
+  );
+}
+
+function ProcessView({ state }: { state: TuiState }) {
+  const navigation = state.processNavigation;
+  const session = navigation?.session;
+  if (navigation === undefined || session === undefined) {
+    return <Text color="red">Process attachment state is unavailable.</Text>;
+  }
+  return (
+    <Box flexDirection="column" borderStyle="round" paddingX={1}>
+      <Text bold color="cyan">
+        {`${session.process.displayName} · ${session.process.jobId.slice(0, 8)} · ${session.process.state}`}
+      </Text>
+      <Text dimColor>
+        {`${session.inputState === "owned" ? "input owned" : "read-only"} · ${session.rows}×${session.cols} · cursor ${session.cursor} · retained ${session.earliestCursor}–${session.latestCursor}${session.complete ? " · complete" : ""}`}
+      </Text>
+      {session.screenRows.length === 0 ? (
+        <Text dimColor>Waiting for terminal output…</Text>
+      ) : (
+        session.screenRows.map((row, index) => (
+          <Text key={`${session.cursor}:${index}`}>
+            {row.length === 0 ? " " : row}
+          </Text>
+        ))
+      )}
+      <Text dimColor>
+        {session.inputState === "owned"
+          ? "typing → PTY · Ctrl+C interrupt · Ctrl+K terminate · Ctrl+] detach"
+          : "w acquire input · k terminate · Ctrl+] detach"}
+      </Text>
+    </Box>
+  );
+}
+
+function ProcessTerminateConfirmation({ state }: { state: TuiState }) {
+  const session = state.processNavigation?.session;
+  return (
+    <Box
+      flexDirection="column"
+      borderStyle="round"
+      borderColor="red"
+      paddingX={1}
+    >
+      <Text bold color="red">
+        Terminate durable process?
+      </Text>
+      <Text>
+        {session === undefined
+          ? "The attached process is unavailable."
+          : `${session.process.displayName} · ${session.process.jobId}`}
+      </Text>
+      <Text dimColor>
+        {session?.terminating === true
+          ? "Terminating the complete process group…"
+          : "y terminate · n/Esc cancel"}
       </Text>
     </Box>
   );

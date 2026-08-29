@@ -8,6 +8,7 @@ pub const MAX_FRAME_BYTES: usize = 1_048_576;
 pub const MAX_ARGUMENTS: usize = 64;
 pub const MAX_ARGUMENT_BYTES: usize = 4_096;
 pub const MAX_TOTAL_ARGUMENT_BYTES: usize = 32_768;
+pub const MAX_DISPLAY_NAME_BYTES: usize = 128;
 pub const MAX_ENVIRONMENT_ENTRIES: usize = 128;
 pub const MAX_ENVIRONMENT_BYTES: usize = 65_536;
 pub const MAX_OUTPUT_LIMIT_BYTES: u64 = 67_108_864;
@@ -104,6 +105,8 @@ pub struct HelloParams {
 pub struct StartParams {
     pub argv: Vec<String>,
     pub cwd: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
     pub environment: BTreeMap<String, String>,
     pub timeout_ms: u64,
     pub output_limit_bytes: u64,
@@ -349,6 +352,8 @@ pub struct JobSnapshot {
 #[derive(Clone, Debug, Serialize)]
 pub struct JobSummary {
     pub job_id: String,
+    pub display_name: Option<String>,
+    pub cwd: String,
     pub state: JobState,
     pub io_mode: IoMode,
     pub lifecycle: JobLifecycle,
@@ -519,6 +524,18 @@ pub fn validate_start(params: &StartParams) -> Result<(), ProtocolError> {
             "cwd must contain 1-4096 bytes without a null byte.",
         ));
     }
+    if let Some(display_name) = &params.display_name
+        && (display_name.trim().is_empty()
+            || display_name.len() > MAX_DISPLAY_NAME_BYTES
+            || display_name.chars().any(char::is_control))
+    {
+        return Err(ProtocolError::new(
+            "INVALID_REQUEST",
+            format!(
+                "display_name must contain 1-{MAX_DISPLAY_NAME_BYTES} UTF-8 bytes without control characters."
+            ),
+        ));
+    }
     let cwd = std::path::Path::new(&params.cwd);
     if !cwd.is_absolute() || !cwd.is_dir() {
         return Err(ProtocolError::new(
@@ -559,9 +576,10 @@ pub fn validate_start(params: &StartParams) -> Result<(), ProtocolError> {
             format!("environment must total at most {MAX_ENVIRONMENT_BYTES} bytes."),
         ));
     }
-    let maximum_timeout = match params.lifecycle {
-        JobLifecycle::Foreground => MAX_TIMEOUT_MS,
-        JobLifecycle::Background => MAX_BACKGROUND_TIMEOUT_MS,
+    let maximum_timeout = match (params.io_mode, params.lifecycle) {
+        (IoMode::Pipe, JobLifecycle::Foreground) => MAX_TIMEOUT_MS,
+        (IoMode::Pipe | IoMode::Pty, JobLifecycle::Background)
+        | (IoMode::Pty, JobLifecycle::Foreground) => MAX_BACKGROUND_TIMEOUT_MS,
     };
     if !(100..=maximum_timeout).contains(&params.timeout_ms)
         || !(1..=MAX_OUTPUT_LIMIT_BYTES).contains(&params.output_limit_bytes)
@@ -693,6 +711,7 @@ mod tests {
         let params = StartParams {
             argv: vec!["x".repeat(MAX_ARGUMENT_BYTES + 1)],
             cwd: std::env::current_dir().expect("cwd").display().to_string(),
+            display_name: None,
             environment: BTreeMap::new(),
             timeout_ms: 1_000,
             output_limit_bytes: 1_024,
@@ -727,6 +746,7 @@ mod tests {
         assert_eq!(params.io_mode, IoMode::Pipe);
         assert_eq!(params.lifecycle, JobLifecycle::Foreground);
         assert!(params.pty.is_none());
+        assert!(params.display_name.is_none());
         let encoded = serde_json::to_value(params).expect("legacy encoding");
         assert!(encoded.get("io_mode").is_none());
         assert!(encoded.get("lifecycle").is_none());
@@ -737,6 +757,7 @@ mod tests {
         let params = StartParams {
             argv: vec!["/usr/bin/true".to_owned()],
             cwd: std::env::current_dir().expect("cwd").display().to_string(),
+            display_name: Some("test terminal".to_owned()),
             environment: BTreeMap::new(),
             timeout_ms: 1_000,
             output_limit_bytes: 1_024,

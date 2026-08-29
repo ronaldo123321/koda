@@ -38,6 +38,12 @@ def main() -> int:
         (b"> /activity", b"\r"),
         (b"Durable activity", None),
         (b"#0 tool.started", b"\x1b"),
+        ("ready · idle".encode(), b"/processes"),
+        (b"> /processes", b"\r"),
+        (b"Durable terminal jobs", b"\r"),
+        (b"pty-ready", b"\x03"),
+        (b"pty-input:03", b"\x1d"),
+        (b"Durable terminal jobs", b"\x1b"),
         ("ready · idle".encode(), None),
     ]
     output = bytearray()

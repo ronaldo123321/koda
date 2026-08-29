@@ -34,6 +34,22 @@ import {
   planAcceptanceResolveResultSchema,
   planGetParamsSchema,
   planGetResultSchema,
+  processAcquireInputParamsSchema,
+  processAcquireInputResultSchema,
+  processAttachParamsSchema,
+  processAttachResultSchema,
+  processDetachParamsSchema,
+  processDetachResultSchema,
+  processInputParamsSchema,
+  processInputResultSchema,
+  processListParamsSchema,
+  processListResultSchema,
+  processReadParamsSchema,
+  processReadResultSchema,
+  processResizeParamsSchema,
+  processResizeResultSchema,
+  processTerminateParamsSchema,
+  processTerminateResultSchema,
   artifactReadParamsSchema,
   artifactReadResultSchema,
   contextInstructionReadParamsSchema,
@@ -88,6 +104,11 @@ import {
   type JsonValue,
   type TurnId,
 } from "@koda/protocol";
+import {
+  InteractiveProcessError,
+  NativeExecutorError,
+  type InteractiveProcessService,
+} from "@koda/runtime-node";
 import { ZodError, type ZodType } from "zod";
 
 import { PendingApprovalRegistry } from "./approval-registry.js";
@@ -101,6 +122,7 @@ export interface KodaAppServerOptions {
   diagnostic?(message: string): unknown | Promise<unknown>;
   fatal?(error: Error): unknown;
   planAcceptanceTimeoutMs?: number;
+  interactiveProcessService?: InteractiveProcessService;
 }
 
 export class KodaAppServer {
@@ -111,6 +133,8 @@ export class KodaAppServer {
   private readonly fatal: (error: Error) => unknown;
   private readonly approvals = new PendingApprovalRegistry();
   private readonly planAcceptances: PendingPlanAcceptanceRegistry;
+  private readonly interactiveProcessService:
+    InteractiveProcessService | undefined;
   private readonly activeTurns = new Map<TurnId, TurnHandle>();
   private readonly turnMonitors = new Map<TurnId, Promise<void>>();
   private initialized = false;
@@ -126,6 +150,7 @@ export class KodaAppServer {
     this.planAcceptances = new PendingPlanAcceptanceRegistry(
       options.planAcceptanceTimeoutMs,
     );
+    this.interactiveProcessService = options.interactiveProcessService;
   }
 
   public get shouldClose(): boolean {
@@ -278,6 +303,22 @@ export class KodaAppServer {
         return this.revokeApprovalGrant(request.params);
       case "approval/grants/revokeAll":
         return this.revokeAllApprovalGrants(request.params);
+      case "process/list":
+        return this.listProcesses(request.params);
+      case "process/attach":
+        return this.attachProcess(request.params);
+      case "process/read":
+        return this.readProcess(request.params);
+      case "process/acquire-input":
+        return this.acquireProcessInput(request.params);
+      case "process/input":
+        return this.writeProcessInput(request.params);
+      case "process/resize":
+        return this.resizeProcess(request.params);
+      case "process/detach":
+        return this.detachProcess(request.params);
+      case "process/terminate":
+        return this.terminateProcess(request.params);
       default:
         throw rpcError(
           APP_SERVER_RPC_ERROR_CODE.METHOD_NOT_FOUND,
@@ -340,6 +381,7 @@ export class KodaAppServer {
           dynamicToolCatalog: true,
           plugins: true,
           workspaceMutationRecovery: true,
+          interactiveProcesses: this.interactiveProcessService !== undefined,
         },
         providers: this.application.listProviders(),
       }),
@@ -359,6 +401,148 @@ export class KodaAppServer {
         ...(result.recovery === undefined ? {} : { recovery: result.recovery }),
       }),
     );
+  }
+
+  private async listProcesses(
+    params: JsonValue | undefined,
+  ): Promise<JsonValue> {
+    const input = parseParams(processListParamsSchema, params);
+    return this.processResult(
+      processListResultSchema,
+      this.requireInteractiveProcesses().listProcesses({
+        workspace: input.workspace,
+        ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+        ...(input.limit === undefined ? {} : { limit: input.limit }),
+      }),
+    );
+  }
+
+  private async attachProcess(
+    params: JsonValue | undefined,
+  ): Promise<JsonValue> {
+    const input = parseParams(processAttachParamsSchema, params);
+    return this.processResult(
+      processAttachResultSchema,
+      this.requireInteractiveProcesses().attach({
+        workspace: input.workspace,
+        jobId: input.jobId,
+        rows: input.rows,
+        cols: input.cols,
+        ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+      }),
+    );
+  }
+
+  private async readProcess(params: JsonValue | undefined): Promise<JsonValue> {
+    const input = parseParams(processReadParamsSchema, params);
+    return this.processResult(
+      processReadResultSchema,
+      this.requireInteractiveProcesses().read(
+        input.processSessionId,
+        input.maxBytes,
+      ),
+    );
+  }
+
+  private async acquireProcessInput(
+    params: JsonValue | undefined,
+  ): Promise<JsonValue> {
+    const input = parseParams(processAcquireInputParamsSchema, params);
+    return this.processResult(
+      processAcquireInputResultSchema,
+      this.requireInteractiveProcesses().acquireInput(input.processSessionId),
+    );
+  }
+
+  private async writeProcessInput(
+    params: JsonValue | undefined,
+  ): Promise<JsonValue> {
+    const input = parseParams(processInputParamsSchema, params);
+    return this.processResult(
+      processInputResultSchema,
+      this.requireInteractiveProcesses().writeInput(
+        input.processSessionId,
+        Buffer.from(input.dataBase64, "base64"),
+      ),
+    );
+  }
+
+  private async resizeProcess(
+    params: JsonValue | undefined,
+  ): Promise<JsonValue> {
+    const input = parseParams(processResizeParamsSchema, params);
+    return this.processResult(
+      processResizeResultSchema,
+      this.requireInteractiveProcesses().resize(
+        input.processSessionId,
+        input.rows,
+        input.cols,
+      ),
+    );
+  }
+
+  private async detachProcess(
+    params: JsonValue | undefined,
+  ): Promise<JsonValue> {
+    const input = parseParams(processDetachParamsSchema, params);
+    await this.processOperation(() =>
+      this.requireInteractiveProcesses().detach(input.processSessionId),
+    );
+    return jsonValueSchema.parse(
+      processDetachResultSchema.parse({ detached: true }),
+    );
+  }
+
+  private async terminateProcess(
+    params: JsonValue | undefined,
+  ): Promise<JsonValue> {
+    const input = parseParams(processTerminateParamsSchema, params);
+    return this.processResult(
+      processTerminateResultSchema,
+      this.requireInteractiveProcesses().terminate(input),
+    );
+  }
+
+  private requireInteractiveProcesses(): InteractiveProcessService {
+    if (this.interactiveProcessService === undefined) {
+      throw rpcError(
+        APP_SERVER_RPC_ERROR_CODE.APPLICATION,
+        "Interactive processes are unavailable because the native executor is not configured.",
+        "INTERACTIVE_PROCESSES_UNAVAILABLE",
+      );
+    }
+    return this.interactiveProcessService;
+  }
+
+  private async processResult<T>(
+    schema: ZodType<T>,
+    operation: Promise<T>,
+  ): Promise<JsonValue> {
+    return jsonValueSchema.parse(
+      schema.parse(await this.processOperation(() => operation)),
+    );
+  }
+
+  private async processOperation<T>(operation: () => Promise<T>): Promise<T> {
+    try {
+      return await operation();
+    } catch (error) {
+      if (error instanceof InteractiveProcessError) {
+        throw rpcError(
+          APP_SERVER_RPC_ERROR_CODE.APPLICATION,
+          error.message,
+          error.code,
+        );
+      }
+      if (error instanceof NativeExecutorError) {
+        throw rpcError(
+          APP_SERVER_RPC_ERROR_CODE.APPLICATION,
+          error.message,
+          error.code,
+        );
+      }
+      throw error;
+    }
   }
 
   private async getThread(params: JsonValue | undefined): Promise<JsonValue> {
@@ -1104,6 +1288,7 @@ export class KodaAppServer {
       }
       await Promise.allSettled(completions);
       await Promise.allSettled([...this.turnMonitors.values()]);
+      await this.interactiveProcessService?.close();
     })();
     return this.shutdownPromise;
   }

@@ -1,6 +1,6 @@
 # Koda Phase 4B Supervised Native Execution Design
 
-- Status: In progress — Phase 4B3A runtime implemented; Phase 4B3B UX next
+- Status: In progress — Phase 4B3 complete; Phase 4B4 platform completion next
 - Date: 2026-08-28
 - Depends on: Phase 4A complete
 
@@ -183,8 +183,9 @@ terminal projection contract is in [Phase 4B3B interactive process UI](2026-08-2
 
 - **Phase 4B3A complete:** add PTY-backed foreground jobs, managed background
   jobs, attach/detach, resize, bounded input ownership, and reconnect cursors.
-- **Phase 4B3B next:** expose those runtime primitives through the TUI and
-  app-server interactive process workflow.
+- **Phase 4B3B complete:** expose those runtime primitives through the approved
+  `exec_terminal` Tool, app-server process sessions, and the TUI interactive
+  process workflow.
 
 ### Phase 4B4: platform completion
 
@@ -273,3 +274,21 @@ The strict Node API includes `startPty`, raw attachment operations, and
 resize and `SIGWINCH`, competing readers/writers, stale fencing, detached
 background execution across Supervisor restart, terminal reads, and cursor
 rotation while the existing pipe and Worker recovery suite remains intact.
+
+## Phase 4B3B implementation result
+
+Phase 4B3B adds app-server protocol v14 and a long-lived
+`InteractiveProcessService` above the Phase 4B3A primitives. Native attachment
+capabilities, lease tokens, and fences remain confined to the server; clients
+receive random process-session IDs and bounded, workspace-filtered PTY
+metadata. The service handles lease renewal and read-only downgrade, cursor
+expiry, resize, detach, explicit process-group termination, and shutdown
+cleanup without coupling a durable job to an Agent Turn.
+
+The Agent harness exposes an always-approved `exec_terminal` Tool that shares
+the structured command-policy boundary with `exec_command`. The TUI adds a
+`/processes` workflow, explicit keyboard ownership, safe `Ctrl+C` delivery,
+attach/detach and termination controls, and an incremental bounded terminal
+projector. Protocol, service, controller, renderer, native integration,
+app-server integration, and real-TTY tests close Phase 4B3. Windows named-pipe,
+Job Object, and ConPTY ownership remain Phase 4B4.

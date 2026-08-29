@@ -28,6 +28,22 @@ import {
   planAcceptanceResolveResultSchema,
   planGetParamsSchema,
   planGetResultSchema,
+  processAcquireInputParamsSchema,
+  processAcquireInputResultSchema,
+  processAttachParamsSchema,
+  processAttachResultSchema,
+  processDetachParamsSchema,
+  processDetachResultSchema,
+  processInputParamsSchema,
+  processInputResultSchema,
+  processListParamsSchema,
+  processListResultSchema,
+  processReadParamsSchema,
+  processReadResultSchema,
+  processResizeParamsSchema,
+  processResizeResultSchema,
+  processTerminateParamsSchema,
+  processTerminateResultSchema,
   settingsGetParamsSchema,
   settingsGetResultSchema,
   settingsUpdateParamsSchema,
@@ -82,6 +98,22 @@ import {
   type PlanAcceptanceResolveResult,
   type PlanGetParams,
   type PlanGetResult,
+  type ProcessAcquireInputParams,
+  type ProcessAcquireInputResult,
+  type ProcessAttachParams,
+  type ProcessAttachResult,
+  type ProcessDetachParams,
+  type ProcessDetachResult,
+  type ProcessInputParams,
+  type ProcessInputResult,
+  type ProcessListParams,
+  type ProcessListResult,
+  type ProcessReadParams,
+  type ProcessReadResult,
+  type ProcessResizeParams,
+  type ProcessResizeResult,
+  type ProcessTerminateParams,
+  type ProcessTerminateResult,
   type SettingsGetParams,
   type SettingsGetResult,
   type SettingsUpdateParams,
@@ -194,6 +226,18 @@ export interface AppServerClientApi {
   revokeAllApprovalGrants(
     params: ApprovalGrantsRevokeAllParams,
   ): Promise<ApprovalGrantsRevokeAllResult>;
+  listProcesses(params: ProcessListParams): Promise<ProcessListResult>;
+  attachProcess(params: ProcessAttachParams): Promise<ProcessAttachResult>;
+  readProcess(params: ProcessReadParams): Promise<ProcessReadResult>;
+  acquireProcessInput(
+    params: ProcessAcquireInputParams,
+  ): Promise<ProcessAcquireInputResult>;
+  writeProcessInput(params: ProcessInputParams): Promise<ProcessInputResult>;
+  resizeProcess(params: ProcessResizeParams): Promise<ProcessResizeResult>;
+  detachProcess(params: ProcessDetachParams): Promise<ProcessDetachResult>;
+  terminateProcess(
+    params: ProcessTerminateParams,
+  ): Promise<ProcessTerminateResult>;
   onNotification(
     listener: (notification: AppServerNotification) => void,
   ): () => void;
@@ -567,6 +611,82 @@ export class NodeAppServerClient implements AppServerClientApi {
       "approval/grants/revokeAll",
       jsonValueSchema.parse(approvalGrantsRevokeAllParamsSchema.parse(params)),
       approvalGrantsRevokeAllResultSchema,
+    );
+  }
+
+  public listProcesses(params: ProcessListParams): Promise<ProcessListResult> {
+    return this.connection.request(
+      "process/list",
+      jsonValueSchema.parse(processListParamsSchema.parse(params)),
+      processListResultSchema,
+    );
+  }
+
+  public attachProcess(
+    params: ProcessAttachParams,
+  ): Promise<ProcessAttachResult> {
+    return this.connection.request(
+      "process/attach",
+      jsonValueSchema.parse(processAttachParamsSchema.parse(params)),
+      processAttachResultSchema,
+    );
+  }
+
+  public readProcess(params: ProcessReadParams): Promise<ProcessReadResult> {
+    return this.connection.request(
+      "process/read",
+      jsonValueSchema.parse(processReadParamsSchema.parse(params)),
+      processReadResultSchema,
+    );
+  }
+
+  public acquireProcessInput(
+    params: ProcessAcquireInputParams,
+  ): Promise<ProcessAcquireInputResult> {
+    return this.connection.request(
+      "process/acquire-input",
+      jsonValueSchema.parse(processAcquireInputParamsSchema.parse(params)),
+      processAcquireInputResultSchema,
+    );
+  }
+
+  public writeProcessInput(
+    params: ProcessInputParams,
+  ): Promise<ProcessInputResult> {
+    return this.connection.request(
+      "process/input",
+      jsonValueSchema.parse(processInputParamsSchema.parse(params)),
+      processInputResultSchema,
+    );
+  }
+
+  public resizeProcess(
+    params: ProcessResizeParams,
+  ): Promise<ProcessResizeResult> {
+    return this.connection.request(
+      "process/resize",
+      jsonValueSchema.parse(processResizeParamsSchema.parse(params)),
+      processResizeResultSchema,
+    );
+  }
+
+  public detachProcess(
+    params: ProcessDetachParams,
+  ): Promise<ProcessDetachResult> {
+    return this.connection.request(
+      "process/detach",
+      jsonValueSchema.parse(processDetachParamsSchema.parse(params)),
+      processDetachResultSchema,
+    );
+  }
+
+  public terminateProcess(
+    params: ProcessTerminateParams,
+  ): Promise<ProcessTerminateResult> {
+    return this.connection.request(
+      "process/terminate",
+      jsonValueSchema.parse(processTerminateParamsSchema.parse(params)),
+      processTerminateResultSchema,
     );
   }
 

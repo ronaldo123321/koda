@@ -25,6 +25,7 @@
     "@koda/agent-core": "workspace:*",
     "@koda/app": "workspace:*",
     "@koda/protocol": "workspace:*",
+    "@koda/runtime-node": "workspace:*",
     "zod": "^4.1.5"
   },
   "devDependencies": {

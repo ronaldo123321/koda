@@ -86,6 +86,12 @@ const disconnectListeners = new Set<(error?: Error) => void>();
 const durableEvents: AgentEvent[] = [];
 let currentPlan = awaitingPlan;
 let currentCheckpoint = awaitingCheckpoint;
+const processJobId = "phase-4b3b-tty-job";
+const processSessionId = "00000000-0000-4000-8000-000000000001";
+let processCursor = 0;
+const processOutput: Buffer[] = [
+  Buffer.from("\u001b[31mpty-ready\u001b[0m\r\n"),
+];
 
 const initialization = initializeResultSchema.parse({
   protocolVersion: APP_SERVER_PROTOCOL_VERSION,
@@ -115,6 +121,7 @@ const initialization = initializeResultSchema.parse({
     dynamicToolCatalog: true,
     plugins: true,
     workspaceMutationRecovery: true,
+    interactiveProcesses: true,
   },
   providers: [
     {
@@ -304,6 +311,54 @@ const client: AppServerClientApi = {
   }),
   revokeApprovalGrant: async () => ({ revoked: false }),
   revokeAllApprovalGrants: async () => ({ revokedCount: 0 }),
+  listProcesses: async (params) => ({
+    workspace: params.workspace,
+    processes: [processSummary()],
+    nextCursor: null,
+  }),
+  attachProcess: async (params) => ({
+    processSessionId,
+    process: processSummary(),
+    inputState: "owned",
+    rows: params.rows,
+    cols: params.cols,
+    cursor: processCursor,
+    earliestCursor: 0,
+    latestCursor: processCursor,
+    complete: false,
+  }),
+  readProcess: async () => {
+    const output = processOutput.shift() ?? Buffer.alloc(0);
+    const cursor = processCursor;
+    processCursor += output.byteLength;
+    return {
+      status: "ok" as const,
+      processSessionId,
+      inputState: "owned" as const,
+      cursor,
+      nextCursor: processCursor,
+      earliestCursor: 0,
+      latestCursor: processCursor,
+      complete: false,
+      dataBase64: output.toString("base64"),
+    };
+  },
+  acquireProcessInput: async () => ({
+    processSessionId,
+    inputState: "owned",
+  }),
+  writeProcessInput: async (params) => {
+    const bytes = Buffer.from(params.dataBase64, "base64");
+    processOutput.push(Buffer.from(`pty-input:${bytes.toString("hex")}\r\n`));
+    return { processSessionId, acceptedBytes: bytes.byteLength };
+  },
+  resizeProcess: async (params) => ({
+    processSessionId,
+    rows: params.rows,
+    cols: params.cols,
+  }),
+  detachProcess: async () => ({ detached: true }),
+  terminateProcess: async () => ({ process: processSummary() }),
   onNotification: (listener) => {
     notificationListeners.add(listener);
     return () => notificationListeners.delete(listener);
@@ -329,6 +384,19 @@ const exitCode = await runTui(
 );
 process.stdout.write(`\n[phase-3g-tty] exit ${exitCode}\n`);
 process.exitCode = exitCode;
+
+function processSummary() {
+  return {
+    jobId: processJobId,
+    displayName: "TTY process",
+    cwd: process.cwd(),
+    state: "running" as const,
+    lifecycle: "background" as const,
+    createdAtMs: 1,
+    updatedAtMs: 2,
+    pid: process.pid,
+  };
+}
 
 function emitEvent(
   sequence: number,

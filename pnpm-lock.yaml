@@ -32,6 +32,9 @@ importers:
       '@koda/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
+      '@koda/runtime-node':
+        specifier: workspace:*
+        version: link:../../packages/runtime-node
       zod:
         specifier: ^4.1.5
         version: 4.4.3

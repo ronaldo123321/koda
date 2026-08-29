@@ -74,6 +74,7 @@ export interface NativeExecutorPtyStartInput extends NativeExecutorStartInput {
   cols: number;
   term?: string;
   lifecycle?: "foreground" | "background";
+  displayName?: string;
 }
 
 export type NativeIoMode = "pipe" | "pty";
@@ -139,6 +140,8 @@ export interface NativeOutputReadResult {
 
 export interface NativeJobSummary {
   job_id: string;
+  display_name: string | null;
+  cwd: string;
   state: NativeJobState;
   io_mode: NativeIoMode;
   lifecycle: NativeJobLifecycle;
@@ -293,6 +296,8 @@ const jobSnapshotSchema = z
 const jobSummarySchema = z
   .object({
     job_id: identifier,
+    display_name: z.string().min(1).max(128).nullable(),
+    cwd: z.string().min(1).max(4_096),
     state: jobStateSchema,
     io_mode: ioModeSchema,
     lifecycle: jobLifecycleSchema,
@@ -590,6 +595,9 @@ export class NativeExecutorClient {
       termination_confirmation_ms: input.terminationConfirmationMs,
       io_mode: "pty",
       lifecycle: input.lifecycle ?? "foreground",
+      ...(input.displayName === undefined
+        ? {}
+        : { display_name: input.displayName }),
       pty: {
         rows: input.rows,
         cols: input.cols,
