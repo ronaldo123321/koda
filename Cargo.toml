@@ -1,0 +1,12 @@
+[workspace]
+members = ["native/koda-exec"]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+version = "0.0.0"
+
+[profile.release]
+lto = "thin"
+strip = true

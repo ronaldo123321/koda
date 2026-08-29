@@ -103,6 +103,7 @@ import {
   ArtifactMaintenanceLease,
   ArtifactStore,
   JsonlEventStore,
+  NativeExecutorClient,
   ProjectCommandTemplateError,
   ProjectSkillError,
   ReadOnlyWorkspace,
@@ -1593,9 +1594,18 @@ export class KodaApplication {
         mutationCoordinator,
         mutationJournal,
       );
+      const nativeExecutorPath = this.environment.KODA_EXEC_PATH?.trim();
+      const nativeExecutor =
+        nativeExecutorPath === undefined || nativeExecutorPath.length === 0
+          ? undefined
+          : await NativeExecutorClient.open({
+              binaryPath: nativeExecutorPath,
+              stateDirectory: join(configuration.kodaHome, "executor"),
+            });
       const commandRunner = await WorkspaceCommandRunner.open(workspace.root, {
         environment: this.environment,
         artifactStore,
+        ...(nativeExecutor === undefined ? {} : { nativeExecutor }),
       });
       registerExecCommandTool(tools, commandRunner);
       pluginSession.registerTools(tools);

@@ -1,6 +1,6 @@
 # Koda Phase 4B Supervised Native Execution Design
 
-- Status: Accepted — Phase 4B1 implementation next
+- Status: In progress — Phase 4B1 implemented; Phase 4B2 next
 - Date: 2026-08-28
 - Depends on: Phase 4A complete
 
@@ -206,3 +206,22 @@ Filesystem, network, environment capability policy, scoped secrets, and OS
 sandbox strength reporting remain Phase 4C. Remote transports remain Phase 4D.
 Signed native release packaging remains Phase 4E. Child-agent process ownership
 and worktree delegation remain Phase 5.
+
+## Phase 4B1 implementation result
+
+Phase 4B1 is implemented on `main` as a Cargo workspace containing the
+`koda-exec` binary plus a strict Node client in `@koda/runtime-node`. The daemon
+uses a private Unix Socket, verifies the connecting effective user, negotiates
+protocol v1 capabilities, accepts idempotent structured starts, owns a POSIX
+process group, retains bounded stream bytes in private files, and exposes live
+status, output ranges, and termination. `WorkspaceCommandRunner` preserves its
+existing approval, result, Artifact, and audit contracts when the native backend
+is explicitly selected with `KODA_EXEC_PATH`; native failures never trigger a
+silent TypeScript fallback.
+
+The deterministic suite covers strict request parsing, bounds, idempotency
+conflicts, timeout escalation, a second Node client's reconnect to the same
+job, output integrity and Artifact materialization, cancellation, and the
+existing TypeScript compatibility backend. Capability negotiation truthfully
+reports `durable_restart_recovery: false`, `pty: false`, and `job_object: false`
+until their owning delivery slices land.

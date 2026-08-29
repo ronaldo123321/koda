@@ -16,6 +16,11 @@ import {
   OwnedProcessTree,
   type ProcessTerminationReport,
 } from "./process-tree-controller.js";
+import {
+  NativeExecutorClient,
+  NativeExecutorError,
+  type NativeJobSnapshot,
+} from "./native-executor-client.js";
 
 export type CommandErrorCode =
   | "INVALID_COMMAND"
@@ -23,6 +28,8 @@ export type CommandErrorCode =
   | "COMMAND_CWD_CHANGED"
   | "COMMAND_NOT_FOUND"
   | "COMMAND_START_FAILED"
+  | "NATIVE_EXECUTOR_UNAVAILABLE"
+  | "NATIVE_EXECUTOR_PROTOCOL_ERROR"
   | "PROCESS_TERMINATION_UNCERTAIN";
 
 export class CommandError extends Error {
@@ -79,6 +86,7 @@ export interface WorkspaceCommandRunnerOptions {
   artifactStore?: ArtifactStore;
   terminationGraceMs?: number;
   terminationConfirmationMs?: number;
+  nativeExecutor?: NativeExecutorClient;
 }
 
 interface WorkingDirectorySnapshot {
@@ -144,6 +152,7 @@ export class WorkspaceCommandRunner {
     private readonly terminationGraceMs: number,
     private readonly terminationConfirmationMs: number,
     private readonly artifactStore?: ArtifactStore,
+    private readonly nativeExecutor?: NativeExecutorClient,
   ) {}
 
   public static async open(
@@ -178,6 +187,7 @@ export class WorkspaceCommandRunner {
       terminationGraceMs,
       terminationConfirmationMs,
       options.artifactStore,
+      options.nativeExecutor,
     );
   }
 
@@ -218,7 +228,7 @@ export class WorkspaceCommandRunner {
         executed = true;
         signal.throwIfAborted();
         await this.revalidateWorkingDirectory(requestedCwd, cwd);
-        return runForegroundCommand({
+        const executionOptions: RunForegroundCommandOptions = {
           argv,
           cwd: cwd.absolutePath,
           workspacePath: cwd.workspacePath,
@@ -232,7 +242,10 @@ export class WorkspaceCommandRunner {
           timeoutMs,
           signal,
           ...(report === undefined ? {} : { report }),
-        });
+        };
+        return this.nativeExecutor === undefined
+          ? runForegroundCommand(executionOptions)
+          : runNativeForegroundCommand(this.nativeExecutor, executionOptions);
       },
     };
   }
@@ -358,6 +371,301 @@ interface RunForegroundCommandOptions {
   timeoutMs: number;
   signal: AbortSignal;
   report?: (event: ToolOperationalEvent) => Promise<void>;
+}
+
+const MAX_NATIVE_ARTIFACT_OUTPUT_BYTES = 67_108_864;
+const NATIVE_JOB_POLL_INTERVAL_MS = 20;
+
+async function runNativeForegroundCommand(
+  executor: NativeExecutorClient,
+  options: RunForegroundCommandOptions,
+): Promise<ExecCommandResult> {
+  options.signal.throwIfAborted();
+  let snapshot: NativeJobSnapshot;
+  try {
+    snapshot = await executor.start({
+      argv: [...options.argv],
+      cwd: options.cwd,
+      environment: options.environment,
+      timeoutMs: options.timeoutMs,
+      outputLimitBytes:
+        options.artifactStore === undefined
+          ? options.maxOutputBytes
+          : MAX_NATIVE_ARTIFACT_OUTPUT_BYTES,
+      terminationGraceMs: options.terminationGraceMs,
+      terminationConfirmationMs: options.terminationConfirmationMs,
+    });
+  } catch (error) {
+    throw mapNativeExecutorError(error, options.argv[0] ?? "command");
+  }
+
+  let reportedPid: number | undefined;
+  const reportStarted = async (current: NativeJobSnapshot): Promise<void> => {
+    if (reportedPid !== undefined || current.pid === null) return;
+    try {
+      await options.report?.({
+        type: "process.started",
+        payload: { pid: current.pid, ownership: "posix_process_group" },
+      });
+      reportedPid = current.pid;
+    } catch (error) {
+      await terminateAndObserve(
+        executor,
+        current.job_id,
+        "output_failure",
+      ).catch(() => undefined);
+      throw error;
+    }
+  };
+
+  await reportStarted(snapshot);
+  let cancelled = false;
+  while (!isNativeTerminal(snapshot.state)) {
+    if (options.signal.aborted) {
+      cancelled = true;
+      try {
+        snapshot = await terminateAndObserve(
+          executor,
+          snapshot.job_id,
+          "cancellation",
+        );
+      } catch (error) {
+        throw mapNativeExecutorError(error, options.argv[0] ?? "command");
+      }
+      break;
+    }
+    await waitMilliseconds(NATIVE_JOB_POLL_INTERVAL_MS);
+    try {
+      snapshot = await executor.get(snapshot.job_id);
+    } catch (error) {
+      throw mapNativeExecutorError(error, options.argv[0] ?? "command");
+    }
+    await reportStarted(snapshot);
+  }
+  await reportStarted(snapshot);
+
+  if (snapshot.state === "start_failed") {
+    throw commandStartFailure(snapshot, options.argv[0] ?? "command");
+  }
+  const pid = snapshot.pid;
+  if (pid === null || reportedPid === undefined) {
+    throw new CommandError(
+      "NATIVE_EXECUTOR_PROTOCOL_ERROR",
+      "The native executor reached a terminal state without a reported process ID.",
+    );
+  }
+  await reportNativeCompletion(options.report, snapshot, pid);
+  if (snapshot.state === "termination_uncertain") {
+    throw new CommandError(
+      "PROCESS_TERMINATION_UNCERTAIN",
+      `Koda could not confirm that native process tree ${pid} terminated.`,
+    );
+  }
+  if (cancelled) {
+    throw abortError(options.signal.reason);
+  }
+  if (snapshot.failure !== null) {
+    throw new CommandError(
+      "COMMAND_START_FAILED",
+      `Native command execution failed: ${snapshot.failure.message}`,
+    );
+  }
+
+  const [stdout, stderr] = await Promise.all([
+    materializeNativeOutput(executor, snapshot, "stdout", options),
+    materializeNativeOutput(executor, snapshot, "stderr", options),
+  ]);
+  return {
+    argv: [...options.argv],
+    cwd: options.workspacePath,
+    exit_code: snapshot.exit_code,
+    signal: snapshot.signal,
+    stdout: stdout.text,
+    stderr: stderr.text,
+    stdout_bytes: snapshot.stdout_bytes,
+    stderr_bytes: snapshot.stderr_bytes,
+    stdout_truncated: snapshot.stdout_truncated || stdout.truncated,
+    stderr_truncated: snapshot.stderr_truncated || stderr.truncated,
+    ...(stdout.artifact === undefined
+      ? {}
+      : { stdout_artifact: stdout.artifact }),
+    ...(stderr.artifact === undefined
+      ? {}
+      : { stderr_artifact: stderr.artifact }),
+    timed_out: snapshot.timed_out,
+    duration_ms: snapshot.duration_ms,
+    ...(snapshot.termination === null
+      ? {}
+      : {
+          termination: {
+            reason: snapshot.termination.reason,
+            outcome: snapshot.termination.outcome,
+          },
+        }),
+  };
+}
+
+async function terminateAndObserve(
+  executor: NativeExecutorClient,
+  jobId: string,
+  reason: "cancellation" | "output_failure",
+): Promise<NativeJobSnapshot> {
+  let snapshot = await executor.terminate(jobId, reason);
+  while (!isNativeTerminal(snapshot.state)) {
+    await waitMilliseconds(NATIVE_JOB_POLL_INTERVAL_MS);
+    snapshot = await executor.get(jobId);
+  }
+  return snapshot;
+}
+
+async function reportNativeCompletion(
+  report: ((event: ToolOperationalEvent) => Promise<void>) | undefined,
+  snapshot: NativeJobSnapshot,
+  pid: number,
+): Promise<void> {
+  for (const attempt of snapshot.termination?.attempts ?? []) {
+    await report?.({
+      type: "process.termination_requested",
+      payload: {
+        pid,
+        reason: snapshot.termination?.reason ?? "output_failure",
+        attempt: attempt.attempt,
+        mechanism: attempt.mechanism,
+      },
+    });
+  }
+  if (snapshot.state !== "termination_uncertain") {
+    await report?.({
+      type: "process.exited",
+      payload: {
+        pid,
+        exitCode: snapshot.exit_code,
+        signal: snapshot.signal,
+      },
+    });
+  }
+  if (snapshot.termination !== null) {
+    await report?.({
+      type: "process.termination_completed",
+      payload: {
+        pid,
+        reason: snapshot.termination.reason,
+        outcome: snapshot.termination.outcome,
+      },
+    });
+  }
+}
+
+async function materializeNativeOutput(
+  executor: NativeExecutorClient,
+  snapshot: NativeJobSnapshot,
+  stream: "stdout" | "stderr",
+  options: RunForegroundCommandOptions,
+): Promise<MaterializedTextOutput> {
+  const retainedBytes =
+    stream === "stdout"
+      ? snapshot.stdout_retained_bytes
+      : snapshot.stderr_retained_bytes;
+  const totalBytes =
+    stream === "stdout" ? snapshot.stdout_bytes : snapshot.stderr_bytes;
+  const supervisorTruncated =
+    stream === "stdout" ? snapshot.stdout_truncated : snapshot.stderr_truncated;
+  const targetBytes = supervisorTruncated
+    ? Math.min(retainedBytes, options.maxOutputBytes)
+    : retainedBytes;
+  const capture = await createOutputCapture(
+    supervisorTruncated ? undefined : options.artifactStore,
+    options.maxOutputBytes,
+  );
+  try {
+    let offset = 0;
+    while (offset < targetBytes) {
+      const output = await executor.readOutput(
+        snapshot.job_id,
+        stream,
+        offset,
+        Math.min(65_536, targetBytes - offset),
+      );
+      if (
+        output.job_id !== snapshot.job_id ||
+        output.stream !== stream ||
+        output.offset !== offset ||
+        output.total_bytes !== totalBytes ||
+        output.retained_bytes !== retainedBytes ||
+        output.next_offset <= offset
+      ) {
+        throw new CommandError(
+          "NATIVE_EXECUTOR_PROTOCOL_ERROR",
+          `Native executor returned inconsistent ${stream} output metadata.`,
+        );
+      }
+      await capture.append(output.data);
+      offset = output.next_offset;
+    }
+    const materialized = await capture.finish();
+    return {
+      ...materialized,
+      totalBytes,
+      truncated: supervisorTruncated || materialized.truncated,
+    };
+  } catch (error) {
+    await capture.abort();
+    throw error instanceof NativeExecutorError
+      ? mapNativeExecutorError(error, options.argv[0] ?? "command")
+      : error;
+  }
+}
+
+function isNativeTerminal(state: NativeJobSnapshot["state"]): boolean {
+  return (
+    state === "exited" ||
+    state === "start_failed" ||
+    state === "termination_uncertain"
+  );
+}
+
+function commandStartFailure(
+  snapshot: NativeJobSnapshot,
+  executable: string,
+): CommandError {
+  const code =
+    snapshot.failure?.code === "COMMAND_NOT_FOUND"
+      ? "COMMAND_NOT_FOUND"
+      : "COMMAND_START_FAILED";
+  return new CommandError(
+    code,
+    code === "COMMAND_NOT_FOUND"
+      ? `Command executable was not found: ${executable}`
+      : (snapshot.failure?.message ?? "Native command could not start."),
+  );
+}
+
+function mapNativeExecutorError(
+  error: unknown,
+  executable: string,
+): CommandError | Error {
+  if (!(error instanceof NativeExecutorError)) {
+    return error instanceof Error ? error : new Error(String(error));
+  }
+  if (error.code === "COMMAND_NOT_FOUND") {
+    return new CommandError(
+      "COMMAND_NOT_FOUND",
+      `Command executable was not found: ${executable}`,
+      { cause: error },
+    );
+  }
+  if (error.code === "COMMAND_START_FAILED") {
+    return new CommandError("COMMAND_START_FAILED", error.message, {
+      cause: error,
+    });
+  }
+  return new CommandError(
+    error.code === "NATIVE_EXECUTOR_UNAVAILABLE"
+      ? "NATIVE_EXECUTOR_UNAVAILABLE"
+      : "NATIVE_EXECUTOR_PROTOCOL_ERROR",
+    error.message,
+    { cause: error },
+  );
 }
 
 async function runForegroundCommand(
@@ -805,6 +1113,12 @@ function abortError(reason: unknown): Error {
   );
   error.name = "AbortError";
   return error;
+}
+
+function waitMilliseconds(milliseconds: number): Promise<void> {
+  return new Promise((resolvePromise) => {
+    setTimeout(resolvePromise, milliseconds);
+  });
 }
 
 function isNodeError(

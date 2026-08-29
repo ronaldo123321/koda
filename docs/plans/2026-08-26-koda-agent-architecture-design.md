@@ -422,9 +422,9 @@ Status: **Complete; Phase 3A through Phase 3I are implemented and verified.**
 
 ### Phase 4: hardening
 
-Status: **In progress; the Phase 4A1 crash-safe filesystem recovery core is implemented and verified, with Phase 4A2 conflict-resolution clients next.**
+Status: **In progress; Phase 4A is complete and Phase 4B1 native foreground supervision is implemented and verified, with Phase 4B2 restart reconciliation next.**
 
-- Rust execution sidecar.
+- Rust execution Supervisor. **Phase 4B1 implements the versioned local protocol, POSIX foreground ownership, bounded output, and live-Supervisor reconnect; restart reconciliation, PTY/background jobs, and Windows Job Objects remain later Phase 4B slices.**
 - OS-specific sandboxing and network policy.
 - Secret handling and signed cross-platform releases.
 - High-risk shell-string execution, if retained after sandbox evaluation.

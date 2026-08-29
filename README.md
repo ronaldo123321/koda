@@ -6,7 +6,7 @@ The project is building the control plane around a coding model: typed conversat
 
 ## Current status
 
-The Phase 3 local-agent foundation is complete and Phase 4A now hardens workspace mutations across process crashes. Phase 4A adds private durable journals, conservative automatic rollback, divergent-edit quarantine, token-bound inspection and backup export, and explicitly audited conflict resolution on top of the Phase 3 planning and extension Harness:
+The Phase 3 local-agent foundation and Phase 4A crash-safe workspace recovery are complete. Phase 4B1 now adds an opt-in Rust execution supervisor with a versioned local protocol, reconnectable job observation, POSIX process-group ownership, bounded retained output, and explicit native capability reporting on top of those foundations:
 
 - Versioned Thread, Turn, Item, and Agent Event schemas.
 - A provider-neutral streaming model interface.
@@ -39,6 +39,7 @@ The Phase 3 local-agent foundation is complete and Phase 4A now hardens workspac
 - A durable `tool.execution_started` boundary after policy and approval, immediately before handler execution.
 - Typed process start, exit, termination-attempt, and termination-outcome events tied to the originating tool call.
 - POSIX process-group ownership with graceful-to-force escalation, descendant cleanup, and bounded confirmation.
+- An independent Rust `koda-exec` supervisor over a private, same-user Unix Socket with strict length-prefixed framing, capability negotiation, idempotent starts, reconnectable status/output reads, and no silent TypeScript fallback.
 - Windows tree-aware `taskkill` handling with explicit direct-child fallback and honest uncertain outcomes.
 - Structured interrupted-operation recovery that reports effect and process evidence without replaying a side effect or killing a historical PID.
 - A rebuildable SQLite schema v2 projection for thread metadata plus bounded display-worthy history search; JSONL remains authoritative.
@@ -85,7 +86,7 @@ The Phase 3 local-agent foundation is complete and Phase 4A now hardens workspac
 - Idle-only `/activity` pagination over the complete durable execution trace plus 32 ms assistant-delta notification coalescing that preserves exact final output and flushes semantic events immediately.
 - Offline provider, runtime, CLI, and deterministic agent-loop tests.
 
-Provider-assisted semantic compaction, exact provider tokenizers and pricing, custom endpoints/profiles, live model discovery, automatic routing/fallback, cross-provider resume, additional providers, FTS5/fuzzy/live or cross-workspace search, alternate-screen navigation, rich Markdown/syntax/diff rendering, binary artifact views, overlapping/fuzzy/directory change operations, interactive process UX, and the non-Tool MCP capability surface are deliberately deferred beyond the completed Phase 3 baseline. Phase 4A now provides durable post-crash journals, safe automatic change-set recovery, audit reconciliation, conflict write blocking, and explicit human resolution clients. Remote MCP/HTTP/OAuth, shared or remote artifact stores, remote app-server transports, strong sandboxing, Windows Job Objects, crash-surviving supervision, the Rust executor, and any high-risk shell-string support remain later Phase 4 work. Parent/child thread lineage and multi-agent scenario matrices remain Phase 5 work. Workspace writes, process execution, and MCP tools not explicitly classified as read require approval by default.
+Provider-assisted semantic compaction, exact provider tokenizers and pricing, custom endpoints/profiles, live model discovery, automatic routing/fallback, cross-provider resume, additional providers, FTS5/fuzzy/live or cross-workspace search, alternate-screen navigation, rich Markdown/syntax/diff rendering, binary artifact views, overlapping/fuzzy/directory change operations, interactive process UX, and the non-Tool MCP capability surface are deliberately deferred beyond the completed Phase 3 baseline. Phase 4A provides durable post-crash journals, safe automatic change-set recovery, audit reconciliation, conflict write blocking, and explicit human resolution clients. Phase 4B1 provides live-Supervisor reconnect and native POSIX ownership; Supervisor-restart reconciliation, PTY/background jobs, Windows Job Objects, strong sandboxing, remote MCP/HTTP/OAuth, shared storage, remote app-server transports, signed releases, and any high-risk shell-string support remain later Phase 4 work. Parent/child thread lineage and multi-agent scenario matrices remain Phase 5 work. Workspace writes, process execution, and MCP tools not explicitly classified as read require approval by default.
 
 ## Run the CLI
 
@@ -339,6 +340,15 @@ When Koda proposes a patch or command, it prints the exact action and asks for a
 
 Commands run without stdin, have a 30-second default timeout, and retain at most 64 KiB from each output stream. On POSIX, each command owns a process group; timeout, cancellation, output failure, or unsupported surviving descendants trigger `SIGTERM`, a grace period, and then `SIGKILL` when needed. Windows uses tree-aware `taskkill` with explicit uncertainty when termination cannot be confirmed. This TypeScript runtime provides guardrails, not a security sandbox: an approved executable or repository script still runs with the current user's operating-system permissions.
 
+Phase 4B1 also provides the Rust supervisor on macOS and Linux. `pnpm build` builds `target/debug/koda-exec`; set its absolute path to select the native backend explicitly:
+
+```bash
+export KODA_EXEC_PATH="$PWD/target/debug/koda-exec"
+node apps/cli/dist/main.js run "run the tests" --cwd .
+```
+
+When selected, Koda starts or reconnects to the private Supervisor beneath `KODA_HOME/executor`, performs a mandatory version/capability handshake, and keeps job ownership independent of one Node client. Removing `KODA_EXEC_PATH` selects the existing TypeScript compatibility backend during the migration. Koda never silently falls back after a native startup or protocol failure. Phase 4B1 can reconnect while the same Supervisor remains alive; durable recovery after the Supervisor itself crashes is Phase 4B2.
+
 When the provider reports usage, Koda persists normalized input, cached, cache-write, output, reasoning, and total token counts and prints a turn summary. Missing provider usage is reported as unmeasured rather than treated as zero billable usage.
 
 `ripgrep` (`rg`) must be available for the `search_text` tool. `list_files` and `read_file` continue to work without it.
@@ -349,6 +359,7 @@ Requirements:
 
 - Node.js 22.20 or later; CI runs Node.js 24.
 - pnpm 10.28.2.
+- Rust 1.85 or later with Cargo; the workspace uses Rust 2024 edition.
 
 ```bash
 pnpm install
@@ -372,6 +383,7 @@ pnpm eval:scenarios
 - `@koda/app-server-client-node`: typed local JSON-RPC client, NDJSON framing, request lifecycle, diagnostics, and owned app-server process cleanup.
 - `@koda/tui`: React/Ink controller, static transcript and live-region rendering, keyboard interaction, and `koda-chat` entry point.
 - `@koda/testkit`: deterministic clocks, IDs, tools, in-memory event storage, and offline reliability scenarios.
+- `koda-exec`: native POSIX process supervisor, private local protocol, bounded output ownership, timeout, cancellation, and reconnectable live job status.
 
 ## Architecture
 
@@ -388,6 +400,8 @@ pnpm eval:scenarios
 - [Phase 2D process reliability design](docs/plans/2026-08-26-phase-2d-process-reliability-design.md)
 - [Phase 2E SQLite metadata design](docs/plans/2026-08-26-phase-2e-sqlite-metadata-design.md)
 - [Phase 2F scenarios and artifact GC design](docs/plans/2026-08-26-phase-2f-scenarios-artifact-gc-design.md)
+- [Phase 4 hardening roadmap](docs/plans/2026-08-28-phase-4-roadmap.md)
+- [Phase 4B supervised native execution design](docs/plans/2026-08-28-phase-4b-supervised-native-execution-design.md)
 - [Phase 3 extensibility roadmap](docs/plans/2026-08-26-phase-3-roadmap.md)
 - [Phase 3A local stdio app-server design](docs/plans/2026-08-26-phase-3a-stdio-app-server-design.md)
 - [Phase 3B local MCP client design](docs/plans/2026-08-26-phase-3b-mcp-client-design.md)

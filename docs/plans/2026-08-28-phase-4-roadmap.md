@@ -1,6 +1,6 @@
 # Koda Phase 4 Hardening Roadmap
 
-- Status: In progress — Phase 4A complete; Phase 4B supervised execution next
+- Status: In progress — Phase 4B1 complete; Phase 4B2 restart reconciliation next
 - Date: 2026-08-28
 - Depends on: completed Phase 3A through Phase 3I baseline
 
@@ -45,7 +45,7 @@ Implementation status:
 
 ### Phase 4B: supervised native execution boundary
 
-Status: Accepted — Phase 4B1 protocol and foreground supervision next
+Status: In progress — Phase 4B1 complete; Phase 4B2 next
 
 - Define a versioned local executor protocol independent of providers and clients.
 - Add the Rust `koda-exec` sidecar for durable process ownership and bounded shutdown.
@@ -55,6 +55,11 @@ Status: Accepted — Phase 4B1 protocol and foreground supervision next
 
 The accepted architecture, crash semantics, protocol, delivery slices, and
 acceptance criteria are in [Phase 4B supervised native execution](2026-08-28-phase-4b-supervised-native-execution-design.md).
+
+Implementation status:
+
+- **Phase 4B1 complete:** Cargo workspace and `koda-exec`, private same-user Unix Socket, strict length-prefixed protocol v1, capability handshake, idempotent foreground starts, POSIX process groups, timeout/cancellation escalation, bounded file-backed stdout/stderr, reconnectable live job status and output, strict Node client validation, explicit `KODA_EXEC_PATH` selection, existing exec-tool result/audit compatibility, and cross-language tests.
+- **Phase 4B2 next:** crash-durable job records, Supervisor-restart reconciliation using platform process identity, job listing/retention, orphan policy, and kill-point testing.
 
 ### Phase 4C: sandbox, network, and secret policy
 

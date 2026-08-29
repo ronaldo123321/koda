@@ -4,6 +4,7 @@ export * from "./artifact-tools.js";
 export * from "./change-set-tool.js";
 export * from "./exec-command-tool.js";
 export * from "./jsonl-event-store.js";
+export * from "./native-executor-client.js";
 export * from "./patch-document.js";
 export * from "./patch-set-tool.js";
 export * from "./process-tree-controller.js";
