@@ -1,6 +1,6 @@
 # Koda Phase 4B4B Windows Job Object Execution Design
 
-- Status: Accepted — implementation next
+- Status: In progress — Phase 4B4B1 complete; Phase 4B4B2 next
 - Date: 2026-08-30
 - Depends on: Phase 4B4A Windows platform foundations complete
 - Target: Windows 10 version 1809 and later, with unchanged macOS/Linux behavior
@@ -322,6 +322,39 @@ existing stable protocol codes.
 - Open only verified Windows capabilities.
 - Add Rust and Node tests for real Windows command trees and crash points.
 - Keep clean Linux and Windows CI gates green.
+
+## Implementation progress
+
+Phase 4B4B1 was implemented and verified on 2026-08-30:
+
+- `Supervisor`, `WorkerRuntime`, durable storage, internal Worker protocol,
+  attachment state, and PTY output storage now compile through the shared
+  Windows runtime instead of a separate control-plane stub.
+- Windows Worker endpoints use SID-, canonical job-directory-, and job-ID-bound
+  Named Pipe names. The shared stream wrapper supports authenticated server and
+  client peers without duplicating framing or HMAC handshake logic.
+- Worker bootstrap parses a pointer-width `--token-handle`, uses
+  `CreateProcessW` plus `STARTUPINFOEX`, and restricts inheritance to the
+  anonymous token pipe and standard `NUL` handle. Token bytes never enter argv
+  or the environment.
+- Durable atomic replacement, output flushing, exclusive lock sharing, and
+  terminal-record retention now honor Windows filesystem semantics while
+  preserving the Unix implementation.
+- Windows `job/start` remains fail closed with
+  `PLATFORM_CAPABILITY_UNAVAILABLE`; shared durable reads such as `job/list`
+  are enabled. No execution or recovery capability bit is opened early.
+- Local macOS verification passed 22 native tests, strict workspace Clippy,
+  formatting, type checking, and the complete 504-test suite. GitHub Actions
+  run [33285427198](https://github.com/ronaldo123321/koda/actions/runs/33285427198)
+  passed both Linux `verify` and Windows `windows-native`, including 30 Windows
+  native tests and all 5 Windows Node control-plane tests.
+
+Phase 4B4B2 is next. Job Object ownership, direct command construction,
+environment blocks, command output pipes, suspended start, completion-port
+observation, cancellation, timeout, and force termination remain intentionally
+unavailable until that slice is implemented and verified. Phase 4B4B3 still
+owns restart/crash acceptance and capability activation; Phase 4B4C still owns
+ConPTY and all interactive Windows terminal behavior.
 
 ## Acceptance criteria
 

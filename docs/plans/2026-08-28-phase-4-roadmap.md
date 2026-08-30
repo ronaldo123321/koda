@@ -1,6 +1,6 @@
 # Koda Phase 4 Hardening Roadmap
 
-- Status: In progress — Phase 4B4B design accepted; implementation next
+- Status: In progress — Phase 4B4B1 complete; Phase 4B4B2 next
 - Date: 2026-08-28
 - Depends on: completed Phase 3A through Phase 3I baseline
 
@@ -45,7 +45,7 @@ Implementation status:
 
 ### Phase 4B: supervised native execution boundary
 
-Status: In progress — Phase 4B4B design accepted; implementation next
+Status: In progress — Phase 4B4B1 complete; Phase 4B4B2 next
 
 - Define a versioned local executor protocol independent of providers and clients.
 - Add the Rust `koda-exec` sidecar for durable process ownership and bounded shutdown.
@@ -63,7 +63,9 @@ Implementation status:
 - **Phase 4B3A complete:** POSIX PTY/background starts, Worker-owned controlling terminals, attach/detach, bounded segmented cursor logs, HMAC attachment capabilities, renewable fenced input ownership, resize, strict Node primitives, and real-PTY restart/failure tests.
 - **Phase 4B3B complete:** approved `exec_terminal`, app-server protocol v14 process sessions, workspace-filtered discovery, TUI process pane, safe key routing, visible attachment/lease state, bounded terminal projection, and real-TTY acceptance.
 - **Phase 4B4A complete:** platform seams, authenticated Windows Named Pipes, Windows process identity, private state ACL/locking, restricted bootstrap handle inheritance, fail-closed capability reporting, negative framing/identity tests, and clean Linux/Windows CI.
-- **Phase 4B4B design accepted; implementation next:** shared Windows Supervisor/Worker runtime, atomic Job Object process ownership, Pipe/Background execution, termination, timeout, output, and restart recovery.
+- **Phase 4B4B1 complete:** shared Windows Supervisor/Worker and durable runtime, SID/state/job-bound Worker Named Pipes, restricted token-handle Worker startup, Windows atomic state replacement and file semantics, fail-closed command execution, and clean Linux/Windows CI.
+- **Phase 4B4B2 next:** atomic Job Object process ownership, direct Pipe/Background execution, output, natural descendant completion, timeout, cancellation, and force termination.
+- **Phase 4B4B3 pending:** Supervisor restart reattachment, Worker-loss recovery acceptance, and verified Windows capability activation.
 - **Phase 4B4C pending:** ConPTY interactive execution, input, resize, attachment, and terminal recovery.
 
 The accepted Phase 4B2 contract is in [Phase 4B2 Worker recovery](2026-08-29-phase-4b2-worker-recovery-design.md).
