@@ -640,6 +640,11 @@ describe("Phase 4C2 native admission and evidence", () => {
       };
       const started = await client.start(input);
       const terminal = await waitTerminal(client, started.job_id);
+      if (terminal.security.stage !== "launch_setup") {
+        throw new Error(
+          `Linux late fault boundary ${faultPoint} did not retain launch evidence: ${JSON.stringify(terminal)}`,
+        );
+      }
       expect(terminal.state).toBe("termination_uncertain");
       expect(terminal.security).toMatchObject({
         schema_version: 3,
