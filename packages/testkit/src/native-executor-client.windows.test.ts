@@ -10,6 +10,13 @@ import {
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 
 const windowsDescribe = process.platform === "win32" ? describe : describe.skip;
+const windowsEnvironment: NodeJS.ProcessEnv = {
+  ComSpec: process.env.ComSpec,
+  PATH: process.env.PATH,
+  SystemRoot: process.env.SystemRoot,
+  TEMP: process.env.TEMP,
+  TMP: process.env.TMP,
+};
 
 windowsDescribe("NativeExecutorClient Windows control plane", () => {
   let root: string;
@@ -54,7 +61,7 @@ windowsDescribe("NativeExecutorClient Windows control plane", () => {
         ].join(""),
       ],
       cwd: root,
-      environment: process.env,
+      environment: windowsEnvironment,
       timeoutMs: 5_000,
       outputLimitBytes: 4_096,
       terminationGraceMs: 50,
@@ -97,7 +104,7 @@ windowsDescribe("NativeExecutorClient Windows control plane", () => {
         ].join(""),
       ],
       cwd: root,
-      environment: process.env,
+      environment: windowsEnvironment,
       timeoutMs: 5_000,
       outputLimitBytes: 4_096,
       terminationGraceMs: 50,
@@ -127,7 +134,7 @@ windowsDescribe("NativeExecutorClient Windows control plane", () => {
     const started = await client.start({
       argv: [process.execPath, "-e", "setInterval(()=>{},1000)"],
       cwd: root,
-      environment: process.env,
+      environment: windowsEnvironment,
       timeoutMs: 150,
       outputLimitBytes: 4_096,
       terminationGraceMs: 25,
@@ -147,7 +154,7 @@ windowsDescribe("NativeExecutorClient Windows control plane", () => {
       client.startPty({
         argv: [process.execPath, "-e", "process.exit(0)"],
         cwd: root,
-        environment: process.env,
+        environment: windowsEnvironment,
         timeoutMs: 1_000,
         outputLimitBytes: 4_096,
         terminationGraceMs: 100,
