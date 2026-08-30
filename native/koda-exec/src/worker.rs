@@ -19,6 +19,8 @@ use tokio::time::{sleep, timeout};
 
 use crate::attachment::AttachmentRegistry;
 use crate::durable::{JobLock, JobRecord, JobStore, StoredJobState, sha256_hex};
+#[cfg(target_os = "linux")]
+use crate::execution_policy::ExecutionSecurityStage;
 #[cfg(unix)]
 use crate::execution_policy::FilesystemPolicy;
 use crate::execution_policy::{
@@ -306,6 +308,25 @@ impl WorkerRuntime {
         #[cfg(unix)]
         fault_point("after_security_setup");
         Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn verified_linux_fault_point(&self, name: &str) -> Result<(), ProtocolError> {
+        if std::env::var("KODA_EXEC_TEST_FAULT_POINT").as_deref() != Ok(name) {
+            return Ok(());
+        }
+        let state = self.record.read_state()?;
+        let applied = matches!(
+            state.security,
+            Some(ExecutionSecuritySnapshot::Policy(ref security))
+                if state.state == JobState::Running
+                    && security.schema_version == 3
+                    && security.stage == ExecutionSecurityStage::LaunchSetup
+        );
+        if !applied {
+            return Err(execution_security::corrupt());
+        }
+        std::process::abort();
     }
 
     #[cfg(unix)]
@@ -1745,7 +1766,7 @@ fn prepare_unix_launch(
         )
         .map_err(execution_security::policy_error)?;
         environment.remove(crate::linux_bubblewrap::LINUX_SANDBOX_FAULT_ENV);
-        if let Ok(point) = std::env::var(crate::linux_bubblewrap::LINUX_SANDBOX_FAULT_ENV)
+        if let Ok(point) = std::env::var("KODA_EXEC_TEST_FAULT_POINT")
             && matches!(
                 point.as_str(),
                 "after_linux_namespace_setup" | "after_linux_seccomp"
@@ -1839,7 +1860,7 @@ async fn wait_for_linux_sandbox_confirmation(
             network_denied,
             digest,
             &runtime,
-            Duration::from_secs(3),
+            Duration::from_secs(10),
         )
         .map(|_| ())
     })
@@ -1979,8 +2000,9 @@ async fn activate_unix_launch(
         .await;
         return Err(error);
     }
+    #[cfg(target_os = "linux")]
     if linux_bubblewrap {
-        fault_point("after_linux_sandbox_evidence");
+        runtime.verified_linux_fault_point("after_linux_sandbox_evidence")?;
     }
     if let Err(error) = release_gate(sandbox_release_write) {
         return fail_running_unix_launch(
@@ -1995,8 +2017,9 @@ async fn activate_unix_launch(
         )
         .await;
     }
+    #[cfg(target_os = "linux")]
     if linux_bubblewrap {
-        fault_point("after_linux_sandbox_release");
+        runtime.verified_linux_fault_point("after_linux_sandbox_release")?;
     }
     Ok(())
 }

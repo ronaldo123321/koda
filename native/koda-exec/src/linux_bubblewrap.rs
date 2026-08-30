@@ -22,7 +22,7 @@ const MAX_CAPTURE_BYTES: usize = 4 * 1024;
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const CONFIRMATION_MAGIC: &[u8; 16] = b"KODA-LINUX-V001!";
 const CONFIRMATION_FRAME_BYTES: usize = 112;
-pub const LINUX_SANDBOX_FAULT_ENV: &str = "KODA_EXEC_TEST_FAULT_POINT";
+pub const LINUX_SANDBOX_FAULT_ENV: &str = "KODA_EXEC_INTERNAL_SANDBOX_FAULT";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BubblewrapUnavailableReason {
