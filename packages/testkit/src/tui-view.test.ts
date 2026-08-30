@@ -20,6 +20,11 @@ import {
   type TuiInputController,
   type TuiState,
 } from "@koda/tui";
+import {
+  c1ExecutionCapabilities,
+  createExecutionLaunchSetupSnapshot,
+  resolveExecutionPolicy,
+} from "@koda/runtime-node";
 import { renderToString, type Key } from "ink";
 import { createElement } from "react";
 import { describe, expect, it, vi } from "vitest";
@@ -397,6 +402,10 @@ describe("Koda Ink view", () => {
   it("renders process sessions and routes PTY keys without leaking into chat", () => {
     const controller = fakeInputController();
     const state = baseState();
+    const security = createExecutionLaunchSetupSnapshot(
+      resolveExecutionPolicy({ workspaceRoot: "/workspace" }),
+      c1ExecutionCapabilities("native_posix"),
+    );
     const process = {
       jobId: "process-job-1",
       displayName: "Dev server",
@@ -406,6 +415,7 @@ describe("Koda Ink view", () => {
       createdAtMs: 1,
       updatedAtMs: 2,
       pid: 42,
+      security,
     };
     state.mode = "process_view";
     state.processNavigation = {
@@ -435,6 +445,8 @@ describe("Koda Ink view", () => {
     expect(frame).toContain("Dev server · process-");
     expect(frame).toContain("server ready");
     expect(frame).toContain("Ctrl+C interrupt");
+    expect(frame).toContain("OS sandbox: none");
+    expect(frame).toContain("native_posix");
 
     const requestExit = vi.fn();
     routeTuiInput(controller, state, "c", key({ ctrl: true }), requestExit);
@@ -448,11 +460,14 @@ describe("Koda Ink view", () => {
     expect(controller.detachProcessSession).toHaveBeenCalledTimes(2);
     expect(requestExit).not.toHaveBeenCalled();
 
-    const processSession = state.processNavigation.session;
+    const processNavigation = state.processNavigation;
+    if (processNavigation === undefined)
+      throw new Error("Expected process navigation");
+    const processSession = processNavigation.session;
     expect(processSession).toBeDefined();
     if (processSession === undefined)
       throw new Error("Expected process session");
-    state.processNavigation.session = {
+    processNavigation.session = {
       ...processSession,
       inputState: "read_only",
     };

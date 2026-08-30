@@ -937,6 +937,10 @@ describe("Phase 1A CLI", () => {
               exit_code: 0,
               stdout: "validation passed",
               timed_out: false,
+              security: {
+                kind: "policy",
+                stage: "launch_setup",
+              },
             },
           });
         },
@@ -954,6 +958,7 @@ describe("Phase 1A CLI", () => {
           approvalCalls += 1;
           expect(request.name).toBe("exec_command");
           expect(request.details).toContain(JSON.stringify(process.execPath));
+          expect(request.details).toContain("OS sandbox: none");
           return { decision: "approved" };
         },
       }),
@@ -964,6 +969,7 @@ describe("Phase 1A CLI", () => {
       }),
     };
     const stdout = new MemoryWriter();
+    const stderr = new MemoryWriter();
 
     const exitCode = await runCommand(
       {
@@ -978,7 +984,7 @@ describe("Phase 1A CLI", () => {
         },
         processDirectory: root,
         stdout,
-        stderr: new MemoryWriter(),
+        stderr,
       },
       dependencies,
     );
@@ -986,6 +992,7 @@ describe("Phase 1A CLI", () => {
     expect(exitCode).toBe(0);
     expect(approvalCalls).toBe(1);
     expect(stdout.value).toBe("Validation passed.\n");
+    expect(stderr.value).toContain("OS sandbox: none");
     const events = await new JsonlEventStore(
       join(kodaHome, "threads", "exec-cli-thread.jsonl"),
     ).readAll();
@@ -1002,6 +1009,92 @@ describe("Phase 1A CLI", () => {
     expect(lifecycle.indexOf("process.exited")).toBeLessThan(
       lifecycle.indexOf("tool.completed"),
     );
+    expect(
+      events.events.find((event) => event.type === "process.started"),
+    ).toMatchObject({
+      payload: {
+        security: { kind: "policy", stage: "launch_setup" },
+      },
+    });
+  });
+
+  it("rejects a protected execution profile before approval or launch", async () => {
+    const root = await mkdtemp(join(tmpdir(), "koda-protected-exec-cli-"));
+    temporaryDirectories.push(root);
+    const workspaceRoot = join(root, "repo");
+    const marker = join(workspaceRoot, "must-not-run.txt");
+    await mkdir(workspaceRoot);
+    let approvalCalls = 0;
+    const provider = new ScriptedModelProvider([
+      {
+        events: [
+          {
+            type: "tool_call",
+            callId: toolCallIdSchema.parse("protected-exec-cli-call"),
+            name: "exec_command",
+            arguments: {
+              argv: [
+                process.execPath,
+                "-e",
+                "require('node:fs').writeFileSync('must-not-run.txt', 'bad')",
+              ],
+            },
+          },
+          { type: "completed", finishReason: "tool_calls" },
+        ],
+      },
+      {
+        assertRequest: (request) => {
+          expect(request.items.at(-1)).toMatchObject({
+            type: "tool_result",
+            status: "error",
+            error: { code: "EXECUTION_POLICY_UNAVAILABLE" },
+          });
+        },
+        events: [
+          { type: "assistant_delta", text: "Policy refused execution." },
+          { type: "completed", finishReason: "stop" },
+        ],
+      },
+    ]);
+    const dependencies: RunCommandDependencies = {
+      openWorkspace: (path) => ReadOnlyWorkspace.open(path),
+      createProvider: () => provider,
+      createApprovalBroker: () => ({
+        request: async () => {
+          approvalCalls += 1;
+          return { decision: "approved" };
+        },
+      }),
+      createIds: () => ({
+        threadId: threadIdSchema.parse("protected-exec-cli-thread"),
+        turnId: turnIdSchema.parse("protected-exec-cli-turn"),
+        itemIds: new DeterministicItemIdFactory(),
+      }),
+    };
+
+    const exitCode = await runCommand(
+      {
+        prompt: "Try the protected command.",
+        cwd: workspaceRoot,
+        signal: new AbortController().signal,
+      },
+      {
+        environment: {
+          OPENAI_API_KEY: "offline-test-key",
+          KODA_HOME: join(root, "state"),
+          KODA_EXECUTION_PROFILE: "read-only",
+        },
+        processDirectory: root,
+        stdout: new MemoryWriter(),
+        stderr: new MemoryWriter(),
+      },
+      dependencies,
+    );
+
+    expect(exitCode).toBe(0);
+    expect(approvalCalls).toBe(0);
+    await expect(access(marker)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("does not start a rejected structured command", async () => {

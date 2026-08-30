@@ -120,12 +120,24 @@ export function registerExecCommandTool(
             key: createHash("sha256")
               .update(
                 JSON.stringify({
-                  version: 1,
+                  version: 2,
                   toolName: "exec_command",
                   workspaceRoot: runner.root,
                   cwd: command.cwd,
                   argv: command.argv,
                   timeoutMs: command.timeoutMs,
+                  policyDigest:
+                    command.security.kind === "policy"
+                      ? command.security.policy_digest
+                      : "legacy_unknown",
+                  backend:
+                    command.security.kind === "policy"
+                      ? command.security.backend
+                      : "legacy_unknown",
+                  capabilitiesDigest:
+                    command.security.kind === "policy"
+                      ? command.security.capabilities_digest
+                      : "legacy_unknown",
                 }),
               )
               .digest("hex"),

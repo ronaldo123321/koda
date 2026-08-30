@@ -14,7 +14,6 @@ import {
 import {
   executionPolicyDigest,
   normalizeExecutionPolicy,
-  resolveExecutionPolicy,
   validateExecutionSecuritySnapshot,
 } from "./execution-policy.js";
 
@@ -86,9 +85,8 @@ export interface NativeExecutorStartInput {
   lifecycle?: "foreground" | "background";
   displayName?: string;
   requestId?: string;
-  /** C1B bridge: absent means explicit unconfined policy rooted at canonical cwd.
-   * C1C will supply the trusted application's frozen workspace policy here. */
-  policy?: ExecutionPolicy;
+  /** Frozen policy selected by the trusted application before approval. */
+  policy: ExecutionPolicy;
 }
 
 export interface NativeExecutorPtyStartInput extends NativeExecutorStartInput {
@@ -623,15 +621,12 @@ export class NativeExecutorClient {
     input: NativeExecutorStartInput,
   ): Promise<NativeJobSnapshot> {
     const requestId = input.requestId ?? randomUUID();
-    const supplied =
-      input.policy === undefined
-        ? undefined
-        : normalizeExecutionPolicy(input.policy);
+    const policy = normalizeExecutionPolicy(input.policy);
     const cwd = await realpath(input.cwd);
     const params = {
       argv: [...input.argv],
       cwd,
-      policy: supplied ?? resolveExecutionPolicy({ workspaceRoot: cwd }),
+      policy,
       environment: definedEnvironment(input.environment),
       timeout_ms: input.timeoutMs,
       output_limit_bytes: input.outputLimitBytes,
@@ -650,15 +645,12 @@ export class NativeExecutorClient {
     input: NativeExecutorPtyStartInput,
   ): Promise<NativeJobSnapshot> {
     const requestId = input.requestId ?? randomUUID();
-    const supplied =
-      input.policy === undefined
-        ? undefined
-        : normalizeExecutionPolicy(input.policy);
+    const policy = normalizeExecutionPolicy(input.policy);
     const cwd = await realpath(input.cwd);
     const params = {
       argv: [...input.argv],
       cwd,
-      policy: supplied ?? resolveExecutionPolicy({ workspaceRoot: cwd }),
+      policy,
       environment: definedEnvironment(input.environment),
       timeout_ms: input.timeoutMs,
       output_limit_bytes: input.outputLimitBytes,

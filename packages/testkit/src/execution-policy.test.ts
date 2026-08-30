@@ -14,14 +14,17 @@ import {
   canonicalExecutionPolicy,
   c1ExecutionCapabilities,
   createExecutionAdmissionSnapshot,
+  createExecutionLaunchSetupSnapshot,
   evaluateExecutionPolicy,
   executionCapabilitiesDigest,
   executionPolicyDigest,
+  executionPolicyPreview,
   ExecutionPolicyError,
   normalizeExecutionPolicy,
   resolveExecutionPolicy,
   validateExecutionSecuritySnapshot,
 } from "@koda/runtime-node";
+import { KodaApplication } from "@koda/app";
 import { describe, expect, it } from "vitest";
 
 interface Fixtures {
@@ -181,6 +184,29 @@ describe("Phase 4C1A execution policy contract", () => {
     expect(Object.isFrozen(resolved)).toBe(true);
   });
 
+  it("validates and freezes application profile selection with explicit precedence", () => {
+    expect(
+      () =>
+        new KodaApplication({
+          environment: { KODA_EXECUTION_PROFILE: "invalid-profile" },
+          processDirectory: "/workspace",
+        }),
+    ).toThrow("KODA_EXECUTION_PROFILE must be one of");
+    expect(
+      () =>
+        new KodaApplication({
+          environment: { KODA_EXECUTION_PROFILE: "invalid-profile" },
+          processDirectory: "/workspace",
+          executionPolicy: {
+            filesystem: "unrestricted",
+            network: "inherit",
+            process_isolation: "inherit",
+            environment: "explicit",
+          },
+        }),
+    ).not.toThrow();
+  });
+
   it("never falls back on invalid configured values or accepts a workspace override", () => {
     for (const environmentProfile of [
       "",
@@ -248,6 +274,26 @@ describe("Phase 4C1A execution policy contract", () => {
                 environment: { status: "not_applied" },
                 supervision: { status: "not_applied" },
               });
+              const setup = createExecutionLaunchSetupSnapshot(
+                policy,
+                capabilities,
+              );
+              expect(setup).toMatchObject({
+                stage: "launch_setup",
+                environment: {
+                  status: "applied",
+                  mechanism: "explicit_environment",
+                  layer: "application",
+                },
+                supervision: {
+                  status: "applied",
+                  mechanism: capabilities.supervision.mechanism,
+                  layer: capabilities.supervision.layer,
+                },
+              });
+              expect(executionPolicyPreview(snapshot)).toContain(
+                "OS sandbox: none",
+              );
               expect(JSON.stringify(snapshot)).not.toContain('"applied"');
             }
           }

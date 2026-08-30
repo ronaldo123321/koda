@@ -1,8 +1,11 @@
 import { type ToolOperationalEvent } from "@koda/agent-core";
-import { WorkspaceCommandRunner } from "@koda/runtime-node";
+import {
+  WorkspaceCommandRunner,
+  resolveExecutionPolicy,
+} from "@koda/runtime-node";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { access, mkdtemp, rm } from "node:fs/promises";
+import { access, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -73,6 +76,7 @@ windowsDescribe("NativeExecutorClient Windows control plane", () => {
         ].join(""),
       ],
       cwd: root,
+      policy: await policyFor(root),
       environment: windowsEnvironment,
       timeoutMs: 5_000,
       outputLimitBytes: 4_096,
@@ -116,6 +120,7 @@ windowsDescribe("NativeExecutorClient Windows control plane", () => {
         ].join(""),
       ],
       cwd: root,
+      policy: await policyFor(root),
       environment: windowsEnvironment,
       timeoutMs: 5_000,
       outputLimitBytes: 4_096,
@@ -146,6 +151,7 @@ windowsDescribe("NativeExecutorClient Windows control plane", () => {
     const started = await client.start({
       argv: [process.execPath, "-e", "setInterval(()=>{},1000)"],
       cwd: root,
+      policy: await policyFor(root),
       environment: windowsEnvironment,
       timeoutMs: 150,
       outputLimitBytes: 4_096,
@@ -219,6 +225,7 @@ windowsDescribe("NativeExecutorClient Windows control plane", () => {
         "process.stdout.write('before-restart');setInterval(()=>{},1000)",
       ],
       cwd: restartRoot,
+      policy: await policyFor(restartRoot),
       environment: windowsEnvironment,
       timeoutMs: 5_000,
       outputLimitBytes: 4_096,
@@ -264,6 +271,7 @@ windowsDescribe("NativeExecutorClient Windows control plane", () => {
       const started = await faultClient.start({
         argv: [process.execPath, "-e", "setInterval(()=>{},1000)"],
         cwd: faultRoot,
+        policy: await policyFor(faultRoot),
         environment: windowsEnvironment,
         timeoutMs: 5_000,
         outputLimitBytes: 4_096,
@@ -306,6 +314,7 @@ windowsDescribe("NativeExecutorClient Windows control plane", () => {
           `require('node:fs').writeFileSync(${JSON.stringify(marker)},'bad')`,
         ],
         cwd: faultRoot,
+        policy: await policyFor(faultRoot),
         environment: windowsEnvironment,
         timeoutMs: 5_000,
         outputLimitBytes: 4_096,
@@ -351,6 +360,7 @@ windowsDescribe("NativeExecutorClient Windows control plane", () => {
         ].join(""),
       ],
       cwd: root,
+      policy: await policyFor(root),
       environment: windowsEnvironment,
       timeoutMs: 10_000,
       outputLimitBytes: 64 * 1_024,
@@ -430,6 +440,7 @@ windowsDescribe("NativeExecutorClient Windows control plane", () => {
         ].join(""),
       ],
       cwd: root,
+      policy: await policyFor(root),
       environment: windowsEnvironment,
       timeoutMs: 5_000,
       outputLimitBytes: 64 * 1_024,
@@ -462,6 +473,7 @@ windowsDescribe("NativeExecutorClient Windows control plane", () => {
         "process.on('SIGINT',()=>process.stdout.write('SIGINT;'));process.stdout.write('CANCEL-READY;');setInterval(()=>{},1000)",
       ],
       cwd: root,
+      policy: await policyFor(root),
       environment: windowsEnvironment,
       timeoutMs: 5_000,
       outputLimitBytes: 64 * 1_024,
@@ -497,6 +509,7 @@ windowsDescribe("NativeExecutorClient Windows control plane", () => {
         "process.stdout.write('TIMEOUT-READY;');setInterval(()=>{},1000)",
       ],
       cwd: root,
+      policy: await policyFor(root),
       environment: windowsEnvironment,
       timeoutMs: 250,
       outputLimitBytes: 64 * 1_024,
@@ -549,6 +562,7 @@ windowsDescribe("NativeExecutorClient Windows control plane", () => {
         ].join(""),
       ],
       cwd: restartRoot,
+      policy: await policyFor(restartRoot),
       environment: windowsEnvironment,
       timeoutMs: 10_000,
       outputLimitBytes: 64 * 1_024,
@@ -612,6 +626,7 @@ windowsDescribe("NativeExecutorClient Windows control plane", () => {
           "process.stdout.write('RETAINED-BEFORE-WORKER-LOSS');setInterval(()=>{},1000)",
         ],
         cwd: faultRoot,
+        policy: await policyFor(faultRoot),
         environment: windowsEnvironment,
         timeoutMs: 5_000,
         outputLimitBytes: 64 * 1_024,
@@ -659,6 +674,7 @@ windowsDescribe("NativeExecutorClient Windows control plane", () => {
           `require('node:fs').writeFileSync(${JSON.stringify(marker)},'bad')`,
         ],
         cwd: faultRoot,
+        policy: await policyFor(faultRoot),
         environment: windowsEnvironment,
         timeoutMs: 5_000,
         outputLimitBytes: 64 * 1_024,
@@ -725,6 +741,10 @@ windowsDescribe("NativeExecutorClient Windows control plane", () => {
     expect(exitCode).not.toBe(0);
   });
 });
+
+async function policyFor(root: string) {
+  return resolveExecutionPolicy({ workspaceRoot: await realpath(root) });
+}
 
 async function waitTerminal(
   client: NativeExecutorClient,

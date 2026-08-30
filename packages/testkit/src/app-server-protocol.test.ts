@@ -55,7 +55,7 @@ import { describe, expect, it } from "vitest";
 
 describe("app-server protocol", () => {
   it("accepts strict versioned requests and safe JSON-RPC IDs", () => {
-    expect(APP_SERVER_PROTOCOL_VERSION).toBe(14);
+    expect(APP_SERVER_PROTOCOL_VERSION).toBe(15);
     expect(
       jsonRpcRequestSchema.parse({
         jsonrpc: "2.0",
@@ -424,6 +424,10 @@ describe("app-server protocol", () => {
 
   it("validates bounded process sessions without native credentials", () => {
     const processSessionId = "00000000-0000-4000-8000-000000000001";
+    const security = {
+      schema_version: 1 as const,
+      kind: "legacy_unknown" as const,
+    };
     expect(
       processAttachResultSchema.parse({
         processSessionId,
@@ -436,6 +440,7 @@ describe("app-server protocol", () => {
           createdAtMs: 1,
           updatedAtMs: 2,
           pid: 42,
+          security,
         },
         inputState: "owned",
         rows: 24,
@@ -458,6 +463,7 @@ describe("app-server protocol", () => {
           createdAtMs: 1,
           updatedAtMs: 2,
           pid: 42,
+          security,
         },
         inputState: "owned",
         rows: 24,

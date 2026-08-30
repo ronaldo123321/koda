@@ -37,6 +37,8 @@ import {
   collectArtifactReferences,
   extensionCatalogParamsSchema,
   extensionReadParamsSchema,
+  executionPolicyConfigSchema,
+  executionProfileSchema,
   itemIdSchema,
   recoveryItemSchema,
   THREAD_EVENTS_DEFAULT_LIMIT,
@@ -69,6 +71,8 @@ import {
   type ExtensionCatalogResult,
   type ExtensionReadParams,
   type ExtensionReadResult,
+  type ExecutionPolicyConfig,
+  type ExecutionProfile,
   type ArtifactReadParams,
   type ArtifactReadResult,
   type ItemId,
@@ -139,6 +143,7 @@ import {
   registerReadOnlyWorkspaceTools,
   registerStructuredPatchTool,
   registerUpdatePlanTool,
+  resolveExecutionPolicy,
   type RepositoryInstructionSet,
   type ProjectSkillCatalog,
   type ThreadIndexDiagnostic,
@@ -352,6 +357,7 @@ export interface KodaApplicationOptions {
   dependencies?: KodaApplicationDependencies;
   approvalGrantRegistry?: ApprovalGrantRegistry;
   interactiveProcessService?: InteractiveProcessService;
+  executionPolicy?: ExecutionPolicyConfig;
 }
 
 export interface KodaApplicationDependencies {
@@ -391,6 +397,8 @@ export class KodaApplication {
   private readonly approvalGrantRegistry: ApprovalGrantRegistry;
   private readonly interactiveProcessService:
     InteractiveProcessService | undefined;
+  private readonly executionPolicyConfig: ExecutionPolicyConfig | undefined;
+  private readonly executionProfile: ExecutionProfile | undefined;
 
   public constructor(options: KodaApplicationOptions) {
     this.environment = options.environment;
@@ -399,6 +407,29 @@ export class KodaApplication {
     this.approvalGrantRegistry =
       options.approvalGrantRegistry ?? new ApprovalGrantRegistry();
     this.interactiveProcessService = options.interactiveProcessService;
+    if (options.executionPolicy !== undefined) {
+      const parsed = executionPolicyConfigSchema.safeParse(
+        options.executionPolicy,
+      );
+      if (!parsed.success) {
+        throw new ConfigurationError(
+          "Execution policy configuration is invalid.",
+        );
+      }
+      this.executionPolicyConfig = Object.freeze({ ...parsed.data });
+      this.executionProfile = undefined;
+    } else {
+      const configuredProfile =
+        options.environment.KODA_EXECUTION_PROFILE?.trim() || "unconfined";
+      const parsed = executionProfileSchema.safeParse(configuredProfile);
+      if (!parsed.success) {
+        throw new ConfigurationError(
+          "KODA_EXECUTION_PROFILE must be one of: unconfined, read-only, workspace-write.",
+        );
+      }
+      this.executionPolicyConfig = undefined;
+      this.executionProfile = parsed.data;
+    }
   }
 
   public startTurn(input: StartTurnInput, client: TurnClient): TurnHandle {
@@ -1306,6 +1337,15 @@ export class KodaApplication {
       const workspace = await this.dependencies.openWorkspace(
         configuration.cwd,
       );
+      const executionPolicy = resolveExecutionPolicy({
+        workspaceRoot: workspace.root,
+        ...(this.executionPolicyConfig === undefined
+          ? {}
+          : { policy: this.executionPolicyConfig }),
+        ...(this.executionProfile === undefined
+          ? {}
+          : { environmentProfile: this.executionProfile }),
+      });
       controller.signal.throwIfAborted();
       const mutationJournal = await WorkspaceMutationJournalStore.open(
         configuration.kodaHome,
@@ -1612,6 +1652,7 @@ export class KodaApplication {
       const commandRunner = await WorkspaceCommandRunner.open(workspace.root, {
         environment: this.environment,
         artifactStore,
+        executionPolicy,
         ...(nativeExecutor === undefined ? {} : { nativeExecutor }),
         ...(this.interactiveProcessService === undefined
           ? {}

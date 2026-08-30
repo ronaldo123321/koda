@@ -6,6 +6,7 @@ import type {
   ProcessTerminationMechanism,
   ProcessTerminationOutcome,
   ProcessTerminationReason,
+  ExecutionSecuritySnapshot,
   PlanUpdatedPayload,
   PlanAcceptanceRequest,
   PlanAcceptanceResolution,
@@ -41,7 +42,11 @@ export interface ToolContext {
 export type ToolOperationalEvent =
   | {
       type: "process.started";
-      payload: { pid: number; ownership: ProcessOwnership };
+      payload: {
+        pid: number;
+        ownership: ProcessOwnership;
+        security: ExecutionSecuritySnapshot;
+      };
     }
   | {
       type: "process.exited";

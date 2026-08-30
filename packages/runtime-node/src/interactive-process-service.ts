@@ -13,6 +13,7 @@ import {
   type ProcessReadResult,
   type ProcessResizeResult,
   type ProcessTerminateResult,
+  type ExecutionSecuritySnapshot,
 } from "@koda/protocol";
 
 import {
@@ -68,6 +69,7 @@ export interface InteractiveTerminalStartResult {
   state: NativeJobSnapshot["state"];
   lifecycle: "foreground" | "background";
   pid: number | null;
+  security: ExecutionSecuritySnapshot;
 }
 
 interface InteractiveProcessNativeClient {
@@ -174,6 +176,7 @@ export class InteractiveProcessService {
       state: snapshot.state,
       lifecycle: input.lifecycle ?? "foreground",
       pid: snapshot.pid,
+      security: snapshot.security,
     };
   }
 
@@ -378,6 +381,7 @@ export class InteractiveProcessService {
         state: snapshot.state,
         updatedAtMs: Date.now(),
         pid: snapshot.pid,
+        security: snapshot.security,
       },
     };
   }
@@ -490,6 +494,7 @@ function toProcessSummary(job: NativeJobSummary): InteractiveProcessSummary {
     createdAtMs: job.created_at_ms,
     updatedAtMs: job.updated_at_ms,
     pid: job.pid,
+    security: job.security,
   };
 }
 

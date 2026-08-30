@@ -35,6 +35,7 @@ import {
   turnContextSnapshotSchema,
 } from "./context.js";
 import { toolCatalogChangedPayloadSchema } from "./tool-catalogs.js";
+import { executionSecuritySnapshotSchema } from "./execution-policy.js";
 
 const metadataShape = {
   schemaVersion: z.literal(1),
@@ -174,6 +175,8 @@ export const agentEventSchema = z.discriminatedUnion("type", [
       name: z.string().min(1),
       pid: z.number().int().positive(),
       ownership: processOwnershipSchema,
+      // Historical JSONL records predate execution-security evidence.
+      security: executionSecuritySnapshotSchema.optional(),
     }),
   }),
   z.object({

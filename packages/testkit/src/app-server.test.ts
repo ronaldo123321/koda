@@ -245,6 +245,7 @@ describe("KodaAppServer", () => {
       expect(approval).not.toHaveProperty(
         "params.event.payload.grantCandidate",
       );
+      expect(JSON.stringify(approval)).toContain("OS sandbox: none");
       await request(server, 3, "approval/resolve", {
         turnId: "server-terminal-turn",
         callId: "server-terminal-call",
@@ -271,6 +272,13 @@ describe("KodaAppServer", () => {
       ) {
         throw new Error("Started terminal was not discoverable.");
       }
+      expect(processSummary).toMatchObject({
+        security: {
+          kind: "policy",
+          stage: "launch_setup",
+          backend: "native_posix",
+        },
+      });
       await request(server, 5, "process/attach", {
         workspace: fixture.workspaceRoot,
         jobId: processSummary.jobId,
@@ -281,6 +289,15 @@ describe("KodaAppServer", () => {
       expect(JSON.stringify(attached)).not.toMatch(
         /capability|lease_token|leaseToken|fence/u,
       );
+      expect(attached).toMatchObject({
+        process: {
+          security: {
+            kind: "policy",
+            stage: "launch_setup",
+            backend: "native_posix",
+          },
+        },
+      });
       if (
         !isObject(attached) ||
         typeof attached.processSessionId !== "string"

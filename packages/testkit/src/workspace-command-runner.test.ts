@@ -1,6 +1,20 @@
-import { ArtifactStore, WorkspaceCommandRunner } from "@koda/runtime-node";
+import {
+  ArtifactStore,
+  c1ExecutionCapabilities,
+  type NativeExecutorClient,
+  WorkspaceCommandRunner,
+  resolveExecutionPolicy,
+} from "@koda/runtime-node";
 import type { ToolOperationalEvent } from "@koda/agent-core";
-import { access, mkdir, mkdtemp, rename, rm, symlink } from "node:fs/promises";
+import {
+  access,
+  mkdir,
+  mkdtemp,
+  realpath,
+  rename,
+  rm,
+  symlink,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -38,6 +52,15 @@ describe("WorkspaceCommandRunner", () => {
     expect(command.preview).toContain('cwd: "packages"');
     expect(command.preview).toContain("timeout: 2000 ms");
     expect(command.preview).toContain(JSON.stringify(process.execPath));
+    expect(command.preview).toContain("OS sandbox: none");
+    expect(command.security).toMatchObject({
+      kind: "policy",
+      stage: "admission",
+      backend:
+        process.platform === "win32"
+          ? "typescript_windows"
+          : "typescript_posix",
+    });
 
     const lifecycle: ToolOperationalEvent[] = [];
     const result = await command.execute(
@@ -59,12 +82,68 @@ describe("WorkspaceCommandRunner", () => {
       stdout_truncated: false,
       stderr_truncated: false,
       timed_out: false,
+      security: {
+        kind: "policy",
+        stage: "launch_setup",
+        environment: { status: "applied" },
+        supervision: { status: "applied" },
+      },
     });
     expect(result.duration_ms).toBeGreaterThanOrEqual(0);
     expect(lifecycle.map((event) => event.type)).toEqual([
       "process.started",
       "process.exited",
     ]);
+    expect(lifecycle[0]).toMatchObject({
+      type: "process.started",
+      payload: {
+        security: { kind: "policy", stage: "launch_setup" },
+      },
+    });
+  });
+
+  it.each(["read-only", "workspace-write"] as const)(
+    "rejects the protected %s profile before approval or launch",
+    async (profile) => {
+      const root = await createWorkspace();
+      const canonicalRoot = await realpath(root);
+      const runner = await WorkspaceCommandRunner.open(root, {
+        executionPolicy: resolveExecutionPolicy({
+          workspaceRoot: canonicalRoot,
+          environmentProfile: profile,
+        }),
+      });
+
+      await expect(
+        runner.prepare({ argv: [process.execPath, "--version"] }),
+      ).rejects.toMatchObject({ code: "EXECUTION_POLICY_UNAVAILABLE" });
+    },
+  );
+
+  it("invalidates a prepared command when the backend contract changes", async () => {
+    const root = await createWorkspace();
+    let helloCalls = 0;
+    let startCalls = 0;
+    const nativeExecutor = {
+      hello: async () => ({
+        execution_security: c1ExecutionCapabilities(
+          helloCalls++ === 0 ? "native_posix" : "native_windows",
+        ),
+      }),
+      start: async () => {
+        startCalls += 1;
+        throw new Error("must not start");
+      },
+    } as unknown as NativeExecutorClient;
+    const runner = await WorkspaceCommandRunner.open(root, { nativeExecutor });
+    const command = await runner.prepare({
+      argv: [process.execPath, "--version"],
+    });
+
+    await expect(
+      command.execute(new AbortController().signal),
+    ).rejects.toMatchObject({ code: "EXECUTION_POLICY_CHANGED" });
+    expect(startCalls).toBe(0);
   });
 
   it("passes only allowlisted environment variables", async () => {

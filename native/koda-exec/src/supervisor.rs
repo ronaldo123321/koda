@@ -785,11 +785,21 @@ impl WorkerConnection {
         if hello.job_id != record.manifest.job_id
             || state.worker_pid != Some(hello.worker_pid)
             || state.worker_start_identity.as_deref() != Some(&hello.worker_start_identity)
-            || !process_identity_matches(hello.worker_pid, &hello.worker_start_identity)
         {
             return Err(ProtocolError::new(
                 "WORKER_AUTHENTICATION_FAILED",
                 "Worker process identity does not match durable state.",
+            ));
+        }
+        if !process_identity_matches(hello.worker_pid, &hello.worker_start_identity) {
+            // A short-lived Worker can publish a terminal state and exit after
+            // answering hello but before this liveness check. Its durable
+            // identity still matched exactly, so route the caller through the
+            // ordinary unavailable/reconcile path instead of misclassifying the
+            // exit race as an authentication failure.
+            return Err(ProtocolError::new(
+                "WORKER_UNAVAILABLE",
+                "Worker exited while its authenticated connection was being established.",
             ));
         }
         let proof = decode_base64(&hello.proof_base64)

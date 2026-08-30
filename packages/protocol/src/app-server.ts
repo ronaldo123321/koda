@@ -29,8 +29,9 @@ import {
   planStageIdSchema,
 } from "./plans.js";
 import { workspaceChangeSetResolutionSchema } from "./change-sets.js";
+import { executionSecuritySnapshotSchema } from "./execution-policy.js";
 
-export const APP_SERVER_PROTOCOL_VERSION = 14 as const;
+export const APP_SERVER_PROTOCOL_VERSION = 15 as const;
 
 export const THREAD_EVENTS_DEFAULT_LIMIT = 200;
 export const THREAD_EVENTS_MAXIMUM_LIMIT = 200;
@@ -248,6 +249,7 @@ export const interactiveProcessSummarySchema = z
     createdAtMs: z.number().int().safe().nonnegative(),
     updatedAtMs: z.number().int().safe().nonnegative(),
     pid: z.number().int().safe().positive().nullable(),
+    security: executionSecuritySnapshotSchema,
   })
   .strict();
 

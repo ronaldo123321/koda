@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useSyncExternalStore } from "react";
 import { Box, Static, Text, useApp, useInput, useStdout, type Key } from "ink";
+import type { ExecutionSecuritySnapshot } from "@koda/protocol";
 
 import {
   TuiController,
@@ -1234,7 +1235,7 @@ function ProcessList({ state }: { state: TuiState }) {
               bold={index === navigation.selectedIndex}
               {...(index === navigation.selectedIndex ? { color: "cyan" } : {})}
             >
-              {`${index === navigation.selectedIndex ? ">" : " "} ${boundPresentationText(process.displayName, 128)} · ${process.jobId.slice(0, 8)} · ${process.state} · ${process.lifecycle} · pid ${process.pid ?? "—"} · ${process.updatedAtMs}`}
+              {`${index === navigation.selectedIndex ? ">" : " "} ${boundPresentationText(process.displayName, 128)} · ${process.jobId.slice(0, 8)} · ${process.state} · ${process.lifecycle} · pid ${process.pid ?? "—"} · ${compactExecutionSecurity(process.security)} · ${process.updatedAtMs}`}
             </Text>
           );
         })
@@ -1260,7 +1261,7 @@ function ProcessView({ state }: { state: TuiState }) {
         {`${session.process.displayName} · ${session.process.jobId.slice(0, 8)} · ${session.process.state}`}
       </Text>
       <Text dimColor>
-        {`${session.inputState === "owned" ? "input owned" : "read-only"} · ${session.rows}×${session.cols} · cursor ${session.cursor} · retained ${session.earliestCursor}–${session.latestCursor}${session.complete ? " · complete" : ""}`}
+        {`${session.inputState === "owned" ? "input owned" : "read-only"} · ${session.rows}×${session.cols} · cursor ${session.cursor} · retained ${session.earliestCursor}–${session.latestCursor}${session.complete ? " · complete" : ""} · ${compactExecutionSecurity(session.process.security)}`}
       </Text>
       {session.screenRows.length === 0 ? (
         <Text dimColor>Waiting for terminal output…</Text>
@@ -1278,6 +1279,12 @@ function ProcessView({ state }: { state: TuiState }) {
       </Text>
     </Box>
   );
+}
+
+function compactExecutionSecurity(security: ExecutionSecuritySnapshot): string {
+  return security.kind === "legacy_unknown"
+    ? "security unknown (legacy)"
+    : `OS sandbox: none · ${security.backend} · fs ${security.policy.filesystem} · net ${security.policy.network}`;
 }
 
 function ProcessTerminateConfirmation({ state }: { state: TuiState }) {

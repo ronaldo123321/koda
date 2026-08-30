@@ -88,6 +88,7 @@ describe("TuiController", () => {
       createdAtMs: 1,
       updatedAtMs: 2,
       pid: 42,
+      security: { schema_version: 1 as const, kind: "legacy_unknown" as const },
     };
     const listProcesses = vi.spyOn(client, "listProcesses").mockResolvedValue({
       workspace: "/workspace",

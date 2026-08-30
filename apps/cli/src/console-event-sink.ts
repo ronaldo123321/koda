@@ -82,6 +82,16 @@ export class ConsoleEventSink implements EventSink {
       return;
     }
 
+    if (event.type === "process.started") {
+      const security = event.payload.security;
+      this.writeDiagnostic(
+        security === undefined || security.kind === "legacy_unknown"
+          ? `process ${event.payload.pid} started; execution security: legacy evidence unknown`
+          : `process ${event.payload.pid} started; backend ${security.backend}; OS sandbox: none`,
+      );
+      return;
+    }
+
     if (event.type === "process.termination_requested") {
       this.writeDiagnostic(
         `terminating process ${event.payload.pid}: ${event.payload.reason} (${event.payload.attempt})`,

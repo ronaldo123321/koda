@@ -1,6 +1,6 @@
 # Koda Phase 4C1 Execution Policy and Isolation Reporting Design
 
-- Status: Approved — C1A–C1B complete; C1C–C1D pending
+- Status: Approved — C1A–C1C complete; C1D pending
 - Date: 2026-08-30
 - Depends on: completed Phase 4B supervised native execution
 
@@ -263,7 +263,8 @@ the app-server protocol and existing grants were unchanged, and setting
 `KODA_EXECUTION_PROFILE` did not affect CLI/TUI execution. Native v2,
 Supervisor/Worker admission, and durable evidence were subsequently delivered
 by C1B. Application option and environment wiring, TypeScript fallback
-admission, grants, events, and client rendering remain C1C.
+admission, grants, events, and client rendering were subsequently delivered by
+C1C.
 
 - [Protocol contract](../../packages/protocol/src/execution-policy.ts): strict
   policy/configuration, capability, and evidence schemas. Profile configuration
@@ -341,13 +342,10 @@ and `git diff --check` passed. This change has not been run on Windows CI yet.
 ## C1B implementation record — 2026-08-30
 
 C1B is complete at the native execution boundary. It does not implement an OS
-sandbox and does not activate `KODA_EXECUTION_PROFILE`. Existing application
-callers remain source-compatible through a temporary Node bridge: when they do
-not provide a policy, the native client creates an unconfined policy whose
-workspace root is the canonical command cwd. C1C must replace that bridge with
-the application instance's frozen workspace policy; until then, policy preview,
-grant binding, TypeScript fallback admission, events, app-server, CLI, and TUI
-reporting are not complete.
+sandbox. At the C1B boundary `KODA_EXECUTION_PROFILE` was not active and a
+temporary Node bridge still synthesized unconfined policy for callers that
+omitted it. C1C removed that bridge: native starts now require the trusted
+caller's full frozen policy, and every application execution path supplies it.
 
 ### Native protocol and admission
 
@@ -422,6 +420,75 @@ format checks, and `git diff --check` passed locally. The Windows Rust standard
 library target is not installed on this host, so local Windows cross-compilation
 could not run. Windows compilation and the 17 existing native Windows tests
 remain explicit Phase C1D/CI acceptance; C1B does not claim those passed here.
+
+## C1C implementation record — 2026-08-30
+
+C1C completes the application and client wiring for the C1 contract. It still
+does not implement filesystem, network, or host-process isolation. Every
+current protected profile is therefore recognized and rejected before approval
+rather than weakened to unconfined execution.
+
+### Trusted configuration and preparation
+
+- `KodaApplicationOptions.executionPolicy` accepts the typed configuration
+  shape without workspace authority. It takes precedence over
+  `KODA_EXECUTION_PROFILE`; otherwise the profile is validated and fixed when
+  the application is constructed. The canonical workspace root is bound only
+  after the trusted application opens the workspace. Later environment changes,
+  model arguments, repository content, Skills, plugins, and MCP output cannot
+  replace that selection.
+- `WorkspaceCommandRunner` receives the resulting frozen policy. It identifies
+  one effective backend for both foreground and interactive execution, rejects
+  mismatched native services, creates an admission snapshot during command or
+  PTY preparation, and refuses unsupported requirements before returning an
+  approval preview. The preview includes requested dimensions, backend,
+  expected environment/supervision behavior, and the literal
+  `OS sandbox: none` statement.
+- Immediately before execution the runner revalidates the cwd identity, policy
+  digest, backend identity, and semantic capability digest. A changed backend
+  produces `EXECUTION_POLICY_CHANGED` before a user process starts. The
+  TypeScript fallback uses the same admission contract and records only
+  explicit-environment and process-tree setup after spawn; it never claims
+  native durability or OS isolation.
+- Native Pipe and PTY starts now require a full policy at the TypeScript type and
+  runtime boundary. The C1B omitted-policy compatibility bridge is gone. The
+  native Supervisor and Worker remain the independent final admission and
+  evidence authorities.
+
+### Grants, events, and clients
+
+- Exact-command grant identity is version 2 and binds the policy digest,
+  backend, and capability digest in addition to workspace/cwd/argv/timeout.
+  Preparation still precedes grant matching, so an unavailable policy cannot
+  be overridden by a previously approved grant. PTY remains per-start approval.
+- Foreground results and current `process.started` audit events carry the
+  retained security snapshot. Historical JSONL events may omit that new field
+  and remain replayable as legacy evidence; they are never upgraded from the
+  current platform. PTY start results, process lists, attachments, and
+  termination responses carry the native job's retained snapshot.
+- App-server protocol version 15 makes process security mandatory on its current
+  process responses. CLI diagnostics show the actual backend and
+  `OS sandbox: none`; TUI activity and process panes show the same statement or
+  explicit legacy-unknown evidence. Approval details across CLI/TUI/app-server
+  reuse the common prepared preview rather than recomputing guarantees.
+
+### C1C verification
+
+Local macOS verification passed `pnpm test`: all 36 Rust tests and 613 Vitest
+tests passed; 20 Vitest tests were skipped (17 native Windows tests and 3
+optional real-v1 compatibility tests not enabled in the ordinary suite).
+Focused native policy/client verification also passed 26 tests with the same 3
+optional compatibility skips. `pnpm typecheck`, `pnpm format:check`,
+`cargo clippy --workspace --all-targets -- -D warnings`, and
+`git diff --check` passed locally.
+
+Full-suite concurrency exposed and fixed an existing short-process exit race:
+when a Worker published its terminal state and exited after answering `hello`
+but before the Supervisor's final liveness check, the connection now routes
+through `WORKER_UNAVAILABLE` and durable reconciliation instead of incorrectly
+reporting an authentication mismatch. Windows compilation and the 17 native
+Windows tests were not run on this host and remain explicit C1D/CI acceptance;
+C1C does not claim that platform result.
 
 ## Acceptance matrix
 

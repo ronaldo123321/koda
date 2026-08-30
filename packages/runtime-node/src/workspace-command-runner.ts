@@ -5,7 +5,12 @@ import { Writable } from "node:stream";
 import { finished } from "node:stream/promises";
 
 import type { ToolOperationalEvent } from "@koda/agent-core";
-import type { ArtifactReference } from "@koda/protocol";
+import type {
+  ArtifactReference,
+  ExecutionCapabilities,
+  ExecutionPolicy,
+  ExecutionSecuritySnapshot,
+} from "@koda/protocol";
 
 import {
   ArtifactStore,
@@ -25,6 +30,17 @@ import type {
   InteractiveProcessService,
   InteractiveTerminalStartResult,
 } from "./interactive-process-service.js";
+import {
+  c1ExecutionCapabilities,
+  createExecutionAdmissionSnapshot,
+  createExecutionLaunchSetupSnapshot,
+  executionCapabilitiesDigest,
+  executionPolicyDigest,
+  executionPolicyPreview,
+  normalizeExecutionPolicy,
+  resolveExecutionPolicy,
+  type ExecutionPolicyErrorCode,
+} from "./execution-policy.js";
 
 export type CommandErrorCode =
   | "INVALID_COMMAND"
@@ -34,7 +50,8 @@ export type CommandErrorCode =
   | "COMMAND_START_FAILED"
   | "NATIVE_EXECUTOR_UNAVAILABLE"
   | "NATIVE_EXECUTOR_PROTOCOL_ERROR"
-  | "PROCESS_TERMINATION_UNCERTAIN";
+  | "PROCESS_TERMINATION_UNCERTAIN"
+  | ExecutionPolicyErrorCode;
 
 export class CommandError extends Error {
   public constructor(
@@ -77,6 +94,7 @@ export interface ExecCommandResult {
   timed_out: boolean;
   duration_ms: number;
   termination?: ProcessTerminationReport;
+  security: ExecutionSecuritySnapshot;
 }
 
 export interface PreparedWorkspaceCommand {
@@ -86,6 +104,7 @@ export interface PreparedWorkspaceCommand {
   title: string;
   summary: string;
   preview: string;
+  security: ExecutionSecuritySnapshot;
   execute(
     signal: AbortSignal,
     report?: (event: ToolOperationalEvent) => Promise<void>,
@@ -101,6 +120,7 @@ export interface PreparedWorkspaceTerminal {
   title: string;
   summary: string;
   preview: string;
+  security: ExecutionSecuritySnapshot;
   execute(signal: AbortSignal): Promise<InteractiveTerminalStartResult>;
 }
 
@@ -112,6 +132,7 @@ export interface WorkspaceCommandRunnerOptions {
   terminationConfirmationMs?: number;
   nativeExecutor?: NativeExecutorClient;
   interactiveProcessService?: InteractiveProcessService;
+  executionPolicy?: ExecutionPolicy;
 }
 
 interface WorkingDirectorySnapshot {
@@ -179,6 +200,8 @@ export class WorkspaceCommandRunner {
     private readonly maxOutputBytes: number,
     private readonly terminationGraceMs: number,
     private readonly terminationConfirmationMs: number,
+    private readonly executionPolicy: ExecutionPolicy,
+    private readonly executionCapabilities: ExecutionCapabilities,
     private readonly artifactStore?: ArtifactStore,
     private readonly nativeExecutor?: NativeExecutorClient,
     private readonly interactiveProcessService?: InteractiveProcessService,
@@ -209,14 +232,48 @@ export class WorkspaceCommandRunner {
       30_000,
       "terminationConfirmationMs",
     );
+    const executionPolicy = normalizeExecutionPolicy(
+      options.executionPolicy ??
+        resolveExecutionPolicy({ workspaceRoot: canonicalRoot }),
+    );
+    if (executionPolicy.workspace_root !== canonicalRoot) {
+      throw new CommandError(
+        "INVALID_EXECUTION_POLICY",
+        "Execution policy workspace does not match the command workspace.",
+      );
+    }
+    if (
+      options.nativeExecutor !== undefined &&
+      options.interactiveProcessService !== undefined &&
+      options.nativeExecutor !==
+        options.interactiveProcessService.nativeExecutor
+    ) {
+      throw new CommandError(
+        "INVALID_EXECUTION_POLICY",
+        "Foreground and interactive execution must use the same native security backend.",
+      );
+    }
+    const nativeExecutor =
+      options.nativeExecutor ??
+      options.interactiveProcessService?.nativeExecutor;
+    const executionCapabilities =
+      nativeExecutor === undefined
+        ? c1ExecutionCapabilities(
+            process.platform === "win32"
+              ? "typescript_windows"
+              : "typescript_posix",
+          )
+        : (await nativeExecutor.hello()).execution_security;
     return new WorkspaceCommandRunner(
       canonicalRoot,
       filterEnvironment(options.environment ?? process.env),
       maxOutputBytes,
       terminationGraceMs,
       terminationConfirmationMs,
+      executionPolicy,
+      executionCapabilities,
       options.artifactStore,
-      options.nativeExecutor,
+      nativeExecutor,
       options.interactiveProcessService,
     );
   }
@@ -238,6 +295,10 @@ export class WorkspaceCommandRunner {
       "timeout_ms",
     );
     const cwd = await this.resolveWorkingDirectory(requestedCwd);
+    const security = createExecutionAdmissionSnapshot(
+      this.executionPolicy,
+      this.executionCapabilities,
+    );
     const displayName = basename(argv[0] ?? "command") || argv[0];
     let executed = false;
 
@@ -251,7 +312,9 @@ export class WorkspaceCommandRunner {
         `cwd: ${JSON.stringify(cwd.workspacePath)}`,
         `timeout: ${timeoutMs} ms`,
         `argv: ${JSON.stringify(argv)}`,
+        executionPolicyPreview(security),
       ].join("\n"),
+      security,
       execute: async (signal, report) => {
         if (executed) {
           throw new CommandError(
@@ -262,6 +325,7 @@ export class WorkspaceCommandRunner {
         executed = true;
         signal.throwIfAborted();
         await this.revalidateWorkingDirectory(requestedCwd, cwd);
+        await this.revalidateExecutionSecurity(security);
         const executionOptions: RunForegroundCommandOptions = {
           argv,
           cwd: cwd.absolutePath,
@@ -275,6 +339,8 @@ export class WorkspaceCommandRunner {
           terminationConfirmationMs: this.terminationConfirmationMs,
           timeoutMs,
           signal,
+          policy: this.executionPolicy,
+          capabilities: this.executionCapabilities,
           ...(report === undefined ? {} : { report }),
         };
         return this.nativeExecutor === undefined
@@ -303,6 +369,10 @@ export class WorkspaceCommandRunner {
       "timeout_ms",
     );
     const cwd = await this.resolveWorkingDirectory(requestedCwd);
+    const security = createExecutionAdmissionSnapshot(
+      this.executionPolicy,
+      this.executionCapabilities,
+    );
     const executable = argv[0] ?? "terminal";
     const defaultDisplayName = basename(executable) || executable;
     const displayName = options.displayName ?? defaultDisplayName;
@@ -331,7 +401,9 @@ export class WorkspaceCommandRunner {
         `lifecycle: ${options.lifecycle}`,
         `timeout: ${options.timeoutMs} ms`,
         `argv: ${JSON.stringify(argv)}`,
+        executionPolicyPreview(security),
       ].join("\n"),
+      security,
       execute: async (signal) => {
         if (executed) {
           throw new CommandError(
@@ -342,6 +414,7 @@ export class WorkspaceCommandRunner {
         executed = true;
         signal.throwIfAborted();
         await this.revalidateWorkingDirectory(requestedCwd, cwd);
+        await this.revalidateExecutionSecurity(security);
         return service.startTerminal({
           argv,
           cwd: cwd.absolutePath,
@@ -355,9 +428,39 @@ export class WorkspaceCommandRunner {
           term: "xterm-256color",
           lifecycle: options.lifecycle,
           displayName,
+          policy: this.executionPolicy,
         });
       },
     };
+  }
+
+  private async revalidateExecutionSecurity(
+    prepared: ExecutionSecuritySnapshot,
+  ): Promise<void> {
+    if (prepared.kind !== "policy") {
+      throw new CommandError(
+        "EXECUTION_SECURITY_CORRUPT",
+        "Prepared execution security evidence is invalid.",
+      );
+    }
+    const current =
+      this.nativeExecutor === undefined
+        ? c1ExecutionCapabilities(
+            process.platform === "win32"
+              ? "typescript_windows"
+              : "typescript_posix",
+          )
+        : (await this.nativeExecutor.hello()).execution_security;
+    if (
+      prepared.policy_digest !== executionPolicyDigest(this.executionPolicy) ||
+      prepared.backend !== current.backend ||
+      prepared.capabilities_digest !== executionCapabilitiesDigest(current)
+    ) {
+      throw new CommandError(
+        "EXECUTION_POLICY_CHANGED",
+        "The prepared execution security contract changed after approval.",
+      );
+    }
   }
 
   private async resolveWorkingDirectory(
@@ -480,6 +583,8 @@ interface RunForegroundCommandOptions {
   terminationConfirmationMs: number;
   timeoutMs: number;
   signal: AbortSignal;
+  policy: ExecutionPolicy;
+  capabilities: ExecutionCapabilities;
   report?: (event: ToolOperationalEvent) => Promise<void>;
 }
 
@@ -504,6 +609,7 @@ async function runNativeForegroundCommand(
           : MAX_NATIVE_ARTIFACT_OUTPUT_BYTES,
       terminationGraceMs: options.terminationGraceMs,
       terminationConfirmationMs: options.terminationConfirmationMs,
+      policy: options.policy,
     });
   } catch (error) {
     throw mapNativeExecutorError(error, options.argv[0] ?? "command");
@@ -521,6 +627,7 @@ async function runNativeForegroundCommand(
             process.platform === "win32"
               ? "windows_job_object"
               : "posix_process_group",
+          security: current.security,
         },
       });
       reportedPid = current.pid;
@@ -624,6 +731,7 @@ async function runNativeForegroundCommand(
             outcome: snapshot.termination.outcome,
           },
         }),
+    security: snapshot.security,
   };
 }
 
@@ -793,6 +901,21 @@ function mapNativeExecutorError(
       cause: error,
     });
   }
+  if (
+    [
+      "INVALID_EXECUTION_POLICY",
+      "EXECUTION_POLICY_UNAVAILABLE",
+      "EXECUTION_POLICY_CHANGED",
+      "INCOMPATIBLE_PROTOCOL",
+      "EXECUTION_SECURITY_CORRUPT",
+    ].includes(error.code)
+  ) {
+    return new CommandError(
+      error.code as ExecutionPolicyErrorCode,
+      error.message,
+      { cause: error },
+    );
+  }
   return new CommandError(
     error.code === "NATIVE_EXECUTOR_UNAVAILABLE"
       ? "NATIVE_EXECUTOR_UNAVAILABLE"
@@ -899,10 +1022,15 @@ async function runForegroundCommand(
     terminationConfirmationMs: options.terminationConfirmationMs,
     ...(options.report === undefined ? {} : { report: options.report }),
   });
+  let security: ExecutionSecuritySnapshot;
   try {
+    security = createExecutionLaunchSetupSnapshot(
+      options.policy,
+      options.capabilities,
+    );
     await options.report?.({
       type: "process.started",
-      payload: { pid, ownership: ownedProcess.ownership },
+      payload: { pid, ownership: ownedProcess.ownership, security },
     });
   } catch (error) {
     await ownedProcess.terminate("output_failure").catch(() => undefined);
@@ -1023,6 +1151,7 @@ async function runForegroundCommand(
       timed_out: timedOut,
       duration_ms: Math.max(0, Date.now() - startedAt),
       ...(termination === undefined ? {} : { termination }),
+      security,
     };
   } catch (error) {
     let failure = error;

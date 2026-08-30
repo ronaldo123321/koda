@@ -248,6 +248,63 @@ export function createExecutionAdmissionSnapshot(
   });
 }
 
+/** Application-level launch evidence for the TypeScript fallback. This is
+ * created only after the child has spawned and its process-tree ownership is
+ * established. It does not claim filesystem, network, or process isolation. */
+export function createExecutionLaunchSetupSnapshot(
+  policyInput: unknown,
+  capabilitiesInput: unknown,
+): ExecutionSecuritySnapshot {
+  const policy = normalizeExecutionPolicy(policyInput);
+  const caps = parse(
+    executionCapabilitiesSchema,
+    capabilitiesInput,
+    "INVALID_EXECUTION_POLICY",
+  );
+  if (!evaluateExecutionPolicy(policy, caps).allowed)
+    throw new ExecutionPolicyError("EXECUTION_POLICY_UNAVAILABLE");
+  return validateExecutionSecuritySnapshot({
+    schema_version: 1,
+    kind: "policy",
+    stage: "launch_setup",
+    policy,
+    policy_digest: executionPolicyDigest(policy),
+    capabilities_digest: executionCapabilitiesDigest(caps),
+    backend: caps.backend,
+    filesystem: { status: "not_requested" },
+    network: { status: "not_requested" },
+    process_isolation: { status: "not_requested" },
+    environment: {
+      status: "applied",
+      mechanism: "explicit_environment",
+      layer: "application",
+    },
+    supervision: {
+      status: "applied",
+      mechanism: caps.supervision.mechanism,
+      layer: caps.supervision.layer,
+    },
+  });
+}
+
+export function executionPolicyPreview(snapshotInput: unknown): string {
+  const snapshot = validateExecutionSecuritySnapshot(snapshotInput);
+  if (snapshot.kind === "legacy_unknown") {
+    return "Execution security: legacy evidence unknown";
+  }
+  const supervision = executionSupervision(snapshot.backend);
+  return [
+    "Execution security:",
+    `backend: ${snapshot.backend}`,
+    `filesystem: ${snapshot.policy.filesystem}`,
+    `network: ${snapshot.policy.network}`,
+    `process isolation: ${snapshot.policy.process_isolation}`,
+    "environment: explicit application filtering",
+    `expected process supervision: ${supervision.mechanism} (${supervision.layer})`,
+    "OS sandbox: none",
+  ].join("\n");
+}
+
 /** Use at trust boundaries in addition to the structural protocol schema.
  * Checking a retained report never promotes evidence or assumes a command ran.
  */

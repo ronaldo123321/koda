@@ -7,6 +7,7 @@ import {
   type NativePtyAttachment,
   WorkspaceCommandRunner,
   registerExecTerminalTool,
+  resolveExecutionPolicy,
   type NativeJobSnapshot,
 } from "@koda/runtime-node";
 import { randomUUID } from "node:crypto";
@@ -64,6 +65,7 @@ describeNative("NativeExecutorClient", () => {
         ].join(""),
       ],
       cwd: root,
+      policy: await policyFor(root),
       environment: { PATH: process.env.PATH },
       timeoutMs: 3_000,
       outputLimitBytes: 65_536,
@@ -131,6 +133,7 @@ describeNative("NativeExecutorClient", () => {
       }
       expect(prepared.invocation.approval).toMatchObject({
         title: 'Start terminal "Tool terminal"',
+        details: expect.stringContaining("OS sandbox: none"),
       });
       expect(prepared.invocation.approval?.grantCandidate).toBeUndefined();
       const execution = await prepared.invocation.execute();
@@ -138,6 +141,13 @@ describeNative("NativeExecutorClient", () => {
       if (execution.status !== "success") {
         throw new Error("exec_terminal did not return a durable handle.");
       }
+      expect(execution.output).toMatchObject({
+        security: {
+          kind: "policy",
+          stage: "launch_setup",
+          backend: "native_posix",
+        },
+      });
       const jobId = (execution.output as { job_id?: string }).job_id;
       if (jobId === undefined) throw new Error("Missing exec_terminal job ID.");
 
@@ -149,6 +159,11 @@ describeNative("NativeExecutorClient", () => {
             jobId,
             displayName: "Tool terminal",
             cwd: canonicalRoot,
+            security: expect.objectContaining({
+              kind: "policy",
+              stage: "launch_setup",
+              backend: "native_posix",
+            }),
           }),
         ]),
       );
@@ -159,7 +174,16 @@ describeNative("NativeExecutorClient", () => {
         rows: 30,
         cols: 100,
       });
-      expect(attached).toMatchObject({ inputState: "owned" });
+      expect(attached).toMatchObject({
+        inputState: "owned",
+        process: {
+          security: {
+            kind: "policy",
+            stage: "launch_setup",
+            backend: "native_posix",
+          },
+        },
+      });
       await service.writeInput(
         attached.processSessionId,
         Buffer.from("hello\n"),
@@ -195,6 +219,7 @@ describeNative("NativeExecutorClient", () => {
         ].join(""),
       ],
       cwd: root,
+      policy: await policyFor(root),
       environment: { PATH: process.env.PATH },
       timeoutMs: 3_000,
       outputLimitBytes: 65_536,
@@ -247,6 +272,7 @@ describeNative("NativeExecutorClient", () => {
         "process.stdout.write('before-');setTimeout(()=>process.stdout.write('after'),400)",
       ],
       cwd: root,
+      policy: await policyFor(root),
       environment: { PATH: process.env.PATH },
       timeoutMs: 3_000,
       outputLimitBytes: 65_536,
@@ -285,6 +311,7 @@ describeNative("NativeExecutorClient", () => {
         "process.stdin.setEncoding('utf8');console.log('ready');process.stdin.once('data',(data)=>{console.log('got:'+data.trim());process.exit(0)})",
       ],
       cwd: root,
+      policy: await policyFor(root),
       environment: { PATH: process.env.PATH },
       timeoutMs: 3_000,
       outputLimitBytes: 65_536,
@@ -317,6 +344,7 @@ describeNative("NativeExecutorClient", () => {
     const started = await client.startPty({
       argv: [process.execPath, "-e", "process.stdout.write('x'.repeat(70000))"],
       cwd: root,
+      policy: await policyFor(root),
       environment: { PATH: process.env.PATH },
       timeoutMs: 3_000,
       outputLimitBytes: 65_536,
@@ -352,6 +380,7 @@ describeNative("NativeExecutorClient", () => {
         "setTimeout(() => process.stdout.write('reconnected'), 75)",
       ],
       cwd: root,
+      policy: await policyFor(root),
       environment: { PATH: process.env.PATH },
       timeoutMs: 2_000,
       outputLimitBytes: 1_024,
@@ -385,6 +414,7 @@ describeNative("NativeExecutorClient", () => {
         "process.stdout.write('before-'); setTimeout(() => process.stdout.write('after'), 400)",
       ],
       cwd: root,
+      policy: await policyFor(root),
       environment: { PATH: process.env.PATH },
       timeoutMs: 2_000,
       outputLimitBytes: 1_024,
@@ -418,6 +448,7 @@ describeNative("NativeExecutorClient", () => {
         "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)",
       ],
       cwd: root,
+      policy: await policyFor(root),
       environment: { PATH: process.env.PATH },
       timeoutMs: 300,
       outputLimitBytes: 1_024,
@@ -427,6 +458,7 @@ describeNative("NativeExecutorClient", () => {
     const cancellationJob = await client.start({
       argv: [process.execPath, "-e", "setInterval(() => {}, 1000)"],
       cwd: root,
+      policy: await policyFor(root),
       environment: { PATH: process.env.PATH },
       timeoutMs: 2_000,
       outputLimitBytes: 1_024,
@@ -482,6 +514,7 @@ describeNative("NativeExecutorClient", () => {
     const input = {
       argv: [process.execPath, "-e", "process.stdout.write('resumed-once')"],
       cwd: faultRoot,
+      policy: await policyFor(faultRoot),
       environment: { PATH: process.env.PATH },
       timeoutMs: 2_000,
       outputLimitBytes: 1_024,
@@ -519,6 +552,7 @@ describeNative("NativeExecutorClient", () => {
     const input = {
       argv: [process.execPath, "-e", "process.stdout.write('once')"],
       cwd: root,
+      policy: await policyFor(root),
       environment: { PATH: process.env.PATH },
       timeoutMs: 2_000,
       outputLimitBytes: 1_024,
@@ -549,6 +583,7 @@ describeNative("NativeExecutorClient", () => {
         "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)",
       ],
       cwd: root,
+      policy: await policyFor(root),
       environment: { PATH: process.env.PATH },
       timeoutMs: 100,
       outputLimitBytes: 1_024,
@@ -576,6 +611,7 @@ describeNative("NativeExecutorClient", () => {
       const started = await faultClient.start({
         argv: [process.execPath, "-e", "setInterval(() => {}, 1000)"],
         cwd: faultRoot,
+        policy: await policyFor(faultRoot),
         environment: { PATH: process.env.PATH },
         timeoutMs: 2_000,
         outputLimitBytes: 1_024,
@@ -606,6 +642,7 @@ describeNative("NativeExecutorClient", () => {
       const started = await faultClient.startPty({
         argv: [process.execPath, "-e", "setInterval(()=>{},1000)"],
         cwd: faultRoot,
+        policy: await policyFor(faultRoot),
         environment: { PATH: process.env.PATH },
         timeoutMs: 2_000,
         outputLimitBytes: 65_536,
@@ -642,6 +679,7 @@ describeNative("NativeExecutorClient", () => {
           `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'bad')`,
         ],
         cwd: faultRoot,
+        policy: await policyFor(faultRoot),
         environment: { PATH: process.env.PATH },
         timeoutMs: 2_000,
         outputLimitBytes: 1_024,
@@ -685,6 +723,12 @@ describeNative("NativeExecutorClient", () => {
       argv: [process.execPath, "-e", "process.stdout.write('123456789abcdef')"],
       timeoutMs: 2_000,
     });
+    expect(command.preview).toContain("OS sandbox: none");
+    expect(command.security).toMatchObject({
+      kind: "policy",
+      stage: "admission",
+      backend: "native_posix",
+    });
     const lifecycle: ToolOperationalEvent[] = [];
     const result = await command.execute(
       new AbortController().signal,
@@ -699,11 +743,26 @@ describeNative("NativeExecutorClient", () => {
       stdout_truncated: true,
       timed_out: false,
       stdout_artifact: { type: "artifact", bytes: 15 },
+      security: {
+        kind: "policy",
+        stage: "launch_setup",
+        backend: "native_posix",
+      },
     });
     expect(lifecycle.map((event) => event.type)).toEqual([
       "process.started",
       "process.exited",
     ]);
+    expect(lifecycle[0]).toMatchObject({
+      type: "process.started",
+      payload: {
+        security: {
+          kind: "policy",
+          stage: "launch_setup",
+          backend: "native_posix",
+        },
+      },
+    });
     await expect(
       artifactStore.readRange(result.stdout_artifact?.id ?? "", 0, 65_536),
     ).resolves.toMatchObject({ content: "123456789abcdef" });
@@ -740,6 +799,10 @@ describeNative("NativeExecutorClient", () => {
     );
   });
 });
+
+async function policyFor(root: string) {
+  return resolveExecutionPolicy({ workspaceRoot: await realpath(root) });
+}
 
 async function waitTerminal(
   client: NativeExecutorClient,

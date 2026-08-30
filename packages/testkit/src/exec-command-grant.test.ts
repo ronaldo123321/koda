@@ -1,4 +1,5 @@
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, realpath, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -12,6 +13,10 @@ import {
 } from "@koda/protocol";
 import {
   WorkspaceCommandRunner,
+  c1ExecutionCapabilities,
+  executionCapabilitiesDigest,
+  executionPolicyDigest,
+  resolveExecutionPolicy,
   registerExecCommandTool,
 } from "@koda/runtime-node";
 import { afterEach, describe, expect, it } from "vitest";
@@ -40,6 +45,28 @@ describe("exec_command approval grant identity", () => {
     );
 
     expect(explicitDefaults.key).toBe(defaults.key);
+    const canonicalRoot = await realpath(firstRoot);
+    const policy = resolveExecutionPolicy({ workspaceRoot: canonicalRoot });
+    const capabilities = c1ExecutionCapabilities(
+      process.platform === "win32" ? "typescript_windows" : "typescript_posix",
+    );
+    expect(defaults.key).toBe(
+      createHash("sha256")
+        .update(
+          JSON.stringify({
+            version: 2,
+            toolName: "exec_command",
+            workspaceRoot: canonicalRoot,
+            cwd: ".",
+            argv,
+            timeoutMs: 30_000,
+            policyDigest: executionPolicyDigest(policy),
+            backend: capabilities.backend,
+            capabilitiesDigest: executionCapabilitiesDigest(capabilities),
+          }),
+        )
+        .digest("hex"),
+    );
     await expect(
       grantCandidate(first, { argv: [...argv, "extra"] }, "different-argv"),
     ).resolves.not.toMatchObject({ key: defaults.key });
