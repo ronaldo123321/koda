@@ -1,6 +1,6 @@
 # Koda Phase 4B4B Windows Job Object Execution Design
 
-- Status: In progress — Phase 4B4B2 complete; Phase 4B4B3 next
+- Status: Complete — Phase 4B4B1 through Phase 4B4B3 verified
 - Date: 2026-08-30
 - Depends on: Phase 4B4A Windows platform foundations complete
 - Target: Windows 10 version 1809 and later, with unchanged macOS/Linux behavior
@@ -378,10 +378,36 @@ Phase 4B4B2 was implemented and verified on 2026-08-30:
   passed both Linux `verify` and Windows `windows-native`, including 34 Windows
   native tests and all 8 Windows Node acceptance tests.
 
-Phase 4B4B3 is next. It owns Supervisor restart reattachment acceptance,
-Worker-loss disappearance checks, crash-point coverage, platform-correct
-lifecycle evidence, and Windows capability activation. Phase 4B4C still owns
-ConPTY and all interactive Windows terminal behavior.
+Phase 4B4B3 was implemented and verified on 2026-08-30:
+
+- A restarted Supervisor reconnects to the same live Worker through the
+  authenticated per-job Named Pipe, preserves idempotent job identity, reads
+  existing output, and can terminate that same Job Object-owned tree.
+- Worker loss after the command boundary retains PID plus creation-time
+  identity, observes the root's bounded disappearance after
+  `KILL_ON_JOB_CLOSE`, synchronizes retained output, and records conservative
+  `TerminationUncertain` evidence without inventing a descendant-complete exit.
+- Crash acceptance proves that a command created suspended never executes when
+  its Worker dies before resume, and that a post-`Running` Worker loss leaves no
+  verified root process alive.
+- Windows now reports `job_object`, `reattach`, and
+  `durable_restart_recovery` as verified while keeping `process_group` and `pty`
+  false. Application lifecycle events distinguish `windows_job_object`,
+  `windows_console_ctrl_break`, and `windows_job_object_terminate` from the
+  legacy TypeScript taskkill backend.
+- High-concurrency app-server teardown uses bounded filesystem retry so a
+  terminal Worker's final durable write cannot race fixture deletion, while a
+  persistent leak still fails the suite.
+- Local verification passed strict native and Windows cross-target Clippy,
+  formatting, type checking, and all 504 platform-neutral tests. GitHub Actions
+  run
+  [33287500713](https://github.com/ronaldo123321/koda/actions/runs/33287500713)
+  passed Linux `verify` and Windows `windows-native`, including 34 Windows
+  native tests and all 12 Windows Node acceptance tests.
+
+Phase 4B4B is complete. Phase 4B4C owns ConPTY creation, interactive input,
+resize, attachment, and terminal recovery; no PTY capability is opened by this
+phase.
 
 ## Acceptance criteria
 

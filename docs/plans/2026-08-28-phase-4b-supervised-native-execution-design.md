@@ -1,6 +1,6 @@
 # Koda Phase 4B Supervised Native Execution Design
 
-- Status: In progress — Phase 4B4B2 complete; Phase 4B4B3 next
+- Status: In progress — Phase 4B4B complete; Phase 4B4C next
 - Date: 2026-08-28
 - Depends on: Phase 4A complete
 
@@ -201,10 +201,10 @@ terminal projection contract is in [Phase 4B3B interactive process UI](2026-08-2
   suspended direct command construction, restricted standard-handle
   inheritance, descendant-aware output/completion, timeout, cancellation, and
   force termination are implemented and verified on native Windows.
-- **Phase 4B4B3 next:** verify Supervisor reattachment, Worker-loss recovery,
-  crash points, platform-correct lifecycle evidence, and capability activation
-  on Windows.
-- **Phase 4B4C pending:** implement and verify ConPTY interactive execution,
+- **Phase 4B4B3 complete:** Supervisor reattachment, Worker-loss recovery,
+  suspended-start and post-running crash points, platform-correct lifecycle
+  evidence, and Windows capability activation are verified.
+- **Phase 4B4C next:** implement and verify ConPTY interactive execution,
   input, resize, attachment, and terminal recovery.
 - Exercise macOS, Linux, and Windows ownership and shutdown matrices.
 - Remove the TypeScript compatibility backend only after migration and release

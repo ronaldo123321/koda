@@ -1,6 +1,6 @@
 # Koda Phase 4 Hardening Roadmap
 
-- Status: In progress — Phase 4B4B2 complete; Phase 4B4B3 next
+- Status: In progress — Phase 4B4B complete; Phase 4B4C next
 - Date: 2026-08-28
 - Depends on: completed Phase 3A through Phase 3I baseline
 
@@ -45,7 +45,7 @@ Implementation status:
 
 ### Phase 4B: supervised native execution boundary
 
-Status: In progress — Phase 4B4B2 complete; Phase 4B4B3 next
+Status: In progress — Phase 4B4B complete; Phase 4B4C next
 
 - Define a versioned local executor protocol independent of providers and clients.
 - Add the Rust `koda-exec` sidecar for durable process ownership and bounded shutdown.
@@ -65,8 +65,8 @@ Implementation status:
 - **Phase 4B4A complete:** platform seams, authenticated Windows Named Pipes, Windows process identity, private state ACL/locking, restricted bootstrap handle inheritance, fail-closed capability reporting, negative framing/identity tests, and clean Linux/Windows CI.
 - **Phase 4B4B1 complete:** shared Windows Supervisor/Worker and durable runtime, SID/state/job-bound Worker Named Pipes, restricted token-handle Worker startup, Windows atomic state replacement and file semantics, fail-closed command execution, and clean Linux/Windows CI.
 - **Phase 4B4B2 complete:** atomic Job Object process ownership, suspended direct Pipe/Background execution, restricted standard-handle inheritance, descendant-aware completion, bounded output, timeout, cancellation, force termination, and clean Linux/Windows CI.
-- **Phase 4B4B3 next:** Supervisor restart reattachment, Worker-loss recovery acceptance, crash-point coverage, platform-correct lifecycle evidence, and verified Windows capability activation.
-- **Phase 4B4C pending:** ConPTY interactive execution, input, resize, attachment, and terminal recovery.
+- **Phase 4B4B3 complete:** live Worker reattachment after Supervisor restart, Worker-loss and suspended-start crash reconciliation, platform-correct lifecycle evidence, verified capability activation, and clean Linux/Windows CI.
+- **Phase 4B4C next:** ConPTY interactive execution, input, resize, attachment, and terminal recovery.
 
 The accepted Phase 4B2 contract is in [Phase 4B2 Worker recovery](2026-08-29-phase-4b2-worker-recovery-design.md).
 The accepted runtime-first Phase 4B3A contract is in [Phase 4B3A PTY and background runtime](2026-08-29-phase-4b3a-pty-background-runtime-design.md).
