@@ -19,9 +19,10 @@ use tokio::time::{sleep, timeout};
 
 use crate::attachment::AttachmentRegistry;
 use crate::durable::{JobLock, JobRecord, JobStore, StoredJobState, sha256_hex};
+#[cfg(unix)]
+use crate::execution_policy::FilesystemPolicy;
 use crate::execution_policy::{
-    ExecutionCapabilities, ExecutionSecuritySnapshot, FilesystemPolicy,
-    macos_seatbelt_execution_capabilities,
+    ExecutionCapabilities, ExecutionSecuritySnapshot, macos_seatbelt_execution_capabilities,
 };
 use crate::execution_security;
 use crate::framing::{read_json_frame, write_json_frame};
@@ -275,6 +276,8 @@ impl WorkerRuntime {
         identity: String,
         macos_seatbelt_confirmed: bool,
     ) -> Result<(), ProtocolError> {
+        #[cfg(windows)]
+        let _ = macos_seatbelt_confirmed;
         let mut guard = self.state.lock().await;
         let mut next = guard.clone();
         #[cfg(unix)]
