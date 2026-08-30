@@ -1,6 +1,6 @@
 # Koda Phase 4B Supervised Native Execution Design
 
-- Status: In progress — Phase 4B4B complete; Phase 4B4C next
+- Status: Complete — Phase 4B1 through Phase 4B4 verified
 - Date: 2026-08-28
 - Depends on: Phase 4A complete
 
@@ -204,14 +204,17 @@ terminal projection contract is in [Phase 4B3B interactive process UI](2026-08-2
 - **Phase 4B4B3 complete:** Supervisor reattachment, Worker-loss recovery,
   suspended-start and post-running crash points, platform-correct lifecycle
   evidence, and Windows capability activation are verified.
-- **Phase 4B4C next:** implement and verify ConPTY interactive execution,
-  input, resize, attachment, and terminal recovery.
+- **Phase 4B4C complete:** ConPTY interactive execution, exact-byte input,
+  resize, fenced attachment ownership, terminal drain, Supervisor restart,
+  Job Object descendant ownership, and conservative Worker-loss recovery are
+  implemented and verified on native Windows.
 - Exercise macOS, Linux, and Windows ownership and shutdown matrices.
 - Remove the TypeScript compatibility backend only after migration and release
   packaging are complete.
 
 The accepted Phase 4B4A contract is in [Phase 4B4A Windows platform foundations](2026-08-30-phase-4b4a-windows-platform-foundations-design.md).
 The accepted Phase 4B4B contract is in [Phase 4B4B Windows Job Object execution](2026-08-30-phase-4b4b-windows-job-object-execution-design.md).
+The completed Phase 4B4C contract and Windows-native acceptance evidence are in [Phase 4B4C Windows ConPTY](2026-08-30-phase-4b4c-windows-conpty-design.md).
 
 ## Testing and acceptance
 
@@ -269,8 +272,9 @@ Tests kill the Supervisor before Worker launch and while multiple commands are
 running, verify continued output, timeout, cancellation, and idempotency after
 restart, kill Workers on both sides of the command gate, verify uncertain
 cleanup, reject rollback/symlink/wrong-permission state, and preserve the full
-TypeScript runner contract. Capability negotiation now reports
-`durable_restart_recovery: true`; `job_object` remains false until Phase 4B4.
+TypeScript runner contract. At the end of that slice, capability negotiation
+reports `durable_restart_recovery: true` while `job_object` remains false until
+Phase 4B4.
 
 ## Phase 4B3A implementation result
 
@@ -309,5 +313,6 @@ the structured command-policy boundary with `exec_command`. The TUI adds a
 `/processes` workflow, explicit keyboard ownership, safe `Ctrl+C` delivery,
 attach/detach and termination controls, and an incremental bounded terminal
 projector. Protocol, service, controller, renderer, native integration,
-app-server integration, and real-TTY tests close Phase 4B3. Windows named-pipe,
-Job Object, and ConPTY ownership remain Phase 4B4.
+app-server integration, and real-TTY tests close Phase 4B3. Phase 4B4 then
+completes the same ownership and terminal contract on Windows through
+authenticated Named Pipes, Job Objects, and ConPTY.

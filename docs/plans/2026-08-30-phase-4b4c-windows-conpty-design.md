@@ -1,6 +1,6 @@
 # Koda Phase 4B4C Windows ConPTY Design
 
-- Status: Accepted for implementation
+- Status: Complete — Phase 4B4C1 through Phase 4B4C3 implemented and verified
 - Date: 2026-08-30
 - Depends on: Phase 4B3A PTY runtime and Phase 4B4B Windows Job Object execution
 - Target: Windows 10 version 1809 and later, with unchanged macOS/Linux behavior
@@ -17,7 +17,7 @@ This phase includes:
 
 - ConPTY creation with the requested initial rows and columns;
 - direct suspended process creation with both ConPTY and Job Object attributes;
-- raw UTF-8 plus VT output capture into the existing segmented PTY log;
+- raw ConPTY UTF-8/VT stream capture into the existing segmented PTY log;
 - fenced input, serialized resize, attach/detach, and reconnect;
 - descendant-aware natural completion and complete-tree termination;
 - Supervisor restart reattachment and conservative Worker-loss recovery; and
@@ -56,7 +56,8 @@ Each PTY Worker owns:
 - the host input-write and output-read pipe handles;
 - one anonymous `KILL_ON_JOB_CLOSE` Job Object and its completion port;
 - the root process and suspended primary thread handles;
-- one output-drain task and one serialized input/resize task;
+- one dedicated output-drain OS thread, a bounded async handoff, and one
+  serialized input/resize task;
 - the existing segmented PTY output store;
 - attachment capabilities and the fenced input lease; and
 - timeout and termination state.
@@ -81,8 +82,11 @@ closes its duplicate references. Only the host input-write and output-read ends
 remain in the Worker.
 
 Input and output are serviced independently. A blocked input write can never
-prevent the output channel from draining. Output bytes remain raw: Koda does
-not decode UTF-8 or interpret VT sequences in the executor.
+prevent the output channel from draining. Output bytes remain raw from Koda's
+perspective: the executor does not decode UTF-8 or interpret VT sequences.
+ConPTY may consume the application's console or VT operations and emit its own
+projected VT screen stream, so retained bytes are not promised to be
+byte-for-byte identical to child writes.
 
 `PSEUDOCONSOLE_INHERIT_CURSOR` is not enabled. Koda starts a new terminal
 session and has no parent console cursor to inherit.
@@ -102,8 +106,10 @@ PTY process creation preserves the Phase 4B4B persist-before-execute boundary:
    environment block, and set `TERM` to the validated PTY value.
 7. Call `CreateProcessW` directly with `CREATE_SUSPENDED`,
    `CREATE_NEW_PROCESS_GROUP`, `CREATE_UNICODE_ENVIRONMENT`, and
-   `EXTENDED_STARTUPINFO_PRESENT`. Handle inheritance is disabled and
-   `STARTF_USESTDHANDLES` is not set.
+   `EXTENDED_STARTUPINFO_PRESENT`. Handle inheritance is disabled.
+   `STARTF_USESTDHANDLES` explicitly supplies null standard handles so a
+   redirected Supervisor or CI host cannot bypass ConPTY through ambient
+   standard handles.
 8. Persist the root PID and creation-time identity in `CommandStarting`.
 9. Resume the primary thread and persist `Running`.
 
@@ -258,6 +264,28 @@ terminal semantics, not an alternative process-tree ownership claim.
 - Add crash-point coverage before resume and after `Running`.
 - Open the Windows `pty` capability only after native acceptance passes.
 - Preserve clean Linux and Windows CI gates.
+
+## Implementation result
+
+Phase 4B4C1 generalizes Windows process attributes for restricted inherited
+handles, Job Objects, and `HPCON`; constructs synchronous ConPTY channels; and
+creates the terminal root suspended inside the existing Job Object. The
+process start clears ambient standard handles, persists PID identity before
+resume, and keeps the Job Object as the only process-tree authority.
+
+Phase 4B4C2 routes Windows PTY starts through that substrate. A dedicated OS
+thread continuously drains the synchronous ConPTY output pipe into a bounded
+Tokio channel so `ClosePseudoConsole` cannot block the async Worker. The
+Worker serializes exact-byte input and resize, supports fenced attachment
+ownership, records best-effort `windows_conpty_ctrl_c`, and escalates through
+`windows_job_object_terminate` when required.
+
+Phase 4B4C3 activates `pty: true` after native Windows tests proved real TTY
+and dimensions, raw input, UTF-8/projected VT retention, resize, competing
+attachments, detach/reattach, descendant-aware completion, timeout and
+cancellation, Supervisor restart continuity, deterministic Worker-loss output
+retention, and the suspended pre-resume gate. The cross-platform verification
+and Windows-native acceptance gates passed in [GitHub Actions run 65](https://github.com/ronaldo123321/koda/actions/runs/33290693542).
 
 ## Acceptance criteria
 
