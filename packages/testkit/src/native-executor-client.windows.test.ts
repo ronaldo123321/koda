@@ -329,12 +329,14 @@ windowsDescribe("NativeExecutorClient Windows control plane", () => {
           `require("node:fs").writeFileSync(${JSON.stringify(startupMarker)},"started");`,
           'const readline=require("node:readline");',
           "const dimensions=()=>`${process.stdout.columns}x${process.stdout.rows}`;",
+          "process.stdout.write('\\u001b[31mUTF8:你好\\u001b[0m\\n');",
           "process.stdout.write(`READY:${process.stdin.isTTY}:${process.stdout.isTTY}:${dimensions()}:${process.env.TERM}\\n`);",
           "const lines=readline.createInterface({input:process.stdin,terminal:false});",
+          "let inputCount=0;",
           "lines.on('line',(line)=>{",
           "if(line==='size'){process.stdout.write(`SIZE:${dimensions()}\\n`);return;}",
           "if(line==='exit'){process.stdout.write('EXIT\\n');process.exit(0);return;}",
-          "process.stdout.write(`ECHO:${line}\\n`);",
+          "process.stdout.write(`ECHO:${++inputCount}:${line}\\n`);",
           "});",
           "setInterval(()=>{},1000);",
         ].join(""),
@@ -374,20 +376,21 @@ windowsDescribe("NativeExecutorClient Windows control plane", () => {
       );
     }
     expect(ready).toContain("READY:true:true:80x24:xterm-256color");
+    expect(ready).toContain("\u001b[31mUTF8:你好\u001b[0m");
 
     await writer.resize(30, 100);
-    await writer.write("size\r");
+    await writer.write("size\n");
     expect(await waitForPtyText(writer, "SIZE:100x30")).toContain(
       "SIZE:100x30",
     );
 
     await writer.close();
     await reader.acquireInput();
-    await reader.write("reattached\r");
-    expect(await waitForPtyText(reader, "ECHO:reattached")).toContain(
-      "ECHO:reattached",
+    await reader.write("reattached\n");
+    expect(await waitForPtyText(reader, "ECHO:1:reattached")).toContain(
+      "ECHO:1:reattached",
     );
-    await reader.write("exit\r");
+    await reader.write("exit\n");
     const terminal = await waitTerminal(client, started.job_id);
     expect(terminal).toMatchObject({
       state: "exited",
@@ -398,6 +401,269 @@ windowsDescribe("NativeExecutorClient Windows control plane", () => {
     const final = await waitForPtyText(reader, "EXIT");
     expect(final).toContain("EXIT");
     expect((await reader.read()).complete).toBe(true);
+  }, 30_000);
+
+  test("waits for ConPTY descendants and drains their final output", async () => {
+    const started = await client.startPty({
+      argv: [
+        process.execPath,
+        "-e",
+        [
+          'const {spawn}=require("node:child_process");',
+          "process.stdout.write('root-out;');",
+          "const child=spawn(process.execPath,['-e',\"setTimeout(()=>process.stdout.write('child-final'),250)\"],{stdio:'inherit',windowsHide:true});",
+          "child.unref();",
+        ].join(""),
+      ],
+      cwd: root,
+      environment: windowsEnvironment,
+      timeoutMs: 5_000,
+      outputLimitBytes: 64 * 1_024,
+      terminationGraceMs: 100,
+      terminationConfirmationMs: 3_000,
+      rows: 24,
+      cols: 80,
+      lifecycle: "background",
+    });
+    const attachment = await client.openAttachment(started.job_id);
+    const output = await waitForPtyText(attachment, "child-final");
+    const terminal = await waitTerminal(client, started.job_id);
+
+    expect(output).toContain("root-out;child-final");
+    expect(terminal).toMatchObject({
+      state: "exited",
+      io_mode: "pty",
+      exit_code: 0,
+      timed_out: false,
+    });
+    expect((await attachment.read()).complete).toBe(true);
+  }, 30_000);
+
+  test("terminates ConPTY trees on cancellation and timeout with retained output", async () => {
+    const cancelled = await client.startPty({
+      argv: [
+        process.execPath,
+        "-e",
+        "process.on('SIGINT',()=>process.stdout.write('SIGINT;'));process.stdout.write('CANCEL-READY;');setInterval(()=>{},1000)",
+      ],
+      cwd: root,
+      environment: windowsEnvironment,
+      timeoutMs: 5_000,
+      outputLimitBytes: 64 * 1_024,
+      terminationGraceMs: 100,
+      terminationConfirmationMs: 3_000,
+      rows: 24,
+      cols: 80,
+    });
+    const cancelledOutput = await client.openAttachment(cancelled.job_id);
+    await waitForPtyText(cancelledOutput, "CANCEL-READY;");
+    await client.terminate(cancelled.job_id, "cancellation");
+    const cancelledTerminal = await waitTerminal(client, cancelled.job_id);
+
+    expect(cancelledTerminal).toMatchObject({
+      state: "exited",
+      timed_out: false,
+      termination: { reason: "cancellation", outcome: "terminated" },
+    });
+    expect(cancelledTerminal.termination?.attempts).toContainEqual({
+      attempt: "graceful",
+      mechanism: "windows_conpty_ctrl_c",
+    });
+    expect(cancelledTerminal.termination?.attempts).toContainEqual({
+      attempt: "force",
+      mechanism: "windows_job_object_terminate",
+    });
+    expect((await cancelledOutput.read()).complete).toBe(true);
+
+    const timed = await client.startPty({
+      argv: [
+        process.execPath,
+        "-e",
+        "process.stdout.write('TIMEOUT-READY;');setInterval(()=>{},1000)",
+      ],
+      cwd: root,
+      environment: windowsEnvironment,
+      timeoutMs: 250,
+      outputLimitBytes: 64 * 1_024,
+      terminationGraceMs: 50,
+      terminationConfirmationMs: 3_000,
+      rows: 24,
+      cols: 80,
+    });
+    const timedOutput = await client.openAttachment(timed.job_id);
+    const timedTerminal = await waitTerminal(client, timed.job_id);
+    const retained = await waitForPtyText(timedOutput, "TIMEOUT-READY;");
+
+    expect(retained).toContain("TIMEOUT-READY;");
+    expect(timedTerminal).toMatchObject({
+      state: "exited",
+      timed_out: true,
+      termination: { reason: "timeout", outcome: "terminated" },
+    });
+    expect(timedTerminal.termination?.attempts[0]).toEqual({
+      attempt: "graceful",
+      mechanism: "windows_conpty_ctrl_c",
+    });
+  }, 30_000);
+
+  test("keeps a live ConPTY and its fenced input across Supervisor restart", async () => {
+    const restartRoot = await mkdtemp(
+      join(tmpdir(), "koda-windows-pty-restart-"),
+    );
+    let restartClient = await NativeExecutorClient.open({
+      binaryPath: resolve("target/debug/koda-exec.exe"),
+      stateDirectory: join(restartRoot, "state"),
+    });
+    const requestId = `windows-pty-restart-${randomUUID()}`;
+    const input = {
+      argv: [
+        process.execPath,
+        "-e",
+        [
+          'const readline=require("node:readline");',
+          "const dimensions=()=>`${process.stdout.columns}x${process.stdout.rows}`;",
+          "process.stdout.write('RESTART-READY\\n');",
+          "readline.createInterface({input:process.stdin,terminal:false}).on('line',(line)=>{",
+          "if(line==='size'){process.stdout.write(`RESTART-SIZE:${dimensions()}\\n`);return;}",
+          "if(line==='exit'){process.stdout.write('RESTART-EXIT\\n');process.exit(0);return;}",
+          "process.stdout.write(`RESTART-ECHO:${line}\\n`);",
+          "});setInterval(()=>{},1000);",
+        ].join(""),
+      ],
+      cwd: restartRoot,
+      environment: windowsEnvironment,
+      timeoutMs: 10_000,
+      outputLimitBytes: 64 * 1_024,
+      terminationGraceMs: 100,
+      terminationConfirmationMs: 3_000,
+      rows: 24,
+      cols: 80,
+      lifecycle: "background" as const,
+      requestId,
+    };
+    const started = await restartClient.startPty(input);
+    const original = await restartClient.openAttachment(started.job_id);
+    const originalLease = await original.acquireInput();
+    try {
+      await waitForPtyText(original, "RESTART-READY");
+      await restartClient.closeOwnedSupervisorForTests();
+      restartClient = await NativeExecutorClient.open({
+        binaryPath: resolve("target/debug/koda-exec.exe"),
+        stateDirectory: join(restartRoot, "state"),
+      });
+      const duplicate = await restartClient.startPty(input);
+      const renewed = await original.renewInput();
+      await original.write("after-restart\n");
+      await original.resize(31, 101);
+      await original.write("size\n");
+      const continued = await waitForPtyText(original, "RESTART-SIZE:101x31");
+
+      expect(duplicate.job_id).toBe(started.job_id);
+      expect(renewed.fence).toBe(originalLease.fence);
+      expect(continued).toContain("RESTART-ECHO:after-restart");
+      await original.close();
+      const replacement = await restartClient.openAttachment(started.job_id);
+      await replacement.acquireInput();
+      await replacement.write("exit\n");
+      const terminal = await waitTerminal(restartClient, started.job_id);
+      const output = await waitForPtyText(replacement, "RESTART-EXIT");
+
+      expect(output).toContain("RESTART-ECHO:after-restart");
+      expect(output).toContain("RESTART-SIZE:101x31");
+      expect(terminal).toMatchObject({ state: "exited", exit_code: 0 });
+    } finally {
+      await original.close().catch(() => undefined);
+      await restartClient
+        .terminate(started.job_id, "cancellation")
+        .catch(() => undefined);
+      await restartClient.closeOwnedSupervisorForTests();
+      await rm(restartRoot, { force: true, recursive: true });
+    }
+  }, 30_000);
+
+  test("retains ConPTY output and kills its tree after Worker loss", async () => {
+    const faultRoot = await mkdtemp(
+      join(tmpdir(), "koda-windows-pty-output-loss-"),
+    );
+    const faultClient = await openFaultClient(faultRoot, "after_pty_output");
+    try {
+      const started = await faultClient.startPty({
+        argv: [
+          process.execPath,
+          "-e",
+          "process.stdout.write('RETAINED-BEFORE-WORKER-LOSS');setInterval(()=>{},1000)",
+        ],
+        cwd: faultRoot,
+        environment: windowsEnvironment,
+        timeoutMs: 5_000,
+        outputLimitBytes: 64 * 1_024,
+        terminationGraceMs: 50,
+        terminationConfirmationMs: 3_000,
+        rows: 24,
+        cols: 80,
+      });
+      const terminal = await waitTerminal(faultClient, started.job_id);
+      const attachment = await faultClient.openAttachment(started.job_id);
+      const output = await waitForPtyText(
+        attachment,
+        "RETAINED-BEFORE-WORKER-LOSS",
+      );
+
+      expect(output).toContain("RETAINED-BEFORE-WORKER-LOSS");
+      expect(terminal).toMatchObject({
+        state: "termination_uncertain",
+        io_mode: "pty",
+        termination: { reason: "orphan_cleanup", outcome: "uncertain" },
+        failure: { code: "WORKER_LOST_AFTER_COMMAND_BOUNDARY" },
+      });
+      if (terminal.pid === null) {
+        throw new Error(
+          "Windows ConPTY Worker-loss job did not publish a PID.",
+        );
+      }
+      expect(() => process.kill(terminal.pid!, 0)).toThrow();
+      expect((await attachment.read()).complete).toBe(true);
+    } finally {
+      await faultClient.closeOwnedSupervisorForTests();
+      await rm(faultRoot, { force: true, recursive: true });
+    }
+  }, 30_000);
+
+  test("never resumes a suspended ConPTY command after Worker loss", async () => {
+    const faultRoot = await mkdtemp(join(tmpdir(), "koda-windows-pty-gate-"));
+    const marker = join(faultRoot, "pty-command-executed");
+    const faultClient = await openFaultClient(faultRoot, "after_command_spawn");
+    try {
+      const started = await faultClient.startPty({
+        argv: [
+          process.execPath,
+          "-e",
+          `require('node:fs').writeFileSync(${JSON.stringify(marker)},'bad')`,
+        ],
+        cwd: faultRoot,
+        environment: windowsEnvironment,
+        timeoutMs: 5_000,
+        outputLimitBytes: 64 * 1_024,
+        terminationGraceMs: 50,
+        terminationConfirmationMs: 3_000,
+        rows: 24,
+        cols: 80,
+      });
+      const terminal = await waitTerminal(faultClient, started.job_id);
+
+      expect(terminal).toMatchObject({
+        state: "termination_uncertain",
+        io_mode: "pty",
+        failure: { code: "WORKER_LOST_AFTER_COMMAND_BOUNDARY" },
+      });
+      await new Promise<void>((resolvePromise) =>
+        setTimeout(resolvePromise, 100),
+      );
+      await expect(access(marker)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await faultClient.closeOwnedSupervisorForTests();
+      await rm(faultRoot, { force: true, recursive: true });
+    }
   }, 30_000);
 
   test("routes durable read operations through the shared Supervisor", async () => {
@@ -509,7 +775,7 @@ async function waitForPtyText(
     await new Promise<void>((resolvePromise) => setTimeout(resolvePromise, 10));
   }
   throw new Error(
-    `Native PTY job '${attachment.credentials.job_id}' did not emit '${expected}'.`,
+    `Native PTY job '${attachment.credentials.job_id}' did not emit '${expected}'. Output: ${JSON.stringify(text)}`,
   );
 }
 

@@ -1348,6 +1348,7 @@ async fn capture_windows_pty_output(
             .await
             .append(&chunk?)
             .map_err(protocol_io_error)?;
+        fault_point("after_pty_output");
     }
     runtime
         .require_pty()
