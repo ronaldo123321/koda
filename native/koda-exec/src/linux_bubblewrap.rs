@@ -16,7 +16,7 @@ pub const BUBBLEWRAP_OVERRIDE: &str = "KODA_BWRAP_PATH";
 pub const LINUX_SANDBOX_CONFIRMATION_FD: i32 = 4;
 pub const LINUX_SANDBOX_RELEASE_FD: i32 = 5;
 const PROBE_REVISION: u32 = 1;
-const BUILDER_REVISION: &[u8] = b"koda-linux-bubblewrap-builder-v1";
+const BUILDER_REVISION: &[u8] = b"koda-linux-bubblewrap-builder-v2";
 const MAX_VERSION_BYTES: usize = 256;
 const MAX_CAPTURE_BYTES: usize = 4 * 1024;
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
@@ -455,6 +455,7 @@ pub fn run_sandbox_bootstrap(
     validate_pipe_descriptor(confirmation_fd)?;
     validate_pipe_descriptor(release_fd)?;
     let digest = parse_hex_digest(digest_hex)?;
+    install_parent_death_signal()?;
     linux_bootstrap_fault("after_linux_namespace_setup");
     close_inherited_descriptors(confirmation_fd, release_fd)?;
     install_seccomp(network_denied)?;
@@ -499,6 +500,51 @@ fn linux_bootstrap_fault(name: &str) {
     if std::env::var(LINUX_SANDBOX_FAULT_ENV).as_deref() == Ok(name) {
         std::process::abort();
     }
+}
+
+#[cfg(target_os = "linux")]
+fn install_parent_death_signal() -> io::Result<()> {
+    // Bubblewrap remains the direct parent of the inner bootstrap. Coupling the
+    // bootstrap to that parent closes the orphan window if the Worker and then
+    // Bubblewrap disappear before Supervisor reconciliation can safely signal
+    // the original process group.
+    // SAFETY: getppid reads the current parent process identity.
+    let parent = unsafe { libc::getppid() };
+    if parent <= 1 {
+        return Err(io::Error::other(
+            "Linux sandbox bootstrap parent is unavailable",
+        ));
+    }
+    // SAFETY: PR_SET_PDEATHSIG accepts one scalar signal value.
+    if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // The parent can exit between getppid and prctl. In that race the kernel did
+    // not observe the parent transition for this newly installed setting.
+    // SAFETY: getppid reads the current parent process identity.
+    if unsafe { libc::getppid() } != parent {
+        return Err(io::Error::other(
+            "Linux sandbox bootstrap parent changed during setup",
+        ));
+    }
+    let mut signal = 0;
+    // SAFETY: PR_GET_PDEATHSIG writes one integer to the supplied valid pointer.
+    if unsafe {
+        libc::prctl(
+            libc::PR_GET_PDEATHSIG,
+            std::ptr::from_mut(&mut signal),
+            0,
+            0,
+            0,
+        )
+    } != 0
+        || signal != libc::SIGKILL
+    {
+        return Err(io::Error::other(
+            "Linux sandbox parent-death signal was not installed",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -1550,6 +1596,25 @@ pub fn run_probe_contract(
     }
     ensure_only_standard_descriptors()
         .map_err(|_| io::Error::other("descriptor whitelist verification failed"))?;
+    let mut parent_death_signal = 0;
+    expect_zero(
+        // SAFETY: PR_GET_PDEATHSIG writes one integer to the supplied valid pointer.
+        unsafe {
+            libc::prctl(
+                libc::PR_GET_PDEATHSIG,
+                std::ptr::from_mut(&mut parent_death_signal),
+                0,
+                0,
+                0,
+            )
+        },
+        "parent-death signal could not be read",
+    )?;
+    if parent_death_signal != libc::SIGKILL {
+        return Err(io::Error::other(
+            "parent-death signal was not preserved across exec",
+        ));
+    }
     expect_errno(
         // SAFETY: the raw syscall intentionally tests the installed filter.
         unsafe { libc::unshare(libc::CLONE_NEWUSER) },
@@ -1738,6 +1803,15 @@ fn expect_errno(result: i32, expected: i32, message: &str) -> io::Result<()> {
 #[cfg(target_os = "linux")]
 fn expect_scalar_errno(result: libc::c_long, expected: i32, message: &str) -> io::Result<()> {
     if result == -1 && io::Error::last_os_error().raw_os_error() == Some(expected) {
+        Ok(())
+    } else {
+        Err(io::Error::other(message))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn expect_zero(result: i32, message: &str) -> io::Result<()> {
+    if result == 0 {
         Ok(())
     } else {
         Err(io::Error::other(message))

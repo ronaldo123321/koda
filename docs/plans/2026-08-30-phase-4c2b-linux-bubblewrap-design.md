@@ -795,6 +795,8 @@ evidence, and post-release fault boundaries on Linux-capable hosts.
 - Completed preview/result/event/app-server/CLI/TUI schema-v3 reporting tests.
 - Added the real side-effect, descriptor, syscall, network, Pipe/PTY,
   background, runtime-replacement, and restart matrices.
+- Added and self-tested an inner `PR_SET_PDEATHSIG(SIGKILL)` link so Worker loss
+  cannot orphan released user code after Bubblewrap exits with its parent.
 - Published the revised execution-security guarantee with explicit limits.
 - Added the dedicated `linux-native` CI job with fail-closed capability
   requirements and bounded diagnostics. Repository owners must configure that

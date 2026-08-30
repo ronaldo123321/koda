@@ -61,6 +61,8 @@ The Linux protected boundary consists of:
   network mode, `no_new_privs`, seccomp mode, policy, capabilities, builder, and
   runtime identity;
 - a second release pipe that remains closed until applied evidence is durable.
+- a verified `PR_SET_PDEATHSIG(SIGKILL)` chain from Bubblewrap to the inner
+  bootstrap/user process, closing the orphan window if the Worker disappears.
 
 The denied-network filter blocks socket and socketpair creation, io_uring
 setup/enter/register, nested user-namespace entry, setuid/setgid transitions,
