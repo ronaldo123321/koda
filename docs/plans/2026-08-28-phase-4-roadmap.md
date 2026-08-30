@@ -1,6 +1,6 @@
 # Koda Phase 4 Hardening Roadmap
 
-- Status: In progress — Phase 4B, Phase 4C1, and macOS Phase 4C2A complete; Linux isolation next
+- Status: In progress — Phase 4B, Phase 4C1, and macOS Phase 4C2A complete; Linux Phase 4C2B design approved
 - Date: 2026-08-28
 - Depends on: completed Phase 3A through Phase 3I baseline
 
@@ -81,7 +81,7 @@ The completed Windows terminal contract and acceptance evidence are in [Phase 4B
 
 ### Phase 4C: sandbox, network, and secret policy
 
-Status: In progress — Phase 4C1 and macOS Phase 4C2A complete; Linux isolation next
+Status: In progress — Phase 4C1 and macOS Phase 4C2A complete; Linux Phase 4C2B design approved, C2B1 next
 
 - Add explicit filesystem, process, environment, and network capabilities.
 - Implement available OS isolation mechanisms and expose their effective strength rather than a portable boolean claim.
@@ -140,12 +140,18 @@ and typed inherited-network combinations, and the final guarantee is
 published. Phase 4C2A closes only with the same implementation commit passing
 macOS, Linux, and Windows regression CI.
 
-The next platform slice is Linux isolation against the same policy, evidence,
-Pipe/PTY, background-job, and client contracts. Its concrete mechanism and
-design remain to be approved before implementation. Secret injection and
-redaction, resource quotas, finer-grained network policy, provider/MCP/plugin
-sandboxing, shell syntax, and all Windows sandbox controls remain later Phase
-4C work rather than implicit parts of the macOS completion.
+The approved next platform slice is
+[Phase 4C2B Linux Bubblewrap](2026-08-30-phase-4c2b-linux-bubblewrap-design.md).
+It uses a trusted Bubblewrap mount/user/network namespace boundary plus a
+Koda-owned `no_new_privs`/seccomp bootstrap and the same two-way durable release
+gate as macOS. C2B1 begins with execution-security schema v3, native protocol
+v4, durable format v4, runtime fingerprints, shared fixtures, and compatibility;
+it does not activate protected Linux execution yet.
+
+Secret injection and redaction, resource quotas, finer-grained network policy,
+provider/MCP/plugin sandboxing, shell syntax, Landlock fallback, bundled
+Bubblewrap distribution, and all Windows sandbox controls remain later Phase
+4C/4E work rather than implicit parts of Linux completion.
 
 Deferred Windows sandbox work remains explicit: restricted-token and privilege
 policy, filesystem workspace/scratch rules, network denial, launch confirmation,
