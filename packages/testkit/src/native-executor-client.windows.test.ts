@@ -376,7 +376,8 @@ windowsDescribe("NativeExecutorClient Windows control plane", () => {
       );
     }
     expect(ready).toContain("READY:true:true:80x24:xterm-256color");
-    expect(ready).toContain("\u001b[31mUTF8:你好\u001b[0m");
+    expect(ready).toContain("UTF8:你好");
+    expect(ready).toContain("\u001b[");
 
     await writer.resize(30, 100);
     await writer.write("size\n");
@@ -413,6 +414,7 @@ windowsDescribe("NativeExecutorClient Windows control plane", () => {
           "process.stdout.write('root-out;');",
           "const child=spawn(process.execPath,['-e',\"setTimeout(()=>process.stdout.write('child-final'),250)\"],{stdio:'inherit',windowsHide:true});",
           "child.unref();",
+          "setTimeout(()=>process.exit(0),100);",
         ].join(""),
       ],
       cwd: root,

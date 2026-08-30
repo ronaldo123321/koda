@@ -61,6 +61,8 @@ use crate::pty_output::PtyOutputStore;
 
 const OUTPUT_BUFFER_BYTES: usize = 16_384;
 const PTY_COMMAND_QUEUE_DEPTH: usize = 64;
+#[cfg(windows)]
+const WINDOWS_PTY_FAULT_MARKER: &[u8] = b"RETAINED-BEFORE-WORKER-LOSS";
 
 pub async fn run_worker(
     job_directory: &Path,
@@ -1319,6 +1321,9 @@ async fn capture_windows_pty_output(
     runtime: &WorkerRuntime,
 ) -> io::Result<()> {
     let (sender, mut receiver) = mpsc::channel::<io::Result<Vec<u8>>>(16);
+    let fault_after_marker =
+        std::env::var("KODA_EXEC_TEST_FAULT_POINT").as_deref() == Ok("after_pty_output");
+    let mut fault_probe = Vec::new();
     std::thread::Builder::new()
         .name("koda-conpty-output".to_owned())
         .spawn(move || {
@@ -1340,15 +1345,28 @@ async fn capture_windows_pty_output(
             io::Error::other(format!("Could not start ConPTY output reader: {error}"))
         })?;
     while let Some(chunk) = receiver.recv().await {
+        let chunk = chunk?;
         runtime
             .require_pty()
             .map_err(protocol_io_error)?
             .output
             .lock()
             .await
-            .append(&chunk?)
+            .append(&chunk)
             .map_err(protocol_io_error)?;
-        fault_point("after_pty_output");
+        if fault_after_marker {
+            fault_probe.extend_from_slice(&chunk);
+            if fault_probe
+                .windows(WINDOWS_PTY_FAULT_MARKER.len())
+                .any(|window| window == WINDOWS_PTY_FAULT_MARKER)
+            {
+                fault_point("after_pty_output");
+            }
+            let retained = WINDOWS_PTY_FAULT_MARKER.len() - 1;
+            if fault_probe.len() > retained {
+                fault_probe.drain(..fault_probe.len() - retained);
+            }
+        }
     }
     runtime
         .require_pty()
