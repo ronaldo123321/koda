@@ -14,6 +14,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: pnpm/action-setup@v4
         with:
           version: 10.28.2
@@ -24,6 +26,12 @@ jobs:
       - run: sudo apt-get update
       - run: sudo apt-get install --yes ripgrep
       - run: pnpm install --frozen-lockfile
+      - name: Build pinned Phase 4C1 legacy executor fixture
+        shell: bash
+        run: |
+          legacy_binary="$RUNNER_TEMP/koda-exec-v1"
+          ./scripts/build-phase-4c1-v1-executor.sh "$legacy_binary"
+          echo "KODA_LEGACY_EXECUTOR_BINARY=$legacy_binary" >> "$GITHUB_ENV"
       - run: pnpm format:check
       - run: pnpm typecheck
       - name: Run full test suite
@@ -41,6 +49,37 @@ jobs:
             echo "::error title=Full test suite failed::$summary"
             exit "$test_status"
           fi
+
+  macos-native:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: pnpm --filter @koda/runtime-node... build
+      - run: cargo build -p koda-exec
+      - name: Build pinned Phase 4C1 legacy executor fixture
+        shell: bash
+        run: |
+          legacy_binary="$RUNNER_TEMP/koda-exec-v1"
+          ./scripts/build-phase-4c1-v1-executor.sh "$legacy_binary"
+          echo "KODA_LEGACY_EXECUTOR_BINARY=$legacy_binary" >> "$GITHUB_ENV"
+      - name: Run macOS native execution-policy acceptance
+        run: >-
+          pnpm exec vitest run
+          packages/testkit/src/native-executor-client.test.ts
+          packages/testkit/src/native-execution-policy.test.ts
 
   windows-native:
     runs-on: windows-latest
@@ -73,4 +112,8 @@ jobs:
       - run: pnpm install --frozen-lockfile --ignore-scripts
       - run: pnpm --filter @koda/runtime-node... build
       - run: cargo build -p koda-exec
-      - run: pnpm exec vitest run packages/testkit/src/native-executor-client.windows.test.ts
+      - name: Run Windows native execution-policy acceptance
+        run: >-
+          pnpm exec vitest run
+          packages/testkit/src/native-executor-client.windows.test.ts
+          packages/testkit/src/native-execution-policy.test.ts

@@ -1,9 +1,10 @@
-import { mkdtemp, mkdir, realpath, rm } from "node:fs/promises";
+import { access, mkdtemp, mkdir, realpath, rm } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { ToolRegistry } from "@koda/agent-core";
+import { AgentLoop, EffectToolPolicy, ToolRegistry } from "@koda/agent-core";
+import { ApprovalGrantRegistry } from "@koda/app";
 import {
   threadIdSchema,
   toolCallIdSchema,
@@ -11,15 +12,19 @@ import {
   type ApprovalGrantCandidate,
   type JsonObject,
 } from "@koda/protocol";
+import { ScriptedModelProvider } from "@koda/providers";
 import {
   WorkspaceCommandRunner,
   c1ExecutionCapabilities,
   executionCapabilitiesDigest,
   executionPolicyDigest,
+  type NativeExecutorClient,
   resolveExecutionPolicy,
   registerExecCommandTool,
 } from "@koda/runtime-node";
 import { afterEach, describe, expect, it } from "vitest";
+
+import { DeterministicItemIdFactory, MemoryEventStore } from "./index.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -82,6 +87,98 @@ describe("exec_command approval grant identity", () => {
     await expect(
       grantCandidate(second, { argv }, "different-workspace"),
     ).resolves.not.toMatchObject({ key: defaults.key });
+
+    const native = await createRegistry(firstRoot, {
+      nativeExecutor: {
+        hello: async () => ({
+          execution_security: c1ExecutionCapabilities(
+            process.platform === "win32" ? "native_windows" : "native_posix",
+          ),
+        }),
+      } as NativeExecutorClient,
+    });
+    await expect(
+      grantCandidate(native, { argv }, "different-backend"),
+    ).resolves.not.toMatchObject({ key: defaults.key });
+  });
+
+  it("cannot use an existing unconfined grant to bypass a protected policy", async () => {
+    const root = await createWorkspace();
+    const canonicalRoot = await realpath(root);
+    const marker = join(root, "must-not-run");
+    const argv = [
+      process.execPath,
+      "-e",
+      `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'bad')`,
+    ];
+    const unconfinedTools = await createRegistry(root);
+    const candidate = await grantCandidate(
+      unconfinedTools,
+      { argv },
+      "unconfined-grant",
+    );
+    const grants = new ApprovalGrantRegistry();
+    const manager = grants.forWorkspace(canonicalRoot);
+    const pending = manager.prepare("exec_command", candidate, {
+      expiresInSeconds: 900,
+    });
+    pending.activate();
+
+    const protectedTools = await createRegistry(root, {
+      executionPolicy: resolveExecutionPolicy({
+        workspaceRoot: canonicalRoot,
+        environmentProfile: "read-only",
+      }),
+    });
+    let approvalCalls = 0;
+    const events = new MemoryEventStore();
+    const result = await new AgentLoop({
+      provider: new ScriptedModelProvider([
+        {
+          events: [
+            {
+              type: "tool_call",
+              callId: toolCallIdSchema.parse("protected-grant-call"),
+              name: "exec_command",
+              arguments: { argv },
+            },
+            { type: "completed", finishReason: "tool_calls" },
+          ],
+        },
+        {
+          events: [
+            { type: "assistant_delta", text: "Policy refused execution." },
+            { type: "completed", finishReason: "stop" },
+          ],
+        },
+      ]),
+      tools: protectedTools,
+      policy: new EffectToolPolicy("on-request"),
+      approvals: {
+        request: async () => {
+          approvalCalls += 1;
+          return { decision: "approved" };
+        },
+      },
+      approvalGrants: manager,
+      events,
+      ids: new DeterministicItemIdFactory("protected-grant"),
+    }).runTurn({
+      threadId: threadIdSchema.parse("protected-grant-thread"),
+      turnId: turnIdSchema.parse("protected-grant-turn"),
+      userInput: "Try the protected command.",
+    });
+
+    expect(result.status).toBe("completed");
+    expect(approvalCalls).toBe(0);
+    expect(grants.list(canonicalRoot)[0]).toMatchObject({ uses: 0 });
+    expect(events.events.map((event) => event.type)).not.toContain(
+      "approval.grant_used",
+    );
+    expect(events.events.map((event) => event.type)).not.toContain(
+      "tool.execution_started",
+    );
+    await expect(access(marker)).rejects.toMatchObject({ code: "ENOENT" });
   });
 });
 
@@ -91,9 +188,15 @@ async function createWorkspace(): Promise<string> {
   return root;
 }
 
-async function createRegistry(root: string): Promise<ToolRegistry> {
+async function createRegistry(
+  root: string,
+  options: Parameters<typeof WorkspaceCommandRunner.open>[1] = {},
+): Promise<ToolRegistry> {
   const registry = new ToolRegistry();
-  registerExecCommandTool(registry, await WorkspaceCommandRunner.open(root));
+  registerExecCommandTool(
+    registry,
+    await WorkspaceCommandRunner.open(root, options),
+  );
   return registry;
 }
 

@@ -6,7 +6,7 @@ The project is building the control plane around a coding model: typed conversat
 
 ## Current status
 
-The Phase 3 local-agent foundation, Phase 4A crash-safe workspace recovery, Phase 4B supervised native execution, and the Phase 4C1A–C1C application-side execution-policy path are complete. Koda now has an opt-in Rust execution supervisor with a versioned local protocol, reconnectable job observation, POSIX process groups, Windows Job Objects and ConPTY, bounded retained output, explicit native capability reporting, and end-to-end execution-policy evidence on top of those foundations:
+The Phase 3 local-agent foundation, Phase 4A crash-safe workspace recovery, Phase 4B supervised native execution, and the Phase 4C1 application-side execution-policy implementation are complete; Phase 4C1 awaits remote Linux, macOS, and Windows acceptance. Koda now has an opt-in Rust execution supervisor with a versioned local protocol, reconnectable job observation, POSIX process groups, Windows Job Objects and ConPTY, bounded retained output, explicit native capability reporting, and end-to-end execution-policy evidence on top of those foundations:
 
 - Versioned Thread, Turn, Item, and Agent Event schemas.
 - A provider-neutral streaming model interface.
@@ -348,7 +348,9 @@ Execution policy defaults to `unconfined` and may be selected before startup wit
 export KODA_EXECUTION_PROFILE=unconfined
 ```
 
-Every prepared command records its requested policy dimensions, selected backend, capability digest, and expected launch controls. A successful start retains the launch-time security snapshot in process events, command results, app-server v15 process summaries, CLI output, and TUI views. Current C1C snapshots therefore state `OS sandbox: none` literally; process-tree supervision and environment filtering are reported separately and are not presented as filesystem or network isolation. Exact-command approval grants are bound to the policy digest, backend, and capability digest, so changing any of them invalidates the grant before execution.
+Every prepared command records its requested policy dimensions, selected backend, capability digest, and expected launch controls. A successful start retains the launch-time security snapshot in process events, command results, app-server v15 process summaries, CLI output, and TUI views. Current Phase 4C1 snapshots therefore state `OS sandbox: none` literally; process-tree supervision and environment filtering are reported separately and are not presented as filesystem or network isolation. Exact-command approval grants are bound to the policy digest, backend, and capability digest, so changing any of them invalidates the grant before execution.
+
+The complete guarantee, evidence, failure, legacy-compatibility, and platform acceptance contract is documented in [Koda execution security guarantees](docs/security/execution-security.md).
 
 Phase 4B provides the Rust Supervisor and per-job Workers on macOS, Linux, and Windows. `pnpm build` builds `target/debug/koda-exec` (`target/debug/koda-exec.exe` on Windows); set its absolute path to select the native backend explicitly:
 

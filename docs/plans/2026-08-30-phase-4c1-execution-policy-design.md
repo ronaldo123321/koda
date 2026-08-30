@@ -1,6 +1,6 @@
 # Koda Phase 4C1 Execution Policy and Isolation Reporting Design
 
-- Status: Approved — C1A–C1C complete; C1D pending
+- Status: Approved — C1D implementation complete; remote platform acceptance pending
 - Date: 2026-08-30
 - Depends on: completed Phase 4B supervised native execution
 
@@ -489,6 +489,41 @@ through `WORKER_UNAVAILABLE` and durable reconciliation instead of incorrectly
 reporting an authentication mismatch. Windows compilation and the 17 native
 Windows tests were not run on this host and remain explicit C1D/CI acceptance;
 C1C does not claim that platform result.
+
+## C1D implementation record — 2026-08-30
+
+C1D reuses the existing contract and runtime suites rather than introducing a
+second acceptance framework. The Linux full-suite workflow now builds a real
+protocol-v1 executor from pinned commit `3aa84ee` and enables the three live
+v1→v2 compatibility cases. A new macOS native job runs the POSIX native client,
+policy-negative, restart, and real-legacy matrices. The Windows native job now
+runs the shared execution-policy suite in addition to its Job Object and ConPTY
+coverage.
+
+The pinned fixture builder archives the old commit into a private temporary
+directory, uses an isolated Cargo target directory, refuses to replace an
+existing output, and removes its source/build tree after copying the requested
+binary. No legacy binary or generated durable state is checked into the
+repository.
+
+Application acceptance now proves that backend changes create different exact
+grant identities and that a still-valid unconfined grant cannot bypass a
+protected policy: no approval is requested, the grant is not marked used, no
+`tool.execution_started` event is persisted, and no user-process marker is
+created. The user-facing guarantee matrix is published in
+[Koda execution security guarantees](../security/execution-security.md).
+
+Local macOS acceptance built the pinned v1 executable and passed `pnpm test`:
+all 36 Rust tests and 617 Vitest tests passed, with only the 17 Windows-native
+tests skipped. All 10 native policy tests ran, including the three formerly
+optional live compatibility cases. `pnpm typecheck`, `pnpm format:check`,
+`cargo clippy --workspace --all-targets -- -D warnings`, and
+`git diff --check` also passed. The fixture's temporary source and target
+directories were removed after the build.
+
+This implementation does not claim C1D or Phase 4C1 closed yet. The workflow
+changes must pass on remote Linux, macOS, and Windows for the same commit; that
+result will be recorded here after the commit is pushed and CI completes.
 
 ## Acceptance matrix
 
