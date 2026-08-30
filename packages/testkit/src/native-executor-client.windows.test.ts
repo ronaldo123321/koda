@@ -44,7 +44,7 @@ windowsDescribe("NativeExecutorClient Windows control plane", () => {
     expect(hello.capabilities).toEqual({
       process_group: false,
       job_object: true,
-      pty: false,
+      pty: true,
       reattach: true,
       durable_restart_recovery: true,
     });
@@ -319,26 +319,77 @@ windowsDescribe("NativeExecutorClient Windows control plane", () => {
     }
   });
 
-  test("continues to reject PTY execution with the stable capability error", async () => {
-    await expect(
-      client.startPty({
-        argv: [process.execPath, "-e", "process.exit(0)"],
-        cwd: root,
-        environment: windowsEnvironment,
-        timeoutMs: 1_000,
-        outputLimitBytes: 4_096,
-        terminationGraceMs: 100,
-        terminationConfirmationMs: 100,
-        rows: 24,
-        cols: 80,
-      }),
-    ).rejects.toMatchObject({ code: "PLATFORM_CAPABILITY_UNAVAILABLE" });
+  test("runs a real ConPTY with fenced input, resize, and detach survival", async () => {
+    const started = await client.startPty({
+      argv: [
+        process.execPath,
+        "-e",
+        [
+          'const readline=require("node:readline");',
+          "const dimensions=()=>`${process.stdout.columns}x${process.stdout.rows}`;",
+          "process.stdout.write(`READY:${process.stdin.isTTY}:${process.stdout.isTTY}:${dimensions()}:${process.env.TERM}\\n`);",
+          "const lines=readline.createInterface({input:process.stdin,terminal:false});",
+          "lines.on('line',(line)=>{",
+          "if(line==='size'){process.stdout.write(`SIZE:${dimensions()}\\n`);return;}",
+          "if(line==='exit'){process.stdout.write('EXIT\\n');process.exit(0);return;}",
+          "process.stdout.write(`ECHO:${line}\\n`);",
+          "});",
+          "setInterval(()=>{},1000);",
+        ].join(""),
+      ],
+      cwd: root,
+      environment: windowsEnvironment,
+      timeoutMs: 10_000,
+      outputLimitBytes: 64 * 1_024,
+      terminationGraceMs: 250,
+      terminationConfirmationMs: 3_000,
+      rows: 24,
+      cols: 80,
+      lifecycle: "background",
+      displayName: "Windows ConPTY acceptance",
+    });
+    const writer = await client.openAttachment(started.job_id);
+    const reader = await client.openAttachment(started.job_id);
+    await writer.acquireInput();
+    await expect(reader.acquireInput()).rejects.toMatchObject({
+      code: "INPUT_LEASE_HELD",
+    });
+    const ready = await waitForPtyText(
+      writer,
+      "READY:true:true:80x24:xterm-256color",
+    );
+    expect(ready).toContain("READY:true:true:80x24:xterm-256color");
+
+    await writer.resize(30, 100);
+    await writer.write("size\r");
+    expect(await waitForPtyText(writer, "SIZE:100x30")).toContain(
+      "SIZE:100x30",
+    );
+
+    await writer.close();
+    await reader.acquireInput();
+    await reader.write("reattached\r");
+    expect(await waitForPtyText(reader, "ECHO:reattached")).toContain(
+      "ECHO:reattached",
+    );
+    await reader.write("exit\r");
+    const terminal = await waitTerminal(client, started.job_id);
+    expect(terminal).toMatchObject({
+      state: "exited",
+      io_mode: "pty",
+      exit_code: 0,
+      timed_out: false,
+    });
+    const final = await waitForPtyText(reader, "EXIT");
+    expect(final).toContain("EXIT");
+    expect((await reader.read()).complete).toBe(true);
   });
 
   test("routes durable read operations through the shared Supervisor", async () => {
     const result = await client.list();
     expect(result.jobs.length).toBeGreaterThanOrEqual(3);
-    expect(result.jobs.every((job) => job.io_mode === "pipe")).toBe(true);
+    expect(result.jobs.some((job) => job.io_mode === "pipe")).toBe(true);
+    expect(result.jobs.some((job) => job.io_mode === "pty")).toBe(true);
   });
 
   test("serves concurrent authenticated Named Pipe handshakes", async () => {
@@ -422,6 +473,24 @@ async function waitForOutput(
     await new Promise<void>((resolvePromise) => setTimeout(resolvePromise, 10));
   }
   throw new Error(`Native job '${jobId}' did not emit '${expected}'.`);
+}
+
+async function waitForPtyText(
+  attachment: Awaited<ReturnType<NativeExecutorClient["openAttachment"]>>,
+  expected: string,
+): Promise<string> {
+  let text = "";
+  for (let attempt = 0; attempt < 500; attempt += 1) {
+    const output = await attachment.read();
+    if (output.status === "ok") {
+      text += output.data.toString("utf8");
+      if (text.includes(expected)) return text;
+    }
+    await new Promise<void>((resolvePromise) => setTimeout(resolvePromise, 10));
+  }
+  throw new Error(
+    `Native PTY job '${attachment.credentials.job_id}' did not emit '${expected}'.`,
+  );
 }
 
 async function openFaultClient(

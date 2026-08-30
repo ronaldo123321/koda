@@ -652,6 +652,7 @@ async function reportNativeCompletion(
     if (
       attempt.mechanism !== "posix_process_group_signal" &&
       attempt.mechanism !== "windows_console_ctrl_break" &&
+      attempt.mechanism !== "windows_conpty_ctrl_c" &&
       attempt.mechanism !== "windows_job_object_terminate"
     ) {
       continue;

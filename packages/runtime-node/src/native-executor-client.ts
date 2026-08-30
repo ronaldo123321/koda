@@ -100,6 +100,7 @@ export interface NativeTerminationAttempt {
   mechanism:
     | "posix_process_group_signal"
     | "windows_console_ctrl_break"
+    | "windows_conpty_ctrl_c"
     | "windows_job_object_terminate"
     | "windows_job_object_close_observation"
     | "windows_job_object_recovery_pending"
@@ -228,6 +229,7 @@ const terminationAttemptSchema = z
     mechanism: z.enum([
       "posix_process_group_signal",
       "windows_console_ctrl_break",
+      "windows_conpty_ctrl_c",
       "windows_job_object_terminate",
       "windows_job_object_close_observation",
       "windows_job_object_recovery_pending",

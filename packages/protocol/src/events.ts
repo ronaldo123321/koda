@@ -88,6 +88,7 @@ export const processTerminationAttemptSchema = z.enum(["graceful", "force"]);
 export const processTerminationMechanismSchema = z.enum([
   "posix_process_group_signal",
   "windows_console_ctrl_break",
+  "windows_conpty_ctrl_c",
   "windows_job_object_terminate",
   "windows_taskkill",
   "direct_child_signal",

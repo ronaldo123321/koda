@@ -33,7 +33,7 @@ pub const fn capabilities() -> PlatformCapabilities {
     PlatformCapabilities {
         process_group: cfg!(unix),
         job_object: cfg!(windows),
-        pty: cfg!(unix),
+        pty: cfg!(any(unix, windows)),
         reattach: true,
         durable_restart_recovery: true,
     }
@@ -89,7 +89,9 @@ pub mod process {
 
 #[cfg(windows)]
 pub mod process {
-    pub use super::windows::{ManagedProcessTree, SuspendedManagedProcess};
+    pub use super::windows::{
+        ManagedProcessTree, SuspendedManagedProcess, SuspendedManagedPtyProcess,
+    };
 }
 
 #[cfg(unix)]
@@ -106,7 +108,7 @@ mod tests {
         let capabilities = capabilities();
         assert_eq!(capabilities.process_group, cfg!(unix));
         assert_eq!(capabilities.job_object, cfg!(windows));
-        assert_eq!(capabilities.pty, cfg!(unix));
+        assert!(capabilities.pty);
         assert!(capabilities.reattach);
         assert!(capabilities.durable_restart_recovery);
     }

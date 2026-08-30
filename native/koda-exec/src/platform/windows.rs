@@ -992,6 +992,25 @@ impl SuspendedManagedPtyProcess {
     }
 }
 
+impl Drop for SuspendedManagedPtyProcess {
+    fn drop(&mut self) {
+        if self.input.is_none() && self.output.is_none() {
+            return;
+        }
+        drop(self.input.take());
+        let drainer = self.output.take().map(|mut output| {
+            std::thread::spawn(move || {
+                let mut buffer = [0u8; 8_192];
+                while output.read(&mut buffer).is_ok_and(|count| count > 0) {}
+            })
+        });
+        let _ = self.tree.close_pseudo_console();
+        if let Some(drainer) = drainer {
+            let _ = drainer.join();
+        }
+    }
+}
+
 impl ManagedProcessTree {
     pub fn pid(&self) -> u32 {
         self.inner.pid
