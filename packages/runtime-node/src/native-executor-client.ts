@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { access, chmod, lstat, mkdir, realpath, stat } from "node:fs/promises";
 import { constants } from "node:fs";
 import { createConnection, type Socket } from "node:net";
@@ -18,6 +18,7 @@ export type NativeExecutorErrorCode =
   | "NATIVE_EXECUTOR_UNAVAILABLE"
   | "NATIVE_EXECUTOR_PROTOCOL_ERROR"
   | "NATIVE_EXECUTOR_START_FAILED"
+  | "PLATFORM_CAPABILITY_UNAVAILABLE"
   | "INCOMPATIBLE_PROTOCOL"
   | "INVALID_REQUEST"
   | "IDEMPOTENCY_CONFLICT"
@@ -508,18 +509,11 @@ export class NativeExecutorClient {
     const stateDirectory = await preparePrivateDirectory(
       options.stateDirectory,
     );
-    const socketPath = resolve(
-      options.socketPath ?? join(stateDirectory, "koda-exec.sock"),
+    const socketPath = await resolveLocalEndpoint(
+      binaryPath,
+      stateDirectory,
+      options.socketPath,
     );
-    if (
-      !isAbsolute(socketPath) ||
-      Buffer.byteLength(socketPath, "utf8") > 100
-    ) {
-      throw new NativeExecutorError(
-        "NATIVE_EXECUTOR_START_FAILED",
-        "The executor socket path must be absolute and at most 100 UTF-8 bytes.",
-      );
-    }
     const startupTimeoutMs = validateTimeout(
       options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS,
       "startupTimeoutMs",
@@ -862,7 +856,7 @@ export class NativeExecutorClient {
       this.binaryPath,
       [
         "serve",
-        "--socket",
+        "--endpoint",
         this.socketPath,
         "--state-dir",
         this.stateDirectory,
@@ -1222,6 +1216,7 @@ function normalizeRemoteCode(
 ): NativeExecutorErrorCode {
   switch (code) {
     case "INCOMPATIBLE_PROTOCOL":
+    case "PLATFORM_CAPABILITY_UNAVAILABLE":
     case "INVALID_REQUEST":
     case "IDEMPOTENCY_CONFLICT":
     case "JOB_NOT_FOUND":
@@ -1292,8 +1287,79 @@ async function preparePrivateDirectory(input: string): Promise<string> {
       `Executor state path must be a real directory: ${requested}`,
     );
   }
-  await chmod(requested, 0o700);
+  if (process.platform !== "win32") {
+    await chmod(requested, 0o700);
+  }
   return realpath(requested);
+}
+
+async function resolveLocalEndpoint(
+  binaryPath: string,
+  stateDirectory: string,
+  configured: string | undefined,
+): Promise<string> {
+  if (process.platform === "win32") {
+    const endpoint =
+      configured ??
+      (await queryDefaultWindowsEndpoint(binaryPath, stateDirectory));
+    if (
+      !/^\\\\\.\\pipe\\koda-exec-[a-z0-9-]+$/u.test(endpoint) ||
+      endpoint.length > 240
+    ) {
+      throw new NativeExecutorError(
+        "NATIVE_EXECUTOR_START_FAILED",
+        "The Windows executor endpoint must be a bounded local Koda Named Pipe name.",
+      );
+    }
+    return endpoint;
+  }
+
+  const endpoint = resolve(
+    configured ?? join(stateDirectory, "koda-exec.sock"),
+  );
+  if (!isAbsolute(endpoint) || Buffer.byteLength(endpoint, "utf8") > 100) {
+    throw new NativeExecutorError(
+      "NATIVE_EXECUTOR_START_FAILED",
+      "The executor socket path must be absolute and at most 100 UTF-8 bytes.",
+    );
+  }
+  return endpoint;
+}
+
+async function queryDefaultWindowsEndpoint(
+  binaryPath: string,
+  stateDirectory: string,
+): Promise<string> {
+  return new Promise((resolvePromise, rejectPromise) => {
+    execFile(
+      binaryPath,
+      ["endpoint", "--state-dir", stateDirectory],
+      { encoding: "utf8", windowsHide: true, timeout: 5_000 },
+      (error, stdout) => {
+        if (error !== null) {
+          rejectPromise(
+            new NativeExecutorError(
+              "NATIVE_EXECUTOR_START_FAILED",
+              `Could not derive the Windows executor endpoint: ${error.message}`,
+              { cause: error },
+            ),
+          );
+          return;
+        }
+        const endpoint = stdout.trim();
+        if (endpoint.length === 0 || endpoint.includes("\n")) {
+          rejectPromise(
+            new NativeExecutorError(
+              "NATIVE_EXECUTOR_START_FAILED",
+              "koda-exec returned an invalid Windows endpoint.",
+            ),
+          );
+          return;
+        }
+        resolvePromise(endpoint);
+      },
+    );
+  });
 }
 
 function validateTimeout(value: number, name: string): number {

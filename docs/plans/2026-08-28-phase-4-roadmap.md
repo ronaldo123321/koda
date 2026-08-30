@@ -1,6 +1,6 @@
 # Koda Phase 4 Hardening Roadmap
 
-- Status: In progress — Phase 4B3 complete; Phase 4B4 platform completion next
+- Status: In progress — Phase 4B4A complete; Phase 4B4B next
 - Date: 2026-08-28
 - Depends on: completed Phase 3A through Phase 3I baseline
 
@@ -45,7 +45,7 @@ Implementation status:
 
 ### Phase 4B: supervised native execution boundary
 
-Status: In progress — Phase 4B3 complete; Phase 4B4 platform completion next
+Status: In progress — Phase 4B4A complete; Phase 4B4B next
 
 - Define a versioned local executor protocol independent of providers and clients.
 - Add the Rust `koda-exec` sidecar for durable process ownership and bounded shutdown.
@@ -62,10 +62,14 @@ Implementation status:
 - **Phase 4B2 complete:** per-job detached Workers, crash-durable manifests/state heads, authenticated Supervisor restart attachment, start-identity reconciliation, command start gates, bounded job listing, conservative retention/quarantine, and deterministic Supervisor/Worker kill-point tests.
 - **Phase 4B3A complete:** POSIX PTY/background starts, Worker-owned controlling terminals, attach/detach, bounded segmented cursor logs, HMAC attachment capabilities, renewable fenced input ownership, resize, strict Node primitives, and real-PTY restart/failure tests.
 - **Phase 4B3B complete:** approved `exec_terminal`, app-server protocol v14 process sessions, workspace-filtered discovery, TUI process pane, safe key routing, visible attachment/lease state, bounded terminal projection, and real-TTY acceptance.
+- **Phase 4B4A complete:** platform seams, authenticated Windows Named Pipes, Windows process identity, private state ACL/locking, restricted bootstrap handle inheritance, fail-closed capability reporting, negative framing/identity tests, and clean Linux/Windows CI.
+- **Phase 4B4B next:** Windows Job Object process-tree ownership, termination, timeout, and restart recovery.
+- **Phase 4B4C pending:** ConPTY interactive execution, input, resize, attachment, and terminal recovery.
 
 The accepted Phase 4B2 contract is in [Phase 4B2 Worker recovery](2026-08-29-phase-4b2-worker-recovery-design.md).
 The accepted runtime-first Phase 4B3A contract is in [Phase 4B3A PTY and background runtime](2026-08-29-phase-4b3a-pty-background-runtime-design.md).
 The accepted product-layer Phase 4B3B contract is in [Phase 4B3B interactive process UI](2026-08-29-phase-4b3b-interactive-process-ui-design.md).
+The accepted Windows platform-foundation contract is in [Phase 4B4A Windows platform foundations](2026-08-30-phase-4b4a-windows-platform-foundations-design.md).
 
 ### Phase 4C: sandbox, network, and secret policy
 

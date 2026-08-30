@@ -1,7 +1,6 @@
 use std::collections::VecDeque;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use base64::Engine;
@@ -175,11 +174,7 @@ impl PtyOutputStore {
 
     fn create_segment(&mut self) -> Result<(), ProtocolError> {
         let path = self.directory.join(segment_name(self.latest));
-        OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&path)
+        crate::platform::state_security::open_new_private_file(&path)
             .map_err(output_error)?
             .sync_all()
             .map_err(output_error)?;

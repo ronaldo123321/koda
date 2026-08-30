@@ -1,9 +1,6 @@
 use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io;
-use std::os::fd::AsRawFd;
-use std::os::unix::fs::FileTypeExt;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -13,19 +10,22 @@ use base64::Engine;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
-use tokio::net::UnixStream;
 use tokio::sync::Mutex;
 use tokio::time::sleep;
 use uuid::Uuid;
 
 use crate::attachment::{create_stateless_attachment, verify_capability};
 use crate::durable::{JobRecord, JobStore};
-use crate::framing::{read_json_frame, verify_peer, write_json_frame};
+use crate::framing::{read_json_frame, write_json_frame};
 use crate::internal_protocol::{
     WORKER_PROTOCOL_VERSION, WorkerHelloParams, WorkerHelloResult, WorkerRequest, WorkerResponse,
     WorkerTerminateParams, decode_base64, encode_base64, new_nonce, worker_proof,
 };
-use crate::process_identity::process_identity_matches;
+use crate::platform::bootstrap::configure_worker_command;
+use crate::platform::identity::process_identity_matches;
+use crate::platform::{
+    LocalStream, connect_local_endpoint, remove_local_endpoint, verify_local_peer,
+};
 use crate::protocol::{
     AttachmentAcquireInputParams, AttachmentCredentials, AttachmentDetachParams,
     AttachmentDetachResult, AttachmentOpenParams, AttachmentReadParams, AttachmentReadResult,
@@ -605,7 +605,6 @@ impl Supervisor {
             .read(true)
             .open(&token_path)
             .map_err(worker_spawn_io_error)?;
-        let source_fd = token_file.as_raw_fd();
         let mut command = Command::new(&self.binary_path);
         command
             .arg("worker")
@@ -615,24 +614,8 @@ impl Supervisor {
             .arg("3")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .process_group(0);
-        // SAFETY: the closure uses only async-signal-safe descriptor operations before exec.
-        unsafe {
-            command.pre_exec(move || {
-                if source_fd != 3 {
-                    if libc::dup2(source_fd, 3) < 0 {
-                        return Err(io::Error::last_os_error());
-                    }
-                } else {
-                    let flags = libc::fcntl(3, libc::F_GETFD);
-                    if flags < 0 || libc::fcntl(3, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
-                        return Err(io::Error::last_os_error());
-                    }
-                }
-                Ok(())
-            });
-        }
+            .stderr(Stdio::null());
+        configure_worker_command(&mut command, &token_file, 3);
         command.spawn().map_err(worker_spawn_io_error)?;
         Ok(())
     }
@@ -743,15 +726,15 @@ impl Supervisor {
 }
 
 struct WorkerConnection {
-    stream: UnixStream,
+    stream: LocalStream,
 }
 
 impl WorkerConnection {
     async fn connect(record: &JobRecord) -> Result<Self, ProtocolError> {
-        let mut stream = UnixStream::connect(record.worker_socket_path())
+        let mut stream = connect_local_endpoint(&record.worker_socket_path())
             .await
             .map_err(worker_connect_error)?;
-        verify_peer(&stream).map_err(|error| {
+        verify_local_peer(&stream).map_err(|error| {
             ProtocolError::new(
                 "WORKER_AUTHENTICATION_FAILED",
                 format!("Worker peer identity could not be verified: {error}"),
@@ -930,7 +913,7 @@ fn read_terminal_attachment(
 }
 
 async fn read_worker_response(
-    stream: &mut UnixStream,
+    stream: &mut LocalStream,
     request_id: &str,
 ) -> Result<WorkerResponse, ProtocolError> {
     let response = read_json_frame::<WorkerResponse>(stream)
@@ -1034,18 +1017,7 @@ fn file_length(path: &Path) -> Result<u64, ProtocolError> {
 }
 
 fn remove_stale_worker_socket(record: &JobRecord) -> Result<(), ProtocolError> {
-    let path = record.worker_socket_path();
-    match std::fs::symlink_metadata(&path) {
-        Ok(metadata) if metadata.file_type().is_socket() => {
-            std::fs::remove_file(path).map_err(state_io_error)
-        }
-        Ok(_) => Err(ProtocolError::new(
-            "JOB_STATE_CORRUPT",
-            "Worker control endpoint is not a Unix Socket.",
-        )),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(state_io_error(error)),
-    }
+    remove_local_endpoint(&record.worker_socket_path()).map_err(state_io_error)
 }
 
 fn unix_millis() -> u64 {

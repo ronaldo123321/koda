@@ -1,21 +1,24 @@
-#![cfg_attr(not(unix), allow(dead_code, unused_imports))]
+#![cfg_attr(windows, allow(dead_code))]
 
-#[cfg(not(unix))]
-compile_error!("Phase 4B2 koda-exec currently supports POSIX systems only.");
-
+#[cfg(unix)]
 mod attachment;
+#[cfg(unix)]
 mod durable;
+mod executor_runtime;
 mod framing;
+#[cfg(unix)]
 mod internal_protocol;
-mod process_identity;
+mod platform;
 mod protocol;
+#[cfg(unix)]
 mod pty_output;
+#[cfg(unix)]
 mod supervisor;
+#[cfg(unix)]
 mod worker;
 
 use std::io;
-use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use protocol::{
@@ -23,8 +26,9 @@ use protocol::{
     validate_hello, validate_request,
 };
 use serde_json::json;
-use supervisor::Supervisor;
-use tokio::net::UnixStream;
+
+use crate::executor_runtime::ExecutorRuntime;
+use crate::platform::{LocalStream, capabilities};
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
@@ -36,35 +40,69 @@ async fn main() {
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     match parse_arguments(std::env::args().skip(1))? {
-        Arguments::Serve { socket, state_dir } => serve(socket, state_dir).await,
-        Arguments::Worker { job_dir, token_fd } => worker::run_worker(&job_dir, token_fd)
-            .await
-            .map_err(|error| format!("{}: {}", error.code, error.message).into()),
-        Arguments::CommandBootstrap { gate_fd, argv } => {
-            worker::run_command_bootstrap(gate_fd, argv)?;
+        Arguments::Serve {
+            endpoint,
+            state_dir,
+        } => serve(endpoint, state_dir).await,
+        Arguments::Endpoint { state_dir } => {
+            println!(
+                "{}",
+                platform::default_local_endpoint(&state_dir)?.display()
+            );
             Ok(())
         }
+        Arguments::Worker { job_dir, token_fd } => run_worker(job_dir, token_fd).await,
+        Arguments::CommandBootstrap { gate_fd, argv } => run_command_bootstrap(gate_fd, argv),
     }
 }
 
-async fn serve(socket: PathBuf, state_dir: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
-    prepare_socket_parent(&socket)?;
+#[cfg(unix)]
+async fn run_worker(job_dir: PathBuf, token_fd: i32) -> Result<(), Box<dyn std::error::Error>> {
+    worker::run_worker(&job_dir, token_fd)
+        .await
+        .map_err(|error| format!("{}: {}", error.code, error.message).into())
+}
+
+#[cfg(windows)]
+async fn run_worker(_job_dir: PathBuf, _token_fd: i32) -> Result<(), Box<dyn std::error::Error>> {
+    Err("PLATFORM_CAPABILITY_UNAVAILABLE: Windows Worker startup requires Phase 4B4B".into())
+}
+
+#[cfg(unix)]
+fn run_command_bootstrap(
+    gate_fd: i32,
+    argv: Vec<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    worker::run_command_bootstrap(gate_fd, argv)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn run_command_bootstrap(
+    _gate_fd: i32,
+    _argv: Vec<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    Err("PLATFORM_CAPABILITY_UNAVAILABLE: Windows command startup requires Phase 4B4B".into())
+}
+
+async fn serve(endpoint: PathBuf, state_dir: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    platform::prepare_local_endpoint_parent(&endpoint)?;
     // Binding first serializes recovery: only one Supervisor may inspect and adopt Workers.
-    let listener = framing::bind_private_socket(&socket).await?;
+    let listener = platform::bind_local_endpoint(&endpoint).await?;
     let binary_path = std::env::current_exe()?;
-    let supervisor = Supervisor::open(&state_dir, binary_path)
+    let runtime = ExecutorRuntime::open(&state_dir, binary_path)
         .await
         .map_err(|error| format!("{}: {}", error.code, error.message))?;
 
     loop {
-        let (stream, _) = listener.accept().await?;
-        if let Err(error) = framing::verify_peer(&stream) {
+        let stream = platform::accept_local_connection(&listener).await?;
+        if let Err(error) = platform::verify_local_peer(&stream) {
             eprintln!("koda-exec: rejected local peer: {error}");
             continue;
         }
-        let connection_supervisor = Arc::clone(&supervisor);
+        let connection_runtime = Arc::clone(&runtime);
         tokio::spawn(async move {
-            if let Err(error) = handle_connection(stream, connection_supervisor).await {
+            if let Err(error) = handle_connection(stream, connection_runtime).await {
                 let ordinary_disconnect = matches!(
                     error.kind(),
                     io::ErrorKind::UnexpectedEof
@@ -80,9 +118,21 @@ async fn serve(socket: PathBuf, state_dir: PathBuf) -> Result<(), Box<dyn std::e
 }
 
 enum Arguments {
-    Serve { socket: PathBuf, state_dir: PathBuf },
-    Worker { job_dir: PathBuf, token_fd: i32 },
-    CommandBootstrap { gate_fd: i32, argv: Vec<String> },
+    Serve {
+        endpoint: PathBuf,
+        state_dir: PathBuf,
+    },
+    Endpoint {
+        state_dir: PathBuf,
+    },
+    Worker {
+        job_dir: PathBuf,
+        token_fd: i32,
+    },
+    CommandBootstrap {
+        gate_fd: i32,
+        argv: Vec<String>,
+    },
 }
 
 fn parse_arguments(
@@ -91,12 +141,24 @@ fn parse_arguments(
     match arguments.next().as_deref() {
         Some("serve") => {
             let values = parse_named_arguments(arguments)?;
-            let socket = required_path(&values, "--socket")?;
+            let endpoint = local_endpoint_argument(&values)?;
             let state_dir = required_path(&values, "--state-dir")?;
-            if !socket.is_absolute() || !state_dir.is_absolute() {
-                return Err("--socket and --state-dir must be absolute paths".into());
+            platform::validate_local_endpoint(&endpoint)?;
+            if !state_dir.is_absolute() {
+                return Err("--state-dir must be an absolute path".into());
             }
-            Ok(Arguments::Serve { socket, state_dir })
+            Ok(Arguments::Serve {
+                endpoint,
+                state_dir,
+            })
+        }
+        Some("endpoint") => {
+            let values = parse_named_arguments(arguments)?;
+            let state_dir = required_path(&values, "--state-dir")?;
+            if !state_dir.is_absolute() {
+                return Err("--state-dir must be an absolute path".into());
+            }
+            Ok(Arguments::Endpoint { state_dir })
         }
         Some("worker") => {
             let values = parse_named_arguments(arguments)?;
@@ -131,7 +193,7 @@ fn parse_arguments(
             Ok(Arguments::CommandBootstrap { gate_fd, argv })
         }
         _ => Err(
-            "usage: koda-exec serve --socket PATH --state-dir PATH | koda-exec worker --job-dir PATH --token-fd FD"
+            "usage: koda-exec serve --endpoint ENDPOINT --state-dir PATH | koda-exec endpoint --state-dir PATH | koda-exec worker --job-dir PATH --token-fd FD"
                 .into(),
         ),
     }
@@ -163,24 +225,20 @@ fn required_path(
         .ok_or_else(|| format!("{name} is required").into())
 }
 
-fn prepare_socket_parent(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let parent = path.parent().ok_or("socket path has no parent directory")?;
-    if let Ok(metadata) = std::fs::symlink_metadata(parent) {
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(format!(
-                "executor runtime path '{}' must be a real directory",
-                parent.display()
-            )
-            .into());
-        }
-    } else {
-        std::fs::create_dir_all(parent)?;
+fn local_endpoint_argument(
+    values: &std::collections::HashMap<String, String>,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    match (values.get("--endpoint"), values.get("--socket")) {
+        (Some(endpoint), None) | (None, Some(endpoint)) => Ok(PathBuf::from(endpoint)),
+        (Some(_), Some(_)) => Err("--endpoint and --socket cannot be used together".into()),
+        (None, None) => Err("--endpoint is required".into()),
     }
-    std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
-    Ok(())
 }
 
-async fn handle_connection(mut stream: UnixStream, supervisor: Arc<Supervisor>) -> io::Result<()> {
+async fn handle_connection(
+    mut stream: LocalStream,
+    runtime: Arc<ExecutorRuntime>,
+) -> io::Result<()> {
     let mut handshaken = false;
     loop {
         let payload = match framing::read_frame(&mut stream).await? {
@@ -221,11 +279,11 @@ async fn handle_connection(mut stream: UnixStream, supervisor: Arc<Supervisor>) 
                                 "supervisor_version": env!("CARGO_PKG_VERSION"),
                                 "platform": std::env::consts::OS,
                                 "capabilities": {
-                                    "process_group": true,
-                                    "job_object": false,
-                                    "pty": true,
-                                    "reattach": true,
-                                    "durable_restart_recovery": true
+                                    "process_group": capabilities().process_group,
+                                    "job_object": capabilities().job_object,
+                                    "pty": capabilities().pty,
+                                    "reattach": capabilities().reattach,
+                                    "durable_restart_recovery": capabilities().durable_restart_recovery
                                 },
                                 "limits": {
                                     "max_frame_bytes": MAX_FRAME_BYTES,
@@ -248,7 +306,7 @@ async fn handle_connection(mut stream: UnixStream, supervisor: Arc<Supervisor>) 
                     "system/hello must succeed before other executor methods.",
                 ),
             ),
-            Ok(()) => match supervisor
+            Ok(()) => match runtime
                 .dispatch(request_id.clone(), &request.method, request.params)
                 .await
             {
@@ -264,15 +322,30 @@ async fn handle_connection(mut stream: UnixStream, supervisor: Arc<Supervisor>) 
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    const TEST_ENDPOINT: &str = "/tmp/koda.sock";
+    #[cfg(windows)]
+    const TEST_ENDPOINT: &str = r"\\.\pipe\koda-exec-test";
+
+    #[cfg(unix)]
+    const TEST_STATE_DIRECTORY: &str = "/tmp/koda-exec";
+    #[cfg(windows)]
+    const TEST_STATE_DIRECTORY: &str = r"C:\koda-exec";
+
+    #[cfg(unix)]
+    const TEST_JOB_DIRECTORY: &str = "/tmp/job";
+    #[cfg(windows)]
+    const TEST_JOB_DIRECTORY: &str = r"C:\koda-job";
+
     #[test]
     fn arguments_require_absolute_paths() {
         let result = parse_arguments(
             [
                 "serve",
-                "--socket",
-                "relative.sock",
+                "--endpoint",
+                TEST_ENDPOINT,
                 "--state-dir",
-                "/tmp/koda-exec",
+                "relative",
             ]
             .into_iter()
             .map(str::to_owned),
@@ -281,9 +354,42 @@ mod tests {
     }
 
     #[test]
+    fn endpoint_argument_replaces_socket_with_a_compatibility_alias() {
+        for name in ["--endpoint", "--socket"] {
+            let result = parse_arguments(
+                [
+                    "serve",
+                    name,
+                    TEST_ENDPOINT,
+                    "--state-dir",
+                    TEST_STATE_DIRECTORY,
+                ]
+                .into_iter()
+                .map(str::to_owned),
+            );
+            assert!(matches!(result, Ok(Arguments::Serve { .. })));
+        }
+
+        let duplicate = parse_arguments(
+            [
+                "serve",
+                "--endpoint",
+                TEST_ENDPOINT,
+                "--socket",
+                TEST_ENDPOINT,
+                "--state-dir",
+                TEST_STATE_DIRECTORY,
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        );
+        assert!(duplicate.is_err());
+    }
+
+    #[test]
     fn worker_requires_inherited_descriptor() {
         let result = parse_arguments(
-            ["worker", "--job-dir", "/tmp/job", "--token-fd", "2"]
+            ["worker", "--job-dir", TEST_JOB_DIRECTORY, "--token-fd", "2"]
                 .into_iter()
                 .map(str::to_owned),
         );
