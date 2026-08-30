@@ -1,6 +1,6 @@
 # Koda Phase 4C1 Execution Policy and Isolation Reporting Design
 
-- Status: Approved — C1D implementation complete; remote platform acceptance pending
+- Status: Complete — C1A through C1D implemented and accepted on Linux, macOS, and Windows
 - Date: 2026-08-30
 - Depends on: completed Phase 4B supervised native execution
 
@@ -521,9 +521,13 @@ optional live compatibility cases. `pnpm typecheck`, `pnpm format:check`,
 `git diff --check` also passed. The fixture's temporary source and target
 directories were removed after the build.
 
-This implementation does not claim C1D or Phase 4C1 closed yet. The workflow
-changes must pass on remote Linux, macOS, and Windows for the same commit; that
-result will be recorded here after the commit is pushed and CI completes.
+Remote platform acceptance completed on implementation commit `4f8f4e9`. The
+Linux `verify`, macOS `macos-native`, and Windows `windows-native` jobs all
+passed in
+[GitHub Actions run 33294887963](https://github.com/ronaldo123321/koda/actions/runs/33294887963).
+The same commit therefore satisfied the cross-platform closure gate and closes
+C1D and Phase 4C1. This result does not claim that a concrete OS sandbox exists;
+those backends remain deferred Phase 4C work.
 
 ## Acceptance matrix
 

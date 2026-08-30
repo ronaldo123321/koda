@@ -1,6 +1,6 @@
 # Koda Phase 4 Hardening Roadmap
 
-- Status: In progress — Phase 4B complete; Phase 4C1 C1D implementation complete, remote platform acceptance pending
+- Status: In progress — Phase 4B and Phase 4C1 complete; later Phase 4C hardening pending
 - Date: 2026-08-28
 - Depends on: completed Phase 3A through Phase 3I baseline
 
@@ -81,7 +81,7 @@ The completed Windows terminal contract and acceptance evidence are in [Phase 4B
 
 ### Phase 4C: sandbox, network, and secret policy
 
-Status: In progress — Phase 4C1 C1D implementation complete; remote Linux/macOS/Windows acceptance pending
+Status: In progress — Phase 4C1 complete; concrete isolation, secrets, grants, and quotas remain
 
 - Add explicit filesystem, process, environment, and network capabilities.
 - Implement available OS isolation mechanisms and expose their effective strength rather than a portable boolean claim.
@@ -110,7 +110,9 @@ C1D adds a pinned real-v1 compatibility fixture, closes the old-grant and
 backend-fingerprint negative matrices, adds shared execution-policy acceptance
 to Windows CI, adds native macOS CI, and publishes the explicit
 [execution-security guarantee](../security/execution-security.md). Phase 4C1
-closes only after the same commit passes remote Linux, macOS, and Windows jobs.
+closed after implementation commit `4f8f4e9` passed the Linux `verify`, macOS
+`macos-native`, and Windows `windows-native` jobs in
+[GitHub Actions run 33294887963](https://github.com/ronaldo123321/koda/actions/runs/33294887963).
 
 ### Phase 4D: authenticated remote operation
 

@@ -1,8 +1,8 @@
 # Koda Execution Security Guarantees
 
 - Scope: Phase 4C1
-- Status: Application and native enforcement contracts implemented; remote
-  platform CI acceptance required before the phase is closed
+- Status: Phase 4C1 complete; application and native enforcement contracts
+  accepted on Linux, macOS, and Windows
 - Last updated: 2026-08-30
 
 Koda separates execution admission, process supervision, and operating-system
@@ -107,6 +107,9 @@ KODA_LEGACY_EXECUTOR_BINARY=/tmp/koda-exec-v1 \
   pnpm exec vitest run packages/testkit/src/native-execution-policy.test.ts
 ```
 
-Local results do not substitute for a platform result. Phase 4C1 closes only
-after the corresponding remote Linux, macOS, and Windows jobs pass for the same
-commit.
+Local results do not substitute for a platform result. Implementation commit
+`4f8f4e9` passed the Linux `verify`, macOS `macos-native`, and Windows
+`windows-native` jobs in
+[GitHub Actions run 33294887963](https://github.com/ronaldo123321/koda/actions/runs/33294887963).
+That same-commit result closes Phase 4C1. It does not change the guarantee
+matrix above: every current backend still reports no Koda-enforced OS sandbox.
