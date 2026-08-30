@@ -971,7 +971,15 @@ fn apply_retention(store: &JobStore, records: &mut Vec<JobRecord>) -> Result<(),
         {
             remove_stale_worker_socket(&record)?;
             if expired {
+                // Windows cannot rename a directory while its child lock file is
+                // open, even when that handle permits delete sharing. Endpoint
+                // ownership already serializes Supervisors and the verified
+                // terminal state is immutable, so release the recovery lock at
+                // this final retention boundary before the same-volume move.
+                #[cfg(windows)]
+                drop(lock);
                 let trash = store.move_to_trash(&record)?;
+                #[cfg(unix)]
                 drop(lock);
                 std::fs::remove_dir_all(trash).map_err(state_io_error)?;
                 continue;
