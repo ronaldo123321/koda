@@ -1,6 +1,6 @@
 # Koda Phase 4 Hardening Roadmap
 
-- Status: In progress — Phase 4B complete; Phase 4C next
+- Status: In progress — Phase 4B complete; Phase 4C1 C1A implementation in progress
 - Date: 2026-08-28
 - Depends on: completed Phase 3A through Phase 3I baseline
 
@@ -81,10 +81,20 @@ The completed Windows terminal contract and acceptance evidence are in [Phase 4B
 
 ### Phase 4C: sandbox, network, and secret policy
 
+Status: In progress — Phase 4C1 design approved; C1A implementation in progress
+
 - Add explicit filesystem, process, environment, and network capabilities.
 - Implement available OS isolation mechanisms and expose their effective strength rather than a portable boolean claim.
 - Add scoped secret injection, output redaction, lifetime limits, and audit metadata without persisting secret values.
 - Evaluate shell strings, pipelines, redirection, and command substitution only after the sandbox matrix passes. They may remain unsupported.
+
+The approved Phase 4C1 design is in [Execution policy and isolation reporting](2026-08-30-phase-4c1-execution-policy-design.md).
+It preserves explicitly labeled unconfined execution and refuses unsupported
+isolation requirements without automatic downgrade. C1 covers the policy
+contract, admission, approval binding, durable evidence, and client reporting;
+it does not implement an OS sandbox. Concrete platform isolation, secret
+injection/redaction, additional grants, and resource quotas remain later
+Phase 4C work. Completing C1 will not complete Phase 4C.
 
 ### Phase 4D: authenticated remote operation
 
