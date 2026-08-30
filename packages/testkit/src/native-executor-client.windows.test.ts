@@ -412,7 +412,7 @@ windowsDescribe("NativeExecutorClient Windows control plane", () => {
         [
           'const {spawn}=require("node:child_process");',
           "process.stdout.write('root-out;');",
-          "const child=spawn(process.execPath,['-e',\"setTimeout(()=>process.stdout.write('child-final'),250)\"],{stdio:'inherit',windowsHide:true});",
+          "const child=spawn(process.execPath,['-e',\"setTimeout(()=>process.stdout.write('child-final'),250)\"],{detached:true,stdio:'inherit',windowsHide:true});",
           "child.unref();",
           "setTimeout(()=>process.exit(0),100);",
         ].join(""),
