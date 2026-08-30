@@ -19,6 +19,7 @@ const MAX_MANIFEST_BYTES: u64 = 262_144;
 const MAX_STATE_BYTES: u64 = 65_536;
 const MAX_STATE_HEAD_BYTES: u64 = 4_096;
 const TOKEN_BYTES: usize = 32;
+const STATE_READ_ATTEMPTS: usize = 4;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -338,41 +339,60 @@ impl JobRecord {
     }
 
     pub fn read_state(&self) -> Result<StoredJobState, ProtocolError> {
-        let (version, value) = read_versioned_value(&self.state_path(), MAX_STATE_BYTES)?;
-        if version != self.manifest.format_version {
-            return Err(execution_security::corrupt());
-        }
-        validate_security_fields(&value, version, false)?;
-        let state: StoredJobState =
-            serde_json::from_value(value).map_err(|_| record_decode_error(version))?;
-        validate_state(&state, &self.manifest.job_id)?;
-        validate_security_binding(&self.manifest, &state)?;
-        let (head_version, value) =
-            read_versioned_value(&self.state_head_path(), MAX_STATE_HEAD_BYTES)?;
-        if head_version != version {
-            return Err(execution_security::corrupt());
-        }
-        let head: StateHead =
-            serde_json::from_value(value).map_err(|_| record_decode_error(version))?;
-        validate_state_head(&head, &self.manifest.job_id)?;
-        if head.revision == state.revision && head.state_digest == state.state_digest {
-            return Ok(state);
-        }
-        if state.revision == head.revision.saturating_add(1)
-            && state.previous_state_digest.as_deref() == Some(&head.state_digest)
-        {
-            if version == STORE_FORMAT_VERSION {
-                write_atomic_json(
-                    &self.state_head_path(),
-                    &StateHead::from_state(&state),
-                    MAX_STATE_HEAD_BYTES,
-                )?;
+        self.read_state_with_hook(|_| {})
+    }
+
+    fn read_state_with_hook(
+        &self,
+        mut after_state_read: impl FnMut(usize),
+    ) -> Result<StoredJobState, ProtocolError> {
+        for attempt in 0..STATE_READ_ATTEMPTS {
+            let (version, value) = read_versioned_value(&self.state_path(), MAX_STATE_BYTES)?;
+            if version != self.manifest.format_version {
+                return Err(execution_security::corrupt());
             }
-            return Ok(state);
+            validate_security_fields(&value, version, false)?;
+            let state: StoredJobState =
+                serde_json::from_value(value).map_err(|_| record_decode_error(version))?;
+            validate_state(&state, &self.manifest.job_id)?;
+            validate_security_binding(&self.manifest, &state)?;
+            after_state_read(attempt);
+            let (head_version, value) =
+                read_versioned_value(&self.state_head_path(), MAX_STATE_HEAD_BYTES)?;
+            if head_version != version {
+                return Err(execution_security::corrupt());
+            }
+            let head: StateHead =
+                serde_json::from_value(value).map_err(|_| record_decode_error(version))?;
+            validate_state_head(&head, &self.manifest.job_id)?;
+            if head.revision == state.revision && head.state_digest == state.state_digest {
+                return Ok(state);
+            }
+            if state.revision == head.revision.saturating_add(1)
+                && state.previous_state_digest.as_deref() == Some(&head.state_digest)
+            {
+                if version == STORE_FORMAT_VERSION {
+                    write_atomic_json(
+                        &self.state_head_path(),
+                        &StateHead::from_state(&state),
+                        MAX_STATE_HEAD_BYTES,
+                    )?;
+                }
+                return Ok(state);
+            }
+            // The writer commits state.json before state.head. A reader can
+            // therefore observe the old state and the newly committed head.
+            // Retry only when the independently validated head moved forward;
+            // every persistent or backward mismatch remains corruption.
+            if head.revision > state.revision && attempt + 1 < STATE_READ_ATTEMPTS {
+                std::thread::yield_now();
+                continue;
+            }
+            return Err(corrupt(
+                "Job state head does not match the current or one-step committed revision.",
+            ));
         }
-        Err(corrupt(
-            "Job state head does not match the current or one-step committed revision.",
-        ))
+        unreachable!("state reads either return, retry, or fail")
     }
 
     pub fn transition(
@@ -1302,6 +1322,42 @@ mod tests {
             record.read_state().expect_err("rollback").code,
             "JOB_STATE_CORRUPT"
         );
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn retries_when_a_concurrent_commit_advances_head_after_state_was_read() {
+        let root = std::env::temp_dir().join(format!(
+            "koda-concurrent-state-read-{}",
+            Uuid::new_v4().simple()
+        ));
+        let store = JobStore::open(&root).expect("store");
+        let (record, _) = store.create_job("concurrent-read", start()).expect("job");
+        let current = record.read_state().expect("current");
+        let mut next = current.clone();
+        next.state = JobState::WorkerReady;
+        next.revision = current.revision + 1;
+        next.previous_state_digest = Some(current.state_digest.clone());
+        next.state_digest.clear();
+        next.state_digest = state_digest(&next).expect("next digest");
+
+        let observed = record
+            .read_state_with_hook(|attempt| {
+                if attempt == 0 {
+                    write_atomic_json(&record.state_path(), &next, MAX_STATE_BYTES)
+                        .expect("concurrent state");
+                    write_atomic_json(
+                        &record.state_head_path(),
+                        &StateHead::from_state(&next),
+                        MAX_STATE_HEAD_BYTES,
+                    )
+                    .expect("concurrent head");
+                }
+            })
+            .expect("retry advanced state");
+
+        assert_eq!(observed.revision, next.revision);
+        assert_eq!(observed.state_digest, next.state_digest);
         std::fs::remove_dir_all(root).expect("cleanup");
     }
 

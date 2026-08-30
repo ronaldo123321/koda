@@ -292,9 +292,11 @@ trusted C2A2/C2A3 Seatbelt launch confirmation exists. The current macOS hello
 therefore continues to report C1 unconfined capabilities honestly.
 
 Local C2A1 verification on macOS passed `pnpm typecheck`,
-`pnpm format:check`, 41 Rust tests, and 622 TypeScript/integration tests (20
+`pnpm format:check`, 42 Rust tests, and 622 TypeScript/integration tests (20
 platform-conditional skips), including real PTY, background, reconnect, and
-Supervisor-restart coverage.
+Supervisor-restart coverage. Durable reads also include a deterministic test
+for the concurrent commit window where `state.head` advances after the reader
+has already loaded the preceding `state.json` revision.
 
 ### C2A2: Seatbelt builder and capability probe
 
