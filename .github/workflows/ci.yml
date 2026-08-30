@@ -114,6 +114,6 @@ jobs:
       - run: cargo build -p koda-exec
       - name: Run Windows native execution-policy acceptance
         run: >-
-          pnpm exec vitest run
+          pnpm exec vitest run --no-file-parallelism
           packages/testkit/src/native-executor-client.windows.test.ts
           packages/testkit/src/native-execution-policy.test.ts
