@@ -619,11 +619,12 @@ describe("Phase 4C2 native admission and evidence", () => {
     },
   );
 
-  it
-    .runIf(process.platform === "linux")
-    .each(["after_linux_sandbox_evidence", "after_linux_sandbox_release"])(
-    "retains applied Linux evidence and cleans the group at fault boundary %s",
-    async (faultPoint) => {
+  it.runIf(process.platform === "linux").each([
+    ["after_security_setup", "before sandbox release"],
+    ["after_running", "after sandbox release"],
+  ] as const)(
+    "retains applied Linux evidence and cleans the group %s",
+    async (faultPoint, boundary) => {
       const fixture = await setup();
       const client = await open(fixture, faultPoint);
       const contract = await activeProtectedContract(client);
@@ -645,7 +646,7 @@ describe("Phase 4C2 native admission and evidence", () => {
         terminal.security.stage !== "launch_setup"
       ) {
         throw new Error(
-          `Linux late fault boundary ${faultPoint} did not retain launch evidence: ${JSON.stringify(terminal)}`,
+          `Linux fault ${boundary} did not retain launch evidence: ${JSON.stringify(terminal)}`,
         );
       }
       expect(terminal.state).toBe("termination_uncertain");

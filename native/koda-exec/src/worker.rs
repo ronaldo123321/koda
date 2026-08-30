@@ -310,25 +310,6 @@ impl WorkerRuntime {
         Ok(())
     }
 
-    #[cfg(target_os = "linux")]
-    fn verified_linux_fault_point(&self, name: &str) -> Result<(), ProtocolError> {
-        if std::env::var("KODA_EXEC_TEST_FAULT_POINT").as_deref() != Ok(name) {
-            return Ok(());
-        }
-        let state = self.record.read_state()?;
-        let applied = matches!(
-            state.security,
-            Some(ExecutionSecuritySnapshot::Policy(ref security))
-                if state.state == JobState::Running
-                    && security.schema_version == 3
-                    && security.stage == ExecutionSecurityStage::LaunchSetup
-        );
-        if !applied {
-            return Err(execution_security::corrupt());
-        }
-        std::process::abort();
-    }
-
     #[cfg(unix)]
     async fn publish_command_identity(
         &self,
@@ -2000,10 +1981,6 @@ async fn activate_unix_launch(
         .await;
         return Err(error);
     }
-    #[cfg(target_os = "linux")]
-    if linux_bubblewrap {
-        runtime.verified_linux_fault_point("after_linux_sandbox_evidence")?;
-    }
     if let Err(error) = release_gate(sandbox_release_write) {
         return fail_running_unix_launch(
             runtime,
@@ -2016,10 +1993,6 @@ async fn activate_unix_launch(
             ),
         )
         .await;
-    }
-    #[cfg(target_os = "linux")]
-    if linux_bubblewrap {
-        runtime.verified_linux_fault_point("after_linux_sandbox_release")?;
     }
     Ok(())
 }
