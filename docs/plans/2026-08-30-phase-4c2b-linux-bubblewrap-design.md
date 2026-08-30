@@ -380,6 +380,7 @@ The initial builder is equivalent to:
   --dev /dev
   --remount-ro /dev
   --remount-ro /dev/shm
+  --ro-bind /run /run
   [--bind <workspace> <workspace>]
   [--bind <scratch> <scratch>]
   [--unshare-net]
@@ -409,12 +410,16 @@ seccomp filter instead, and PTY escape behavior is covered by native tests.
 The C2B2 prototype retains the host `/proc` view beneath the read-only root and
 constructs Bubblewrap's fixed minimal `/dev` view so ordinary device access
 such as `/dev/null` remains usable without importing arbitrary host device
-mounts. Fixed remounts make `/`, `/dev`, and `/dev/shm` read-only, closing
-writable child mounts such as `/dev/shm`, `/run`, and `/var/tmp` before the
-validated workspace/scratch binds are reopened. The startup probe verifies
-those locations cannot become general writable temporary storage. `/proc` is
-used only for namespace, process-group, and descriptor verification; it does
-not count as process isolation and is not presented that way.
+mounts. Fixed remounts make `/`, `/dev`, and `/dev/shm` read-only. Because
+Ubuntu commonly exposes `/run` as an independent tmpfs child mount, a fixed
+read-only bind closes it explicitly instead of assuming the root remount is
+recursive. This also works when `/run` is an ordinary directory. The resulting
+mount plan closes writable child mounts such as `/dev/shm`, `/run`, and
+`/var/tmp` before the validated workspace/scratch binds are reopened. The
+startup probe verifies those locations cannot become general writable
+temporary storage. `/proc` is used only for namespace, process-group, and
+descriptor verification; it does not count as process isolation and is not
+presented that way.
 
 ## Filesystem semantics
 

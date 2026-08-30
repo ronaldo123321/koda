@@ -205,6 +205,9 @@ pub fn build_invocation(
         OsString::from("/dev"),
         OsString::from("--remount-ro"),
         OsString::from("/dev/shm"),
+        OsString::from("--ro-bind"),
+        OsString::from("/run"),
+        OsString::from("/run"),
     ];
     if policy.filesystem == FilesystemPolicy::WorkspaceWrite {
         arguments.extend([
@@ -1710,7 +1713,7 @@ mod tests {
             .map(|value| value.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
         assert_eq!(
-            &values[..17],
+            &values[..20],
             [
                 "--die-with-parent",
                 "--unshare-user",
@@ -1729,6 +1732,9 @@ mod tests {
                 "/dev",
                 "--remount-ro",
                 "/dev/shm",
+                "--ro-bind",
+                "/run",
+                "/run",
             ]
         );
         assert!(values.windows(3).any(|slice| slice
