@@ -168,10 +168,27 @@ commit `abd6d3c` passed `verify`, `linux-native`, `macos-native`, and
 [GitHub Actions run 33312729690](https://github.com/ronaldo123321/koda/actions/runs/33312729690),
 which closes Phase 4C2B without completing the deferred work below.
 
-Secret injection and redaction, resource quotas, finer-grained network policy,
-provider/MCP/plugin sandboxing, shell syntax, Landlock fallback, bundled
-Bubblewrap distribution, and all Windows sandbox controls remain later Phase
-4C/4E work rather than implicit parts of Linux completion.
+The approved next security slice is
+[Phase 4C3 secret lifecycle and output redaction](2026-08-30-phase-4c3-secret-lifecycle-redaction-design.md).
+It introduces trusted host-environment declarations, single-use in-memory
+leases, per-job read-only secret files, fresh per-command approval, and exact
+byte-stream redaction before native Pipe/PTY persistence. The first supported
+runtime is deliberately narrow: verified macOS Seatbelt or Linux Bubblewrap,
+protected `read-only`/`workspace-write`, and denied network. C3A establishes the
+cross-language contracts and redaction core; C3B adds trusted configuration and
+approval; C3C adds native injection, cleanup, and pre-persistence Pipe/PTY
+redaction; C3D adds client projection and same-commit platform acceptance.
+
+Phase 4C3 does not claim containment from a process that is intentionally given
+a secret. Encoded/transformed output, writes into the workspace, inherited
+network, Keychain/Vault backends, Provider/MCP/plugin credentials, TypeScript
+execution, and Windows injection remain explicitly deferred.
+
+Until Phase 4C3 closes, secret injection and redaction remain unshipped.
+Resource quotas, finer-grained network policy, provider/MCP/plugin sandboxing,
+shell syntax, Landlock fallback, bundled Bubblewrap distribution, and all
+Windows sandbox controls remain later Phase 4C/4E work rather than implicit
+parts of Linux or Phase 4C3 completion.
 
 Deferred Windows sandbox work remains explicit: restricted-token and privilege
 policy, filesystem workspace/scratch rules, network denial, launch confirmation,
