@@ -1,4 +1,6 @@
-use std::io::{self, Write};
+use std::io;
+#[cfg(unix)]
+use std::io::Write;
 #[cfg(unix)]
 use std::os::fd::RawFd;
 #[cfg(unix)]
@@ -14,10 +16,9 @@ use tokio::fs::OpenOptions;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 #[cfg(unix)]
 use tokio::process::{Child, Command};
-#[cfg(windows)]
-use tokio::sync::oneshot;
 use tokio::sync::{Mutex, mpsc, oneshot, watch};
 use tokio::time::{sleep, timeout};
+#[cfg(unix)]
 use uuid::Uuid;
 
 use crate::attachment::AttachmentRegistry;
@@ -198,6 +199,7 @@ fn worker_execution_capabilities(
 
 struct SecretRuntime {
     directory: std::path::PathBuf,
+    #[cfg(unix)]
     files: Vec<std::path::PathBuf>,
     environment: Vec<(String, String)>,
     values: StdMutex<Vec<Vec<u8>>>,
