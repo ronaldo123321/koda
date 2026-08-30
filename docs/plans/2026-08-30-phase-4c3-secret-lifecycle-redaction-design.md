@@ -1,6 +1,6 @@
 # Phase 4C3 Secret Lifecycle and Output Redaction
 
-- Status: In progress — Phase 4C3A implemented locally; CI pending
+- Status: In progress — Phase 4C3A complete; Phase 4C3B through C3D pending
 - Date: 2026-08-30
 - Depends on: Phase 4C1 execution-policy admission, Phase 4C2A macOS
   Seatbelt, and Phase 4C2B Linux Bubblewrap
@@ -289,7 +289,7 @@ destroyed merely because a JavaScript reference or Worker process disappeared.
 
 ### Phase 4C3A: contract and redaction core
 
-Status: Implemented locally; CI pending
+Status: Complete
 
 - Add strict TypeScript and Rust secret declaration, public evidence, and error
   contracts.
@@ -307,6 +307,10 @@ redactors cover owned buffers on finish, explicit destruction, and error paths.
 The application, command tools, native protocol, Supervisor, and Worker do not
 yet accept a secret lease, so completing C3A does not expose a runtime secret
 feature.
+
+Implementation commit `0846f8c` passed `verify`, `linux-native`,
+`macos-native`, and `windows-native` in
+[GitHub Actions run 33315958454](https://github.com/ronaldo123321/koda/actions/runs/33315958454).
 
 ### Phase 4C3B: trusted configuration and approval
 

@@ -90,6 +90,8 @@ Phase 4C3A defines value-free secret declarations/evidence and matching
 TypeScript/Rust exact-byte streaming-redaction primitives, but no command path
 can resolve, inject, or activate them yet. Their presence does not change this
 published runtime guarantee; Phase 4C3B through C3D remain required.
+The standalone C3A contract implementation is verified by all four jobs in
+[GitHub Actions run 33315958454](https://github.com/ronaldo123321/koda/actions/runs/33315958454).
 
 `workspace_write` is path based. A pre-existing hard link inside the workspace
 still names the same inode as an outside path, so writes through that workspace
