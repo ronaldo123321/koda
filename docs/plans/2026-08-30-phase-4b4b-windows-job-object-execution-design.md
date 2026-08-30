@@ -1,6 +1,6 @@
 # Koda Phase 4B4B Windows Job Object Execution Design
 
-- Status: In progress — Phase 4B4B1 complete; Phase 4B4B2 next
+- Status: In progress — Phase 4B4B2 complete; Phase 4B4B3 next
 - Date: 2026-08-30
 - Depends on: Phase 4B4A Windows platform foundations complete
 - Target: Windows 10 version 1809 and later, with unchanged macOS/Linux behavior
@@ -349,11 +349,38 @@ Phase 4B4B1 was implemented and verified on 2026-08-30:
   passed both Linux `verify` and Windows `windows-native`, including 30 Windows
   native tests and all 5 Windows Node control-plane tests.
 
-Phase 4B4B2 is next. Job Object ownership, direct command construction,
-environment blocks, command output pipes, suspended start, completion-port
-observation, cancellation, timeout, and force termination remain intentionally
-unavailable until that slice is implemented and verified. Phase 4B4B3 still
-owns restart/crash acceptance and capability activation; Phase 4B4C still owns
+Phase 4B4B2 was implemented and verified on 2026-08-30:
+
+- Each Pipe command is created suspended and atomically assigned to an
+  anonymous `KILL_ON_JOB_CLOSE` Job Object through one combined
+  `PROC_THREAD_ATTRIBUTE_JOB_LIST` and restricted handle list. The Worker stays
+  outside the Job and persists PID plus creation-time identity before resume.
+- Direct `CreateProcessW` construction now covers explicit executable
+  resolution, Windows argv quoting, case-insensitive UTF-16 environment blocks,
+  canonical cwd, `NUL` stdin, and isolated stdout/stderr pipe inheritance
+  without a shell fallback.
+- A Job-associated completion port owns natural descendant completion. Root
+  exit alone is insufficient; terminal publication waits for
+  `ACTIVE_PROCESS_ZERO` and bounded stdout/stderr EOF, while an internal packet
+  releases exceptional blocking waits.
+- Foreground and background Pipe jobs share bounded retained output,
+  idempotency, durable discovery, timeout, cancellation, best-effort console
+  interruption, and authoritative `TerminateJobObject` escalation. Windows PTY
+  requests remain explicitly unavailable.
+- The Node client exposes Pipe lifecycle/display-name fields and validates the
+  Windows termination evidence. Native Windows tests prove late descendant
+  output, whole-tree cancellation, timeout, stable PTY rejection, durable list
+  routing, concurrent handshakes, and endpoint exclusivity.
+- Local macOS verification passed strict native and Windows cross-target
+  Clippy, formatting, type checking, and the complete 504-test suite. GitHub
+  Actions run
+  [33286571429](https://github.com/ronaldo123321/koda/actions/runs/33286571429)
+  passed both Linux `verify` and Windows `windows-native`, including 34 Windows
+  native tests and all 8 Windows Node acceptance tests.
+
+Phase 4B4B3 is next. It owns Supervisor restart reattachment acceptance,
+Worker-loss disappearance checks, crash-point coverage, platform-correct
+lifecycle evidence, and Windows capability activation. Phase 4B4C still owns
 ConPTY and all interactive Windows terminal behavior.
 
 ## Acceptance criteria
