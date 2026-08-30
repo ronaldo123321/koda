@@ -863,7 +863,7 @@ fn validate_state(state: &StoredJobState, job_id: &str) -> Result<(), ProtocolEr
     Ok(())
 }
 
-fn validate_secret_directory(path: &Path) -> Result<(), ProtocolError> {
+fn validate_secret_directory(_path: &Path) -> Result<(), ProtocolError> {
     #[cfg(not(unix))]
     return Err(corrupt(
         "Secret directories are unsupported on this platform.",
@@ -873,8 +873,8 @@ fn validate_secret_directory(path: &Path) -> Result<(), ProtocolError> {
 
     #[cfg(unix)]
     {
-        validate_private_directory(path)?;
-        let entries = std::fs::read_dir(path)
+        validate_private_directory(_path)?;
+        let entries = std::fs::read_dir(_path)
             .map_err(state_io_error)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(state_io_error)?;

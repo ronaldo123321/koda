@@ -304,6 +304,11 @@ fn validate_private_secret_file(path: &Path) -> Result<PathBuf, ExecutionPolicyE
     Ok(canonical)
 }
 
+#[cfg(not(unix))]
+fn validate_private_secret_file(_path: &Path) -> Result<PathBuf, ExecutionPolicyError> {
+    Err(ExecutionPolicyError::ExecutionPolicyUnavailable)
+}
+
 pub fn launch_confirmation_digest(
     runtime: &LinuxBubblewrapRuntimeDescriptor,
     policy: &ExecutionPolicy,
