@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::ptr::{null, null_mut};
 use std::slice;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::task::{Context, Poll};
 
 use sha2::{Digest, Sha256};
@@ -39,7 +39,10 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_ALL_ACCESS, FILE_ATTRIBUTE_REPARSE_POINT, FILE_SHARE_DELETE, MOVEFILE_REPLACE_EXISTING,
     MOVEFILE_WRITE_THROUGH, MoveFileExW, WriteFile,
 };
-use windows_sys::Win32::System::Console::{CTRL_BREAK_EVENT, GenerateConsoleCtrlEvent};
+use windows_sys::Win32::System::Console::{
+    COORD, CTRL_BREAK_EVENT, ClosePseudoConsole, CreatePseudoConsole, GenerateConsoleCtrlEvent,
+    HPCON, ResizePseudoConsole,
+};
 use windows_sys::Win32::System::IO::{
     CreateIoCompletionPort, GetQueuedCompletionStatus, PostQueuedCompletionStatus,
 };
@@ -59,8 +62,8 @@ use windows_sys::Win32::System::Threading::{
     DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess,
     GetExitCodeProcess, GetProcessTimes, INFINITE, InitializeProcThreadAttributeList, OpenProcess,
     OpenProcessToken, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_JOB_LIST,
-    PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, ResumeThread, STARTF_USESTDHANDLES,
-    STARTUPINFOEXW, UpdateProcThreadAttribute,
+    PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
+    ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOEXW, UpdateProcThreadAttribute,
 };
 
 const PIPE_PREFIX: &str = r"\\.\pipe\koda-exec-";
@@ -195,15 +198,24 @@ pub struct RestrictedHandleList {
     storage: Vec<usize>,
     handles: Vec<HANDLE>,
     jobs: Vec<HANDLE>,
+    pseudo_consoles: Vec<HPCON>,
 }
 
 impl RestrictedHandleList {
     pub fn new(handles: &[HANDLE]) -> io::Result<Self> {
-        Self::with_job(handles, None)
+        Self::with_job_and_pseudo_console(handles, None, None)
     }
 
     fn with_job(handles: &[HANDLE], job: Option<HANDLE>) -> io::Result<Self> {
-        if handles.is_empty() || handles.iter().any(|handle| handle.is_null()) {
+        Self::with_job_and_pseudo_console(handles, job, None)
+    }
+
+    fn with_job_and_pseudo_console(
+        handles: &[HANDLE],
+        job: Option<HANDLE>,
+        pseudo_console: Option<HPCON>,
+    ) -> io::Result<Self> {
+        if handles.iter().any(|handle| handle.is_null()) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "restricted handle list must contain valid handles",
@@ -229,7 +241,21 @@ impl RestrictedHandleList {
                 "process Job Object handle is null",
             ));
         }
-        let attribute_count = if job.is_some() { 2 } else { 1 };
+        if pseudo_console == Some(0) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "pseudoconsole handle is invalid",
+            ));
+        }
+        let attribute_count = u32::from(!handles.is_empty())
+            + u32::from(job.is_some())
+            + u32::from(pseudo_console.is_some());
+        if attribute_count == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "process attribute list is empty",
+            ));
+        }
         let mut bytes = 0usize;
         // SAFETY: the documented sizing call uses a null list and fills `bytes`.
         unsafe {
@@ -245,18 +271,19 @@ impl RestrictedHandleList {
             return Err(io::Error::last_os_error());
         }
         let handles = handles.to_vec();
-        // SAFETY: list is initialized and `handles` remains alive with this object.
-        if unsafe {
-            UpdateProcThreadAttribute(
-                list,
-                0,
-                PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
-                handles.as_ptr().cast(),
-                size_of_val(handles.as_slice()),
-                null_mut(),
-                null(),
-            )
-        } == 0
+        if !handles.is_empty()
+            // SAFETY: list is initialized and `handles` remains alive with this object.
+            && unsafe {
+                UpdateProcThreadAttribute(
+                    list,
+                    0,
+                    PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
+                    handles.as_ptr().cast(),
+                    size_of_val(handles.as_slice()),
+                    null_mut(),
+                    null(),
+                )
+            } == 0
         {
             // SAFETY: list was initialized successfully above.
             unsafe {
@@ -284,10 +311,32 @@ impl RestrictedHandleList {
             }
             return Err(io::Error::last_os_error());
         }
+        let pseudo_consoles = pseudo_console.into_iter().collect::<Vec<_>>();
+        if !pseudo_consoles.is_empty()
+            // SAFETY: list is initialized and the heap-backed HPCON value remains stable.
+            && unsafe {
+                UpdateProcThreadAttribute(
+                    list,
+                    0,
+                    PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE as usize,
+                    pseudo_consoles.as_ptr().cast(),
+                    size_of_val(pseudo_consoles.as_slice()),
+                    null_mut(),
+                    null(),
+                )
+            } == 0
+        {
+            // SAFETY: list was initialized successfully above.
+            unsafe {
+                DeleteProcThreadAttributeList(list);
+            }
+            return Err(io::Error::last_os_error());
+        }
         Ok(Self {
             storage,
             handles,
             jobs,
+            pseudo_consoles,
         })
     }
 
@@ -302,6 +351,11 @@ impl RestrictedHandleList {
     #[cfg(test)]
     fn jobs(&self) -> &[HANDLE] {
         &self.jobs
+    }
+
+    #[cfg(test)]
+    fn pseudo_consoles(&self) -> &[HPCON] {
+        &self.pseudo_consoles
     }
 }
 
@@ -684,6 +738,13 @@ pub struct SuspendedManagedProcess {
     stderr: Option<File>,
 }
 
+pub struct SuspendedManagedPtyProcess {
+    tree: ManagedProcessTree,
+    primary_thread: OwnedHandle,
+    input: Option<File>,
+    output: Option<File>,
+}
+
 #[derive(Clone)]
 pub struct ManagedProcessTree {
     inner: Arc<ManagedProcessTreeInner>,
@@ -693,7 +754,26 @@ struct ManagedProcessTreeInner {
     job: OwnedHandle,
     process: OwnedHandle,
     completion_port: OwnedHandle,
+    pseudo_console: StdMutex<Option<OwnedPseudoConsole>>,
     pid: u32,
+}
+
+struct OwnedPseudoConsole(HPCON);
+
+// HPCON refers to a kernel-owned pseudoconsole that may be resized and closed
+// from the Worker's independent I/O and teardown threads.
+unsafe impl Send for OwnedPseudoConsole {}
+unsafe impl Sync for OwnedPseudoConsole {}
+
+impl Drop for OwnedPseudoConsole {
+    fn drop(&mut self) {
+        if self.0 != 0 {
+            // SAFETY: this wrapper owns the live HPCON exactly once.
+            unsafe {
+                ClosePseudoConsole(self.0);
+            }
+        }
+    }
 }
 
 impl SuspendedManagedProcess {
@@ -712,50 +792,7 @@ impl SuspendedManagedProcess {
         let environment_block = windows_environment_block(environment)?;
         let current_directory = wide(cwd.as_os_str());
 
-        // SAFETY: null security attributes and name request an anonymous Job Object.
-        let job = unsafe { CreateJobObjectW(null(), null()) };
-        if job.is_null() {
-            return Err(io::Error::last_os_error());
-        }
-        let job = OwnedHandle(job);
-        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        // SAFETY: job is live and limits is a correctly sized initialized value.
-        if unsafe {
-            SetInformationJobObject(
-                job.0,
-                JobObjectExtendedLimitInformation,
-                (&raw const limits).cast(),
-                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-            )
-        } == 0
-        {
-            return Err(io::Error::last_os_error());
-        }
-
-        // SAFETY: INVALID_HANDLE_VALUE requests a new standalone completion port.
-        let completion_port =
-            unsafe { CreateIoCompletionPort(INVALID_HANDLE_VALUE, null_mut(), 0, 1) };
-        if completion_port.is_null() {
-            return Err(io::Error::last_os_error());
-        }
-        let completion_port = OwnedHandle(completion_port);
-        let association = JOBOBJECT_ASSOCIATE_COMPLETION_PORT {
-            CompletionKey: JOB_COMPLETION_KEY as *mut c_void,
-            CompletionPort: completion_port.0,
-        };
-        // SAFETY: both kernel handles are live and association is correctly sized.
-        if unsafe {
-            SetInformationJobObject(
-                job.0,
-                JobObjectAssociateCompletionPortInformation,
-                (&raw const association).cast(),
-                size_of::<JOBOBJECT_ASSOCIATE_COMPLETION_PORT>() as u32,
-            )
-        } == 0
-        {
-            return Err(io::Error::last_os_error());
-        }
+        let (job, completion_port) = create_managed_job()?;
 
         let (stdout, stdout_child) = create_child_output_pipe()?;
         let (stderr, stderr_child) = create_child_output_pipe()?;
@@ -806,6 +843,7 @@ impl SuspendedManagedProcess {
                 job,
                 process: OwnedHandle(process.hProcess),
                 completion_port,
+                pseudo_console: StdMutex::new(None),
                 pid: process.dwProcessId,
             }),
         };
@@ -843,6 +881,114 @@ impl SuspendedManagedProcess {
             )
         })?;
         Ok((self.tree.clone(), stdout, stderr))
+    }
+}
+
+impl SuspendedManagedPtyProcess {
+    pub fn spawn(
+        argv: &[String],
+        cwd: &Path,
+        environment: &BTreeMap<String, String>,
+        term: &str,
+        rows: u16,
+        cols: u16,
+    ) -> io::Result<Self> {
+        if argv.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Windows command argv is empty",
+            ));
+        }
+        let mut environment = environment.clone();
+        environment.retain(|key, _| !key.eq_ignore_ascii_case("TERM"));
+        environment.insert("TERM".to_owned(), term.to_owned());
+        let executable = resolve_windows_executable(&argv[0], cwd, &environment)?;
+        let environment_block = windows_environment_block(&environment)?;
+        let current_directory = wide(cwd.as_os_str());
+        let (job, completion_port) = create_managed_job()?;
+        let (pseudo_console, input, output, console_input, console_output) =
+            create_pseudo_console_channels(rows, cols)?;
+        let mut attributes = RestrictedHandleList::with_job_and_pseudo_console(
+            &[],
+            Some(job.0),
+            Some(pseudo_console.0),
+        )?;
+        let application = wide(executable.as_os_str());
+        let mut command_arguments = Vec::with_capacity(argv.len());
+        command_arguments.push(executable.as_os_str());
+        command_arguments.extend(argv[1..].iter().map(OsStr::new));
+        let mut command_line = windows_command_line(&command_arguments);
+        let mut startup = STARTUPINFOEXW::default();
+        startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
+        startup.lpAttributeList = attributes.as_raw().cast();
+        let mut process = PROCESS_INFORMATION::default();
+        // SAFETY: all pointers refer to live values. The process is born suspended,
+        // atomically assigned to the Job Object, and attached to ConPTY by the
+        // combined attribute list. No handles are inherited by the command.
+        let created = unsafe {
+            CreateProcessW(
+                application.as_ptr(),
+                command_line.as_mut_ptr(),
+                null(),
+                null(),
+                0,
+                CREATE_SUSPENDED
+                    | CREATE_NEW_PROCESS_GROUP
+                    | CREATE_UNICODE_ENVIRONMENT
+                    | EXTENDED_STARTUPINFO_PRESENT,
+                environment_block.as_ptr().cast(),
+                current_directory.as_ptr(),
+                &startup.StartupInfo,
+                &mut process,
+            )
+        };
+        if created == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        drop((attributes, console_input, console_output));
+        let tree = ManagedProcessTree {
+            inner: Arc::new(ManagedProcessTreeInner {
+                job,
+                process: OwnedHandle(process.hProcess),
+                completion_port,
+                pseudo_console: StdMutex::new(Some(pseudo_console)),
+                pid: process.dwProcessId,
+            }),
+        };
+        Ok(Self {
+            tree,
+            primary_thread: OwnedHandle(process.hThread),
+            input: Some(input),
+            output: Some(output),
+        })
+    }
+
+    pub fn pid(&self) -> u32 {
+        self.tree.pid()
+    }
+
+    pub fn process_identity(&self) -> io::Result<String> {
+        process_identity_from_handle(self.tree.inner.process.0)
+    }
+
+    pub fn resume(mut self) -> io::Result<(ManagedProcessTree, File, File)> {
+        // SAFETY: primary_thread is the live suspended main thread returned by CreateProcessW.
+        if unsafe { ResumeThread(self.primary_thread.0) } == u32::MAX {
+            return Err(io::Error::last_os_error());
+        }
+        let input = self.input.take().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "ConPTY input ownership was already moved",
+            )
+        })?;
+        let output = self.output.take().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "ConPTY output ownership was already moved",
+            )
+        })?;
+        Ok((self.tree.clone(), input, output))
     }
 }
 
@@ -925,10 +1071,161 @@ impl ManagedProcessTree {
             Ok(())
         }
     }
+
+    pub fn resize_pseudo_console(&self, rows: u16, cols: u16) -> io::Result<()> {
+        let guard = self
+            .inner
+            .pseudo_console
+            .lock()
+            .map_err(|_| io::Error::other("pseudoconsole ownership lock is poisoned"))?;
+        let pseudo_console = guard.as_ref().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::Unsupported,
+                "managed process tree does not own a pseudoconsole",
+            )
+        })?;
+        let size = terminal_coord(rows, cols)?;
+        // SAFETY: the guarded HPCON is live and size is validated.
+        let result = unsafe { ResizePseudoConsole(pseudo_console.0, size) };
+        if result < 0 {
+            Err(pseudo_console_error("ResizePseudoConsole", result))
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn close_pseudo_console(&self) -> io::Result<bool> {
+        let pseudo_console = self
+            .inner
+            .pseudo_console
+            .lock()
+            .map_err(|_| io::Error::other("pseudoconsole ownership lock is poisoned"))?
+            .take();
+        let existed = pseudo_console.is_some();
+        drop(pseudo_console);
+        Ok(existed)
+    }
 }
 
 const JOB_COMPLETION_KEY: usize = 0x4b4f4441;
 const JOB_WAIT_CANCELLED: u32 = u32::MAX;
+
+fn create_managed_job() -> io::Result<(OwnedHandle, OwnedHandle)> {
+    // SAFETY: null security attributes and name request an anonymous Job Object.
+    let job = unsafe { CreateJobObjectW(null(), null()) };
+    if job.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    let job = OwnedHandle(job);
+    let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    // SAFETY: job is live and limits is a correctly sized initialized value.
+    if unsafe {
+        SetInformationJobObject(
+            job.0,
+            JobObjectExtendedLimitInformation,
+            (&raw const limits).cast(),
+            size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+
+    // SAFETY: INVALID_HANDLE_VALUE requests a new standalone completion port.
+    let completion_port = unsafe { CreateIoCompletionPort(INVALID_HANDLE_VALUE, null_mut(), 0, 1) };
+    if completion_port.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    let completion_port = OwnedHandle(completion_port);
+    let association = JOBOBJECT_ASSOCIATE_COMPLETION_PORT {
+        CompletionKey: JOB_COMPLETION_KEY as *mut c_void,
+        CompletionPort: completion_port.0,
+    };
+    // SAFETY: both kernel handles are live and association is correctly sized.
+    if unsafe {
+        SetInformationJobObject(
+            job.0,
+            JobObjectAssociateCompletionPortInformation,
+            (&raw const association).cast(),
+            size_of::<JOBOBJECT_ASSOCIATE_COMPLETION_PORT>() as u32,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok((job, completion_port))
+}
+
+fn create_pseudo_console_channels(
+    rows: u16,
+    cols: u16,
+) -> io::Result<(OwnedPseudoConsole, File, File, OwnedHandle, OwnedHandle)> {
+    let size = terminal_coord(rows, cols)?;
+    let (console_input, input) = create_non_inheritable_pipe()?;
+    let (output, console_output) = create_non_inheritable_pipe()?;
+    let mut pseudo_console = 0;
+    // SAFETY: pipe handles are synchronous and live; the HPCON output slot is writable.
+    let result = unsafe {
+        CreatePseudoConsole(
+            size,
+            console_input.0,
+            console_output.0,
+            0,
+            &mut pseudo_console,
+        )
+    };
+    if result < 0 {
+        return Err(pseudo_console_error("CreatePseudoConsole", result));
+    }
+    if pseudo_console == 0 {
+        return Err(io::Error::other(
+            "CreatePseudoConsole returned an invalid handle",
+        ));
+    }
+    // SAFETY: host pipe handles are uniquely owned and transferred into File once.
+    let input = unsafe { File::from_raw_handle(input.into_raw() as RawHandle) };
+    // SAFETY: host pipe handles are uniquely owned and transferred into File once.
+    let output = unsafe { File::from_raw_handle(output.into_raw() as RawHandle) };
+    Ok((
+        OwnedPseudoConsole(pseudo_console),
+        input,
+        output,
+        console_input,
+        console_output,
+    ))
+}
+
+fn create_non_inheritable_pipe() -> io::Result<(OwnedHandle, OwnedHandle)> {
+    let mut read = null_mut();
+    let mut write = null_mut();
+    // SAFETY: null security attributes create non-inheritable synchronous handles.
+    if unsafe { CreatePipe(&mut read, &mut write, null(), 0) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok((OwnedHandle(read), OwnedHandle(write)))
+}
+
+fn terminal_coord(rows: u16, cols: u16) -> io::Result<COORD> {
+    let rows = i16::try_from(rows)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "terminal rows exceed i16"))?;
+    let cols = i16::try_from(cols)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "terminal columns exceed i16"))?;
+    if rows == 0 || cols == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "terminal dimensions must be positive",
+        ));
+    }
+    Ok(COORD { X: cols, Y: rows })
+}
+
+fn pseudo_console_error(stage: &str, result: i32) -> io::Error {
+    io::Error::other(format!(
+        "{stage} failed with HRESULT 0x{:08x}",
+        result as u32
+    ))
+}
 
 fn create_child_output_pipe() -> io::Result<(File, OwnedHandle)> {
     let attributes = SECURITY_ATTRIBUTES {
@@ -1546,6 +1843,33 @@ mod tests {
             .expect("combined process attributes");
         assert_eq!(list.handles(), &[bootstrap_read_handle(&read)]);
         assert_eq!(list.jobs(), &[job.0]);
+    }
+
+    #[test]
+    fn pseudoconsole_attributes_require_no_inherited_command_handles() {
+        let (pseudo_console, input, mut output, console_input, console_output) =
+            create_pseudo_console_channels(24, 80).expect("pseudoconsole");
+        // SAFETY: null security attributes and name request an anonymous Job Object.
+        let job = unsafe { CreateJobObjectW(null(), null()) };
+        assert!(!job.is_null());
+        let job = OwnedHandle(job);
+        let list = RestrictedHandleList::with_job_and_pseudo_console(
+            &[],
+            Some(job.0),
+            Some(pseudo_console.0),
+        )
+        .expect("ConPTY process attributes");
+        assert!(list.handles().is_empty());
+        assert_eq!(list.jobs(), &[job.0]);
+        assert_eq!(list.pseudo_consoles(), &[pseudo_console.0]);
+
+        drop((list, input, console_input, console_output));
+        let drainer = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            output.read_to_end(&mut bytes)
+        });
+        drop(pseudo_console);
+        assert!(drainer.join().expect("output drainer").is_ok());
     }
 
     #[test]
