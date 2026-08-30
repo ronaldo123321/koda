@@ -6,8 +6,19 @@ import { createConnection, type Socket } from "node:net";
 import { isAbsolute, join, resolve } from "node:path";
 
 import { z } from "zod";
+import {
+  executionCapabilitiesSchema,
+  type ExecutionPolicy,
+  type ExecutionSecuritySnapshot,
+} from "@koda/protocol";
+import {
+  executionPolicyDigest,
+  normalizeExecutionPolicy,
+  resolveExecutionPolicy,
+  validateExecutionSecuritySnapshot,
+} from "./execution-policy.js";
 
-const PROTOCOL_VERSION = 1;
+const PROTOCOL_VERSION = 2;
 const MAX_FRAME_BYTES = 1_048_576;
 const DEFAULT_STARTUP_TIMEOUT_MS = 5_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
@@ -20,6 +31,11 @@ export type NativeExecutorErrorCode =
   | "NATIVE_EXECUTOR_START_FAILED"
   | "PLATFORM_CAPABILITY_UNAVAILABLE"
   | "INCOMPATIBLE_PROTOCOL"
+  | "INCOMPATIBLE_STATE_VERSION"
+  | "INVALID_EXECUTION_POLICY"
+  | "EXECUTION_POLICY_UNAVAILABLE"
+  | "EXECUTION_POLICY_CHANGED"
+  | "EXECUTION_SECURITY_CORRUPT"
   | "INVALID_REQUEST"
   | "IDEMPOTENCY_CONFLICT"
   | "JOB_NOT_FOUND"
@@ -70,6 +86,9 @@ export interface NativeExecutorStartInput {
   lifecycle?: "foreground" | "background";
   displayName?: string;
   requestId?: string;
+  /** C1B bridge: absent means explicit unconfined policy rooted at canonical cwd.
+   * C1C will supply the trusted application's frozen workspace policy here. */
+  policy?: ExecutionPolicy;
 }
 
 export interface NativeExecutorPtyStartInput extends NativeExecutorStartInput {
@@ -132,6 +151,7 @@ export interface NativeJobSnapshot {
   stderr_truncated: boolean;
   termination: NativeTerminationSnapshot | null;
   failure: { code: string; message: string } | null;
+  security: ExecutionSecuritySnapshot;
 }
 
 export interface NativeOutputReadResult {
@@ -156,6 +176,7 @@ export interface NativeJobSummary {
   created_at_ms: number;
   updated_at_ms: number;
   pid: number | null;
+  security: ExecutionSecuritySnapshot;
 }
 
 export interface NativeJobListResult {
@@ -252,12 +273,24 @@ const terminationSchema = z
   })
   .strict();
 
+const nativeSecuritySchema = z.unknown().transform((value) => {
+  try {
+    return validateExecutionSecuritySnapshot(value);
+  } catch {
+    throw new NativeExecutorError(
+      "EXECUTION_SECURITY_CORRUPT",
+      "Executor security evidence is invalid or inconsistent.",
+    );
+  }
+});
+
 const jobSnapshotSchema = z
   .object({
     job_id: identifier,
     state: jobStateSchema,
     io_mode: ioModeSchema,
     lifecycle: jobLifecycleSchema,
+    security: nativeSecuritySchema,
     pid: positiveSafeInteger.nullable(),
     exit_code: z.number().int().nullable(),
     signal: z.string().min(1).max(64).nullable(),
@@ -314,6 +347,7 @@ const jobSummarySchema = z
     state: jobStateSchema,
     io_mode: ioModeSchema,
     lifecycle: jobLifecycleSchema,
+    security: nativeSecuritySchema,
     created_at_ms: safeInteger,
     updated_at_ms: safeInteger,
     pid: positiveSafeInteger.nullable(),
@@ -439,7 +473,12 @@ const helloResultSchema = z
   .object({
     protocol_version: z.literal(PROTOCOL_VERSION),
     supervisor_version: z.string().min(1).max(128),
-    platform: z.string().min(1).max(64),
+    platform: z.enum(["linux", "macos", "windows"]),
+    execution_security: executionCapabilitiesSchema.refine(
+      (value) =>
+        value.backend === "native_posix" || value.backend === "native_windows",
+      "Expected native execution capabilities.",
+    ),
     capabilities: z
       .object({
         process_group: z.boolean(),
@@ -460,11 +499,22 @@ const helloResultSchema = z
       })
       .strict(),
   })
-  .strict();
+  .strict()
+  .superRefine((value, context) => {
+    const expected =
+      value.platform === "windows" ? "native_windows" : "native_posix";
+    if (value.execution_security.backend !== expected) {
+      context.addIssue({
+        code: "custom",
+        path: ["execution_security", "backend"],
+        message: "Execution-security backend does not match the platform.",
+      });
+    }
+  });
 
 const responseSchema = z
   .object({
-    protocol_version: z.literal(PROTOCOL_VERSION),
+    protocol_version: positiveSafeInteger,
     request_id: identifier,
     ok: z.boolean(),
     result: z.unknown().optional(),
@@ -573,9 +623,15 @@ export class NativeExecutorClient {
     input: NativeExecutorStartInput,
   ): Promise<NativeJobSnapshot> {
     const requestId = input.requestId ?? randomUUID();
+    const supplied =
+      input.policy === undefined
+        ? undefined
+        : normalizeExecutionPolicy(input.policy);
+    const cwd = await realpath(input.cwd);
     const params = {
-      argv: input.argv,
-      cwd: input.cwd,
+      argv: [...input.argv],
+      cwd,
+      policy: supplied ?? resolveExecutionPolicy({ workspaceRoot: cwd }),
       environment: definedEnvironment(input.environment),
       timeout_ms: input.timeoutMs,
       output_limit_bytes: input.outputLimitBytes,
@@ -594,9 +650,15 @@ export class NativeExecutorClient {
     input: NativeExecutorPtyStartInput,
   ): Promise<NativeJobSnapshot> {
     const requestId = input.requestId ?? randomUUID();
+    const supplied =
+      input.policy === undefined
+        ? undefined
+        : normalizeExecutionPolicy(input.policy);
+    const cwd = await realpath(input.cwd);
     const params = {
-      argv: input.argv,
-      cwd: input.cwd,
+      argv: [...input.argv],
+      cwd,
+      policy: supplied ?? resolveExecutionPolicy({ workspaceRoot: cwd }),
       environment: definedEnvironment(input.environment),
       timeout_ms: input.timeoutMs,
       output_limit_bytes: input.outputLimitBytes,
@@ -618,25 +680,48 @@ export class NativeExecutorClient {
   }
 
   private async startRequest(
-    params: object,
+    params: { policy: ExecutionPolicy },
     requestId: string,
   ): Promise<NativeJobSnapshot> {
     try {
-      return parseProtocolValue(
-        jobSnapshotSchema,
-        await this.call("job/start", params, requestId),
-        "job/start result",
+      return this.validateStartedJob(
+        parseProtocolValue(
+          jobSnapshotSchema,
+          await this.call("job/start", params, requestId),
+          "job/start result",
+        ),
+        params.policy,
       );
     } catch (error) {
       if (!isUnavailable(error)) {
         throw error;
       }
-      return parseProtocolValue(
-        jobSnapshotSchema,
-        await this.call("job/start", params, requestId),
-        "retried job/start result",
+      return this.validateStartedJob(
+        parseProtocolValue(
+          jobSnapshotSchema,
+          await this.call("job/start", params, requestId),
+          "retried job/start result",
+        ),
+        params.policy,
       );
     }
+  }
+
+  private validateStartedJob(
+    snapshot: NativeJobSnapshot,
+    policy: ExecutionPolicy,
+  ): NativeJobSnapshot {
+    if (
+      snapshot.security.kind !== "policy" ||
+      snapshot.security.policy_digest !== executionPolicyDigest(policy) ||
+      snapshot.security.backend !== expectedNativeBackend()
+    ) {
+      throw new NativeExecutorError(
+        "EXECUTION_SECURITY_CORRUPT",
+        "Started job does not match its requested execution policy.",
+      );
+    }
+    return snapshot;
   }
 
   public async get(jobId: string): Promise<NativeJobSnapshot> {
@@ -876,8 +961,20 @@ export class NativeExecutorClient {
         "--state-dir",
         this.stateDirectory,
       ],
-      { detached: true, stdio: "ignore", windowsHide: true },
+      {
+        detached: true,
+        stdio: ["ignore", "ignore", "pipe"],
+        windowsHide: true,
+      },
     );
+    // Recognize only bounded startup error codes, never forward raw stderr.
+    let startupDiagnostics = "";
+    child.stderr?.on("data", (chunk: Buffer) => {
+      startupDiagnostics = (startupDiagnostics + chunk.toString("utf8")).slice(
+        -8192,
+      );
+    });
+    (child.stderr as { unref?: () => void } | null)?.unref?.();
     this.ownedSupervisor = child;
     child.unref();
     await new Promise<void>((resolvePromise, rejectPromise) => {
@@ -906,6 +1003,18 @@ export class NativeExecutorClient {
         lastError = error;
       }
       if (child.exitCode !== null) {
+        if (startupDiagnostics.includes("INCOMPATIBLE_STATE_VERSION:")) {
+          throw new NativeExecutorError(
+            "INCOMPATIBLE_STATE_VERSION",
+            "The job store contains a newer format. Use a compatible executor; existing records were not adopted.",
+          );
+        }
+        if (startupDiagnostics.includes("INCOMPATIBLE_PROTOCOL:")) {
+          throw new NativeExecutorError(
+            "INCOMPATIBLE_PROTOCOL",
+            "A legacy Worker is still starting. Finish or cancel it with the old executor before upgrading.",
+          );
+        }
         throw new NativeExecutorError(
           "NATIVE_EXECUTOR_START_FAILED",
           `koda-exec exited with code ${child.exitCode} before accepting connections.`,
@@ -1070,6 +1179,10 @@ function definedEnvironment(
   );
 }
 
+function expectedNativeBackend(): "native_posix" | "native_windows" {
+  return process.platform === "win32" ? "native_windows" : "native_posix";
+}
+
 function leaseParams(
   attachment: NativeAttachmentCredentials,
   lease: NativeInputLease,
@@ -1194,8 +1307,12 @@ function encodeFrame(value: object): Buffer {
 function parseResponse(value: unknown): ExecutorResponse {
   const parsed = responseSchema.safeParse(value);
   if (!parsed.success) {
-    throw protocolError(
-      `Executor response is invalid: ${parsed.error.message}`,
+    throw protocolError("Executor response is invalid.");
+  }
+  if (parsed.data.protocol_version !== PROTOCOL_VERSION) {
+    throw new NativeExecutorError(
+      "INCOMPATIBLE_PROTOCOL",
+      "Executor protocol v2 is required. Finish or stop the older Supervisor explicitly before upgrading; no fallback was attempted.",
     );
   }
   return parsed.data;
@@ -1208,9 +1325,7 @@ function parseProtocolValue<T>(
 ): T {
   const parsed = schema.safeParse(value);
   if (!parsed.success) {
-    throw protocolError(
-      `Executor ${description} is invalid: ${parsed.error.message}`,
-    );
+    throw protocolError(`Executor ${description} is invalid.`);
   }
   return parsed.data;
 }
@@ -1231,6 +1346,11 @@ function normalizeRemoteCode(
 ): NativeExecutorErrorCode {
   switch (code) {
     case "INCOMPATIBLE_PROTOCOL":
+    case "INCOMPATIBLE_STATE_VERSION":
+    case "INVALID_EXECUTION_POLICY":
+    case "EXECUTION_POLICY_UNAVAILABLE":
+    case "EXECUTION_POLICY_CHANGED":
+    case "EXECUTION_SECURITY_CORRUPT":
     case "PLATFORM_CAPABILITY_UNAVAILABLE":
     case "INVALID_REQUEST":
     case "IDEMPOTENCY_CONFLICT":

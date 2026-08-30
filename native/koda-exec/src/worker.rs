@@ -19,6 +19,7 @@ use tokio::time::{sleep, timeout};
 
 use crate::attachment::AttachmentRegistry;
 use crate::durable::{JobLock, JobRecord, JobStore, StoredJobState, sha256_hex};
+use crate::execution_security;
 use crate::framing::{read_json_frame, write_json_frame};
 use crate::internal_protocol::{
     EmptyParams, WORKER_PROTOCOL_VERSION, WorkerHelloParams, WorkerHelloResult, WorkerRequest,
@@ -88,6 +89,31 @@ pub async fn run_worker(
             "INVALID_WORKER_STATE",
             format!("Worker cannot start from state {:?}.", current.state),
         ));
+    }
+    let admission = if record.manifest.format_version == 1 {
+        Err(ProtocolError::new(
+            "INVALID_EXECUTION_POLICY",
+            "Legacy pending jobs require a fresh approved request.",
+        ))
+    } else {
+        record
+            .manifest
+            .security
+            .as_ref()
+            .ok_or_else(execution_security::corrupt)
+            .and_then(|security| {
+                execution_security::validate_worker_admission(&record.manifest.start, security)
+            })
+    };
+    if let Err(error) = admission {
+        let mut next = current.clone();
+        next.state = JobState::StartFailed;
+        next.failure = Some(JobFailure {
+            code: error.code.into(),
+            message: error.message.clone(),
+        });
+        record.transition(&current, next)?;
+        return Err(error);
     }
     let worker_identity = current_process_identity().map_err(identity_error)?;
     let endpoint = record.worker_socket_path()?;
@@ -189,6 +215,21 @@ impl WorkerRuntime {
     async fn publish_command_starting(&self) -> Result<(), ProtocolError> {
         let mut guard = self.state.lock().await;
         let mut next = guard.clone();
+        if let Err(error) = execution_security::validate_worker_admission(
+            &self.record.manifest.start,
+            guard
+                .security
+                .as_ref()
+                .ok_or_else(execution_security::corrupt)?,
+        ) {
+            next.state = JobState::StartFailed;
+            next.failure = Some(JobFailure {
+                code: error.code.into(),
+                message: error.message.clone(),
+            });
+            *guard = self.record.transition(&guard, next)?;
+            return Err(error);
+        }
         next.state = JobState::CommandStarting;
         *guard = self.record.transition(&guard, next)?;
         Ok(())
@@ -197,10 +238,22 @@ impl WorkerRuntime {
     async fn publish_running(&self, pid: u32, identity: String) -> Result<(), ProtocolError> {
         let mut guard = self.state.lock().await;
         let mut next = guard.clone();
+        #[cfg(unix)]
+        {
+            next.security = Some(execution_security::launch_setup(
+                &self.record.manifest.start,
+                guard
+                    .security
+                    .as_ref()
+                    .ok_or_else(execution_security::corrupt)?,
+            )?);
+        }
         next.state = JobState::Running;
         next.command_pid = Some(pid);
         next.command_start_identity = Some(identity);
         *guard = self.record.transition(&guard, next)?;
+        #[cfg(unix)]
+        fault_point("after_security_setup");
         Ok(())
     }
 
@@ -215,7 +268,15 @@ impl WorkerRuntime {
         next.state = JobState::CommandStarting;
         next.command_pid = Some(pid);
         next.command_start_identity = Some(identity);
+        next.security = Some(execution_security::launch_setup(
+            &self.record.manifest.start,
+            guard
+                .security
+                .as_ref()
+                .ok_or_else(execution_security::corrupt)?,
+        )?);
         *guard = self.record.transition(&guard, next)?;
+        fault_point("after_security_setup");
         Ok(())
     }
 

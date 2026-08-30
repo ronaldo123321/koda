@@ -1,6 +1,6 @@
 # Koda Phase 4C1 Execution Policy and Isolation Reporting Design
 
-- Status: Approved — C1A complete; C1B–C1D pending
+- Status: Approved — C1A–C1B complete; C1C–C1D pending
 - Date: 2026-08-30
 - Depends on: completed Phase 4B supervised native execution
 
@@ -257,12 +257,13 @@ approved major refactor. Do not mark Phase 4C complete when C1 finishes.
 
 ## C1A implementation record — 2026-08-30
 
-C1A is complete as a standalone contract; it is not connected to real command
-launch. The native public protocol and durable format are still v1, the
-app-server protocol and existing grants are unchanged, and setting
-`KODA_EXECUTION_PROFILE` does not yet affect CLI/TUI execution. Native v2,
-Supervisor/Worker admission, and durable evidence are C1B. Application option
-and environment wiring, grants, events, and client rendering are C1C.
+C1A was completed as a standalone contract before native launch integration.
+At that boundary, the native public protocol and durable format were still v1,
+the app-server protocol and existing grants were unchanged, and setting
+`KODA_EXECUTION_PROFILE` did not affect CLI/TUI execution. Native v2,
+Supervisor/Worker admission, and durable evidence were subsequently delivered
+by C1B. Application option and environment wiring, TypeScript fallback
+admission, grants, events, and client rendering remain C1C.
 
 - [Protocol contract](../../packages/protocol/src/execution-policy.ts): strict
   policy/configuration, capability, and evidence schemas. Profile configuration
@@ -336,6 +337,91 @@ tests skipped); final `cargo test --workspace` passed 32 native tests. C1A adds
 97 TypeScript and 10 Rust tests, including the shared-fixture loops.
 `pnpm typecheck`, `pnpm format:check`, `cargo clippy --workspace --all-targets -- -D warnings`,
 and `git diff --check` passed. This change has not been run on Windows CI yet.
+
+## C1B implementation record — 2026-08-30
+
+C1B is complete at the native execution boundary. It does not implement an OS
+sandbox and does not activate `KODA_EXECUTION_PROFILE`. Existing application
+callers remain source-compatible through a temporary Node bridge: when they do
+not provide a policy, the native client creates an unconfined policy whose
+workspace root is the canonical command cwd. C1C must replace that bridge with
+the application instance's frozen workspace policy; until then, policy preview,
+grant binding, TypeScript fallback admission, events, app-server, CLI, and TUI
+reporting are not complete.
+
+### Native protocol and admission
+
+- The public native protocol is v2. `system/hello` reports a separate strict
+  execution-security capability record in addition to the existing process,
+  PTY, and recovery capabilities. The Node client requires v2, checks that the
+  native backend matches the reported platform, and never retries a request
+  using v1. A live v1 Supervisor returns `INCOMPATIBLE_PROTOCOL` and is not
+  stopped or replaced automatically.
+- Every v2 Pipe or PTY start carries a complete policy. Direct native requests
+  with a missing, null, future, malformed, or extra-field policy are rejected
+  before a job directory or Worker is created. The Supervisor recomputes the
+  request digest with that policy and therefore treats reuse of a request ID
+  with a changed policy as an idempotency conflict.
+- The Supervisor validates policy support and canonical launch paths before
+  creating durable state. The workspace and cwd must still resolve to the exact
+  supplied canonical directories, and cwd must be inside the policy workspace.
+  The Worker independently reloads and validates the persisted policy, retained
+  admission snapshot, current native backend, capability digest, and launch
+  paths before `command_starting` and again before setup evidence is committed.
+- On Unix, setup evidence is persisted with the command identity immediately
+  before the start gate is released. On Windows, it is persisted after the
+  suspended process is assigned to its Job Object and before its primary thread
+  resumes. The evidence records explicit environment handling and process
+  supervision only. Filesystem, network, and host-process isolation remain
+  `not_requested`; C1B cannot emit an applied OS-isolation claim. A
+  `launch_setup` snapshot proves setup reached that boundary, not that user code
+  ran or completed.
+
+### Durable v2 and legacy handling
+
+- New manifests, states, and state heads use durable format v2. The manifest
+  retains the immutable admission snapshot; each state retains the current
+  snapshot. Both records and their existing digest chains bind the policy,
+  backend, capability digest, evidence stage, and execution state. A setup
+  snapshot cannot be downgraded on a later transition. Missing or null v2
+  policy/evidence is `EXECUTION_SECURITY_CORRUPT`, never legacy absence.
+- Store scanning preflights every record version before quarantine, retention,
+  or trash cleanup. Versions 1 and 2 use their own original serialization and
+  hash rules. An unknown future format returns `INCOMPATIBLE_STATE_VERSION` and
+  leaves the entire jobs store untouched. Reads do not rewrite v1 manifests,
+  states, heads, logs, tokens, or attachments.
+- Terminal and already-running v1 jobs remain observable as
+  `{schema_version: 1, kind: legacy_unknown}`. The internal Worker control
+  protocol stays v1, so a v2 Supervisor can authenticate to a real live v1 PTY
+  Worker and preserve attach, input ownership, resize, output, termination, and
+  final status. The retained evidence remains unknown and is never inferred
+  from current capabilities.
+- A live v1 Worker that has not crossed the command boundary blocks v2
+  Supervisor startup: the new Supervisor cannot fence the old autonomous
+  launch, so it instructs the caller to settle that job with the old executor.
+  A v1 pending record without a live Worker is durably changed to
+  `start_failed` with `INVALID_EXECUTION_POLICY`; no replacement Worker is
+  spawned and a fresh approved v2 request is required. A real v1 binary can
+  still reopen the resulting format-v1 terminal record, proving the old hash
+  contract was preserved.
+
+### C1B verification
+
+Local macOS verification passed `pnpm test`: 608 Vitest tests passed and 20
+were skipped (17 Windows-only tests and 3 optional real-v1 compatibility tests
+that the ordinary command intentionally does not build). `cargo test
+--workspace` passed 36 tests. A separate run against a real protocol-v1 binary
+built from commit `3aa84ee` passed all 10 C1B integration tests, including the
+three cross-version cases. The suites cover Pipe and PTY refusal with no marker
+file or durable job, strict direct-wire policy parsing, Worker path revalidation,
+pre-gate Worker faults, restart/idempotency evidence, old Supervisor refusal,
+live legacy PTY attachment, and legacy pending-job suppression.
+
+`pnpm typecheck`, `cargo clippy --workspace --all-targets -- -D warnings`,
+format checks, and `git diff --check` passed locally. The Windows Rust standard
+library target is not installed on this host, so local Windows cross-compilation
+could not run. Windows compilation and the 17 existing native Windows tests
+remain explicit Phase C1D/CI acceptance; C1B does not claim those passed here.
 
 ## Acceptance matrix
 

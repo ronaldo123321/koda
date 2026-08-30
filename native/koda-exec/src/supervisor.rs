@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 use crate::attachment::{create_stateless_attachment, verify_capability};
 use crate::durable::{JobRecord, JobStore};
+use crate::execution_security;
 use crate::framing::{read_json_frame, write_json_frame};
 use crate::internal_protocol::{
     WORKER_PROTOCOL_VERSION, WorkerHelloParams, WorkerHelloResult, WorkerRequest, WorkerResponse,
@@ -64,8 +65,22 @@ struct StartRequestRecord {
 impl Supervisor {
     pub async fn open(state_dir: &Path, binary_path: PathBuf) -> Result<Arc<Self>, ProtocolError> {
         let store = JobStore::open(state_dir)?;
-        store.finish_trash_cleanup()?;
         let mut records = store.scan(MAX_SCANNED_JOBS)?;
+        // A v1 Worker launches autonomously: never pretend a new Supervisor can
+        // fence an in-flight old launch. Require it to settle under the old owner.
+        for record in &records {
+            let state = record.read_state()?;
+            if record.manifest.format_version == 1
+                && is_precommand(state.state)
+                && record.try_lock()?.is_none()
+            {
+                return Err(ProtocolError::new(
+                    "INCOMPATIBLE_PROTOCOL",
+                    "A legacy Worker is still starting. Finish or cancel it with the old executor before upgrading.",
+                ));
+            }
+        }
+        store.finish_trash_cleanup()?;
         apply_retention(&store, &mut records)?;
 
         let mut registry = Registry::default();
@@ -105,7 +120,7 @@ impl Supervisor {
     ) -> Result<Value, ProtocolError> {
         match method {
             "job/start" => {
-                let params = crate::protocol::parse_params(params)?;
+                let params = crate::protocol::parse_start_params(params)?;
                 encode(self.start(request_id, params).await?)
             }
             "job/get" => {
@@ -162,21 +177,9 @@ impl Supervisor {
     pub async fn start(
         self: &Arc<Self>,
         request_id: String,
-        mut params: StartParams,
+        params: StartParams,
     ) -> Result<JobSnapshot, ProtocolError> {
         validate_start(&params)?;
-        params.cwd = std::fs::canonicalize(&params.cwd)
-            .map_err(|error| {
-                ProtocolError::new(
-                    "INVALID_REQUEST",
-                    format!("Could not canonicalize cwd: {error}"),
-                )
-            })?
-            .into_os_string()
-            .into_string()
-            .map_err(|_| {
-                ProtocolError::new("INVALID_REQUEST", "Canonical cwd is not valid UTF-8.")
-            })?;
         let request_bytes = serde_json::to_vec(&params).map_err(internal_json_error)?;
         let request_digest = crate::durable::sha256_hex(&request_bytes);
 
@@ -193,6 +196,7 @@ impl Supervisor {
             return self.get(&job_id).await;
         }
 
+        execution_security::admit(&params)?;
         let (record, _) = self.store.create_job(&request_id, params)?;
         let job_id = record.manifest.job_id.clone();
         registry.requests.insert(
@@ -370,6 +374,10 @@ impl Supervisor {
                     created_at_ms: record.manifest.created_at_ms,
                     updated_at_ms: state.updated_at_ms,
                     pid: state.command_pid,
+                    security: state
+                        .security
+                        .clone()
+                        .unwrap_or_else(execution_security::legacy_unknown),
                 })
             })
             .collect::<Result<Vec<_>, ProtocolError>>()?;
@@ -598,6 +606,12 @@ impl Supervisor {
     }
 
     fn spawn_worker(&self, record: &JobRecord) -> Result<(), ProtocolError> {
+        if record.manifest.format_version == 1 {
+            return Err(ProtocolError::new(
+                "INVALID_EXECUTION_POLICY",
+                "Legacy jobs cannot start a new Worker; submit a fresh approved request.",
+            ));
+        }
         let token_path = record.directory.join("control.token");
         spawn_worker_process(&self.binary_path, &record.directory, &token_path)
             .map_err(worker_spawn_io_error)
@@ -654,6 +668,19 @@ impl Supervisor {
         }
         remove_stale_worker_socket(record)?;
         if matches!(current.state, JobState::Accepted | JobState::WorkerReady) {
+            if record.manifest.format_version == 1 {
+                let mut next = current.clone();
+                next.state = JobState::StartFailed;
+                next.failure = Some(JobFailure {
+                    code: "INVALID_EXECUTION_POLICY".into(),
+                    message:
+                        "Legacy pending execution was stopped; submit a fresh approved request."
+                            .into(),
+                });
+                return Ok(record
+                    .transition(&current, next)?
+                    .snapshot(&record.manifest.start));
+            }
             drop(lock);
             self.spawn_worker(record)?;
             return self.wait_for_start(record).await;
@@ -808,13 +835,38 @@ async fn worker_snapshot(
     params: Value,
 ) -> Result<JobSnapshot, ProtocolError> {
     let mut connection = WorkerConnection::connect(record).await?;
-    let result = connection.call(method, params).await?;
-    serde_json::from_value(result).map_err(|error| {
-        ProtocolError::new(
-            "WORKER_PROTOCOL_ERROR",
-            format!("Worker snapshot is invalid: {error}"),
-        )
-    })
+    let mut result = connection.call(method, params).await?;
+    if record.manifest.format_version == 1 {
+        let object = result
+            .as_object_mut()
+            .ok_or_else(execution_security::corrupt)?;
+        if object.contains_key("security") {
+            return Err(execution_security::corrupt());
+        }
+        object.insert(
+            "security".into(),
+            serde_json::to_value(execution_security::legacy_unknown())
+                .map_err(internal_json_error)?,
+        );
+    }
+    let snapshot: JobSnapshot = serde_json::from_value(result)
+        .map_err(|_| ProtocolError::new("WORKER_PROTOCOL_ERROR", "Worker snapshot is invalid."))?;
+    if record.manifest.format_version == 2 {
+        execution_security::validate_retained(&record.manifest.start, &snapshot.security)?;
+        if record.read_state()?.security.as_ref() != Some(&snapshot.security)
+            && record.manifest.security.as_ref() != Some(&snapshot.security)
+        {
+            return Err(execution_security::corrupt());
+        }
+    }
+    Ok(snapshot)
+}
+
+fn is_precommand(state: JobState) -> bool {
+    matches!(
+        state,
+        JobState::Accepted | JobState::WorkerReady | JobState::CommandStarting | JobState::Starting
+    )
 }
 
 async fn worker_value(
@@ -1139,6 +1191,14 @@ mod tests {
                     io_mode: crate::protocol::IoMode::Pipe,
                     lifecycle: crate::protocol::JobLifecycle::Foreground,
                     pty: None,
+                    policy: Some(
+                        crate::execution_policy::resolve_execution_policy(
+                            &std::env::current_dir().unwrap().display().to_string(),
+                            None,
+                            None,
+                        )
+                        .unwrap(),
+                    ),
                 },
             )
             .expect("job")
@@ -1149,6 +1209,17 @@ mod tests {
         let current = record.read_state().expect("current");
         let mut next = current.clone();
         next.state = state;
+        if state == JobState::Running {
+            next.command_pid = Some(1);
+            next.command_start_identity = Some("test-identity".into());
+            next.security = Some(
+                execution_security::launch_setup(
+                    &record.manifest.start,
+                    current.security.as_ref().unwrap(),
+                )
+                .unwrap(),
+            );
+        }
         record.transition(&current, next).expect("transition");
     }
 }

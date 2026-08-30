@@ -1,9 +1,10 @@
 use std::collections::BTreeMap;
 
+use crate::execution_policy::{ExecutionPolicy, ExecutionSecuritySnapshot};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 pub const MAX_FRAME_BYTES: usize = 1_048_576;
 pub const MAX_ARGUMENTS: usize = 64;
 pub const MAX_ARGUMENT_BYTES: usize = 4_096;
@@ -118,6 +119,9 @@ pub struct StartParams {
     pub lifecycle: JobLifecycle,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pty: Option<PtyStartConfig>,
+    // Optional only for reading v1 durable records. v2 starts require it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<ExecutionPolicy>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -347,6 +351,7 @@ pub struct JobSnapshot {
     pub stderr_truncated: bool,
     pub termination: Option<TerminationSnapshot>,
     pub failure: Option<JobFailure>,
+    pub security: ExecutionSecuritySnapshot,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -360,6 +365,7 @@ pub struct JobSummary {
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
     pub pid: Option<u32>,
+    pub security: ExecutionSecuritySnapshot,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -442,6 +448,16 @@ where
     })
 }
 
+pub fn parse_start_params(value: Value) -> Result<StartParams, ProtocolError> {
+    let policy = ExecutionPolicy::parse(value.get("policy").cloned().unwrap_or(Value::Null))
+        .map_err(crate::execution_security::policy_error)?;
+    let mut params: StartParams = serde_json::from_value(value).map_err(|_| {
+        ProtocolError::new("INVALID_REQUEST", "Execution start parameters are invalid.")
+    })?;
+    params.policy = Some(policy);
+    Ok(params)
+}
+
 pub fn validate_request(request: &Request) -> Result<(), ProtocolError> {
     if request.protocol_version != PROTOCOL_VERSION {
         return Err(ProtocolError::new(
@@ -484,7 +500,7 @@ pub fn validate_hello(params: &HelloParams) -> Result<(), ProtocolError> {
     if !params.supported_versions.contains(&PROTOCOL_VERSION) {
         return Err(ProtocolError::new(
             "INCOMPATIBLE_PROTOCOL",
-            "The client does not support executor protocol version 1.",
+            "The client does not support executor protocol version 2.",
         ));
     }
     Ok(())
@@ -537,10 +553,10 @@ pub fn validate_start(params: &StartParams) -> Result<(), ProtocolError> {
         ));
     }
     let cwd = std::path::Path::new(&params.cwd);
-    if !cwd.is_absolute() || !cwd.is_dir() {
+    if !cwd.is_absolute() {
         return Err(ProtocolError::new(
             "INVALID_REQUEST",
-            "cwd must be an existing absolute directory.",
+            "cwd must be an absolute directory path.",
         ));
     }
     if params.environment.len() > MAX_ENVIRONMENT_ENTRIES {
@@ -720,6 +736,7 @@ mod tests {
             io_mode: IoMode::Pipe,
             lifecycle: JobLifecycle::Foreground,
             pty: None,
+            policy: None,
         };
 
         assert_eq!(
@@ -771,6 +788,7 @@ mod tests {
                 term: "xterm-256color".to_owned(),
                 output_limit_bytes: DEFAULT_PTY_OUTPUT_LIMIT_BYTES,
             }),
+            policy: None,
         };
 
         validate_start(&params).expect("valid pty start");

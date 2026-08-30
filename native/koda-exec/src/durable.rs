@@ -3,6 +3,8 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::execution_policy::{ExecutionSecuritySnapshot, ExecutionSecurityStage};
+use crate::execution_security;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -12,7 +14,7 @@ use crate::protocol::{
     IoMode, JobFailure, JobSnapshot, JobState, ProtocolError, StartParams, TerminationSnapshot,
 };
 
-pub const STORE_FORMAT_VERSION: u32 = 1;
+pub const STORE_FORMAT_VERSION: u32 = 2;
 const MAX_MANIFEST_BYTES: u64 = 262_144;
 const MAX_STATE_BYTES: u64 = 65_536;
 const MAX_STATE_HEAD_BYTES: u64 = 4_096;
@@ -29,6 +31,8 @@ pub struct JobManifest {
     pub created_at_ms: u64,
     pub start: StartParams,
     pub manifest_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub security: Option<ExecutionSecuritySnapshot>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -55,6 +59,8 @@ pub struct StoredJobState {
     pub stderr_retained_bytes: u64,
     pub termination: Option<TerminationSnapshot>,
     pub failure: Option<JobFailure>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub security: Option<ExecutionSecuritySnapshot>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -104,6 +110,8 @@ impl JobStore {
         request_id: &str,
         start: StartParams,
     ) -> Result<(JobRecord, Vec<u8>), ProtocolError> {
+        crate::protocol::validate_start(&start)?;
+        let security = execution_security::admit(&start)?;
         let directory_name = sha256_hex(request_id.as_bytes());
         let directory = self.jobs_root.join(directory_name);
         std::fs::create_dir(&directory).map_err(|error| {
@@ -142,6 +150,7 @@ impl JobStore {
             created_at_ms: unix_millis(),
             start,
             manifest_digest: String::new(),
+            security: Some(security.clone()),
         };
         manifest.manifest_digest = manifest_digest(&manifest)?;
         write_new_json(
@@ -151,6 +160,7 @@ impl JobStore {
         )?;
 
         let mut initial = StoredJobState::initial(&manifest.job_id);
+        initial.security = Some(security);
         initial.state_digest = state_digest(&initial)?;
         write_new_json(&directory.join("state.json"), &initial, MAX_STATE_BYTES)?;
         write_new_json(
@@ -170,15 +180,35 @@ impl JobStore {
 
     pub fn scan(&self, maximum_jobs: usize) -> Result<Vec<JobRecord>, ProtocolError> {
         let mut records = Vec::new();
-        let entries = std::fs::read_dir(&self.jobs_root).map_err(state_io_error)?;
-        for (index, entry) in entries.enumerate() {
+        let entries = std::fs::read_dir(&self.jobs_root)
+            .map_err(state_io_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(state_io_error)?;
+        // Preflight the whole store before quarantine/retention changes anything.
+        // Unknown future formats are not corruption to relocate or reinterpret.
+        for entry in &entries {
+            let kind = entry.file_type().map_err(state_io_error)?;
+            if kind.is_dir() && !kind.is_symlink() {
+                for (name, limit) in [
+                    ("manifest.json", MAX_MANIFEST_BYTES),
+                    ("state.json", MAX_STATE_BYTES),
+                    ("state.head", MAX_STATE_HEAD_BYTES),
+                ] {
+                    if let Err(error) = read_versioned_value(&entry.path().join(name), limit)
+                        && error.code == "INCOMPATIBLE_STATE_VERSION"
+                    {
+                        return Err(error);
+                    }
+                }
+            }
+        }
+        for (index, entry) in entries.into_iter().enumerate() {
             if index >= maximum_jobs {
                 return Err(ProtocolError::new(
                     "JOB_STORE_LIMIT_EXCEEDED",
                     format!("Executor job store exceeds its {maximum_jobs}-entry scan limit."),
                 ));
             }
-            let entry = entry.map_err(state_io_error)?;
             let file_type = entry.file_type().map_err(state_io_error)?;
             if !file_type.is_dir() || file_type.is_symlink() {
                 self.quarantine_entry(&entry.path(), "Job-store entry is not a real directory.")?;
@@ -186,6 +216,7 @@ impl JobStore {
             }
             match self.load_job(&entry.path()) {
                 Ok(record) => records.push(record),
+                Err(error) if error.code == "INCOMPATIBLE_STATE_VERSION" => return Err(error),
                 Err(error) => self.quarantine_entry(
                     &entry.path(),
                     &format!("{}: {}", error.code, error.message),
@@ -197,8 +228,11 @@ impl JobStore {
 
     pub fn load_job(&self, directory: &Path) -> Result<JobRecord, ProtocolError> {
         validate_private_directory(directory)?;
+        let (version, value) =
+            read_versioned_value(&directory.join("manifest.json"), MAX_MANIFEST_BYTES)?;
+        validate_security_fields(&value, version, true)?;
         let manifest: JobManifest =
-            read_private_json(&directory.join("manifest.json"), MAX_MANIFEST_BYTES)?;
+            serde_json::from_value(value).map_err(|_| record_decode_error(version))?;
         validate_manifest(&manifest)?;
         let expected_directory = sha256_hex(manifest.request_id.as_bytes());
         if directory.file_name().and_then(|value| value.to_str()) != Some(&expected_directory) {
@@ -304,9 +338,22 @@ impl JobRecord {
     }
 
     pub fn read_state(&self) -> Result<StoredJobState, ProtocolError> {
-        let state: StoredJobState = read_private_json(&self.state_path(), MAX_STATE_BYTES)?;
+        let (version, value) = read_versioned_value(&self.state_path(), MAX_STATE_BYTES)?;
+        if version != self.manifest.format_version {
+            return Err(execution_security::corrupt());
+        }
+        validate_security_fields(&value, version, false)?;
+        let state: StoredJobState =
+            serde_json::from_value(value).map_err(|_| record_decode_error(version))?;
         validate_state(&state, &self.manifest.job_id)?;
-        let head: StateHead = read_private_json(&self.state_head_path(), MAX_STATE_HEAD_BYTES)?;
+        validate_security_binding(&self.manifest, &state)?;
+        let (head_version, value) =
+            read_versioned_value(&self.state_head_path(), MAX_STATE_HEAD_BYTES)?;
+        if head_version != version {
+            return Err(execution_security::corrupt());
+        }
+        let head: StateHead =
+            serde_json::from_value(value).map_err(|_| record_decode_error(version))?;
         validate_state_head(&head, &self.manifest.job_id)?;
         if head.revision == state.revision && head.state_digest == state.state_digest {
             return Ok(state);
@@ -314,11 +361,13 @@ impl JobRecord {
         if state.revision == head.revision.saturating_add(1)
             && state.previous_state_digest.as_deref() == Some(&head.state_digest)
         {
-            write_atomic_json(
-                &self.state_head_path(),
-                &StateHead::from_state(&state),
-                MAX_STATE_HEAD_BYTES,
-            )?;
+            if version == STORE_FORMAT_VERSION {
+                write_atomic_json(
+                    &self.state_head_path(),
+                    &StateHead::from_state(&state),
+                    MAX_STATE_HEAD_BYTES,
+                )?;
+            }
             return Ok(state);
         }
         Err(corrupt(
@@ -340,7 +389,14 @@ impl JobRecord {
             ));
         }
         validate_transition(current.state, next.state)?;
-        next.format_version = STORE_FORMAT_VERSION;
+        next.format_version = current.format_version;
+        validate_security_binding(&self.manifest, &next)?;
+        if let Some(ExecutionSecuritySnapshot::Policy(security)) = &current.security
+            && security.stage == ExecutionSecurityStage::LaunchSetup
+            && current.security != next.security
+        {
+            return Err(execution_security::corrupt());
+        }
         next.job_id = self.manifest.job_id.clone();
         next.revision = current
             .revision
@@ -416,6 +472,7 @@ impl StoredJobState {
             stderr_retained_bytes: 0,
             termination: None,
             failure: None,
+            security: None,
         }
     }
 
@@ -438,6 +495,10 @@ impl StoredJobState {
             stderr_truncated: self.stderr_bytes > self.stderr_retained_bytes,
             termination: self.termination.clone(),
             failure: self.failure.clone(),
+            security: self
+                .security
+                .clone()
+                .unwrap_or_else(execution_security::legacy_unknown),
         }
     }
 }
@@ -445,7 +506,7 @@ impl StoredJobState {
 impl StateHead {
     fn from_state(state: &StoredJobState) -> Self {
         Self {
-            format_version: STORE_FORMAT_VERSION,
+            format_version: state.format_version,
             job_id: state.job_id.clone(),
             revision: state.revision,
             state_digest: state.state_digest.clone(),
@@ -472,13 +533,139 @@ impl JobLock {
     }
 }
 
+fn read_versioned_value(
+    path: &Path,
+    limit: u64,
+) -> Result<(u32, serde_json::Value), ProtocolError> {
+    let value: serde_json::Value = read_private_json(path, limit)?;
+    let version = value
+        .get("format_version")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| corrupt("Job record format version is invalid."))?;
+    if version != 1 && version != u64::from(STORE_FORMAT_VERSION) {
+        return Err(ProtocolError::new(
+            "INCOMPATIBLE_STATE_VERSION",
+            "Job store contains an unsupported format; leave it untouched and use a compatible executor.",
+        ));
+    }
+    Ok((version as u32, value))
+}
+
+fn record_decode_error(version: u32) -> ProtocolError {
+    if version == STORE_FORMAT_VERSION {
+        execution_security::corrupt()
+    } else {
+        corrupt("Legacy job record is malformed.")
+    }
+}
+
+fn validate_security_fields(
+    value: &serde_json::Value,
+    version: u32,
+    manifest: bool,
+) -> Result<(), ProtocolError> {
+    // Presence is significant: explicit null is not legacy absence.
+    let security = value.get("security");
+    let policy = value.get("start").and_then(|start| start.get("policy"));
+    let valid = if version == 1 {
+        security.is_none() && (!manifest || policy.is_none())
+    } else {
+        security.is_some_and(|v| !v.is_null())
+            && (!manifest || policy.is_some_and(|v| !v.is_null()))
+    };
+    if !valid {
+        return Err(execution_security::corrupt());
+    }
+    Ok(())
+}
+
+fn validate_security_binding(
+    manifest: &JobManifest,
+    state: &StoredJobState,
+) -> Result<(), ProtocolError> {
+    if manifest.format_version == 1 {
+        return if state.security.is_none() {
+            Ok(())
+        } else {
+            Err(execution_security::corrupt())
+        };
+    }
+    let admission = manifest
+        .security
+        .as_ref()
+        .ok_or_else(execution_security::corrupt)?;
+    let security = state
+        .security
+        .as_ref()
+        .ok_or_else(execution_security::corrupt)?;
+    execution_security::validate_retained(&manifest.start, security)?;
+    let (ExecutionSecuritySnapshot::Policy(original), ExecutionSecuritySnapshot::Policy(retained)) =
+        (admission, security)
+    else {
+        return Err(execution_security::corrupt());
+    };
+    if original.policy != retained.policy
+        || original.backend != retained.backend
+        || original.policy_digest != retained.policy_digest
+        || original.capabilities_digest != retained.capabilities_digest
+    {
+        return Err(execution_security::corrupt());
+    }
+    if retained.stage == ExecutionSecurityStage::Admission {
+        if security != admission
+            || matches!(
+                state.state,
+                JobState::Running | JobState::Terminating | JobState::Exited
+            )
+        {
+            return Err(execution_security::corrupt());
+        }
+    } else if state.command_pid.is_none()
+        || state.command_start_identity.is_none()
+        || matches!(state.state, JobState::Accepted | JobState::WorkerReady)
+        || !matches!(
+            retained.environment,
+            crate::execution_policy::ExecutionEnforcementEvidence::Applied { .. }
+        )
+        || !matches!(
+            retained.supervision,
+            crate::execution_policy::ExecutionEnforcementEvidence::Applied { .. }
+        )
+    {
+        return Err(execution_security::corrupt());
+    }
+    Ok(())
+}
+
 fn validate_manifest(manifest: &JobManifest) -> Result<(), ProtocolError> {
-    if manifest.format_version != STORE_FORMAT_VERSION {
+    if !matches!(manifest.format_version, 1 | STORE_FORMAT_VERSION) {
         return Err(corrupt("Job manifest format version is unsupported."));
     }
     crate::protocol::validate_identifier(&manifest.job_id, "job_id")?;
     crate::protocol::validate_identifier(&manifest.request_id, "request_id")?;
     crate::protocol::validate_start(&manifest.start)?;
+    match manifest.format_version {
+        1 if manifest.start.policy.is_none() && manifest.security.is_none() => {}
+        STORE_FORMAT_VERSION => {
+            let security = manifest
+                .security
+                .as_ref()
+                .ok_or_else(execution_security::corrupt)?;
+            execution_security::validate_retained(&manifest.start, security)?;
+            let ExecutionSecuritySnapshot::Policy(policy) = security else {
+                return Err(execution_security::corrupt());
+            };
+            let expected = crate::execution_policy::create_execution_admission_snapshot(
+                &policy.policy,
+                &crate::execution_policy::c1_execution_capabilities(policy.backend),
+            )
+            .map_err(|_| execution_security::corrupt())?;
+            if &expected != security {
+                return Err(execution_security::corrupt());
+            }
+        }
+        _ => return Err(execution_security::corrupt()),
+    }
     let request_bytes = serde_json::to_vec(&manifest.start).map_err(json_encode_error)?;
     if manifest.request_digest != sha256_hex(&request_bytes)
         || manifest.manifest_digest != manifest_digest(manifest)?
@@ -490,7 +677,7 @@ fn validate_manifest(manifest: &JobManifest) -> Result<(), ProtocolError> {
 }
 
 fn validate_state(state: &StoredJobState, job_id: &str) -> Result<(), ProtocolError> {
-    if state.format_version != STORE_FORMAT_VERSION
+    if !matches!(state.format_version, 1 | STORE_FORMAT_VERSION)
         || state.job_id != job_id
         || state.revision < 1
         || state.state_digest != state_digest(state)?
@@ -517,7 +704,7 @@ fn validate_state(state: &StoredJobState, job_id: &str) -> Result<(), ProtocolEr
 }
 
 fn validate_state_head(head: &StateHead, job_id: &str) -> Result<(), ProtocolError> {
-    if head.format_version != STORE_FORMAT_VERSION
+    if !matches!(head.format_version, 1 | STORE_FORMAT_VERSION)
         || head.job_id != job_id
         || head.revision < 1
         || !is_sha256(&head.state_digest)
@@ -766,6 +953,7 @@ mod tests {
     use super::*;
 
     fn start() -> StartParams {
+        let cwd = std::env::current_dir().expect("cwd").display().to_string();
         StartParams {
             argv: vec!["/usr/bin/true".to_owned()],
             cwd: std::env::current_dir().expect("cwd").display().to_string(),
@@ -778,7 +966,173 @@ mod tests {
             io_mode: crate::protocol::IoMode::Pipe,
             lifecycle: crate::protocol::JobLifecycle::Foreground,
             pty: None,
+            policy: Some(
+                crate::execution_policy::resolve_execution_policy(&cwd, None, None).unwrap(),
+            ),
         }
+    }
+
+    fn legacy_copy(record: &JobRecord) -> JobRecord {
+        let mut manifest = record.manifest.clone();
+        manifest.format_version = 1;
+        manifest.start.policy = None;
+        manifest.security = None;
+        manifest.request_digest = sha256_hex(&serde_json::to_vec(&manifest.start).unwrap());
+        manifest.manifest_digest = manifest_digest(&manifest).unwrap();
+        let mut state = record.read_state().unwrap();
+        state.format_version = 1;
+        state.security = None;
+        state.state_digest = state_digest(&state).unwrap();
+        write_atomic_json(
+            &record.directory.join("manifest.json"),
+            &manifest,
+            MAX_MANIFEST_BYTES,
+        )
+        .unwrap();
+        write_atomic_json(&record.state_path(), &state, MAX_STATE_BYTES).unwrap();
+        write_atomic_json(
+            &record.state_head_path(),
+            &StateHead::from_state(&state),
+            MAX_STATE_HEAD_BYTES,
+        )
+        .unwrap();
+        JobRecord {
+            directory: record.directory.clone(),
+            manifest,
+        }
+    }
+
+    #[test]
+    fn legacy_hashes_remain_stable_and_reads_do_not_upgrade_records() {
+        let root = std::env::temp_dir().join(format!("koda-legacy-{}", Uuid::new_v4().simple()));
+        let store = JobStore::open(&root).unwrap();
+        let (record, _) = store.create_job("legacy", start()).unwrap();
+        let legacy = legacy_copy(&record);
+        let paths = [
+            legacy.directory.join("manifest.json"),
+            legacy.state_path(),
+            legacy.state_head_path(),
+        ];
+        let before: Vec<_> = paths.iter().map(|p| std::fs::read(p).unwrap()).collect();
+        let loaded = store.load_job(&legacy.directory).unwrap();
+        let state = loaded.read_state().unwrap();
+        assert_eq!(
+            state.snapshot(&loaded.manifest.start).security,
+            execution_security::legacy_unknown()
+        );
+        for (path, bytes) in paths.iter().zip(before) {
+            assert_eq!(std::fs::read(path).unwrap(), bytes);
+        }
+        let mut next = state.clone();
+        next.state = JobState::StartFailed;
+        let next = loaded.transition(&state, next).unwrap();
+        assert_eq!(next.format_version, 1);
+        assert!(next.security.is_none());
+        assert_eq!(
+            store
+                .load_job(&legacy.directory)
+                .unwrap()
+                .manifest
+                .format_version,
+            1
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unknown_future_formats_are_left_in_place_before_any_quarantine() {
+        for name in ["manifest.json", "state.json", "state.head"] {
+            let root =
+                std::env::temp_dir().join(format!("koda-future-{}", Uuid::new_v4().simple()));
+            let store = JobStore::open(&root).unwrap();
+            let (record, _) = store.create_job("future", start()).unwrap();
+            let path = record.directory.join(name);
+            let mut value: serde_json::Value =
+                read_private_json(&path, MAX_MANIFEST_BYTES).unwrap();
+            value["format_version"] = serde_json::json!(3);
+            value["future_field"] = serde_json::json!({"preserve":true});
+            write_atomic_json(&path, &value, MAX_MANIFEST_BYTES).unwrap();
+            let before = std::fs::read(&path).unwrap();
+            assert_eq!(
+                store.scan(10).unwrap_err().code,
+                "INCOMPATIBLE_STATE_VERSION"
+            );
+            assert!(record.directory.exists());
+            assert_eq!(std::fs::read(path).unwrap(), before);
+            assert_eq!(
+                std::fs::read_dir(&store.quarantine_root).unwrap().count(),
+                0
+            );
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn new_records_never_treat_missing_or_null_security_as_legacy() {
+        for name in ["manifest.json", "state.json"] {
+            for null in [false, true] {
+                let root = std::env::temp_dir()
+                    .join(format!("koda-missing-security-{}", Uuid::new_v4().simple()));
+                let store = JobStore::open(&root).unwrap();
+                let (record, _) = store.create_job("missing", start()).unwrap();
+                let path = record.directory.join(name);
+                let mut value: serde_json::Value =
+                    read_private_json(&path, MAX_MANIFEST_BYTES).unwrap();
+                if null {
+                    value["security"] = serde_json::Value::Null;
+                } else {
+                    value.as_object_mut().unwrap().remove("security");
+                }
+                write_atomic_json(&path, &value, MAX_MANIFEST_BYTES).unwrap();
+                assert_eq!(
+                    store.load_job(&record.directory).unwrap_err().code,
+                    "EXECUTION_SECURITY_CORRUPT"
+                );
+                assert!(record.directory.exists());
+                std::fs::remove_dir_all(root).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn unavailable_policy_creates_no_job_and_evidence_cannot_be_downgraded() {
+        let root = std::env::temp_dir().join(format!("koda-admission-{}", Uuid::new_v4().simple()));
+        let store = JobStore::open(&root).unwrap();
+        let mut rejected = start();
+        rejected.policy.as_mut().unwrap().network = crate::execution_policy::NetworkPolicy::Deny;
+        assert_eq!(
+            store.create_job("denied", rejected).unwrap_err().code,
+            "EXECUTION_POLICY_UNAVAILABLE"
+        );
+        assert_eq!(std::fs::read_dir(&store.jobs_root).unwrap().count(), 0);
+        let (record, _) = store.create_job("allowed", start()).unwrap();
+        let initial = record.read_state().unwrap();
+        let mut ready = initial.clone();
+        ready.state = JobState::WorkerReady;
+        let ready = record.transition(&initial, ready).unwrap();
+        let mut starting = ready.clone();
+        starting.state = JobState::CommandStarting;
+        let starting = record.transition(&ready, starting).unwrap();
+        let mut running = starting.clone();
+        running.state = JobState::Running;
+        running.command_pid = Some(1);
+        running.command_start_identity = Some("fixture".into());
+        running.security = Some(
+            execution_security::launch_setup(
+                &record.manifest.start,
+                starting.security.as_ref().unwrap(),
+            )
+            .unwrap(),
+        );
+        let running = record.transition(&starting, running).unwrap();
+        let mut downgraded = running.clone();
+        downgraded.state = JobState::TerminationUncertain;
+        downgraded.security = initial.security;
+        assert_eq!(
+            record.transition(&running, downgraded).unwrap_err().code,
+            "EXECUTION_SECURITY_CORRUPT"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

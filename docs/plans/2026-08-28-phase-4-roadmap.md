@@ -1,6 +1,6 @@
 # Koda Phase 4 Hardening Roadmap
 
-- Status: In progress — Phase 4B complete; Phase 4C1 C1A complete, C1B next
+- Status: In progress — Phase 4B complete; Phase 4C1 C1A–C1B complete, C1C next
 - Date: 2026-08-28
 - Depends on: completed Phase 3A through Phase 3I baseline
 
@@ -81,7 +81,7 @@ The completed Windows terminal contract and acceptance evidence are in [Phase 4B
 
 ### Phase 4C: sandbox, network, and secret policy
 
-Status: In progress — Phase 4C1 C1A complete; C1B–C1D pending
+Status: In progress — Phase 4C1 C1A–C1B complete; C1C–C1D pending
 
 - Add explicit filesystem, process, environment, and network capabilities.
 - Implement available OS isolation mechanisms and expose their effective strength rather than a portable boolean claim.
@@ -98,10 +98,12 @@ Phase 4C work. Completing C1 will not complete Phase 4C.
 
 C1A delivers standalone TS/Rust schemas, deterministic profile resolution,
 conservative capability evaluation, policy/capability fingerprints, and shared
-golden fixtures. These helpers are not yet connected to command or PTY launch:
-native admission and durable evidence are C1B; configuration, approvals, and
-client reporting are C1C; integrated security/platform acceptance is C1D.
-`KODA_EXECUTION_PROFILE` is not an active runtime switch until C1C wiring lands.
+golden fixtures. C1B connects the contract to native Pipe/PTY admission,
+Supervisor/Worker launch boundaries, protocol v2, durable format v2, retained
+evidence, and explicit v1 recovery. Application configuration, TypeScript
+fallback admission, approvals, events, and client reporting remain C1C;
+integrated security/platform acceptance remains C1D. `KODA_EXECUTION_PROFILE`
+is not an active runtime switch until C1C wiring lands.
 
 ### Phase 4D: authenticated remote operation
 

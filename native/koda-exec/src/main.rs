@@ -3,6 +3,7 @@
 mod attachment;
 mod durable;
 pub mod execution_policy;
+mod execution_security;
 mod executor_runtime;
 mod framing;
 mod internal_protocol;
@@ -298,6 +299,7 @@ async fn handle_connection(
                                 "protocol_version": PROTOCOL_VERSION,
                                 "supervisor_version": env!("CARGO_PKG_VERSION"),
                                 "platform": std::env::consts::OS,
+                                "execution_security": execution_security::native_capabilities(),
                                 "capabilities": {
                                     "process_group": capabilities().process_group,
                                     "job_object": capabilities().job_object,
