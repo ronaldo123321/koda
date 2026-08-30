@@ -650,9 +650,9 @@ impl WorkerRuntime {
         #[cfg(windows)]
         {
             lease.destroy();
-            return Err(crate::protocol::secret_policy_error(
+            Err(crate::protocol::secret_policy_error(
                 SecretPolicyError::SecretPolicyUnavailable,
-            ));
+            ))
         }
         #[cfg(unix)]
         {
