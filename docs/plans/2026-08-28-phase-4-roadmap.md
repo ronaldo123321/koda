@@ -193,7 +193,11 @@ output redaction. Phase 4C3B implementation commit `7273895` passed `verify`,
 `linux-native`, `macos-native`, and `windows-native` in
 [GitHub Actions run 33318090937](https://github.com/ronaldo123321/koda/actions/runs/33318090937).
 This adds trusted preparation and approval. C3C now enables the narrow native
-runtime described above; it does not close Phase 4C3 without C3D.
+runtime described above. The closing C3C implementation tree at commit
+`b4ab2c6` passed `verify`, `linux-native`, `macos-native`, and `windows-native`
+in
+[GitHub Actions run 33322204252](https://github.com/ronaldo123321/koda/actions/runs/33322204252).
+This completes C3C, but it does not close Phase 4C3 without C3D.
 
 Phase 4C3 does not claim containment from a process that is intentionally given
 a secret. Encoded/transformed output, writes into the workspace, inherited

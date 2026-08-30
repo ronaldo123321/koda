@@ -375,6 +375,14 @@ and verified prelaunch failure clean files; uncertain termination retains
 `SECRET_REAUTH_REQUIRED` instead of replaying the lease. TypeScript and Windows
 secret execution remain fixed unsupported paths for C3D acceptance.
 
+The closing C3C implementation tree at commit `b4ab2c6` passed `verify`,
+`linux-native`, `macos-native`, and `windows-native` in
+[GitHub Actions run 33322204252](https://github.com/ronaldo123321/koda/actions/runs/33322204252).
+This completes native injection, redaction, lifecycle, and cross-platform
+compatibility for C3C only. Phase 4C3 remains open until C3D projects the safe
+evidence through every client and closes the same-commit platform acceptance
+matrix.
+
 ### Phase 4C3D: clients and platform acceptance
 
 - Project safe secret evidence through CLI, TUI, and app-server responses.
