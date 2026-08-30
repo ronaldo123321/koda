@@ -1,16 +1,21 @@
 use std::ffi::{OsStr, OsString, c_void};
 use std::fs::{File, OpenOptions};
-use std::io;
+use std::io::{self, Read};
 use std::mem::{size_of, size_of_val};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
-use std::os::windows::io::AsRawHandle;
+use std::os::windows::io::{AsRawHandle, FromRawHandle, RawHandle};
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::ptr::{null, null_mut};
 use std::slice;
+use std::task::{Context, Poll};
 
 use sha2::{Digest, Sha256};
-use tokio::net::windows::named_pipe::{NamedPipeServer, PipeMode, ServerOptions};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::net::windows::named_pipe::{
+    ClientOptions, NamedPipeClient, NamedPipeServer, PipeMode, ServerOptions,
+};
 use tokio::sync::Mutex;
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_INSUFFICIENT_BUFFER, ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION,
@@ -28,20 +33,82 @@ use windows_sys::Win32::Security::{
     PROTECTED_DACL_SECURITY_INFORMATION, PSID, SECURITY_ATTRIBUTES, SECURITY_MAX_SID_SIZE,
     TOKEN_QUERY, TOKEN_USER, TokenUser, WELL_KNOWN_SID_TYPE, WinLocalSystemSid,
 };
-use windows_sys::Win32::Storage::FileSystem::{FILE_ALL_ACCESS, FILE_ATTRIBUTE_REPARSE_POINT};
-use windows_sys::Win32::System::Pipes::{CreatePipe, GetNamedPipeClientProcessId};
+use windows_sys::Win32::Storage::FileSystem::{
+    FILE_ALL_ACCESS, FILE_ATTRIBUTE_REPARSE_POINT, MOVEFILE_REPLACE_EXISTING,
+    MOVEFILE_WRITE_THROUGH, MoveFileExW, WriteFile,
+};
+use windows_sys::Win32::System::Pipes::{
+    CreatePipe, GetNamedPipeClientProcessId, GetNamedPipeServerProcessId,
+};
 use windows_sys::Win32::System::SystemServices::{
     ACCESS_ALLOWED_ACE_TYPE, SECURITY_DESCRIPTOR_REVISION,
 };
 use windows_sys::Win32::System::Threading::{
-    DeleteProcThreadAttributeList, GetCurrentProcess, InitializeProcThreadAttributeList,
-    OpenProcess, OpenProcessToken, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-    PROCESS_QUERY_LIMITED_INFORMATION, UpdateProcThreadAttribute,
+    CREATE_NEW_PROCESS_GROUP, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
+    DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess,
+    InitializeProcThreadAttributeList, OpenProcess, OpenProcessToken,
+    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
+    STARTF_USESTDHANDLES, STARTUPINFOEXW, UpdateProcThreadAttribute,
 };
 
 const PIPE_PREFIX: &str = r"\\.\pipe\koda-exec-";
 
-pub type LocalStream = NamedPipeServer;
+pub enum LocalStream {
+    Server(NamedPipeServer),
+    Client(NamedPipeClient),
+}
+
+impl AsyncRead for LocalStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Server(stream) => Pin::new(stream).poll_read(context, buffer),
+            Self::Client(stream) => Pin::new(stream).poll_read(context, buffer),
+        }
+    }
+}
+
+impl AsyncWrite for LocalStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<Result<usize, io::Error>> {
+        match self.get_mut() {
+            Self::Server(stream) => Pin::new(stream).poll_write(context, buffer),
+            Self::Client(stream) => Pin::new(stream).poll_write(context, buffer),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
+        match self.get_mut() {
+            Self::Server(stream) => Pin::new(stream).poll_flush(context),
+            Self::Client(stream) => Pin::new(stream).poll_flush(context),
+        }
+    }
+
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<Result<(), io::Error>> {
+        match self.get_mut() {
+            Self::Server(stream) => Pin::new(stream).poll_shutdown(context),
+            Self::Client(stream) => Pin::new(stream).poll_shutdown(context),
+        }
+    }
+}
+
+impl AsRawHandle for LocalStream {
+    fn as_raw_handle(&self) -> RawHandle {
+        match self {
+            Self::Server(stream) => stream.as_raw_handle(),
+            Self::Client(stream) => stream.as_raw_handle(),
+        }
+    }
+}
 
 pub struct LocalListener {
     endpoint: OsString,
@@ -104,6 +171,7 @@ impl Drop for SecurityDescriptor {
 
 pub struct BootstrapRead(OwnedHandle);
 pub struct BootstrapWrite(OwnedHandle);
+pub type BootstrapHandle = usize;
 
 pub struct RestrictedHandleList {
     storage: Vec<usize>,
@@ -254,14 +322,34 @@ pub async fn accept_local_connection(listener: &LocalListener) -> io::Result<Loc
         return Err(error);
     }
     *next = Some(create_server(&listener.endpoint, false)?);
-    Ok(server)
+    Ok(LocalStream::Server(server))
+}
+
+pub async fn connect_local_endpoint(endpoint: &Path) -> io::Result<LocalStream> {
+    validate_local_endpoint(endpoint)?;
+    ClientOptions::new()
+        .pipe_mode(PipeMode::Byte)
+        .open(endpoint)
+        .map(LocalStream::Client)
+}
+
+pub fn remove_local_endpoint(endpoint: &Path) -> io::Result<()> {
+    // Named Pipe instances are kernel objects and disappear when the owning
+    // handles close; validating here preserves the fail-closed endpoint contract.
+    validate_local_endpoint(endpoint)
 }
 
 pub fn verify_local_peer(stream: &LocalStream) -> io::Result<()> {
     let mut pid = 0;
     let pipe = stream.as_raw_handle() as HANDLE;
-    // SAFETY: `pipe` is a connected Named Pipe server handle and pid is writable.
-    if unsafe { GetNamedPipeClientProcessId(pipe, &mut pid) } == 0 || pid == 0 {
+    // SAFETY: `pipe` is connected and pid is a writable output slot.
+    let result = unsafe {
+        match stream {
+            LocalStream::Server(_) => GetNamedPipeClientProcessId(pipe, &mut pid),
+            LocalStream::Client(_) => GetNamedPipeServerProcessId(pipe, &mut pid),
+        }
+    };
+    if result == 0 || pid == 0 {
         return Err(io::Error::last_os_error());
     }
     let peer = process_user_sid(pid)?;
@@ -288,6 +376,18 @@ pub fn prepare_state_root(path: &Path) -> io::Result<()> {
 
 pub fn worker_control_root() -> PathBuf {
     std::env::temp_dir().join("koda-exec")
+}
+
+pub fn worker_local_endpoint(job_directory: &Path, job_id: &str) -> io::Result<PathBuf> {
+    let job_directory = std::fs::canonicalize(job_directory)?;
+    let user = current_user_sid()?;
+    let sid_hash = short_hash(user.bytes());
+    let normalized_job = job_directory.to_string_lossy().to_lowercase();
+    let job_hash = short_hash(normalized_job.as_bytes());
+    let identity_hash = short_hash(job_id.as_bytes());
+    Ok(PathBuf::from(format!(
+        "{PIPE_PREFIX}worker-{sid_hash}-{job_hash}-{identity_hash}"
+    )))
 }
 
 pub fn secure_private_directory(path: &Path) -> io::Result<()> {
@@ -355,6 +455,24 @@ pub fn open_exclusive_lock(path: &Path) -> io::Result<Option<File>> {
 
 pub fn sync_directory(_path: &Path) {}
 
+pub fn replace_file(source: &Path, target: &Path) -> io::Result<()> {
+    let source = wide(source.as_os_str());
+    let target = wide(target.as_os_str());
+    // SAFETY: both paths are null-terminated and remain live for the call.
+    if unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            target.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    } == 0
+    {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
 pub fn create_bootstrap_channel() -> io::Result<(BootstrapRead, BootstrapWrite)> {
     let attributes = SECURITY_ATTRIBUTES {
         nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
@@ -383,6 +501,160 @@ pub fn bootstrap_read_handle(read: &BootstrapRead) -> HANDLE {
 
 pub fn bootstrap_write_handle(write: &BootstrapWrite) -> HANDLE {
     write.0.0
+}
+
+pub fn read_inherited_secret(
+    handle: BootstrapHandle,
+    expected_bytes: usize,
+) -> io::Result<Vec<u8>> {
+    if handle == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "bootstrap handle is null",
+        ));
+    }
+    let raw = handle as HANDLE;
+    let mut flags = 0;
+    // SAFETY: the numeric value names the dedicated handle inherited from the parent.
+    if unsafe { GetHandleInformation(raw, &mut flags) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the parent transfers unique ownership of this dedicated handle.
+    let file = unsafe { File::from_raw_handle(raw as RawHandle) };
+    let maximum = u64::try_from(expected_bytes.saturating_add(1)).unwrap_or(u64::MAX);
+    let mut bytes = Vec::with_capacity(expected_bytes);
+    file.take(maximum).read_to_end(&mut bytes)?;
+    if bytes.len() != expected_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("bootstrap secret must contain exactly {expected_bytes} bytes"),
+        ));
+    }
+    Ok(bytes)
+}
+
+pub fn spawn_worker_process(
+    binary_path: &Path,
+    job_directory: &Path,
+    token_path: &Path,
+) -> io::Result<()> {
+    validate_private_file(token_path, Some(32))?;
+    let token = std::fs::read(token_path)?;
+    if token.len() != 32 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Worker token must contain exactly 32 bytes",
+        ));
+    }
+
+    let (token_read, token_write) = create_bootstrap_channel()?;
+    let mut written = 0;
+    // SAFETY: the write handle and token buffer are live for this synchronous write.
+    if unsafe {
+        WriteFile(
+            bootstrap_write_handle(&token_write),
+            token.as_ptr(),
+            token.len() as u32,
+            &mut written,
+            null_mut(),
+        )
+    } == 0
+        || written as usize != token.len()
+    {
+        return Err(io::Error::last_os_error());
+    }
+    drop(token_write);
+
+    let null_file = OpenOptions::new().read(true).write(true).open("NUL")?;
+    let null_handle = null_file.as_raw_handle() as HANDLE;
+    // SAFETY: null_handle is live and owned by null_file for this call.
+    if unsafe { SetHandleInformation(null_handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    let token_handle = bootstrap_read_handle(&token_read);
+    let mut attributes = RestrictedHandleList::new(&[token_handle, null_handle])?;
+    let application = wide(binary_path.as_os_str());
+    let token_value = (token_handle as usize).to_string();
+    let mut command_line = windows_command_line(&[
+        binary_path.as_os_str(),
+        OsStr::new("worker"),
+        OsStr::new("--job-dir"),
+        job_directory.as_os_str(),
+        OsStr::new("--token-handle"),
+        OsStr::new(&token_value),
+    ]);
+    let mut startup = STARTUPINFOEXW::default();
+    startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
+    startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    startup.StartupInfo.hStdInput = null_handle;
+    startup.StartupInfo.hStdOutput = null_handle;
+    startup.StartupInfo.hStdError = null_handle;
+    startup.lpAttributeList = attributes.as_raw().cast();
+    let mut process = PROCESS_INFORMATION::default();
+    // SAFETY: all strings are null-terminated, startup attributes remain live,
+    // and only the explicit inheritable handle list is exposed to the child.
+    let created = unsafe {
+        CreateProcessW(
+            application.as_ptr(),
+            command_line.as_mut_ptr(),
+            null(),
+            null(),
+            1,
+            EXTENDED_STARTUPINFO_PRESENT | CREATE_NEW_PROCESS_GROUP | CREATE_UNICODE_ENVIRONMENT,
+            null(),
+            null(),
+            &startup.StartupInfo,
+            &mut process,
+        )
+    };
+    if created == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let _process = OwnedHandle(process.hProcess);
+    let _thread = OwnedHandle(process.hThread);
+    Ok(())
+}
+
+fn windows_command_line(arguments: &[&OsStr]) -> Vec<u16> {
+    let mut command = Vec::new();
+    for (index, argument) in arguments.iter().enumerate() {
+        if index > 0 {
+            command.push(b' ' as u16);
+        }
+        append_quoted_argument(&mut command, argument);
+    }
+    command.push(0);
+    command
+}
+
+fn append_quoted_argument(command: &mut Vec<u16>, argument: &OsStr) {
+    let units = argument.encode_wide().collect::<Vec<_>>();
+    let quoted = units.is_empty()
+        || units
+            .iter()
+            .any(|unit| matches!(*unit, 0x20 | 0x09 | 0x0a | 0x0b | 0x0c | 0x0d | 0x22));
+    if !quoted {
+        command.extend(units);
+        return;
+    }
+    command.push(b'"' as u16);
+    let mut backslashes = 0usize;
+    for unit in units {
+        if unit == b'\\' as u16 {
+            backslashes += 1;
+            continue;
+        }
+        if unit == b'"' as u16 {
+            command.extend(std::iter::repeat_n(b'\\' as u16, backslashes * 2 + 1));
+        } else {
+            command.extend(std::iter::repeat_n(b'\\' as u16, backslashes));
+        }
+        backslashes = 0;
+        command.push(unit);
+    }
+    command.extend(std::iter::repeat_n(b'\\' as u16, backslashes * 2));
+    command.push(b'"' as u16);
 }
 
 fn create_server(endpoint: &OsStr, first_instance: bool) -> io::Result<NamedPipeServer> {
@@ -735,6 +1007,30 @@ mod tests {
     }
 
     #[test]
+    fn worker_endpoint_is_sid_job_directory_and_identity_bound() {
+        let root = std::env::temp_dir().join(format!("koda-worker-{}", uuid::Uuid::new_v4()));
+        let first = root.join("first");
+        let second = root.join("second");
+        std::fs::create_dir_all(&first).expect("first job directory");
+        std::fs::create_dir_all(&second).expect("second job directory");
+        let first_endpoint = worker_local_endpoint(&first, "job-a").expect("first endpoint");
+        let repeat_endpoint = worker_local_endpoint(&first, "job-a").expect("repeat endpoint");
+        let directory_endpoint = worker_local_endpoint(&second, "job-a").expect("directory");
+        let identity_endpoint = worker_local_endpoint(&first, "job-b").expect("identity");
+        assert_eq!(first_endpoint, repeat_endpoint);
+        assert_ne!(first_endpoint, directory_endpoint);
+        assert_ne!(first_endpoint, identity_endpoint);
+        validate_local_endpoint(&first_endpoint).expect("valid endpoint");
+        assert!(!first_endpoint.to_string_lossy().contains("job-a"));
+        assert!(
+            !first_endpoint
+                .to_string_lossy()
+                .contains(&root.to_string_lossy().to_string())
+        );
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
     fn private_acl_and_exclusive_lock_are_enforced() {
         let root = std::env::temp_dir().join(format!("koda-security-{}", uuid::Uuid::new_v4()));
         prepare_state_root(&root).expect("private root");
@@ -768,6 +1064,49 @@ mod tests {
         assert_eq!(write_flags & HANDLE_FLAG_INHERIT, 0);
         let list = RestrictedHandleList::new(&[bootstrap_read_handle(&read)]).expect("list");
         assert_eq!(list.handles(), &[bootstrap_read_handle(&read)]);
+    }
+
+    #[test]
+    fn inherited_bootstrap_secret_is_exact_and_consumed() {
+        let (read, write) = create_bootstrap_channel().expect("channel");
+        let expected = [0x5au8; 32];
+        let mut written = 0;
+        // SAFETY: write and expected are live for this synchronous call.
+        assert_ne!(
+            unsafe {
+                WriteFile(
+                    bootstrap_write_handle(&write),
+                    expected.as_ptr(),
+                    expected.len() as u32,
+                    &mut written,
+                    null_mut(),
+                )
+            },
+            0
+        );
+        assert_eq!(written as usize, expected.len());
+        drop(write);
+        let handle = bootstrap_read_handle(&read) as BootstrapHandle;
+        std::mem::forget(read);
+        assert_eq!(read_inherited_secret(handle, 32).expect("secret"), expected);
+    }
+
+    #[test]
+    fn command_line_quoting_preserves_spaces_quotes_and_trailing_slashes() {
+        let command = windows_command_line(&[
+            OsStr::new(r"C:\Program Files\Koda\koda-exec.exe"),
+            OsStr::new("worker"),
+            OsStr::new(r#"quote\"inside"#),
+            OsStr::new(r"trailing slash\"),
+            OsStr::new(""),
+        ]);
+        let rendered = String::from_utf16(&command[..command.len() - 1]).expect("utf16");
+        let expected = format!(
+            "\"C:\\Program Files\\Koda\\koda-exec.exe\" worker \"quote{}\"inside\" \"trailing slash{}\" \"\"",
+            "\\".repeat(3),
+            "\\".repeat(2),
+        );
+        assert_eq!(rendered, expected);
     }
 
     #[test]

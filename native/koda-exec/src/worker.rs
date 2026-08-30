@@ -1,15 +1,20 @@
 use std::io;
+#[cfg(unix)]
 use std::os::fd::RawFd;
 use std::path::Path;
+#[cfg(unix)]
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use tokio::fs::OpenOptions;
+#[cfg(unix)]
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+#[cfg(unix)]
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, mpsc, watch};
+#[cfg(unix)]
 use tokio::time::{sleep, timeout};
 
 use crate::attachment::AttachmentRegistry;
@@ -20,18 +25,24 @@ use crate::internal_protocol::{
     WorkerResponse, WorkerTerminateParams, decode_base64, encode_base64, parse_params,
     status_value, worker_proof,
 };
+use crate::platform::bootstrap::{BootstrapHandle, read_inherited_secret};
+#[cfg(unix)]
 use crate::platform::bootstrap::{
     await_gate_and_exec, configure_pipe_command, configure_pty_command, create_bootstrap_channel,
-    raw_handle, read_inherited_secret, release_gate,
+    raw_handle, release_gate,
 };
 use crate::platform::identity::current_process_identity;
+#[cfg(unix)]
 use crate::platform::process::{
     ProcessTreeSignal, exit_signal_name, process_group_exists, signal_process_group,
 };
+#[cfg(unix)]
 use crate::platform::terminal::{
     duplicate_terminal, is_terminal_eof, open_terminal, set_terminal_size,
 };
-use crate::platform::{LocalListener, LocalStream, bind_local_endpoint, verify_local_peer};
+use crate::platform::{
+    LocalListener, LocalStream, accept_local_connection, bind_local_endpoint, verify_local_peer,
+};
 use crate::protocol::{
     AttachmentAcquireInputParams, AttachmentCredentials, AttachmentDetachParams,
     AttachmentDetachResult, AttachmentReadParams, AttachmentReadResult, AttachmentRenewParams,
@@ -42,11 +53,15 @@ use crate::protocol::{
 };
 use crate::pty_output::PtyOutputStore;
 
+#[cfg(unix)]
 const OUTPUT_BUFFER_BYTES: usize = 16_384;
 const PTY_COMMAND_QUEUE_DEPTH: usize = 64;
 
-pub async fn run_worker(job_directory: &Path, token_fd: RawFd) -> Result<(), ProtocolError> {
-    let token = read_inherited_token(token_fd)?;
+pub async fn run_worker(
+    job_directory: &Path,
+    token_handle: BootstrapHandle,
+) -> Result<(), ProtocolError> {
+    let token = read_inherited_token(token_handle)?;
     let store_root = job_directory
         .parent()
         .and_then(Path::parent)
@@ -68,7 +83,8 @@ pub async fn run_worker(job_directory: &Path, token_fd: RawFd) -> Result<(), Pro
         ));
     }
     let worker_identity = current_process_identity().map_err(identity_error)?;
-    let listener = bind_local_endpoint(&record.worker_socket_path())
+    let endpoint = record.worker_socket_path()?;
+    let listener = bind_local_endpoint(&endpoint)
         .await
         .map_err(worker_socket_error)?;
     let runtime = Arc::new(WorkerRuntime::new(record, current, token.clone())?);
@@ -93,7 +109,9 @@ pub async fn run_worker(job_directory: &Path, token_fd: RawFd) -> Result<(), Pro
     let execution = execute_job(Arc::clone(&runtime)).await;
     let _ = shutdown_sender.send(true);
     let _ = server.await;
-    let _ = crate::platform::remove_local_endpoint(&runtime.record.worker_socket_path());
+    if let Ok(endpoint) = runtime.record.worker_socket_path() {
+        let _ = crate::platform::remove_local_endpoint(&endpoint);
+    }
     execution
 }
 
@@ -161,6 +179,7 @@ impl WorkerRuntime {
         Ok(())
     }
 
+    #[cfg(unix)]
     async fn publish_command_starting(&self) -> Result<(), ProtocolError> {
         let mut guard = self.state.lock().await;
         let mut next = guard.clone();
@@ -169,6 +188,7 @@ impl WorkerRuntime {
         Ok(())
     }
 
+    #[cfg(unix)]
     async fn publish_running(&self, pid: u32, identity: String) -> Result<(), ProtocolError> {
         let mut guard = self.state.lock().await;
         let mut next = guard.clone();
@@ -179,6 +199,7 @@ impl WorkerRuntime {
         Ok(())
     }
 
+    #[cfg(unix)]
     async fn publish_terminating(&self) -> Result<(), ProtocolError> {
         let mut guard = self.state.lock().await;
         let mut next = guard.clone();
@@ -187,6 +208,7 @@ impl WorkerRuntime {
         Ok(())
     }
 
+    #[cfg(unix)]
     async fn publish_start_failed(&self, error: io::Error) -> Result<(), ProtocolError> {
         self.stdout_complete.store(true, Ordering::Release);
         self.stderr_complete.store(true, Ordering::Release);
@@ -209,6 +231,7 @@ impl WorkerRuntime {
         Ok(())
     }
 
+    #[cfg(unix)]
     async fn publish_terminal(
         &self,
         state: JobState,
@@ -236,6 +259,27 @@ impl WorkerRuntime {
             next.exit_code = status.code();
             next.signal = exit_signal_name(&status);
         }
+        *guard = self.record.transition(&guard, next)?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    async fn publish_platform_unavailable(&self) -> Result<(), ProtocolError> {
+        self.stdout_complete.store(true, Ordering::Release);
+        self.stderr_complete.store(true, Ordering::Release);
+        if let Some(pty) = &self.pty {
+            pty.complete.store(true, Ordering::Release);
+        }
+        let mut guard = self.state.lock().await;
+        let mut next = guard.clone();
+        next.state = JobState::StartFailed;
+        next.duration_ms = duration_millis(self.started_at.elapsed());
+        next.failure = Some(JobFailure {
+            code: "PLATFORM_CAPABILITY_UNAVAILABLE".to_owned(),
+            message:
+                "Windows command execution is unavailable until Job Object ownership is verified."
+                    .to_owned(),
+        });
         *guard = self.record.transition(&guard, next)?;
         Ok(())
     }
@@ -505,8 +549,8 @@ async fn serve_worker(
 ) -> io::Result<()> {
     loop {
         tokio::select! {
-            accepted = listener.accept() => {
-                let (stream, _) = accepted?;
+            accepted = accept_local_connection(&listener) => {
+                let stream = accepted?;
                 verify_local_peer(&stream)?;
                 let connection_runtime = Arc::clone(&runtime);
                 let connection_token = token.clone();
@@ -710,6 +754,7 @@ fn worker_hello(
     })
 }
 
+#[cfg(unix)]
 async fn execute_job(runtime: Arc<WorkerRuntime>) -> Result<(), ProtocolError> {
     match runtime.record.manifest.start.io_mode {
         IoMode::Pipe => execute_pipe_job(runtime).await,
@@ -717,6 +762,12 @@ async fn execute_job(runtime: Arc<WorkerRuntime>) -> Result<(), ProtocolError> {
     }
 }
 
+#[cfg(windows)]
+async fn execute_job(runtime: Arc<WorkerRuntime>) -> Result<(), ProtocolError> {
+    runtime.publish_platform_unavailable().await
+}
+
+#[cfg(unix)]
 async fn execute_pty_job(runtime: Arc<WorkerRuntime>) -> Result<(), ProtocolError> {
     runtime.publish_command_starting().await?;
     fault_point("after_command_starting");
@@ -958,6 +1009,7 @@ async fn execute_pty_job(runtime: Arc<WorkerRuntime>) -> Result<(), ProtocolErro
     Ok(())
 }
 
+#[cfg(unix)]
 async fn capture_pty_output(
     mut source: tokio::fs::File,
     runtime: &WorkerRuntime,
@@ -991,6 +1043,7 @@ async fn capture_pty_output(
     }
 }
 
+#[cfg(unix)]
 async fn write_pty_commands(
     mut destination: tokio::fs::File,
     mut receiver: mpsc::Receiver<PtyCommand>,
@@ -1020,10 +1073,12 @@ async fn write_pty_commands(
     Ok(())
 }
 
+#[cfg(unix)]
 fn protocol_io_error(error: ProtocolError) -> io::Error {
     io::Error::other(format!("{}: {}", error.code, error.message))
 }
 
+#[cfg(unix)]
 async fn execute_pipe_job(runtime: Arc<WorkerRuntime>) -> Result<(), ProtocolError> {
     runtime.publish_command_starting().await?;
     fault_point("after_command_starting");
@@ -1259,21 +1314,25 @@ async fn execute_pipe_job(runtime: Arc<WorkerRuntime>) -> Result<(), ProtocolErr
     Ok(())
 }
 
+#[cfg(unix)]
 pub fn run_command_bootstrap(gate_fd: RawFd, argv: Vec<String>) -> io::Result<()> {
     await_gate_and_exec(gate_fd, argv)
 }
 
+#[cfg(unix)]
 enum JobTrigger {
     Exited(io::Result<std::process::ExitStatus>),
     Terminate(TerminationReason),
     OutputFailed(String),
 }
 
+#[cfg(unix)]
 struct TerminationResult {
     status: Option<std::process::ExitStatus>,
     snapshot: TerminationSnapshot,
 }
 
+#[cfg(unix)]
 async fn capture_output<R>(
     mut source: R,
     path: &Path,
@@ -1314,6 +1373,7 @@ async fn sync_file(path: &Path) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+#[cfg(unix)]
 async fn terminate_child(
     child: &mut Child,
     pid: u32,
@@ -1361,6 +1421,7 @@ async fn terminate_child(
     }
 }
 
+#[cfg(unix)]
 async fn terminate_group_after_root(
     pid: u32,
     reason: TerminationReason,
@@ -1395,6 +1456,7 @@ async fn terminate_group_after_root(
     }
 }
 
+#[cfg(unix)]
 pub async fn cleanup_verified_process_group(
     pid: u32,
     grace_ms: u64,
@@ -1409,6 +1471,23 @@ pub async fn cleanup_verified_process_group(
     .await
 }
 
+#[cfg(windows)]
+pub async fn cleanup_verified_process_group(
+    _pid: u32,
+    _grace_ms: u64,
+    _confirmation_ms: u64,
+) -> TerminationSnapshot {
+    TerminationSnapshot {
+        reason: TerminationReason::OrphanCleanup.as_str().to_owned(),
+        outcome: "uncertain".to_owned(),
+        attempts: vec![TerminationAttempt {
+            attempt: "identity_check".to_owned(),
+            mechanism: "windows_job_object_recovery_pending".to_owned(),
+        }],
+    }
+}
+
+#[cfg(unix)]
 async fn wait_for_group_exit(pid: u32, milliseconds: u64) -> bool {
     if !process_group_exists(pid) {
         return true;
@@ -1423,8 +1502,8 @@ async fn wait_for_group_exit(pid: u32, milliseconds: u64) -> bool {
     !process_group_exists(pid)
 }
 
-fn read_inherited_token(token_fd: RawFd) -> Result<Vec<u8>, ProtocolError> {
-    read_inherited_secret(token_fd, 32).map_err(|error| {
+fn read_inherited_token(token_handle: BootstrapHandle) -> Result<Vec<u8>, ProtocolError> {
+    read_inherited_secret(token_handle, 32).map_err(|error| {
         let code = if error.kind() == io::ErrorKind::InvalidInput {
             "INVALID_WORKER_ARGUMENT"
         } else {

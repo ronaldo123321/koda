@@ -1,20 +1,14 @@
 #![cfg_attr(windows, allow(dead_code))]
 
-#[cfg(unix)]
 mod attachment;
-#[cfg(unix)]
 mod durable;
 mod executor_runtime;
 mod framing;
-#[cfg(unix)]
 mod internal_protocol;
 mod platform;
 mod protocol;
-#[cfg(unix)]
 mod pty_output;
-#[cfg(unix)]
 mod supervisor;
-#[cfg(unix)]
 mod worker;
 
 use std::io;
@@ -51,21 +45,21 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             );
             Ok(())
         }
-        Arguments::Worker { job_dir, token_fd } => run_worker(job_dir, token_fd).await,
+        Arguments::Worker {
+            job_dir,
+            token_handle,
+        } => run_worker(job_dir, token_handle).await,
         Arguments::CommandBootstrap { gate_fd, argv } => run_command_bootstrap(gate_fd, argv),
     }
 }
 
-#[cfg(unix)]
-async fn run_worker(job_dir: PathBuf, token_fd: i32) -> Result<(), Box<dyn std::error::Error>> {
-    worker::run_worker(&job_dir, token_fd)
+async fn run_worker(
+    job_dir: PathBuf,
+    token_handle: platform::bootstrap::BootstrapHandle,
+) -> Result<(), Box<dyn std::error::Error>> {
+    worker::run_worker(&job_dir, token_handle)
         .await
         .map_err(|error| format!("{}: {}", error.code, error.message).into())
-}
-
-#[cfg(windows)]
-async fn run_worker(_job_dir: PathBuf, _token_fd: i32) -> Result<(), Box<dyn std::error::Error>> {
-    Err("PLATFORM_CAPABILITY_UNAVAILABLE: Windows Worker startup requires Phase 4B4B".into())
 }
 
 #[cfg(unix)]
@@ -127,7 +121,7 @@ enum Arguments {
     },
     Worker {
         job_dir: PathBuf,
-        token_fd: i32,
+        token_handle: platform::bootstrap::BootstrapHandle,
     },
     CommandBootstrap {
         gate_fd: i32,
@@ -166,14 +160,11 @@ fn parse_arguments(
             if !job_dir.is_absolute() {
                 return Err("--job-dir must be an absolute path".into());
             }
-            let token_fd = values
-                .get("--token-fd")
-                .ok_or("--token-fd is required")?
-                .parse::<i32>()?;
-            if token_fd < 3 {
-                return Err("--token-fd must be a non-standard descriptor".into());
-            }
-            Ok(Arguments::Worker { job_dir, token_fd })
+            let token_handle = worker_token_handle(&values)?;
+            Ok(Arguments::Worker {
+                job_dir,
+                token_handle,
+            })
         }
         Some("command-bootstrap") => {
             if arguments.next().as_deref() != Some("--gate-fd") {
@@ -233,6 +224,34 @@ fn local_endpoint_argument(
         (Some(_), Some(_)) => Err("--endpoint and --socket cannot be used together".into()),
         (None, None) => Err("--endpoint is required".into()),
     }
+}
+
+#[cfg(unix)]
+fn worker_token_handle(
+    values: &std::collections::HashMap<String, String>,
+) -> Result<platform::bootstrap::BootstrapHandle, Box<dyn std::error::Error>> {
+    let token_fd = values
+        .get("--token-fd")
+        .ok_or("--token-fd is required")?
+        .parse::<i32>()?;
+    if token_fd < 3 {
+        return Err("--token-fd must be a non-standard descriptor".into());
+    }
+    Ok(token_fd)
+}
+
+#[cfg(windows)]
+fn worker_token_handle(
+    values: &std::collections::HashMap<String, String>,
+) -> Result<platform::bootstrap::BootstrapHandle, Box<dyn std::error::Error>> {
+    let token_handle = values
+        .get("--token-handle")
+        .ok_or("--token-handle is required")?
+        .parse::<usize>()?;
+    if token_handle == 0 {
+        return Err("--token-handle must be a non-null inherited handle".into());
+    }
+    Ok(token_handle)
 }
 
 async fn handle_connection(
@@ -386,6 +405,7 @@ mod tests {
         assert!(duplicate.is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn worker_requires_inherited_descriptor() {
         let result = parse_arguments(
@@ -394,5 +414,40 @@ mod tests {
                 .map(str::to_owned),
         );
         assert!(result.is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn worker_requires_inherited_handle() {
+        let missing = parse_arguments(
+            ["worker", "--job-dir", TEST_JOB_DIRECTORY]
+                .into_iter()
+                .map(str::to_owned),
+        );
+        assert!(missing.is_err());
+        let null = parse_arguments(
+            [
+                "worker",
+                "--job-dir",
+                TEST_JOB_DIRECTORY,
+                "--token-handle",
+                "0",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        );
+        assert!(null.is_err());
+        let inherited = parse_arguments(
+            [
+                "worker",
+                "--job-dir",
+                TEST_JOB_DIRECTORY,
+                "--token-handle",
+                "4096",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        );
+        assert!(matches!(inherited, Ok(Arguments::Worker { .. })));
     }
 }

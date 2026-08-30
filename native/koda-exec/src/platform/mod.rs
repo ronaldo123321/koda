@@ -11,12 +11,13 @@ mod windows;
 pub use unix::{
     LocalListener, LocalStream, accept_local_connection, bind_local_endpoint,
     connect_local_endpoint, default_local_endpoint, prepare_local_endpoint_parent,
-    remove_local_endpoint, validate_local_endpoint, verify_local_peer,
+    remove_local_endpoint, validate_local_endpoint, verify_local_peer, worker_local_endpoint,
 };
 #[cfg(windows)]
 pub use windows::{
-    LocalStream, accept_local_connection, bind_local_endpoint, default_local_endpoint,
-    prepare_local_endpoint_parent, validate_local_endpoint, verify_local_peer,
+    LocalListener, LocalStream, accept_local_connection, bind_local_endpoint,
+    connect_local_endpoint, default_local_endpoint, prepare_local_endpoint_parent,
+    remove_local_endpoint, validate_local_endpoint, verify_local_peer, worker_local_endpoint,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -53,33 +54,30 @@ pub mod identity {
 pub mod state_security {
     #[cfg(unix)]
     pub use super::unix::{
-        open_exclusive_lock, open_new_private_file, secure_private_directory, sync_directory,
-        validate_private_directory, validate_private_file, worker_control_root,
+        open_exclusive_lock, open_new_private_file, replace_file, secure_private_directory,
+        sync_directory, validate_private_directory, validate_private_file, worker_control_root,
     };
     #[cfg(windows)]
     #[allow(unused_imports)] // Phase 4B4B moves durable state onto this backend.
     pub use super::windows::{
-        open_exclusive_lock, open_new_private_file, prepare_state_root, secure_private_directory,
-        sync_directory, validate_private_directory, validate_private_file, worker_control_root,
+        open_exclusive_lock, open_new_private_file, prepare_state_root, replace_file,
+        secure_private_directory, sync_directory, validate_private_directory,
+        validate_private_file, worker_control_root,
     };
 }
 
 #[cfg(unix)]
 pub mod bootstrap {
     pub use super::unix::{
-        await_gate_and_exec, configure_pipe_command, configure_pty_command,
-        configure_worker_command, create_bootstrap_channel, raw_handle, read_inherited_secret,
-        release_gate,
+        BootstrapHandle, await_gate_and_exec, configure_pipe_command, configure_pty_command,
+        create_bootstrap_channel, raw_handle, read_inherited_secret, release_gate,
+        spawn_worker_process,
     };
 }
 
 #[cfg(windows)]
 pub mod bootstrap {
-    #[allow(unused_imports)] // Phase 4B4B passes this list to CreateProcessW.
-    pub use super::windows::{
-        BootstrapRead, BootstrapWrite, RestrictedHandleList, bootstrap_read_handle,
-        bootstrap_write_handle, create_bootstrap_channel,
-    };
+    pub use super::windows::{BootstrapHandle, read_inherited_secret, spawn_worker_process};
 }
 
 #[cfg(unix)]

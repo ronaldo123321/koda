@@ -122,6 +122,10 @@ pub fn worker_control_root() -> PathBuf {
     PathBuf::from("/tmp").join(format!("koda-exec-{uid}"))
 }
 
+pub fn worker_local_endpoint(_job_directory: &Path, job_id: &str) -> io::Result<PathBuf> {
+    Ok(worker_control_root().join(format!("{job_id}.sock")))
+}
+
 pub fn secure_private_directory(path: &Path) -> io::Result<()> {
     let metadata = std::fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
@@ -200,6 +204,10 @@ pub fn sync_directory(path: &Path) {
     if let Ok(directory) = File::open(path) {
         let _ = directory.sync_all();
     }
+}
+
+pub fn replace_file(source: &Path, target: &Path) -> io::Result<()> {
+    std::fs::rename(source, target)
 }
 
 pub fn create_bootstrap_channel() -> io::Result<(BootstrapRead, BootstrapWrite)> {
@@ -297,6 +305,27 @@ pub fn configure_worker_command(command: &mut Command, token_file: &File, target
     unsafe {
         command.pre_exec(move || inherit_descriptor(source, target));
     }
+}
+
+pub fn spawn_worker_process(
+    binary_path: &Path,
+    job_directory: &Path,
+    token_path: &Path,
+) -> io::Result<()> {
+    let token_file = OpenOptions::new().read(true).open(token_path)?;
+    let mut command = Command::new(binary_path);
+    command
+        .arg("worker")
+        .arg("--job-dir")
+        .arg(job_directory)
+        .arg("--token-fd")
+        .arg("3")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    configure_worker_command(&mut command, &token_file, 3);
+    command.spawn()?;
+    Ok(())
 }
 
 pub fn configure_pipe_command(

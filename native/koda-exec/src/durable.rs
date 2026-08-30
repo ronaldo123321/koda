@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::platform::state_security;
+use crate::platform::{self, state_security};
 use crate::protocol::{
     IoMode, JobFailure, JobSnapshot, JobState, ProtocolError, StartParams, TerminationSnapshot,
 };
@@ -282,8 +282,9 @@ impl JobRecord {
         self.directory.join("state.head")
     }
 
-    pub fn worker_socket_path(&self) -> PathBuf {
-        state_security::worker_control_root().join(format!("{}.sock", self.manifest.job_id))
+    pub fn worker_socket_path(&self) -> Result<PathBuf, ProtocolError> {
+        platform::worker_local_endpoint(&self.directory, &self.manifest.job_id)
+            .map_err(state_io_error)
     }
 
     pub fn stdout_path(&self) -> PathBuf {
@@ -653,7 +654,7 @@ where
         .ok_or_else(|| corrupt("Durable state path has no parent."))?;
     let temporary = parent.join(format!(".state-{}.tmp", Uuid::new_v4().simple()));
     write_new_private_file(&temporary, &bytes)?;
-    std::fs::rename(&temporary, path).map_err(state_io_error)?;
+    state_security::replace_file(&temporary, path).map_err(state_io_error)?;
     sync_directory(parent);
     Ok(())
 }
@@ -751,6 +752,7 @@ fn json_encode_error(error: serde_json::Error) -> ProtocolError {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     use super::*;
@@ -841,6 +843,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn quarantines_wrong_permissions_and_symlinked_entries() {
         let root = std::env::temp_dir().join(format!("koda-store-{}", Uuid::new_v4().simple()));
         let store = JobStore::open(&root).expect("store");

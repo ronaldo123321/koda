@@ -1,8 +1,6 @@
 use std::collections::HashMap;
-use std::fs::OpenOptions;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -21,7 +19,7 @@ use crate::internal_protocol::{
     WORKER_PROTOCOL_VERSION, WorkerHelloParams, WorkerHelloResult, WorkerRequest, WorkerResponse,
     WorkerTerminateParams, decode_base64, encode_base64, new_nonce, worker_proof,
 };
-use crate::platform::bootstrap::configure_worker_command;
+use crate::platform::bootstrap::spawn_worker_process;
 use crate::platform::identity::process_identity_matches;
 use crate::platform::{
     LocalStream, connect_local_endpoint, remove_local_endpoint, verify_local_peer,
@@ -601,23 +599,8 @@ impl Supervisor {
 
     fn spawn_worker(&self, record: &JobRecord) -> Result<(), ProtocolError> {
         let token_path = record.directory.join("control.token");
-        let token_file = OpenOptions::new()
-            .read(true)
-            .open(&token_path)
-            .map_err(worker_spawn_io_error)?;
-        let mut command = Command::new(&self.binary_path);
-        command
-            .arg("worker")
-            .arg("--job-dir")
-            .arg(&record.directory)
-            .arg("--token-fd")
-            .arg("3")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        configure_worker_command(&mut command, &token_file, 3);
-        command.spawn().map_err(worker_spawn_io_error)?;
-        Ok(())
+        spawn_worker_process(&self.binary_path, &record.directory, &token_path)
+            .map_err(worker_spawn_io_error)
     }
 
     async fn wait_for_start(&self, record: &JobRecord) -> Result<JobSnapshot, ProtocolError> {
@@ -731,7 +714,8 @@ struct WorkerConnection {
 
 impl WorkerConnection {
     async fn connect(record: &JobRecord) -> Result<Self, ProtocolError> {
-        let mut stream = connect_local_endpoint(&record.worker_socket_path())
+        let endpoint = record.worker_socket_path()?;
+        let mut stream = connect_local_endpoint(&endpoint)
             .await
             .map_err(worker_connect_error)?;
         verify_local_peer(&stream).map_err(|error| {
@@ -1017,7 +1001,7 @@ fn file_length(path: &Path) -> Result<u64, ProtocolError> {
 }
 
 fn remove_stale_worker_socket(record: &JobRecord) -> Result<(), ProtocolError> {
-    remove_local_endpoint(&record.worker_socket_path()).map_err(state_io_error)
+    remove_local_endpoint(&record.worker_socket_path()?).map_err(state_io_error)
 }
 
 fn unix_millis() -> u64 {

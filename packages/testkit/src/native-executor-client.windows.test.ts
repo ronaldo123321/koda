@@ -53,6 +53,13 @@ windowsDescribe("NativeExecutorClient Windows control plane", () => {
     });
   });
 
+  test("routes durable read operations through the shared Supervisor", async () => {
+    await expect(client.list()).resolves.toEqual({
+      jobs: [],
+      next_cursor: null,
+    });
+  });
+
   test("serves concurrent authenticated Named Pipe handshakes", async () => {
     const clients = await Promise.all(
       Array.from({ length: 12 }, () =>
