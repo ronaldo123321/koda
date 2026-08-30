@@ -17,7 +17,7 @@ import {
   validateExecutionSecuritySnapshot,
 } from "./execution-policy.js";
 
-const PROTOCOL_VERSION = 3;
+const PROTOCOL_VERSION = 4;
 const MAX_FRAME_BYTES = 1_048_576;
 const DEFAULT_STARTUP_TIMEOUT_MS = 5_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
@@ -506,6 +506,18 @@ const helloResultSchema = z
         code: "custom",
         path: ["execution_security", "backend"],
         message: "Execution-security backend does not match the platform.",
+      });
+    }
+    if (
+      (value.execution_security.schema_version === 2 &&
+        value.platform !== "macos") ||
+      (value.execution_security.schema_version === 3 &&
+        value.platform !== "linux")
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["execution_security", "platform"],
+        message: "Execution-security platform does not match the host.",
       });
     }
   });
@@ -1304,7 +1316,7 @@ function parseResponse(value: unknown): ExecutorResponse {
   if (parsed.data.protocol_version !== PROTOCOL_VERSION) {
     throw new NativeExecutorError(
       "INCOMPATIBLE_PROTOCOL",
-      "Executor protocol v3 is required. Finish or stop the older Supervisor explicitly before upgrading; no fallback was attempted.",
+      "Executor protocol v4 is required. Finish or stop the older Supervisor explicitly before upgrading; no fallback was attempted.",
     );
   }
   return parsed.data;

@@ -41,7 +41,7 @@ describeNative("NativeExecutorClient", () => {
 
   it("negotiates explicit POSIX capabilities", async () => {
     await expect(client.hello()).resolves.toMatchObject({
-      protocol_version: 3,
+      protocol_version: 4,
       platform: process.platform === "darwin" ? "macos" : "linux",
       capabilities: {
         process_group: true,

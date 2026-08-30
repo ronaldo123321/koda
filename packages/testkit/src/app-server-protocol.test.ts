@@ -53,7 +53,10 @@ import {
 } from "@koda/protocol";
 import { describe, expect, it } from "vitest";
 
-import { macosProtectedLaunchSecurity } from "./execution-security-fixtures.js";
+import {
+  linuxProtectedLaunchSecurity,
+  macosProtectedLaunchSecurity,
+} from "./execution-security-fixtures.js";
 
 describe("app-server protocol", () => {
   it("accepts strict versioned requests and safe JSON-RPC IDs", () => {
@@ -450,6 +453,19 @@ describe("app-server protocol", () => {
     });
     expect(attached).not.toHaveProperty("capabilityToken");
     expect(attached.process.security).toEqual(security);
+    expect(
+      processAttachResultSchema.parse({
+        ...attached,
+        process: {
+          ...attached.process,
+          security: linuxProtectedLaunchSecurity(),
+        },
+      }).process.security,
+    ).toMatchObject({
+      schema_version: 3,
+      platform: "linux",
+      sandbox_runtime: { mechanism: "linux_bubblewrap" },
+    });
     expect(() =>
       processAttachResultSchema.parse({
         processSessionId,

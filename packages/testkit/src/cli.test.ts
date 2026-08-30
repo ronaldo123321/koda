@@ -38,7 +38,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { macosProtectedLaunchSecurity } from "./execution-security-fixtures.js";
+import {
+  linuxProtectedLaunchSecurity,
+  macosProtectedLaunchSecurity,
+} from "./execution-security-fixtures.js";
 
 import { DeterministicItemIdFactory } from "./deterministic.js";
 
@@ -244,6 +247,18 @@ describe("Phase 1A CLI", () => {
     });
     await sink.append({
       ...metadata,
+      sequence: 3,
+      type: "process.started",
+      payload: {
+        callId: toolCallIdSchema.parse("linux-console-call"),
+        name: "exec_command",
+        pid: 43,
+        ownership: "posix_process_group",
+        security: linuxProtectedLaunchSecurity(),
+      },
+    });
+    await sink.append({
+      ...metadata,
       type: "turn.completed",
       payload: {
         steps: 1,
@@ -267,6 +282,7 @@ describe("Phase 1A CLI", () => {
     expect(stderr.value).toContain("[koda] using read_file");
     expect(stderr.value).toContain("[koda] artifact sha256:");
     expect(stderr.value).toContain("OS sandbox: macOS Seatbelt");
+    expect(stderr.value).toContain("OS sandbox: Linux Bubblewrap + seccomp");
     expect(stderr.value).toContain("120 input (80 cached, 10 cache write)");
     expect(stderr.value).toContain("1/1 requests reported");
   });

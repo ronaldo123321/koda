@@ -18,6 +18,7 @@ import {
   c1ExecutionCapabilities,
   executionCapabilitiesDigest,
   executionPolicyDigest,
+  linuxBubblewrapExecutionCapabilities,
   type NativeExecutorClient,
   resolveExecutionPolicy,
   registerExecCommandTool,
@@ -179,6 +180,52 @@ describe("exec_command approval grant identity", () => {
       "tool.execution_started",
     );
     await expect(access(marker)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("invalidates an exact-command grant when the Bubblewrap identity changes", async () => {
+    const root = await createWorkspace();
+    const canonicalRoot = await realpath(root);
+    const policy = resolveExecutionPolicy({
+      workspaceRoot: canonicalRoot,
+      environmentProfile: "read-only",
+    });
+    const runtime = {
+      schema_version: 1 as const,
+      mechanism: "linux_bubblewrap" as const,
+      canonical_path: "/usr/bin/bwrap",
+      device: "2049",
+      inode: "123456789",
+      size: 123456,
+      mtime_ns: "1788076800123456789",
+      sha256:
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      version: "bubblewrap 0.11.0",
+      probe_revision: 1 as const,
+    };
+    const registryFor = (sha256: string) =>
+      createRegistry(root, {
+        executionPolicy: policy,
+        nativeExecutor: {
+          hello: async () => ({
+            execution_security: linuxBubblewrapExecutionCapabilities({
+              ...runtime,
+              sha256,
+            }),
+          }),
+        } as NativeExecutorClient,
+      });
+    const argv = [process.execPath, "-e", "process.exit(0)"];
+    const original = await grantCandidate(
+      await registryFor(runtime.sha256),
+      { argv },
+      "linux-runtime-original",
+    );
+    const replaced = await grantCandidate(
+      await registryFor("a".repeat(64)),
+      { argv },
+      "linux-runtime-replaced",
+    );
+    expect(replaced.key).not.toBe(original.key);
   });
 });
 

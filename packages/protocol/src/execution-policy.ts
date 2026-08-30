@@ -3,6 +3,8 @@ import { z } from "zod";
 export const EXECUTION_POLICY_SCHEMA_VERSION = 1;
 export const EXECUTION_WORKSPACE_MAX_BYTES = 4_096;
 export const EXECUTION_SECURITY_MAX_BYTES = 16_384;
+export const EXECUTION_SANDBOX_RUNTIME_PATH_MAX_BYTES = 4_096;
+export const EXECUTION_SANDBOX_RUNTIME_VERSION_MAX_BYTES = 256;
 
 const utf8Bytes = (text: string) => new TextEncoder().encode(text).byteLength;
 
@@ -86,7 +88,7 @@ export const executionBackendSchema = z.enum([
   "typescript_posix",
   "typescript_windows",
 ]);
-export const executionPlatformSchema = z.literal("macos");
+export const executionPlatformSchema = z.enum(["macos", "linux"]);
 export const executionPolicyDimensionSchema = z.enum([
   "filesystem",
   "network",
@@ -101,6 +103,57 @@ const supervisionMechanismSchema = z.enum([
 ]);
 const enforcementLayerSchema = z.enum(["application", "os"]);
 const digestSchema = z.string().regex(/^[a-f0-9]{64}$/u);
+const canonicalU64DecimalSchema = z
+  .string()
+  .regex(/^(?:0|[1-9][0-9]{0,19})$/u)
+  .refine((value) => {
+    try {
+      return BigInt(value) <= 18_446_744_073_709_551_615n;
+    } catch {
+      return false;
+    }
+  }, "Decimal value exceeds u64.");
+
+const linuxSandboxRuntimePathSchema = z
+  .string()
+  .refine(
+    (value) =>
+      value.startsWith("/") &&
+      !value.startsWith("//") &&
+      utf8Bytes(value) <= EXECUTION_SANDBOX_RUNTIME_PATH_MAX_BYTES &&
+      isExecutionWorkspacePath(value),
+    "Invalid Linux sandbox runtime path.",
+  );
+
+const sandboxRuntimeVersionSchema = z.string().refine(
+  (value) =>
+    value.length > 0 &&
+    utf8Bytes(value) <= EXECUTION_SANDBOX_RUNTIME_VERSION_MAX_BYTES &&
+    !/\p{Cc}/u.test(value) &&
+    ![...value].some((character) => {
+      const code = character.codePointAt(0)!;
+      return code >= 0xd800 && code <= 0xdfff;
+    }),
+  "Invalid sandbox runtime version.",
+);
+
+/** Versioned, bounded identity for the exact Bubblewrap binary whose real
+ * capability probe succeeded. It is pure retained evidence in C2B1.
+ */
+export const linuxBubblewrapRuntimeDescriptorSchema = z
+  .object({
+    schema_version: z.literal(1),
+    mechanism: z.literal("linux_bubblewrap"),
+    canonical_path: linuxSandboxRuntimePathSchema,
+    device: canonicalU64DecimalSchema,
+    inode: canonicalU64DecimalSchema,
+    size: z.number().int().safe().nonnegative(),
+    mtime_ns: canonicalU64DecimalSchema,
+    sha256: digestSchema,
+    version: sandboxRuntimeVersionSchema,
+    probe_revision: z.literal(1),
+  })
+  .strict();
 
 export function executionSupervision(backend: ExecutionBackend) {
   return {
@@ -172,7 +225,7 @@ const executionCapabilitiesV1Schema = z
 const executionCapabilitiesV2Schema = z
   .object({
     schema_version: z.literal(2),
-    platform: executionPlatformSchema,
+    platform: z.literal("macos"),
     backend: z.literal("native_posix"),
     filesystem: z
       .object({
@@ -213,9 +266,61 @@ const executionCapabilitiesV2Schema = z
   })
   .strict();
 
+/** Phase 4C2B Linux contract shape. C2B1 must not advertise this capability;
+ * C2B2 may do so only after the exact retained runtime passes the real probe.
+ */
+const executionCapabilitiesV3Schema = z
+  .object({
+    schema_version: z.literal(3),
+    platform: z.literal("linux"),
+    backend: z.literal("native_posix"),
+    sandbox_runtime: linuxBubblewrapRuntimeDescriptorSchema,
+    filesystem: z
+      .object({
+        supported: z.tuple([
+          z.literal("unrestricted"),
+          z.literal("read_only"),
+          z.literal("workspace_write"),
+        ]),
+        mechanism: z.literal("linux_bubblewrap_mount_namespace"),
+      })
+      .strict(),
+    network: z
+      .object({
+        supported: z.tuple([z.literal("inherit"), z.literal("deny")]),
+        mechanism: z.literal("linux_network_namespace_seccomp"),
+      })
+      .strict(),
+    process_isolation: z
+      .object({
+        supported: z.tuple([z.literal("inherit")]),
+        mechanism: z.literal("none"),
+      })
+      .strict(),
+    environment: z
+      .object({
+        supported: z.tuple([z.literal("explicit")]),
+        mechanism: z.literal("explicit_environment"),
+        layer: z.literal("application"),
+      })
+      .strict(),
+    supervision: z
+      .object({
+        mechanism: z.literal("posix_process_group"),
+        layer: z.literal("os"),
+        durable: z.literal(true),
+      })
+      .strict(),
+  })
+  .strict();
+
 export const executionCapabilitiesSchema = z.discriminatedUnion(
   "schema_version",
-  [executionCapabilitiesV1Schema, executionCapabilitiesV2Schema],
+  [
+    executionCapabilitiesV1Schema,
+    executionCapabilitiesV2Schema,
+    executionCapabilitiesV3Schema,
+  ],
 );
 
 export const executionEnforcementEvidenceSchema = z.discriminatedUnion(
@@ -230,6 +335,8 @@ export const executionEnforcementEvidenceSchema = z.discriminatedUnion(
         mechanism: z.enum([
           "explicit_environment",
           "macos_seatbelt",
+          "linux_bubblewrap_mount_namespace",
+          "linux_network_namespace_seccomp",
           "posix_process_group",
           "windows_job_object",
           "windows_taskkill_tree",
@@ -359,10 +466,80 @@ const policySecuritySnapshotV2Schema = z
     }
   });
 
+const policySecuritySnapshotV3Schema = z
+  .object({
+    schema_version: z.literal(3),
+    kind: z.literal("policy"),
+    platform: z.literal("linux"),
+    sandbox_runtime: linuxBubblewrapRuntimeDescriptorSchema,
+    stage: z.enum(["admission", "launch_setup"]),
+    policy: executionPolicySchema,
+    policy_digest: digestSchema,
+    capabilities_digest: digestSchema,
+    backend: z.literal("native_posix"),
+    filesystem: executionEnforcementEvidenceSchema,
+    network: executionEnforcementEvidenceSchema,
+    process_isolation: executionEnforcementEvidenceSchema,
+    environment: executionEnforcementEvidenceSchema,
+    supervision: executionEnforcementEvidenceSchema,
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const reject = () =>
+      context.addIssue({
+        code: "custom",
+        message: "Inconsistent execution security evidence.",
+      });
+    for (const dimension of ["filesystem", "network"] as const) {
+      const requested =
+        value.policy[dimension] !==
+        (dimension === "filesystem" ? "unrestricted" : "inherit");
+      const evidence = value[dimension];
+      if (!requested) {
+        if (evidence.status !== "not_requested") reject();
+        continue;
+      }
+      if (evidence.status === "unknown") continue;
+      const expectedMechanism =
+        dimension === "filesystem"
+          ? "linux_bubblewrap_mount_namespace"
+          : "linux_network_namespace_seccomp";
+      if (value.stage === "admission") {
+        if (evidence.status !== "not_applied") reject();
+      } else if (
+        evidence.status !== "applied" ||
+        evidence.mechanism !== expectedMechanism ||
+        evidence.layer !== "os"
+      ) {
+        reject();
+      }
+    }
+    if (value.process_isolation.status !== "not_requested") reject();
+    for (const dimension of ["environment", "supervision"] as const) {
+      const evidence = value[dimension];
+      if (evidence.status === "not_requested") {
+        reject();
+        continue;
+      }
+      if (evidence.status !== "applied") continue;
+      const expected =
+        dimension === "environment"
+          ? { mechanism: "explicit_environment", layer: "application" }
+          : { mechanism: "posix_process_group", layer: "os" };
+      if (
+        value.stage !== "launch_setup" ||
+        evidence.mechanism !== expected.mechanism ||
+        evidence.layer !== expected.layer
+      )
+        reject();
+    }
+  });
+
 export const executionSecuritySnapshotSchema = z
   .union([
     policySecuritySnapshotV1Schema,
     policySecuritySnapshotV2Schema,
+    policySecuritySnapshotV3Schema,
     z
       .object({
         schema_version: z.literal(1),
@@ -380,6 +557,9 @@ export type ExecutionPolicyConfig = z.infer<typeof executionPolicyConfigSchema>;
 export type ExecutionProfile = z.infer<typeof executionProfileSchema>;
 export type ExecutionBackend = z.infer<typeof executionBackendSchema>;
 export type ExecutionPlatform = z.infer<typeof executionPlatformSchema>;
+export type LinuxBubblewrapRuntimeDescriptor = z.infer<
+  typeof linuxBubblewrapRuntimeDescriptorSchema
+>;
 export type ExecutionPolicyDimension = z.infer<
   typeof executionPolicyDimensionSchema
 >;
@@ -408,24 +588,43 @@ export function executionOsSandboxSummary(
       : [security.filesystem]),
     ...(security.policy.network === "inherit" ? [] : [security.network]),
   ];
-  if (security.schema_version !== 2 || requestedEvidence.length === 0) {
+  if (requestedEvidence.length === 0) {
     return "OS sandbox: none";
   }
+  const expectedMechanisms =
+    security.schema_version === 2
+      ? requestedEvidence.map(() => "macos_seatbelt" as const)
+      : security.schema_version === 3
+        ? [
+            ...(security.policy.filesystem === "unrestricted"
+              ? []
+              : ["linux_bubblewrap_mount_namespace"]),
+            ...(security.policy.network === "inherit"
+              ? []
+              : ["linux_network_namespace_seccomp"]),
+          ]
+        : [];
+  const sandboxName =
+    security.schema_version === 2
+      ? "macOS Seatbelt"
+      : security.schema_version === 3
+        ? "Linux Bubblewrap + seccomp"
+        : undefined;
+  if (sandboxName === undefined) return "OS sandbox: none";
   if (
     requestedEvidence.every(
-      (evidence) =>
+      (evidence, index) =>
         evidence.status === "applied" &&
-        evidence.mechanism === "macos_seatbelt" &&
+        evidence.mechanism === expectedMechanisms[index] &&
         evidence.layer === "os",
     )
-  ) {
-    return "OS sandbox: macOS Seatbelt";
-  }
+  )
+    return `OS sandbox: ${sandboxName}`;
   if (
     security.stage === "admission" &&
     requestedEvidence.every((evidence) => evidence.status === "not_applied")
   ) {
-    return "expected OS sandbox: macOS Seatbelt";
+    return `expected OS sandbox: ${sandboxName}`;
   }
   return "OS sandbox: evidence unavailable";
 }

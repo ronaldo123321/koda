@@ -1,0 +1,255 @@
+{
+  "runtime": {
+    "schema_version": 1,
+    "mechanism": "linux_bubblewrap",
+    "canonical_path": "/usr/bin/bwrap",
+    "device": "2049",
+    "inode": "123456789",
+    "size": 123456,
+    "mtime_ns": "1788076800123456789",
+    "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "version": "bubblewrap 0.11.0",
+    "probe_revision": 1
+  },
+  "capability": {
+    "capabilities": {
+      "schema_version": 3,
+      "platform": "linux",
+      "backend": "native_posix",
+      "sandbox_runtime": {
+        "schema_version": 1,
+        "mechanism": "linux_bubblewrap",
+        "canonical_path": "/usr/bin/bwrap",
+        "device": "2049",
+        "inode": "123456789",
+        "size": 123456,
+        "mtime_ns": "1788076800123456789",
+        "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "version": "bubblewrap 0.11.0",
+        "probe_revision": 1
+      },
+      "filesystem": {
+        "supported": ["unrestricted", "read_only", "workspace_write"],
+        "mechanism": "linux_bubblewrap_mount_namespace"
+      },
+      "network": {
+        "supported": ["inherit", "deny"],
+        "mechanism": "linux_network_namespace_seccomp"
+      },
+      "process_isolation": {
+        "supported": ["inherit"],
+        "mechanism": "none"
+      },
+      "environment": {
+        "supported": ["explicit"],
+        "mechanism": "explicit_environment",
+        "layer": "application"
+      },
+      "supervision": {
+        "mechanism": "posix_process_group",
+        "layer": "os",
+        "durable": true
+      }
+    },
+    "canonical": "{\"schema_version\":3,\"platform\":\"linux\",\"backend\":\"native_posix\",\"sandbox_runtime\":{\"schema_version\":1,\"mechanism\":\"linux_bubblewrap\",\"canonical_path\":\"/usr/bin/bwrap\",\"device\":\"2049\",\"inode\":\"123456789\",\"size\":123456,\"mtime_ns\":\"1788076800123456789\",\"sha256\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"version\":\"bubblewrap 0.11.0\",\"probe_revision\":1},\"filesystem\":{\"supported\":[\"unrestricted\",\"read_only\",\"workspace_write\"],\"mechanism\":\"linux_bubblewrap_mount_namespace\"},\"network\":{\"supported\":[\"inherit\",\"deny\"],\"mechanism\":\"linux_network_namespace_seccomp\"},\"process_isolation\":{\"supported\":[\"inherit\"],\"mechanism\":\"none\"},\"environment\":{\"supported\":[\"explicit\"],\"mechanism\":\"explicit_environment\",\"layer\":\"application\"},\"supervision\":{\"mechanism\":\"posix_process_group\",\"layer\":\"os\",\"durable\":true}}",
+    "sha256": "ea395b51b30b78833c23f8b7465ab09103f14447a2427c6c9eb8837804b5698d"
+  },
+  "policy": {
+    "schema_version": 1,
+    "workspace_root": "/workspace",
+    "filesystem": "workspace_write",
+    "network": "deny",
+    "process_isolation": "inherit",
+    "environment": "explicit"
+  },
+  "snapshot_cases": [
+    {
+      "name": "linux-admission-requested-not-applied",
+      "valid": true,
+      "input": {
+        "schema_version": 3,
+        "kind": "policy",
+        "platform": "linux",
+        "sandbox_runtime": {
+          "schema_version": 1,
+          "mechanism": "linux_bubblewrap",
+          "canonical_path": "/usr/bin/bwrap",
+          "device": "2049",
+          "inode": "123456789",
+          "size": 123456,
+          "mtime_ns": "1788076800123456789",
+          "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          "version": "bubblewrap 0.11.0",
+          "probe_revision": 1
+        },
+        "stage": "admission",
+        "policy": {
+          "schema_version": 1,
+          "workspace_root": "/workspace",
+          "filesystem": "workspace_write",
+          "network": "deny",
+          "process_isolation": "inherit",
+          "environment": "explicit"
+        },
+        "policy_digest": "6f59726471aacb8e3a19253a74a186db1dbd914eca2951ff2c515e8e884a6c4a",
+        "capabilities_digest": "ea395b51b30b78833c23f8b7465ab09103f14447a2427c6c9eb8837804b5698d",
+        "backend": "native_posix",
+        "filesystem": { "status": "not_applied" },
+        "network": { "status": "not_applied" },
+        "process_isolation": { "status": "not_requested" },
+        "environment": { "status": "not_applied" },
+        "supervision": { "status": "not_applied" }
+      }
+    },
+    {
+      "name": "linux-launch-setup-applied",
+      "valid": true,
+      "input": {
+        "schema_version": 3,
+        "kind": "policy",
+        "platform": "linux",
+        "sandbox_runtime": {
+          "schema_version": 1,
+          "mechanism": "linux_bubblewrap",
+          "canonical_path": "/usr/bin/bwrap",
+          "device": "2049",
+          "inode": "123456789",
+          "size": 123456,
+          "mtime_ns": "1788076800123456789",
+          "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          "version": "bubblewrap 0.11.0",
+          "probe_revision": 1
+        },
+        "stage": "launch_setup",
+        "policy": {
+          "schema_version": 1,
+          "workspace_root": "/workspace",
+          "filesystem": "workspace_write",
+          "network": "deny",
+          "process_isolation": "inherit",
+          "environment": "explicit"
+        },
+        "policy_digest": "6f59726471aacb8e3a19253a74a186db1dbd914eca2951ff2c515e8e884a6c4a",
+        "capabilities_digest": "ea395b51b30b78833c23f8b7465ab09103f14447a2427c6c9eb8837804b5698d",
+        "backend": "native_posix",
+        "filesystem": {
+          "status": "applied",
+          "mechanism": "linux_bubblewrap_mount_namespace",
+          "layer": "os"
+        },
+        "network": {
+          "status": "applied",
+          "mechanism": "linux_network_namespace_seccomp",
+          "layer": "os"
+        },
+        "process_isolation": { "status": "not_requested" },
+        "environment": {
+          "status": "applied",
+          "mechanism": "explicit_environment",
+          "layer": "application"
+        },
+        "supervision": {
+          "status": "applied",
+          "mechanism": "posix_process_group",
+          "layer": "os"
+        }
+      }
+    },
+    {
+      "name": "linux-admission-must-not-claim-applied",
+      "valid": false,
+      "input": {
+        "schema_version": 3,
+        "kind": "policy",
+        "platform": "linux",
+        "sandbox_runtime": {
+          "schema_version": 1,
+          "mechanism": "linux_bubblewrap",
+          "canonical_path": "/usr/bin/bwrap",
+          "device": "2049",
+          "inode": "123456789",
+          "size": 123456,
+          "mtime_ns": "1788076800123456789",
+          "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          "version": "bubblewrap 0.11.0",
+          "probe_revision": 1
+        },
+        "stage": "admission",
+        "policy": {
+          "schema_version": 1,
+          "workspace_root": "/workspace",
+          "filesystem": "workspace_write",
+          "network": "deny",
+          "process_isolation": "inherit",
+          "environment": "explicit"
+        },
+        "policy_digest": "6f59726471aacb8e3a19253a74a186db1dbd914eca2951ff2c515e8e884a6c4a",
+        "capabilities_digest": "ea395b51b30b78833c23f8b7465ab09103f14447a2427c6c9eb8837804b5698d",
+        "backend": "native_posix",
+        "filesystem": {
+          "status": "applied",
+          "mechanism": "linux_bubblewrap_mount_namespace",
+          "layer": "os"
+        },
+        "network": { "status": "not_applied" },
+        "process_isolation": { "status": "not_requested" },
+        "environment": { "status": "not_applied" },
+        "supervision": { "status": "not_applied" }
+      }
+    },
+    {
+      "name": "linux-launch-must-use-dimension-specific-mechanisms",
+      "valid": false,
+      "input": {
+        "schema_version": 3,
+        "kind": "policy",
+        "platform": "linux",
+        "sandbox_runtime": {
+          "schema_version": 1,
+          "mechanism": "linux_bubblewrap",
+          "canonical_path": "/usr/bin/bwrap",
+          "device": "2049",
+          "inode": "123456789",
+          "size": 123456,
+          "mtime_ns": "1788076800123456789",
+          "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          "version": "bubblewrap 0.11.0",
+          "probe_revision": 1
+        },
+        "stage": "launch_setup",
+        "policy": {
+          "schema_version": 1,
+          "workspace_root": "/workspace",
+          "filesystem": "workspace_write",
+          "network": "deny",
+          "process_isolation": "inherit",
+          "environment": "explicit"
+        },
+        "policy_digest": "6f59726471aacb8e3a19253a74a186db1dbd914eca2951ff2c515e8e884a6c4a",
+        "capabilities_digest": "ea395b51b30b78833c23f8b7465ab09103f14447a2427c6c9eb8837804b5698d",
+        "backend": "native_posix",
+        "filesystem": {
+          "status": "applied",
+          "mechanism": "linux_network_namespace_seccomp",
+          "layer": "os"
+        },
+        "network": {
+          "status": "applied",
+          "mechanism": "linux_bubblewrap_mount_namespace",
+          "layer": "os"
+        },
+        "process_isolation": { "status": "not_requested" },
+        "environment": {
+          "status": "applied",
+          "mechanism": "explicit_environment",
+          "layer": "application"
+        },
+        "supervision": {
+          "status": "applied",
+          "mechanism": "posix_process_group",
+          "layer": "os"
+        }
+      }
+    }
+  ]
+}

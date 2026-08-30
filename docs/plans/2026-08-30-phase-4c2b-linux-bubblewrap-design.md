@@ -1,6 +1,6 @@
 # Koda Phase 4C2B Linux Bubblewrap Design
 
-- Status: Approved — C2B1 implementation next
+- Status: In progress — C2B1 complete, C2B2 next
 - Date: 2026-08-30
 - Depends on: completed Phase 4C1 execution policy and Phase 4C2A macOS
   Seatbelt delivery
@@ -228,6 +228,7 @@ The strict Linux capability shape is conceptually:
   "platform": "linux",
   "backend": "native_posix",
   "sandbox_runtime": {
+    "schema_version": 1,
     "mechanism": "linux_bubblewrap",
     "canonical_path": "/usr/bin/bwrap",
     "device": "bounded-decimal",
@@ -688,6 +689,8 @@ TUI tests use the same schema-v3 fixture as app-server protocol tests.
 
 ### C2B1: protocol, durable format, and evidence
 
+Status: Complete (2026-08-30)
+
 - Add TypeScript/Rust capability and snapshot schema version 3.
 - Add the bounded Linux sandbox runtime descriptor.
 - Add deterministic canonicalization and shared golden fixtures.
@@ -696,6 +699,15 @@ TUI tests use the same schema-v3 fixture as app-server protocol tests.
 - Preserve strict reads for formats 1 through 3 and future-format behavior.
 - Extend grant/capability fingerprints and mechanism-driven client summaries.
 - Do not advertise schema-v3 capability or execute protected Linux jobs yet.
+
+Delivered with strict TypeScript/Rust schema-v3 validation, a versioned and
+bounded Bubblewrap runtime descriptor, cross-language canonical bytes and
+SHA-256 fixtures, native protocol v4, durable format v4, explicit format 1–3
+compatibility, runtime-bound exact-command grants, and mechanism-derived
+app-server/CLI/TUI summaries. App-server protocol v15 remains compatible with
+the extended discriminated union, so it was not bumped. Linux native runtime
+advertisement intentionally remains schema v1 until C2B2 completes its real
+probe.
 
 ### C2B2: binary trust and real capability probe
 

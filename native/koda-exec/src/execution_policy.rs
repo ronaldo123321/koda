@@ -1,4 +1,4 @@
-//! Phase 4C1A pure contract. Not wired into the v1 launch/durable protocol yet.
+//! Versioned execution-policy, capability, and retained-evidence contracts.
 //! Public types stay independent of platform detection and process creation.
 
 use serde::{Deserialize, Serialize};
@@ -7,6 +7,9 @@ use sha2::{Digest, Sha256};
 
 pub const EXECUTION_WORKSPACE_MAX_BYTES: usize = 4096;
 pub const EXECUTION_SECURITY_MAX_BYTES: usize = 16384;
+pub const EXECUTION_SANDBOX_RUNTIME_PATH_MAX_BYTES: usize = 4096;
+pub const EXECUTION_SANDBOX_RUNTIME_VERSION_MAX_BYTES: usize = 256;
+const JAVASCRIPT_MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutionPolicyError {
@@ -234,6 +237,7 @@ pub enum ExecutionBackend {
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionPlatform {
     Macos,
+    Linux,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -242,6 +246,9 @@ pub enum EnforcementMechanism {
     None,
     ExplicitEnvironment,
     MacosSeatbelt,
+    LinuxBubblewrap,
+    LinuxBubblewrapMountNamespace,
+    LinuxNetworkNamespaceSeccomp,
     PosixProcessGroup,
     WindowsJobObject,
     WindowsTaskkillTree,
@@ -277,6 +284,53 @@ pub struct SupervisionCapability {
     pub durable: bool,
 }
 
+// Declaration order is part of the cross-language capability digest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LinuxBubblewrapRuntimeDescriptor {
+    pub schema_version: u32,
+    pub mechanism: EnforcementMechanism,
+    pub canonical_path: String,
+    pub device: String,
+    pub inode: String,
+    pub size: u64,
+    pub mtime_ns: String,
+    pub sha256: String,
+    pub version: String,
+    pub probe_revision: u32,
+}
+
+impl LinuxBubblewrapRuntimeDescriptor {
+    pub fn parse(value: Value) -> Result<Self, ExecutionPolicyError> {
+        let descriptor: Self = serde_json::from_value(value)
+            .map_err(|_| ExecutionPolicyError::InvalidExecutionPolicy)?;
+        descriptor.validate()?;
+        Ok(descriptor)
+    }
+
+    pub fn validate(&self) -> Result<(), ExecutionPolicyError> {
+        let valid = self.schema_version == 1
+            && self.mechanism == EnforcementMechanism::LinuxBubblewrap
+            && self.canonical_path.starts_with('/')
+            && !self.canonical_path.starts_with("//")
+            && self.canonical_path.len() <= EXECUTION_SANDBOX_RUNTIME_PATH_MAX_BYTES
+            && is_execution_workspace_path(&self.canonical_path)
+            && is_canonical_u64_decimal(&self.device)
+            && is_canonical_u64_decimal(&self.inode)
+            && self.size <= JAVASCRIPT_MAX_SAFE_INTEGER
+            && is_canonical_u64_decimal(&self.mtime_ns)
+            && is_sha256_hex(&self.sha256)
+            && !self.version.is_empty()
+            && self.version.len() <= EXECUTION_SANDBOX_RUNTIME_VERSION_MAX_BYTES
+            && !self.version.chars().any(char::is_control)
+            && self.probe_revision == 1;
+        if !valid {
+            return Err(ExecutionPolicyError::InvalidExecutionPolicy);
+        }
+        Ok(())
+    }
+}
+
 // Field order (including nested structs) is the capability digest contract.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -285,6 +339,8 @@ pub struct ExecutionCapabilities {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform: Option<ExecutionPlatform>,
     pub backend: ExecutionBackend,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_runtime: Option<LinuxBubblewrapRuntimeDescriptor>,
     pub filesystem: IsolationCapability<FilesystemPolicy>,
     pub network: IsolationCapability<NetworkPolicy>,
     pub process_isolation: IsolationCapability<ProcessIsolationPolicy>,
@@ -316,6 +372,7 @@ pub fn c1_execution_capabilities(backend: ExecutionBackend) -> ExecutionCapabili
         schema_version: 1,
         platform: None,
         backend,
+        sandbox_runtime: None,
         filesystem: IsolationCapability {
             supported: vec![FilesystemPolicy::Unrestricted],
             mechanism: EnforcementMechanism::None,
@@ -344,6 +401,7 @@ pub fn macos_seatbelt_execution_capabilities() -> ExecutionCapabilities {
         schema_version: 2,
         platform: Some(ExecutionPlatform::Macos),
         backend: ExecutionBackend::NativePosix,
+        sandbox_runtime: None,
         filesystem: IsolationCapability {
             supported: vec![
                 FilesystemPolicy::Unrestricted,
@@ -373,6 +431,46 @@ pub fn macos_seatbelt_execution_capabilities() -> ExecutionCapabilities {
     }
 }
 
+/// Pure Phase 4C2B contract builder. Runtime advertisement remains disabled
+/// until C2B2 proves this exact descriptor through the complete Linux probe.
+pub fn linux_bubblewrap_execution_capabilities(
+    sandbox_runtime: &LinuxBubblewrapRuntimeDescriptor,
+) -> Result<ExecutionCapabilities, ExecutionPolicyError> {
+    sandbox_runtime.validate()?;
+    Ok(ExecutionCapabilities {
+        schema_version: 3,
+        platform: Some(ExecutionPlatform::Linux),
+        backend: ExecutionBackend::NativePosix,
+        sandbox_runtime: Some(sandbox_runtime.clone()),
+        filesystem: IsolationCapability {
+            supported: vec![
+                FilesystemPolicy::Unrestricted,
+                FilesystemPolicy::ReadOnly,
+                FilesystemPolicy::WorkspaceWrite,
+            ],
+            mechanism: EnforcementMechanism::LinuxBubblewrapMountNamespace,
+        },
+        network: IsolationCapability {
+            supported: vec![NetworkPolicy::Inherit, NetworkPolicy::Deny],
+            mechanism: EnforcementMechanism::LinuxNetworkNamespaceSeccomp,
+        },
+        process_isolation: IsolationCapability {
+            supported: vec![ProcessIsolationPolicy::Inherit],
+            mechanism: EnforcementMechanism::None,
+        },
+        environment: EnvironmentCapability {
+            supported: vec![EnvironmentPolicy::Explicit],
+            mechanism: EnforcementMechanism::ExplicitEnvironment,
+            layer: EnforcementLayer::Application,
+        },
+        supervision: SupervisionCapability {
+            mechanism: EnforcementMechanism::PosixProcessGroup,
+            layer: EnforcementLayer::Os,
+            durable: true,
+        },
+    })
+}
+
 impl ExecutionCapabilities {
     pub fn parse(value: Value) -> Result<Self, ExecutionPolicyError> {
         let caps: Self = serde_json::from_value(value)
@@ -385,6 +483,11 @@ impl ExecutionCapabilities {
         let valid = match self.schema_version {
             1 => self == &c1_execution_capabilities(self.backend),
             2 => self == &macos_seatbelt_execution_capabilities(),
+            3 => self
+                .sandbox_runtime
+                .as_ref()
+                .and_then(|runtime| linux_bubblewrap_execution_capabilities(runtime).ok())
+                .is_some_and(|expected| self == &expected),
             _ => false,
         };
         if !valid {
@@ -499,6 +602,8 @@ pub struct PolicySecuritySnapshot {
     pub schema_version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform: Option<ExecutionPlatform>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_runtime: Option<LinuxBubblewrapRuntimeDescriptor>,
     pub stage: ExecutionSecurityStage,
     pub policy: ExecutionPolicy,
     pub policy_digest: String,
@@ -541,11 +646,22 @@ impl ExecutionSecuritySnapshot {
             return Err(corrupt);
         }
         let expected_capabilities = match snapshot.schema_version {
-            1 if snapshot.platform.is_none() => c1_execution_capabilities(snapshot.backend),
+            1 if snapshot.platform.is_none() && snapshot.sandbox_runtime.is_none() => {
+                c1_execution_capabilities(snapshot.backend)
+            }
             2 if snapshot.platform == Some(ExecutionPlatform::Macos)
+                && snapshot.sandbox_runtime.is_none()
                 && snapshot.backend == ExecutionBackend::NativePosix =>
             {
                 macos_seatbelt_execution_capabilities()
+            }
+            3 if snapshot.platform == Some(ExecutionPlatform::Linux)
+                && snapshot.backend == ExecutionBackend::NativePosix =>
+            {
+                linux_bubblewrap_execution_capabilities(
+                    snapshot.sandbox_runtime.as_ref().ok_or(corrupt)?,
+                )
+                .map_err(|_| corrupt)?
             }
             _ => return Err(corrupt),
         };
@@ -554,6 +670,9 @@ impl ExecutionSecuritySnapshot {
         }
         if snapshot.schema_version == 2 {
             return validate_macos_snapshot(snapshot);
+        }
+        if snapshot.schema_version == 3 {
+            return validate_linux_snapshot(snapshot);
         }
         for (evidence, requested) in [
             (
@@ -676,6 +795,73 @@ fn validate_macos_snapshot(snapshot: &PolicySecuritySnapshot) -> Result<(), Exec
     Ok(())
 }
 
+fn validate_linux_snapshot(snapshot: &PolicySecuritySnapshot) -> Result<(), ExecutionPolicyError> {
+    let corrupt = ExecutionPolicyError::ExecutionSecurityCorrupt;
+    for (evidence, requested, expected_mechanism) in [
+        (
+            &snapshot.filesystem,
+            snapshot.policy.filesystem != FilesystemPolicy::Unrestricted,
+            EnforcementMechanism::LinuxBubblewrapMountNamespace,
+        ),
+        (
+            &snapshot.network,
+            snapshot.policy.network != NetworkPolicy::Inherit,
+            EnforcementMechanism::LinuxNetworkNamespaceSeccomp,
+        ),
+    ] {
+        let valid = if !requested {
+            matches!(evidence, ExecutionEnforcementEvidence::NotRequested {})
+        } else {
+            match evidence {
+                ExecutionEnforcementEvidence::Unknown {} => true,
+                ExecutionEnforcementEvidence::NotApplied {} => {
+                    snapshot.stage == ExecutionSecurityStage::Admission
+                }
+                ExecutionEnforcementEvidence::Applied { mechanism, layer } => {
+                    snapshot.stage == ExecutionSecurityStage::LaunchSetup
+                        && *mechanism == expected_mechanism
+                        && *layer == EnforcementLayer::Os
+                }
+                ExecutionEnforcementEvidence::NotRequested {} => false,
+            }
+        };
+        if !valid {
+            return Err(corrupt);
+        }
+    }
+    if !matches!(
+        snapshot.process_isolation,
+        ExecutionEnforcementEvidence::NotRequested {}
+    ) {
+        return Err(corrupt);
+    }
+    for (evidence, expected_mechanism, expected_layer) in [
+        (
+            &snapshot.environment,
+            EnforcementMechanism::ExplicitEnvironment,
+            EnforcementLayer::Application,
+        ),
+        (
+            &snapshot.supervision,
+            EnforcementMechanism::PosixProcessGroup,
+            EnforcementLayer::Os,
+        ),
+    ] {
+        match evidence {
+            ExecutionEnforcementEvidence::NotRequested {} => return Err(corrupt),
+            ExecutionEnforcementEvidence::Applied { mechanism, layer }
+                if snapshot.stage != ExecutionSecurityStage::LaunchSetup
+                    || *mechanism != expected_mechanism
+                    || *layer != expected_layer =>
+            {
+                return Err(corrupt);
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// Admission is not launch evidence: no applied claims are generated here.
 pub fn create_execution_admission_snapshot(
     policy: &ExecutionPolicy,
@@ -687,6 +873,7 @@ pub fn create_execution_admission_snapshot(
     let snapshot = ExecutionSecuritySnapshot::Policy(Box::new(PolicySecuritySnapshot {
         schema_version: caps.schema_version,
         platform: caps.platform,
+        sandbox_runtime: caps.sandbox_runtime.clone(),
         stage: ExecutionSecurityStage::Admission,
         policy: policy.clone(),
         policy_digest: policy.digest()?,
@@ -712,6 +899,19 @@ pub fn create_execution_admission_snapshot(
 
 fn sha256(value: &str) -> String {
     format!("{:x}", Sha256::digest(value.as_bytes()))
+}
+
+fn is_canonical_u64_decimal(value: &str) -> bool {
+    value
+        .parse::<u64>()
+        .is_ok_and(|parsed| parsed.to_string() == value)
+}
+
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 #[cfg(test)]

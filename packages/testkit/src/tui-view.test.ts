@@ -24,7 +24,10 @@ import { renderToString, type Key } from "ink";
 import { createElement } from "react";
 import { describe, expect, it, vi } from "vitest";
 
-import { macosProtectedLaunchSecurity } from "./execution-security-fixtures.js";
+import {
+  linuxProtectedLaunchSecurity,
+  macosProtectedLaunchSecurity,
+} from "./execution-security-fixtures.js";
 
 describe("Koda Ink view", () => {
   it("renders immutable transcript rows and a bounded live region", () => {
@@ -441,6 +444,11 @@ describe("Koda Ink view", () => {
     expect(frame).toContain("Ctrl+C interrupt");
     expect(frame).toContain("OS sandbox: macOS Seatbelt");
     expect(frame).toContain("native_posix");
+
+    process.security = linuxProtectedLaunchSecurity();
+    const linuxFrame = renderToString(createElement(KodaView, { state }));
+    expect(linuxFrame).toContain("OS sandbox: Linux Bubblewrap");
+    expect(linuxFrame).toContain("+ seccomp");
 
     const requestExit = vi.fn();
     routeTuiInput(controller, state, "c", key({ ctrl: true }), requestExit);

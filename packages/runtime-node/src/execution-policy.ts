@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import {
   executionBackendSchema,
   executionCapabilitiesSchema,
+  linuxBubblewrapRuntimeDescriptorSchema,
   executionPolicyConfigSchema,
   executionPolicySchema,
   executionProfileSchema,
@@ -14,6 +15,7 @@ import {
   type ExecutionPolicyConfig,
   type ExecutionPolicyDimension,
   type ExecutionSecuritySnapshot,
+  type LinuxBubblewrapRuntimeDescriptor,
 } from "@koda/protocol";
 import type { z } from "zod";
 
@@ -191,6 +193,54 @@ export function macosSeatbeltExecutionCapabilities(): ExecutionCapabilities {
   );
 }
 
+/** Pure Phase 4C2B contract builder. C2B1 callers may use it for retained
+ * evidence and compatibility tests, but runtime advertisement stays disabled
+ * until the complete C2B2 probe succeeds.
+ */
+export function linuxBubblewrapExecutionCapabilities(
+  runtimeInput: unknown,
+): ExecutionCapabilities {
+  const sandboxRuntime = parse(
+    linuxBubblewrapRuntimeDescriptorSchema,
+    runtimeInput,
+    "INVALID_EXECUTION_POLICY",
+  );
+  return freezeRecord(
+    parse(
+      executionCapabilitiesSchema,
+      {
+        schema_version: 3,
+        platform: "linux",
+        backend: "native_posix",
+        sandbox_runtime: sandboxRuntime,
+        filesystem: {
+          supported: ["unrestricted", "read_only", "workspace_write"],
+          mechanism: "linux_bubblewrap_mount_namespace",
+        },
+        network: {
+          supported: ["inherit", "deny"],
+          mechanism: "linux_network_namespace_seccomp",
+        },
+        process_isolation: {
+          supported: ["inherit"],
+          mechanism: "none",
+        },
+        environment: {
+          supported: ["explicit"],
+          mechanism: "explicit_environment",
+          layer: "application",
+        },
+        supervision: {
+          mechanism: "posix_process_group",
+          layer: "os",
+          durable: true,
+        },
+      },
+      "INVALID_EXECUTION_POLICY",
+    ),
+  );
+}
+
 export function canonicalExecutionCapabilities(value: unknown): string {
   const caps = parse(
     executionCapabilitiesSchema,
@@ -199,8 +249,13 @@ export function canonicalExecutionCapabilities(value: unknown): string {
   );
   return JSON.stringify({
     schema_version: caps.schema_version,
-    ...(caps.schema_version === 2 ? { platform: caps.platform } : {}),
+    ...(caps.schema_version === 2 || caps.schema_version === 3
+      ? { platform: caps.platform }
+      : {}),
     backend: caps.backend,
+    ...(caps.schema_version === 3
+      ? { sandbox_runtime: canonicalSandboxRuntime(caps.sandbox_runtime) }
+      : {}),
     filesystem: {
       supported: caps.filesystem.supported,
       mechanism: caps.filesystem.mechanism,
@@ -276,7 +331,12 @@ export function createExecutionAdmissionSnapshot(
   return validateExecutionSecuritySnapshot({
     schema_version: caps.schema_version,
     kind: "policy",
-    ...(caps.schema_version === 2 ? { platform: caps.platform } : {}),
+    ...(caps.schema_version === 2 || caps.schema_version === 3
+      ? { platform: caps.platform }
+      : {}),
+    ...(caps.schema_version === 3
+      ? { sandbox_runtime: caps.sandbox_runtime }
+      : {}),
     stage: "admission",
     policy,
     policy_digest: executionPolicyDigest(policy),
@@ -372,7 +432,9 @@ export function validateExecutionSecuritySnapshot(
     const capabilities =
       snapshot.schema_version === 1
         ? c1ExecutionCapabilities(snapshot.backend)
-        : macosSeatbeltExecutionCapabilities();
+        : snapshot.schema_version === 2
+          ? macosSeatbeltExecutionCapabilities()
+          : linuxBubblewrapExecutionCapabilities(snapshot.sandbox_runtime);
     if (
       snapshot.policy_digest !== executionPolicyDigest(snapshot.policy) ||
       snapshot.capabilities_digest !== executionCapabilitiesDigest(capabilities)
@@ -381,6 +443,23 @@ export function validateExecutionSecuritySnapshot(
     }
   }
   return freezeRecord(snapshot);
+}
+
+function canonicalSandboxRuntime(
+  runtime: LinuxBubblewrapRuntimeDescriptor,
+): LinuxBubblewrapRuntimeDescriptor {
+  return {
+    schema_version: runtime.schema_version,
+    mechanism: runtime.mechanism,
+    canonical_path: runtime.canonical_path,
+    device: runtime.device,
+    inode: runtime.inode,
+    size: runtime.size,
+    mtime_ns: runtime.mtime_ns,
+    sha256: runtime.sha256,
+    version: runtime.version,
+    probe_revision: runtime.probe_revision,
+  };
 }
 
 function sha256(value: string): string {

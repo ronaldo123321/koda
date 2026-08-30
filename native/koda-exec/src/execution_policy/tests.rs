@@ -17,6 +17,14 @@ fn macos_fixtures() -> Value {
     .unwrap()
 }
 
+fn linux_fixtures() -> Value {
+    serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../packages/testkit/fixtures/execution-policy-v3.json"
+    )))
+    .unwrap()
+}
+
 fn base() -> ExecutionPolicy {
     resolve_execution_policy("/workspace", None, None).unwrap()
 }
@@ -91,7 +99,7 @@ fn macos_capability_golden_bytes_digest_and_matrix() {
             );
             let admission = create_execution_admission_snapshot(&candidate, &caps).unwrap();
             let encoded = serde_json::to_string(&admission).unwrap();
-            assert!(!encoded.contains(r#"\"applied\""#));
+            assert!(!encoded.contains(r#""applied""#));
             admission.validate().unwrap();
         }
     }
@@ -133,6 +141,108 @@ fn shared_macos_snapshot_cases_match_typescript_validation() {
                 ExecutionPolicyError::ExecutionSecurityCorrupt
             );
         }
+    }
+}
+
+#[test]
+fn linux_capability_golden_bytes_digest_and_matrix() {
+    let fixture = linux_fixtures();
+    let runtime = LinuxBubblewrapRuntimeDescriptor::parse(fixture["runtime"].clone())
+        .expect("valid Bubblewrap runtime descriptor");
+    let caps = linux_bubblewrap_execution_capabilities(&runtime).unwrap();
+    let expected = ExecutionCapabilities::parse(fixture["capability"]["capabilities"].clone())
+        .expect("valid Linux capabilities");
+    assert_eq!(caps, expected);
+    assert_eq!(
+        caps.canonical_json().unwrap(),
+        fixture["capability"]["canonical"].as_str().unwrap()
+    );
+    assert_eq!(
+        caps.digest().unwrap(),
+        fixture["capability"]["sha256"].as_str().unwrap()
+    );
+
+    let policy = ExecutionPolicy::parse(fixture["policy"].clone()).unwrap();
+    for filesystem in [
+        FilesystemPolicy::Unrestricted,
+        FilesystemPolicy::ReadOnly,
+        FilesystemPolicy::WorkspaceWrite,
+    ] {
+        for network in [NetworkPolicy::Inherit, NetworkPolicy::Deny] {
+            let candidate = ExecutionPolicy {
+                filesystem,
+                network,
+                ..policy.clone()
+            };
+            assert!(
+                evaluate_execution_policy(&candidate, &caps)
+                    .unwrap()
+                    .allowed
+            );
+            let admission = create_execution_admission_snapshot(&candidate, &caps).unwrap();
+            let encoded = serde_json::to_string(&admission).unwrap();
+            assert!(!encoded.contains(r#""applied""#));
+            admission.validate().unwrap();
+        }
+    }
+    let unsupported = ExecutionPolicy {
+        process_isolation: ProcessIsolationPolicy::Required,
+        ..policy
+    };
+    assert_eq!(
+        create_execution_admission_snapshot(&unsupported, &caps).unwrap_err(),
+        ExecutionPolicyError::ExecutionPolicyUnavailable
+    );
+}
+
+#[test]
+fn shared_linux_snapshot_cases_match_typescript_validation() {
+    for case in linux_fixtures()["snapshot_cases"].as_array().unwrap() {
+        let parsed = ExecutionSecuritySnapshot::parse(case["input"].clone());
+        if case["valid"].as_bool().unwrap() {
+            assert_eq!(
+                serde_json::to_value(parsed.unwrap()).unwrap(),
+                case["input"],
+                "{}",
+                case["name"]
+            );
+        } else {
+            assert_eq!(
+                parsed.expect_err(case["name"].as_str().unwrap()),
+                ExecutionPolicyError::ExecutionSecurityCorrupt
+            );
+        }
+    }
+}
+
+#[test]
+fn linux_runtime_descriptor_is_strict_bounded_and_versioned() {
+    let base = linux_fixtures()["runtime"].clone();
+    for (field, value) in [
+        ("schema_version", json!(2)),
+        ("mechanism", json!("macos_seatbelt")),
+        ("canonical_path", json!("usr/bin/bwrap")),
+        ("canonical_path", json!(format!("/{}", "a".repeat(4096)))),
+        ("device", json!("00")),
+        ("device", json!("not-a-number")),
+        ("device", json!("18446744073709551616")),
+        ("inode", json!(123456789)),
+        ("size", json!(9_007_199_254_740_992_u64)),
+        ("mtime_ns", json!("-1")),
+        ("mtime_ns", json!("18446744073709551616")),
+        ("sha256", json!("A".repeat(64))),
+        ("version", json!("bubblewrap\n0.11.0")),
+        ("version", json!("bubblewrap\u{0085}0.11.0")),
+        ("version", json!("")),
+        ("probe_revision", json!(2)),
+        ("secret", json!("fixture-secret-marker")),
+    ] {
+        let mut input = base.clone();
+        input[field] = value;
+        assert_eq!(
+            LinuxBubblewrapRuntimeDescriptor::parse(input).unwrap_err(),
+            ExecutionPolicyError::InvalidExecutionPolicy
+        );
     }
 }
 

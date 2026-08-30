@@ -4,7 +4,7 @@ use crate::execution_policy::{ExecutionPolicy, ExecutionSecuritySnapshot};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 pub const MAX_FRAME_BYTES: usize = 1_048_576;
 pub const MAX_ARGUMENTS: usize = 64;
 pub const MAX_ARGUMENT_BYTES: usize = 4_096;
@@ -119,7 +119,7 @@ pub struct StartParams {
     pub lifecycle: JobLifecycle,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pty: Option<PtyStartConfig>,
-    // Optional only for reading v1 durable records. v2 starts require it.
+    // Optional only for reading v1 durable records. Current starts require it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy: Option<ExecutionPolicy>,
 }
@@ -500,7 +500,7 @@ pub fn validate_hello(params: &HelloParams) -> Result<(), ProtocolError> {
     if !params.supported_versions.contains(&PROTOCOL_VERSION) {
         return Err(ProtocolError::new(
             "INCOMPATIBLE_PROTOCOL",
-            "The client does not support executor protocol version 2.",
+            "The client does not support executor protocol version 4.",
         ));
     }
     Ok(())
@@ -801,5 +801,28 @@ mod tests {
         );
 
         assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn protocol_v4_rejects_v3_requests_and_clients_without_fallback() {
+        let request = Request {
+            protocol_version: 3,
+            request_id: "r1".into(),
+            method: "system/hello".into(),
+            params: serde_json::json!({}),
+        };
+        assert_eq!(
+            validate_request(&request).unwrap_err().code,
+            "INCOMPATIBLE_PROTOCOL"
+        );
+        let hello = HelloParams {
+            client_name: "legacy-client".into(),
+            client_version: "1.0.0".into(),
+            supported_versions: vec![3],
+        };
+        assert_eq!(
+            validate_hello(&hello).unwrap_err().code,
+            "INCOMPATIBLE_PROTOCOL"
+        );
     }
 }

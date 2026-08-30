@@ -16,7 +16,7 @@ use crate::protocol::{
     IoMode, JobFailure, JobSnapshot, JobState, ProtocolError, StartParams, TerminationSnapshot,
 };
 
-pub const STORE_FORMAT_VERSION: u32 = 3;
+pub const STORE_FORMAT_VERSION: u32 = 4;
 const MAX_MANIFEST_BYTES: u64 = 262_144;
 const MAX_STATE_BYTES: u64 = 65_536;
 const MAX_STATE_HEAD_BYTES: u64 = 4_096;
@@ -664,6 +664,7 @@ fn validate_security_binding(
     if original.policy != retained.policy
         || original.schema_version != retained.schema_version
         || original.platform != retained.platform
+        || original.sandbox_runtime != retained.sandbox_runtime
         || original.backend != retained.backend
         || original.policy_digest != retained.policy_digest
         || original.capabilities_digest != retained.capabilities_digest
@@ -714,12 +715,25 @@ fn validate_manifest(manifest: &JobManifest) -> Result<(), ProtocolError> {
             let ExecutionSecuritySnapshot::Policy(policy) = security else {
                 return Err(execution_security::corrupt());
             };
-            if manifest.format_version == 2 && policy.schema_version != 1 {
+            let schema_allowed = match manifest.format_version {
+                2 => policy.schema_version == 1,
+                3 => matches!(policy.schema_version, 1..=2),
+                4 => matches!(policy.schema_version, 1..=3),
+                _ => false,
+            };
+            if !schema_allowed {
                 return Err(execution_security::corrupt());
             }
             let capabilities = match policy.schema_version {
                 1 => crate::execution_policy::c1_execution_capabilities(policy.backend),
                 2 => crate::execution_policy::macos_seatbelt_execution_capabilities(),
+                3 => crate::execution_policy::linux_bubblewrap_execution_capabilities(
+                    policy
+                        .sandbox_runtime
+                        .as_ref()
+                        .ok_or_else(execution_security::corrupt)?,
+                )
+                .map_err(|_| execution_security::corrupt())?,
                 _ => return Err(execution_security::corrupt()),
             };
             let expected = crate::execution_policy::create_execution_admission_snapshot(
@@ -1095,6 +1109,32 @@ mod tests {
         }
     }
 
+    fn v3_copy(record: &JobRecord) -> JobRecord {
+        let mut manifest = record.manifest.clone();
+        manifest.format_version = 3;
+        manifest.manifest_digest = manifest_digest(&manifest).unwrap();
+        let mut state = record.read_state().unwrap();
+        state.format_version = 3;
+        state.state_digest = state_digest(&state).unwrap();
+        write_atomic_json(
+            &record.directory.join("manifest.json"),
+            &manifest,
+            MAX_MANIFEST_BYTES,
+        )
+        .unwrap();
+        write_atomic_json(&record.state_path(), &state, MAX_STATE_BYTES).unwrap();
+        write_atomic_json(
+            &record.state_head_path(),
+            &StateHead::from_state(&state),
+            MAX_STATE_HEAD_BYTES,
+        )
+        .unwrap();
+        JobRecord {
+            directory: record.directory.clone(),
+            manifest,
+        }
+    }
+
     #[test]
     fn legacy_hashes_remain_stable_and_reads_do_not_upgrade_records() {
         let root = std::env::temp_dir().join(format!("koda-legacy-{}", Uuid::new_v4().simple()));
@@ -1198,6 +1238,97 @@ mod tests {
     }
 
     #[test]
+    fn v3_records_remain_readable_and_transitions_do_not_upgrade_them() {
+        let root = std::env::temp_dir().join(format!("koda-v3-{}", Uuid::new_v4().simple()));
+        let store = JobStore::open(&root).unwrap();
+        let (record, _) = store
+            .create_job_with_capabilities(
+                "v3",
+                start(),
+                &crate::execution_policy::macos_seatbelt_execution_capabilities(),
+            )
+            .unwrap();
+        let previous = v3_copy(&record);
+        let loaded = store.load_job(&previous.directory).unwrap();
+        let state = loaded.read_state().unwrap();
+        let Some(ExecutionSecuritySnapshot::Policy(security)) = state.security.as_ref() else {
+            panic!("v3 record must retain macOS schema-v2 evidence")
+        };
+        assert_eq!(security.schema_version, 2);
+        let mut next = state.clone();
+        next.state = JobState::StartFailed;
+        let next = loaded.transition(&state, next).unwrap();
+        assert_eq!(next.format_version, 3);
+        assert_eq!(
+            store
+                .load_job(&previous.directory)
+                .unwrap()
+                .manifest
+                .format_version,
+            3
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn durable_format_versions_bind_the_allowed_security_schema() {
+        let root =
+            std::env::temp_dir().join(format!("koda-format-schema-{}", Uuid::new_v4().simple()));
+        let store = JobStore::open(&root).unwrap();
+        let (record, _) = store.create_job("format-schema", start()).unwrap();
+        let policy = record.manifest.start.policy.as_ref().unwrap();
+
+        let mut macos = record.manifest.clone();
+        macos.format_version = 3;
+        macos.security = Some(
+            crate::execution_policy::create_execution_admission_snapshot(
+                policy,
+                &crate::execution_policy::macos_seatbelt_execution_capabilities(),
+            )
+            .unwrap(),
+        );
+        macos.manifest_digest = manifest_digest(&macos).unwrap();
+        validate_manifest(&macos).unwrap();
+        macos.format_version = 2;
+        macos.manifest_digest = manifest_digest(&macos).unwrap();
+        assert_eq!(
+            validate_manifest(&macos).unwrap_err().code,
+            "EXECUTION_SECURITY_CORRUPT"
+        );
+
+        let runtime =
+            crate::execution_policy::LinuxBubblewrapRuntimeDescriptor::parse(serde_json::json!({
+                "schema_version": 1,
+                "mechanism": "linux_bubblewrap",
+                "canonical_path": "/usr/bin/bwrap",
+                "device": "2049",
+                "inode": "123456789",
+                "size": 123456,
+                "mtime_ns": "1788076800123456789",
+                "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "version": "bubblewrap 0.11.0",
+                "probe_revision": 1
+            }))
+            .unwrap();
+        let linux_caps =
+            crate::execution_policy::linux_bubblewrap_execution_capabilities(&runtime).unwrap();
+        let mut linux = record.manifest.clone();
+        linux.security = Some(
+            crate::execution_policy::create_execution_admission_snapshot(policy, &linux_caps)
+                .unwrap(),
+        );
+        linux.manifest_digest = manifest_digest(&linux).unwrap();
+        validate_manifest(&linux).unwrap();
+        linux.format_version = 3;
+        linux.manifest_digest = manifest_digest(&linux).unwrap();
+        assert_eq!(
+            validate_manifest(&linux).unwrap_err().code,
+            "EXECUTION_SECURITY_CORRUPT"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn unknown_future_formats_are_left_in_place_before_any_quarantine() {
         for name in ["manifest.json", "state.json", "state.head"] {
             let root =
@@ -1207,7 +1338,7 @@ mod tests {
             let path = record.directory.join(name);
             let mut value: serde_json::Value =
                 read_private_json(&path, MAX_MANIFEST_BYTES).unwrap();
-            value["format_version"] = serde_json::json!(4);
+            value["format_version"] = serde_json::json!(5);
             value["future_field"] = serde_json::json!({"preserve":true});
             write_atomic_json(&path, &value, MAX_MANIFEST_BYTES).unwrap();
             let before = std::fs::read(&path).unwrap();

@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import {
   executionCapabilitiesSchema,
+  linuxBubblewrapRuntimeDescriptorSchema,
   executionOsSandboxSummary,
   executionPolicySchema,
   executionSecuritySnapshotSchema,
@@ -21,6 +22,7 @@ import {
   executionPolicyDigest,
   executionPolicyPreview,
   ExecutionPolicyError,
+  linuxBubblewrapExecutionCapabilities,
   macosSeatbeltExecutionCapabilities,
   normalizeExecutionPolicy,
   resolveExecutionPolicy,
@@ -57,6 +59,17 @@ interface MacosFixtures {
   snapshot_cases: { name: string; input: unknown; valid: boolean }[];
 }
 
+interface LinuxFixtures {
+  runtime: unknown;
+  capability: {
+    capabilities: ExecutionCapabilities;
+    canonical: string;
+    sha256: string;
+  };
+  policy: ExecutionPolicy;
+  snapshot_cases: { name: string; input: unknown; valid: boolean }[];
+}
+
 const fixtures: Fixtures = JSON.parse(
   readFileSync(
     new URL("../fixtures/execution-policy-v1.json", import.meta.url),
@@ -72,6 +85,13 @@ const macosFixtures: MacosFixtures = JSON.parse(
   ),
 );
 const macosCaps = macosSeatbeltExecutionCapabilities();
+const linuxFixtures: LinuxFixtures = JSON.parse(
+  readFileSync(
+    new URL("../fixtures/execution-policy-v3.json", import.meta.url),
+    "utf8",
+  ),
+);
+const linuxCaps = linuxBubblewrapExecutionCapabilities(linuxFixtures.runtime);
 
 describe("Phase 4C1A execution policy contract", () => {
   it.each(fixtures.policy_cases)(
@@ -554,6 +574,165 @@ describe("Phase 4C2A1 macOS Seatbelt contract", () => {
         },
       }).success,
     ).toBe(false);
+  });
+});
+
+describe("Phase 4C2B1 Linux Bubblewrap contract", () => {
+  it("matches cross-language v3 capability bytes and SHA-256", () => {
+    expect(linuxCaps).toEqual(linuxFixtures.capability.capabilities);
+    expect(canonicalExecutionCapabilities(reverseKeys(linuxCaps))).toBe(
+      linuxFixtures.capability.canonical,
+    );
+    expect(executionCapabilitiesDigest(linuxCaps)).toBe(
+      linuxFixtures.capability.sha256,
+    );
+    expect(executionCapabilitiesSchema.parse(linuxCaps)).toEqual(linuxCaps);
+    if (linuxCaps.schema_version !== 3) {
+      throw new Error("Expected Linux schema-v3 capabilities.");
+    }
+    expect(Object.isFrozen(linuxCaps.sandbox_runtime)).toBe(true);
+  });
+
+  it("binds the complete runtime identity into the capability digest", () => {
+    const runtime = linuxBubblewrapRuntimeDescriptorSchema.parse(
+      linuxFixtures.runtime,
+    );
+    const variants = [
+      runtime,
+      { ...runtime, canonical_path: "/bin/bwrap" },
+      { ...runtime, device: "2050" },
+      { ...runtime, inode: "123456790" },
+      { ...runtime, size: runtime.size + 1 },
+      { ...runtime, mtime_ns: "1788076800123456790" },
+      { ...runtime, sha256: "a".repeat(64) },
+      { ...runtime, version: "bubblewrap 0.11.1" },
+    ];
+    expect(
+      new Set(
+        variants.map((candidate) =>
+          executionCapabilitiesDigest(
+            linuxBubblewrapExecutionCapabilities(candidate),
+          ),
+        ),
+      ).size,
+    ).toBe(variants.length);
+  });
+
+  it("strictly bounds and versions every runtime identity field", () => {
+    const runtime = linuxBubblewrapRuntimeDescriptorSchema.parse(
+      linuxFixtures.runtime,
+    );
+    const invalid = [
+      { ...runtime, schema_version: 2 },
+      { ...runtime, mechanism: "macos_seatbelt" },
+      { ...runtime, canonical_path: "usr/bin/bwrap" },
+      { ...runtime, canonical_path: "//usr/bin/bwrap" },
+      { ...runtime, canonical_path: "/" + "a".repeat(4096) },
+      { ...runtime, device: "00" },
+      { ...runtime, device: "not-a-number" },
+      { ...runtime, device: "18446744073709551616" },
+      { ...runtime, inode: 123456789 },
+      { ...runtime, size: Number.MAX_SAFE_INTEGER + 1 },
+      { ...runtime, mtime_ns: "-1" },
+      { ...runtime, mtime_ns: "18446744073709551616" },
+      { ...runtime, sha256: "A".repeat(64) },
+      { ...runtime, version: "bubblewrap\n0.11.0" },
+      { ...runtime, version: "bubblewrap\u00850.11.0" },
+      { ...runtime, version: "" },
+      { ...runtime, version: "x".repeat(257) },
+      { ...runtime, probe_revision: 2 },
+      { ...runtime, secret: "fixture-secret-marker" },
+    ];
+    for (const candidate of invalid) {
+      expect(
+        linuxBubblewrapRuntimeDescriptorSchema.safeParse(candidate).success,
+      ).toBe(false);
+      expectCode(
+        () => linuxBubblewrapExecutionCapabilities(candidate),
+        "INVALID_EXECUTION_POLICY",
+      );
+    }
+  });
+
+  it("supports the Linux filesystem/network matrix but not process isolation", () => {
+    for (const filesystem of [
+      "unrestricted",
+      "read_only",
+      "workspace_write",
+    ] as const) {
+      for (const network of ["inherit", "deny"] as const) {
+        const policy = { ...linuxFixtures.policy, filesystem, network };
+        expect(evaluateExecutionPolicy(policy, linuxCaps)).toEqual({
+          allowed: true,
+          unmet: [],
+        });
+        const admission = createExecutionAdmissionSnapshot(policy, linuxCaps);
+        expect(admission).toMatchObject({
+          schema_version: 3,
+          platform: "linux",
+          sandbox_runtime: linuxFixtures.runtime,
+          stage: "admission",
+          filesystem: {
+            status:
+              filesystem === "unrestricted" ? "not_requested" : "not_applied",
+          },
+          network: {
+            status: network === "inherit" ? "not_requested" : "not_applied",
+          },
+        });
+        expect(JSON.stringify(admission)).not.toContain('"applied"');
+        expectCode(
+          () => createExecutionLaunchSetupSnapshot(policy, linuxCaps),
+          "EXECUTION_POLICY_UNAVAILABLE",
+        );
+      }
+    }
+    expect(
+      evaluateExecutionPolicy(
+        { ...linuxFixtures.policy, process_isolation: "required" },
+        linuxCaps,
+      ),
+    ).toEqual({
+      allowed: false,
+      unmet: [{ dimension: "process_isolation", reason: "not_implemented" }],
+    });
+  });
+
+  it.each(linuxFixtures.snapshot_cases)(
+    "validates shared Linux retained evidence: $name",
+    ({ input, valid }) => {
+      if (valid)
+        expect(validateExecutionSecuritySnapshot(input)).toEqual(input);
+      else
+        expectCode(
+          () => validateExecutionSecuritySnapshot(input),
+          "EXECUTION_SECURITY_CORRUPT",
+        );
+    },
+  );
+
+  it("derives Linux sandbox summaries only from matching retained evidence", () => {
+    const admission = validateExecutionSecuritySnapshot(
+      linuxFixtures.snapshot_cases[0]!.input,
+    );
+    const launch = validateExecutionSecuritySnapshot(
+      linuxFixtures.snapshot_cases[1]!.input,
+    );
+    expect(executionOsSandboxSummary(admission)).toBe(
+      "expected OS sandbox: Linux Bubblewrap + seccomp",
+    );
+    expect(executionPolicyPreview(admission)).toContain(
+      "expected OS sandbox: Linux Bubblewrap + seccomp",
+    );
+    expect(executionOsSandboxSummary(launch)).toBe(
+      "OS sandbox: Linux Bubblewrap + seccomp",
+    );
+    const missingRuntime = { ...admission } as Record<string, unknown>;
+    delete missingRuntime.sandbox_runtime;
+    expectCode(
+      () => validateExecutionSecuritySnapshot(missingRuntime),
+      "EXECUTION_SECURITY_CORRUPT",
+    );
   });
 });
 

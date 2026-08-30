@@ -1,6 +1,6 @@
 # Koda Phase 4 Hardening Roadmap
 
-- Status: In progress — Phase 4B, Phase 4C1, and macOS Phase 4C2A complete; Linux Phase 4C2B design approved
+- Status: In progress — Phase 4B, Phase 4C1, macOS Phase 4C2A, and Linux Phase 4C2B1 complete
 - Date: 2026-08-28
 - Depends on: completed Phase 3A through Phase 3I baseline
 
@@ -81,7 +81,7 @@ The completed Windows terminal contract and acceptance evidence are in [Phase 4B
 
 ### Phase 4C: sandbox, network, and secret policy
 
-Status: In progress — Phase 4C1 and macOS Phase 4C2A complete; Linux Phase 4C2B design approved, C2B1 next
+Status: In progress — Phase 4C1, macOS Phase 4C2A, and Linux Phase 4C2B1 complete; C2B2 next
 
 - Add explicit filesystem, process, environment, and network capabilities.
 - Implement available OS isolation mechanisms and expose their effective strength rather than a portable boolean claim.
@@ -125,8 +125,8 @@ sandbox acceptance is not a Phase 4C2A completion condition.
 
 C2A1 is complete: strict macOS capability/snapshot v2 contracts and shared
 TS/Rust golden evidence are in place, the native executor protocol and durable
-store are version 3, and durable v1/v2 history remains readable without
-implicit upgrade. C2A2 is also complete: Koda now owns a bounded fixed SBPL
+store advanced to version 3 in that slice, and durable v1/v2 history remained
+readable without implicit upgrade. C2A2 is also complete: Koda now owns a bounded fixed SBPL
 builder, `-D`-only canonical path parameters, a pipe/PID sandbox-bootstrap
 confirmation protocol, and a startup probe that verifies real allowed and
 denied operations through the exact system `sandbox-exec`. C2A3 is complete:
@@ -144,9 +144,13 @@ The approved next platform slice is
 [Phase 4C2B Linux Bubblewrap](2026-08-30-phase-4c2b-linux-bubblewrap-design.md).
 It uses a trusted Bubblewrap mount/user/network namespace boundary plus a
 Koda-owned `no_new_privs`/seccomp bootstrap and the same two-way durable release
-gate as macOS. C2B1 begins with execution-security schema v3, native protocol
-v4, durable format v4, runtime fingerprints, shared fixtures, and compatibility;
-it does not activate protected Linux execution yet.
+gate as macOS. C2B1 is complete with execution-security schema v3, native
+protocol v4, durable format v4, runtime fingerprints, shared fixtures,
+formats 1–3 compatibility, grant binding, and client projections. App-server
+protocol v15 remains compatible. C2B2 is next: frozen Bubblewrap discovery,
+identity verification, the fixed builder, bootstrap/seccomp prototype, and a
+real capability self-test. Protected user execution remains unavailable until
+C2B3.
 
 Secret injection and redaction, resource quotas, finer-grained network policy,
 provider/MCP/plugin sandboxing, shell syntax, Landlock fallback, bundled
