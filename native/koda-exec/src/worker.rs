@@ -1017,8 +1017,7 @@ async fn execute_windows_pty_job(runtime: Arc<WorkerRuntime>) -> Result<(), Prot
     let reader_runtime = Arc::clone(&runtime);
     let reader_failure_sender = io_failure_sender.clone();
     let mut reader_task = tokio::spawn(async move {
-        let source = tokio::fs::File::from_std(output);
-        if let Err(error) = capture_windows_pty_output(source, &reader_runtime).await {
+        if let Err(error) = capture_windows_pty_output(output, &reader_runtime).await {
             let _ = reader_failure_sender.send(error.to_string()).await;
         }
     });
@@ -1316,36 +1315,48 @@ async fn close_windows_pseudo_console(
 
 #[cfg(windows)]
 async fn capture_windows_pty_output(
-    mut source: tokio::fs::File,
+    mut source: std::fs::File,
     runtime: &WorkerRuntime,
 ) -> io::Result<()> {
-    let mut buffer = vec![0u8; OUTPUT_BUFFER_BYTES];
-    loop {
-        let count = match source.read(&mut buffer).await {
-            Ok(count) => count,
-            Err(error) if is_windows_terminal_eof(&error) => 0,
-            Err(error) => return Err(error),
-        };
-        if count == 0 {
-            runtime
-                .require_pty()
-                .map_err(protocol_io_error)?
-                .output
-                .lock()
-                .await
-                .sync()
-                .map_err(protocol_io_error)?;
-            return Ok(());
-        }
+    let (sender, mut receiver) = mpsc::channel::<io::Result<Vec<u8>>>(16);
+    std::thread::Builder::new()
+        .name("koda-conpty-output".to_owned())
+        .spawn(move || {
+            let mut buffer = vec![0u8; OUTPUT_BUFFER_BYTES];
+            loop {
+                let chunk = match std::io::Read::read(&mut source, &mut buffer) {
+                    Ok(0) => break,
+                    Ok(count) => Ok(buffer[..count].to_vec()),
+                    Err(error) if is_windows_terminal_eof(&error) => break,
+                    Err(error) => Err(error),
+                };
+                let failed = chunk.is_err();
+                if sender.blocking_send(chunk).is_err() || failed {
+                    break;
+                }
+            }
+        })
+        .map_err(|error| {
+            io::Error::other(format!("Could not start ConPTY output reader: {error}"))
+        })?;
+    while let Some(chunk) = receiver.recv().await {
         runtime
             .require_pty()
             .map_err(protocol_io_error)?
             .output
             .lock()
             .await
-            .append(&buffer[..count])
+            .append(&chunk?)
             .map_err(protocol_io_error)?;
     }
+    runtime
+        .require_pty()
+        .map_err(protocol_io_error)?
+        .output
+        .lock()
+        .await
+        .sync()
+        .map_err(protocol_io_error)
 }
 
 #[cfg(windows)]

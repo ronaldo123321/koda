@@ -320,11 +320,13 @@ windowsDescribe("NativeExecutorClient Windows control plane", () => {
   });
 
   test("runs a real ConPTY with fenced input, resize, and detach survival", async () => {
+    const startupMarker = join(root, `conpty-started-${randomUUID()}`);
     const started = await client.startPty({
       argv: [
         process.execPath,
         "-e",
         [
+          `require("node:fs").writeFileSync(${JSON.stringify(startupMarker)},"started");`,
           'const readline=require("node:readline");',
           "const dimensions=()=>`${process.stdout.columns}x${process.stdout.rows}`;",
           "process.stdout.write(`READY:${process.stdin.isTTY}:${process.stdout.isTTY}:${dimensions()}:${process.env.TERM}\\n`);",
@@ -354,10 +356,23 @@ windowsDescribe("NativeExecutorClient Windows control plane", () => {
     await expect(reader.acquireInput()).rejects.toMatchObject({
       code: "INPUT_LEASE_HELD",
     });
-    const ready = await waitForPtyText(
-      writer,
-      "READY:true:true:80x24:xterm-256color",
-    );
+    let ready: string;
+    try {
+      ready = await waitForPtyText(
+        writer,
+        "READY:true:true:80x24:xterm-256color",
+      );
+    } catch (error) {
+      const markerExists = await access(startupMarker).then(
+        () => true,
+        () => false,
+      );
+      const snapshot = await client.get(started.job_id);
+      throw new Error(
+        `${error instanceof Error ? error.message : String(error)} Child startup marker: ${markerExists}. Snapshot: ${JSON.stringify(snapshot)}`,
+        { cause: error },
+      );
+    }
     expect(ready).toContain("READY:true:true:80x24:xterm-256color");
 
     await writer.resize(30, 100);
