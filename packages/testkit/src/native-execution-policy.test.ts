@@ -202,7 +202,10 @@ describe("Phase 4C2 native admission and evidence", () => {
     });
     expect((await client.start(input)).job_id).toBe(started.job_id);
     await expect(
-      client.start({ ...input, policy: { ...input.policy!, network: "deny" } }),
+      client.start({
+        ...input,
+        argv: [process.execPath, "-e", "console.log('policy-conflict')"],
+      }),
     ).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
     await client.closeOwnedSupervisorForTests();
     const restarted = await open(fixture);
