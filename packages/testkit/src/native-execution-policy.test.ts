@@ -869,7 +869,7 @@ describe("Phase 4C2 native admission and evidence", () => {
       const marker = join(workspace, `linux-cleaned-${faultPoint}`);
       const input = await inputFor(
         workspace,
-        `setTimeout(()=>require('fs').writeFileSync(${JSON.stringify(marker)},'bad'),500)`,
+        `setTimeout(()=>require('fs').writeFileSync(${JSON.stringify(marker)},'bad'),2000)`,
       );
       input.policy = {
         ...input.policy!,
@@ -899,7 +899,7 @@ describe("Phase 4C2 native admission and evidence", () => {
           mechanism: "linux_network_namespace_seccomp",
         },
       });
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, 600));
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 2200));
       await expect(access(marker)).rejects.toMatchObject({ code: "ENOENT" });
     },
   );

@@ -168,7 +168,7 @@ jobs:
             exit 1
           fi
       - run: pnpm install --frozen-lockfile --ignore-scripts
-      - run: pnpm --filter @koda/runtime-node... build
+      - run: pnpm -r --if-present build
       - run: cargo build -p koda-exec
       - name: Build pinned Phase 4C1 legacy executor fixture
         shell: bash
