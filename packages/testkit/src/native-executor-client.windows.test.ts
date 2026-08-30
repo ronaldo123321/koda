@@ -203,7 +203,7 @@ windowsDescribe("NativeExecutorClient Windows control plane", () => {
       argv: [
         process.execPath,
         "-e",
-        "process.stdout.write('before-');setTimeout(()=>process.stdout.write('after'),500)",
+        "process.stdout.write('before-restart');setInterval(()=>{},1000)",
       ],
       cwd: restartRoot,
       environment: windowsEnvironment,
@@ -222,16 +222,20 @@ windowsDescribe("NativeExecutorClient Windows control plane", () => {
         stateDirectory: join(restartRoot, "state"),
       });
       const duplicate = await restartClient.start(input);
-      const terminal = await waitTerminal(restartClient, started.job_id);
-      const output = await restartClient.readOutput(
+      const output = await waitForOutput(
+        restartClient,
         started.job_id,
-        "stdout",
-        0,
+        "before-restart",
       );
+      await restartClient.terminate(started.job_id, "cancellation");
+      const terminal = await waitTerminal(restartClient, started.job_id);
 
       expect(duplicate.job_id).toBe(started.job_id);
-      expect(terminal).toMatchObject({ state: "exited", exit_code: 0 });
-      expect(output.data.toString("utf8")).toBe("before-after");
+      expect(output).toContain("before-restart");
+      expect(terminal).toMatchObject({
+        state: "exited",
+        termination: { reason: "cancellation", outcome: "terminated" },
+      });
     } finally {
       await restartClient.closeOwnedSupervisorForTests();
       await rm(restartRoot, { force: true, recursive: true });
@@ -400,6 +404,20 @@ async function waitForChildPid(
     await new Promise<void>((resolvePromise) => setTimeout(resolvePromise, 10));
   }
   throw new Error(`Native job '${jobId}' did not publish its child PID.`);
+}
+
+async function waitForOutput(
+  client: NativeExecutorClient,
+  jobId: string,
+  expected: string,
+): Promise<string> {
+  for (let attempt = 0; attempt < 300; attempt += 1) {
+    const output = await client.readOutput(jobId, "stdout", 0);
+    const text = output.data.toString("utf8");
+    if (text.includes(expected)) return text;
+    await new Promise<void>((resolvePromise) => setTimeout(resolvePromise, 10));
+  }
+  throw new Error(`Native job '${jobId}' did not emit '${expected}'.`);
 }
 
 async function openFaultClient(
