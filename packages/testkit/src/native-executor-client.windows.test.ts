@@ -1,5 +1,8 @@
+import { type ToolOperationalEvent } from "@koda/agent-core";
+import { WorkspaceCommandRunner } from "@koda/runtime-node";
+import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { access, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -35,15 +38,15 @@ windowsDescribe("NativeExecutorClient Windows control plane", () => {
     await rm(root, { force: true, recursive: true });
   });
 
-  test("keeps B2 capabilities closed until restart recovery is accepted", async () => {
+  test("opens only the verified Windows Job Object capabilities", async () => {
     const hello = await client.hello();
     expect(hello.platform).toBe("windows");
     expect(hello.capabilities).toEqual({
       process_group: false,
-      job_object: false,
+      job_object: true,
       pty: false,
-      reattach: false,
-      durable_restart_recovery: false,
+      reattach: true,
+      durable_restart_recovery: true,
     });
   });
 
@@ -149,6 +152,165 @@ windowsDescribe("NativeExecutorClient Windows control plane", () => {
     });
   });
 
+  test("reports Windows Job Object ownership and termination evidence upstream", async () => {
+    const runner = await WorkspaceCommandRunner.open(root, {
+      environment: windowsEnvironment,
+      nativeExecutor: client,
+      terminationGraceMs: 25,
+      terminationConfirmationMs: 2_000,
+    });
+    const prepared = await runner.prepare({
+      argv: [process.execPath, "-e", "setInterval(()=>{},1000)"],
+      timeoutMs: 150,
+    });
+    const events: ToolOperationalEvent[] = [];
+    const result = await prepared.execute(
+      new AbortController().signal,
+      async (event) => {
+        events.push(event);
+      },
+    );
+
+    expect(result.timed_out).toBe(true);
+    expect(events).toContainEqual({
+      type: "process.started",
+      payload: expect.objectContaining({ ownership: "windows_job_object" }),
+    });
+    expect(events).toContainEqual({
+      type: "process.termination_requested",
+      payload: expect.objectContaining({
+        attempt: "force",
+        mechanism: "windows_job_object_terminate",
+      }),
+    });
+    expect(events).toContainEqual({
+      type: "process.termination_completed",
+      payload: expect.objectContaining({
+        reason: "timeout",
+        outcome: "terminated",
+      }),
+    });
+  });
+
+  test("reattaches to the same live Worker after Supervisor restart", async () => {
+    const restartRoot = await mkdtemp(join(tmpdir(), "koda-windows-restart-"));
+    let restartClient = await NativeExecutorClient.open({
+      binaryPath: resolve("target/debug/koda-exec.exe"),
+      stateDirectory: join(restartRoot, "state"),
+    });
+    const requestId = `windows-restart-${randomUUID()}`;
+    const input = {
+      argv: [
+        process.execPath,
+        "-e",
+        "process.stdout.write('before-');setTimeout(()=>process.stdout.write('after'),500)",
+      ],
+      cwd: restartRoot,
+      environment: windowsEnvironment,
+      timeoutMs: 5_000,
+      outputLimitBytes: 4_096,
+      terminationGraceMs: 25,
+      terminationConfirmationMs: 2_000,
+      lifecycle: "background" as const,
+      requestId,
+    };
+    try {
+      const started = await restartClient.start(input);
+      await restartClient.closeOwnedSupervisorForTests();
+      restartClient = await NativeExecutorClient.open({
+        binaryPath: resolve("target/debug/koda-exec.exe"),
+        stateDirectory: join(restartRoot, "state"),
+      });
+      const duplicate = await restartClient.start(input);
+      const terminal = await waitTerminal(restartClient, started.job_id);
+      const output = await restartClient.readOutput(
+        started.job_id,
+        "stdout",
+        0,
+      );
+
+      expect(duplicate.job_id).toBe(started.job_id);
+      expect(terminal).toMatchObject({ state: "exited", exit_code: 0 });
+      expect(output.data.toString("utf8")).toBe("before-after");
+    } finally {
+      await restartClient.closeOwnedSupervisorForTests();
+      await rm(restartRoot, { force: true, recursive: true });
+    }
+  });
+
+  test("reconciles Worker loss only after the persisted root disappears", async () => {
+    const faultRoot = await mkdtemp(
+      join(tmpdir(), "koda-windows-worker-loss-"),
+    );
+    const faultClient = await openFaultClient(faultRoot, "after_running");
+    try {
+      const started = await faultClient.start({
+        argv: [process.execPath, "-e", "setInterval(()=>{},1000)"],
+        cwd: faultRoot,
+        environment: windowsEnvironment,
+        timeoutMs: 5_000,
+        outputLimitBytes: 4_096,
+        terminationGraceMs: 25,
+        terminationConfirmationMs: 2_000,
+      });
+      const terminal = await waitTerminal(faultClient, started.job_id);
+
+      expect(terminal).toMatchObject({
+        state: "termination_uncertain",
+        termination: { reason: "orphan_cleanup", outcome: "uncertain" },
+        failure: { code: "WORKER_LOST_AFTER_COMMAND_BOUNDARY" },
+      });
+      expect(
+        terminal.termination?.attempts.some(
+          (attempt) =>
+            attempt.mechanism === "windows_job_object_recovery_pending",
+        ),
+      ).toBe(false);
+      if (started.pid === null) {
+        throw new Error("Windows Worker-loss job did not publish a root PID.");
+      }
+      const rootPid = started.pid;
+      expect(() => process.kill(rootPid, 0)).toThrow();
+    } finally {
+      await faultClient.closeOwnedSupervisorForTests();
+      await rm(faultRoot, { force: true, recursive: true });
+    }
+  });
+
+  test("never resumes a command when the Worker dies after suspended creation", async () => {
+    const faultRoot = await mkdtemp(join(tmpdir(), "koda-windows-start-gate-"));
+    const marker = join(faultRoot, "command-executed");
+    const faultClient = await openFaultClient(faultRoot, "after_command_spawn");
+    try {
+      const started = await faultClient.start({
+        argv: [
+          process.execPath,
+          "-e",
+          `require('node:fs').writeFileSync(${JSON.stringify(marker)},'bad')`,
+        ],
+        cwd: faultRoot,
+        environment: windowsEnvironment,
+        timeoutMs: 5_000,
+        outputLimitBytes: 4_096,
+        terminationGraceMs: 25,
+        terminationConfirmationMs: 2_000,
+      });
+      const terminal = await waitTerminal(faultClient, started.job_id);
+
+      expect(terminal).toMatchObject({
+        state: "termination_uncertain",
+        failure: { code: "WORKER_LOST_AFTER_COMMAND_BOUNDARY" },
+      });
+      await new Promise<void>((resolvePromise) =>
+        setTimeout(resolvePromise, 100),
+      );
+      await expect(access(marker)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await faultClient.closeOwnedSupervisorForTests();
+      await rm(faultRoot, { force: true, recursive: true });
+    }
+  });
+
   test("continues to reject PTY execution with the stable capability error", async () => {
     await expect(
       client.startPty({
@@ -238,4 +400,24 @@ async function waitForChildPid(
     await new Promise<void>((resolvePromise) => setTimeout(resolvePromise, 10));
   }
   throw new Error(`Native job '${jobId}' did not publish its child PID.`);
+}
+
+async function openFaultClient(
+  faultRoot: string,
+  faultPoint: string,
+): Promise<NativeExecutorClient> {
+  const previousFaultPoint = process.env.KODA_EXEC_TEST_FAULT_POINT;
+  try {
+    process.env.KODA_EXEC_TEST_FAULT_POINT = faultPoint;
+    return await NativeExecutorClient.open({
+      binaryPath: resolve("target/debug/koda-exec.exe"),
+      stateDirectory: join(faultRoot, "state"),
+    });
+  } finally {
+    if (previousFaultPoint === undefined) {
+      delete process.env.KODA_EXEC_TEST_FAULT_POINT;
+    } else {
+      process.env.KODA_EXEC_TEST_FAULT_POINT = previousFaultPoint;
+    }
+  }
 }

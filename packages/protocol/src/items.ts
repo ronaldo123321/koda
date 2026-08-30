@@ -166,6 +166,7 @@ export const recoveryItemSchema = z.object({
           pid: z.number().int().positive(),
           ownership: z.enum([
             "posix_process_group",
+            "windows_job_object",
             "windows_taskkill_tree",
             "direct_child",
           ]),

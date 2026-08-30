@@ -31,6 +31,8 @@ use crate::platform::bootstrap::{
 };
 use crate::platform::identity::current_process_identity;
 #[cfg(windows)]
+use crate::platform::identity::process_start_identity;
+#[cfg(windows)]
 use crate::platform::process::{ManagedProcessTree, SuspendedManagedProcess};
 #[cfg(unix)]
 use crate::platform::process::{
@@ -1736,6 +1738,7 @@ async fn terminate_group_after_root(
 #[cfg(unix)]
 pub async fn cleanup_verified_process_group(
     pid: u32,
+    _expected_identity: &str,
     grace_ms: u64,
     confirmation_ms: u64,
 ) -> TerminationSnapshot {
@@ -1750,16 +1753,34 @@ pub async fn cleanup_verified_process_group(
 
 #[cfg(windows)]
 pub async fn cleanup_verified_process_group(
-    _pid: u32,
+    pid: u32,
+    expected_identity: &str,
     _grace_ms: u64,
-    _confirmation_ms: u64,
+    confirmation_ms: u64,
 ) -> TerminationSnapshot {
+    let deadline = Instant::now() + Duration::from_millis(confirmation_ms);
+    let disappeared = loop {
+        match process_start_identity(pid) {
+            Ok(Some(actual)) if actual == expected_identity => {}
+            Ok(_) => break true,
+            Err(_) => {}
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
+        sleep(Duration::from_millis(20)).await;
+    };
     TerminationSnapshot {
         reason: TerminationReason::OrphanCleanup.as_str().to_owned(),
-        outcome: "uncertain".to_owned(),
+        outcome: if disappeared {
+            "terminated"
+        } else {
+            "uncertain"
+        }
+        .to_owned(),
         attempts: vec![TerminationAttempt {
             attempt: "identity_check".to_owned(),
-            mechanism: "windows_job_object_recovery_pending".to_owned(),
+            mechanism: "windows_job_object_close_observation".to_owned(),
         }],
     }
 }

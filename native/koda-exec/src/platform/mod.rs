@@ -32,10 +32,10 @@ pub struct PlatformCapabilities {
 pub const fn capabilities() -> PlatformCapabilities {
     PlatformCapabilities {
         process_group: cfg!(unix),
-        job_object: false,
+        job_object: cfg!(windows),
         pty: cfg!(unix),
-        reattach: cfg!(unix),
-        durable_restart_recovery: cfg!(unix),
+        reattach: true,
+        durable_restart_recovery: true,
     }
 }
 
@@ -105,9 +105,9 @@ mod tests {
     fn capabilities_match_the_verified_runtime() {
         let capabilities = capabilities();
         assert_eq!(capabilities.process_group, cfg!(unix));
-        assert!(!capabilities.job_object);
+        assert_eq!(capabilities.job_object, cfg!(windows));
         assert_eq!(capabilities.pty, cfg!(unix));
-        assert_eq!(capabilities.reattach, cfg!(unix));
-        assert_eq!(capabilities.durable_restart_recovery, cfg!(unix));
+        assert!(capabilities.reattach);
+        assert!(capabilities.durable_restart_recovery);
     }
 }

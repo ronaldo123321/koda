@@ -74,6 +74,7 @@ const approvalResolvedPayloadSchema = z
 export const toolEffectSchema = z.enum(["read", "control", "write", "execute"]);
 export const processOwnershipSchema = z.enum([
   "posix_process_group",
+  "windows_job_object",
   "windows_taskkill_tree",
   "direct_child",
 ]);
@@ -86,6 +87,8 @@ export const processTerminationReasonSchema = z.enum([
 export const processTerminationAttemptSchema = z.enum(["graceful", "force"]);
 export const processTerminationMechanismSchema = z.enum([
   "posix_process_group_signal",
+  "windows_console_ctrl_break",
+  "windows_job_object_terminate",
   "windows_taskkill",
   "direct_child_signal",
 ]);

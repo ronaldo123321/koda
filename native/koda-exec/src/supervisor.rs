@@ -667,6 +667,7 @@ impl Supervisor {
             if process_identity_matches(pid, identity) {
                 attempts = crate::worker::cleanup_verified_process_group(
                     pid,
+                    identity,
                     record.manifest.start.termination_grace_ms,
                     record.manifest.start.termination_confirmation_ms,
                 )
@@ -700,7 +701,7 @@ impl Supervisor {
         });
         next.failure = Some(JobFailure {
             code: "WORKER_LOST_AFTER_COMMAND_BOUNDARY".to_owned(),
-            message: "The Worker disappeared after command start; the process group was reconciled without claiming a verified exit status.".to_owned(),
+            message: "The Worker disappeared after command start; the owned command tree was reconciled without claiming a verified exit status.".to_owned(),
         });
         let state = record.transition(&current, next)?;
         drop(lock);

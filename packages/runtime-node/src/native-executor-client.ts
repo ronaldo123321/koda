@@ -101,6 +101,7 @@ export interface NativeTerminationAttempt {
     | "posix_process_group_signal"
     | "windows_console_ctrl_break"
     | "windows_job_object_terminate"
+    | "windows_job_object_close_observation"
     | "windows_job_object_recovery_pending"
     | "process_start_identity_mismatch"
     | "command_identity_not_persisted";
@@ -228,6 +229,7 @@ const terminationAttemptSchema = z
       "posix_process_group_signal",
       "windows_console_ctrl_break",
       "windows_job_object_terminate",
+      "windows_job_object_close_observation",
       "windows_job_object_recovery_pending",
       "process_start_identity_mismatch",
       "command_identity_not_persisted",

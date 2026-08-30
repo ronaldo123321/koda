@@ -515,7 +515,13 @@ async function runNativeForegroundCommand(
     try {
       await options.report?.({
         type: "process.started",
-        payload: { pid: current.pid, ownership: "posix_process_group" },
+        payload: {
+          pid: current.pid,
+          ownership:
+            process.platform === "win32"
+              ? "windows_job_object"
+              : "posix_process_group",
+        },
       });
       reportedPid = current.pid;
     } catch (error) {
@@ -640,9 +646,13 @@ async function reportNativeCompletion(
   pid: number,
 ): Promise<void> {
   for (const attempt of snapshot.termination?.attempts ?? []) {
+    if (attempt.attempt === "identity_check") {
+      continue;
+    }
     if (
-      attempt.attempt === "identity_check" ||
-      attempt.mechanism !== "posix_process_group_signal"
+      attempt.mechanism !== "posix_process_group_signal" &&
+      attempt.mechanism !== "windows_console_ctrl_break" &&
+      attempt.mechanism !== "windows_job_object_terminate"
     ) {
       continue;
     }
