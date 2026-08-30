@@ -1,6 +1,6 @@
 # Koda Phase 4B Supervised Native Execution Design
 
-- Status: In progress — Phase 4B4A design accepted; platform foundations next
+- Status: In progress — Phase 4B4A complete; Phase 4B4B next
 - Date: 2026-08-28
 - Depends on: Phase 4A complete
 
@@ -189,9 +189,10 @@ terminal projection contract is in [Phase 4B3B interactive process UI](2026-08-2
 
 ### Phase 4B4: platform completion
 
-- **Phase 4B4A next:** add platform seams, authenticated Windows Named Pipes,
-  process identity, private state security, bootstrap handle inheritance, and
-  Windows-native CI without enabling command execution.
+- **Phase 4B4A complete:** platform seams, authenticated Windows Named Pipes,
+  process identity, private state security, bootstrap handle inheritance,
+  fail-closed command behavior, and Linux/Windows CI are implemented and
+  verified.
 - **Phase 4B4B pending:** implement and verify Windows Job Object process-tree
   ownership, termination, timeout, and restart recovery.
 - **Phase 4B4C pending:** implement and verify ConPTY interactive execution,

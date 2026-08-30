@@ -1,6 +1,6 @@
 # Koda Phase 4B4A Windows Platform Foundations Design
 
-- Status: Accepted — implementation next
+- Status: Complete — implemented and verified
 - Date: 2026-08-30
 - Depends on: Phase 4B3 native PTY and interactive-process workflow complete
 - Target: Windows 10 version 1809 and later, plus unchanged macOS/Linux support
@@ -237,6 +237,29 @@ Phase 4B4A is complete when tests prove:
 7. Windows capabilities remain false and `job/start` remains unavailable until
    its ownership backend is verified.
 8. Linux and Windows CI gates pass from clean checkouts.
+
+## Completion record
+
+Phase 4B4A was implemented and verified on 2026-08-30:
+
+- Phase 4B4A1 moved transport, process identity, state security, bootstrap,
+  process-tree, and terminal behavior behind platform boundaries while retaining
+  the existing Unix implementations.
+- Phase 4B4A2 added the Windows Named Pipe control plane, explicit current-user
+  and LocalSystem ACLs, peer-process SID checks, creation-time process identity,
+  exclusive state locking, restricted bootstrap handle lists, shared protocol
+  framing, and stable fail-closed capability behavior.
+- Phase 4B4A3 added Windows-native Rust and Node acceptance coverage for
+  authenticated concurrent connections, endpoint exclusivity, ACL
+  normalization, identity mismatch, invalid and partial frames, capability
+  reporting, and unavailable command execution.
+- Local macOS verification passed the Rust native suite, Windows cross-target
+  compilation and Clippy, and the complete TypeScript/native test suite.
+- [GitHub Actions run 33283759220](https://github.com/ronaldo123321/koda/actions/runs/33283759220)
+  passed both the clean Linux `verify` gate and the Windows-native gate.
+
+Only Phase 4B4A is complete. Job Object execution remains Phase 4B4B and ConPTY
+interactive execution remains Phase 4B4C.
 
 ## Verified platform references
 
