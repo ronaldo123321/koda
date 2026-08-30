@@ -62,6 +62,46 @@ jobs:
           echo "KODA_LEGACY_EXECUTOR_BINARY=$legacy_binary" >> "$GITHUB_ENV"
       - run: pnpm format:check
       - run: pnpm typecheck
+      - name: Run Linux capability startup smoke
+        shell: bash
+        run: |
+          state_directory="$RUNNER_TEMP/koda-linux-smoke-state"
+          endpoint="$RUNNER_TEMP/koda-linux-smoke.sock"
+          diagnostics="$RUNNER_TEMP/koda-linux-smoke.stderr"
+          mkdir -m 0700 "$state_directory"
+          target/debug/koda-exec serve \
+            --endpoint "$endpoint" \
+            --state-dir "$state_directory" \
+            2>"$diagnostics" &
+          supervisor_pid=$!
+          cleanup() {
+            kill "$supervisor_pid" 2>/dev/null || true
+            wait "$supervisor_pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          for _ in {1..100}; do
+            if [[ -S "$endpoint" ]]; then
+              exit 0
+            fi
+            if ! kill -0 "$supervisor_pid" 2>/dev/null; then
+              wait "$supervisor_pid" || true
+              trap - EXIT
+              diagnostic="$(grep -F 'The Linux Bubblewrap capability probe failed because ' "$diagnostics" | tail -n 1 || true)"
+              if [[ -z "$diagnostic" ]]; then
+                diagnostic="The Linux capability startup smoke failed without a recognized bounded diagnostic."
+              fi
+              diagnostic="${diagnostic//'%'/'%25'}"
+              diagnostic="${diagnostic//$'\r'/'%0D'}"
+              diagnostic="${diagnostic//$'\n'/'%0A'}"
+              echo "::error title=Linux capability startup smoke failed::$diagnostic"
+              exit 1
+            fi
+            sleep 0.1
+          done
+
+          echo "::error title=Linux capability startup smoke timed out::The native executor did not publish its local endpoint within ten seconds."
+          exit 1
       - name: Run full test suite
         shell: bash
         run: |

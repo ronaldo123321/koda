@@ -833,7 +833,7 @@ profiles targeting `/usr/bin/bwrap` can conflict.
 The existing Linux `verify` job is already the shared full-suite gate. C2B2
 pins Ubuntu 24.04, installs the distro Bubblewrap and AppArmor tooling, loads
 the distro's scoped `bwrap-userns-restrict` profile, performs a fixed namespace
-preflight, and runs with
+preflight plus a bounded native-executor startup smoke, and runs with
 `KODA_REQUIRE_LINUX_BUBBLEWRAP=1`, so schema-v3 advertisement cannot pass from
 pure fixtures. Phase 4C2B4 adds a separate `linux-native` job on
 `ubuntu-24.04` for the complete protected Pipe/PTY matrix:
