@@ -21,6 +21,8 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
+      - run: sudo apt-get update
+      - run: sudo apt-get install --yes ripgrep
       - run: pnpm install --frozen-lockfile
       - run: pnpm format:check
       - run: pnpm typecheck
