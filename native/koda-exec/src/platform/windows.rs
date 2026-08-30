@@ -313,14 +313,16 @@ impl RestrictedHandleList {
         }
         let pseudo_consoles = pseudo_console.into_iter().collect::<Vec<_>>();
         if !pseudo_consoles.is_empty()
-            // SAFETY: list is initialized and the heap-backed HPCON value remains stable.
+            // SAFETY: list is initialized and the HPCON itself is the attribute value.
+            // Unlike handle and Job lists, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE
+            // expects the opaque handle, not a pointer to an array containing it.
             && unsafe {
                 UpdateProcThreadAttribute(
                     list,
                     0,
                     PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE as usize,
-                    pseudo_consoles.as_ptr().cast(),
-                    size_of_val(pseudo_consoles.as_slice()),
+                    pseudo_consoles[0] as *const c_void,
+                    size_of::<HPCON>(),
                     null_mut(),
                     null(),
                 )
