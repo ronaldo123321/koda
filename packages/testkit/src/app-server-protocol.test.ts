@@ -53,6 +53,8 @@ import {
 } from "@koda/protocol";
 import { describe, expect, it } from "vitest";
 
+import { macosProtectedLaunchSecurity } from "./execution-security-fixtures.js";
+
 describe("app-server protocol", () => {
   it("accepts strict versioned requests and safe JSON-RPC IDs", () => {
     expect(APP_SERVER_PROTOCOL_VERSION).toBe(15);
@@ -424,33 +426,30 @@ describe("app-server protocol", () => {
 
   it("validates bounded process sessions without native credentials", () => {
     const processSessionId = "00000000-0000-4000-8000-000000000001";
-    const security = {
-      schema_version: 1 as const,
-      kind: "legacy_unknown" as const,
-    };
-    expect(
-      processAttachResultSchema.parse({
-        processSessionId,
-        process: {
-          jobId: "job-1",
-          displayName: "Dev server",
-          cwd: "/workspace",
-          state: "running",
-          lifecycle: "background",
-          createdAtMs: 1,
-          updatedAtMs: 2,
-          pid: 42,
-          security,
-        },
-        inputState: "owned",
-        rows: 24,
-        cols: 80,
-        cursor: 10,
-        earliestCursor: 5,
-        latestCursor: 20,
-        complete: false,
-      }),
-    ).not.toHaveProperty("capabilityToken");
+    const security = macosProtectedLaunchSecurity();
+    const attached = processAttachResultSchema.parse({
+      processSessionId,
+      process: {
+        jobId: "job-1",
+        displayName: "Dev server",
+        cwd: "/workspace",
+        state: "running",
+        lifecycle: "background",
+        createdAtMs: 1,
+        updatedAtMs: 2,
+        pid: 42,
+        security,
+      },
+      inputState: "owned",
+      rows: 24,
+      cols: 80,
+      cursor: 10,
+      earliestCursor: 5,
+      latestCursor: 20,
+      complete: false,
+    });
+    expect(attached).not.toHaveProperty("capabilityToken");
+    expect(attached.process.security).toEqual(security);
     expect(() =>
       processAttachResultSchema.parse({
         processSessionId,

@@ -1,6 +1,6 @@
 # Koda Phase 4C2A macOS Seatbelt Design
 
-- Status: In progress — C2A1 through C2A3 complete; C2A4 next
+- Status: Complete — C2A1 through C2A4 implemented and accepted
 - Date: 2026-08-30
 - Depends on: completed Phase 4C1 execution policy and isolation reporting
 - Platform order: macOS first, Linux second, Windows sandboxing last
@@ -342,14 +342,14 @@ remain the same-commit release gate.
   A two-way handshake keeps user code stopped until confirmation, identity
   revalidation, and durable `running`/`launch_setup` publication succeed.
 - Preserve cancellation, timeout, background, attachment, resize, restart, and
-  output contracts. **Implemented on the shared Worker path; the exhaustive
-  protected lifecycle matrix remains C2A4 acceptance.**
+  output contracts. **Implemented on the shared Worker path and accepted by
+  the exhaustive protected lifecycle matrix in C2A4.**
 
 Local C2A3 tests prove real read-only/network-denied Pipe and PTY execution,
 workspace-plus-private-scratch write confinement, public v2 capability
 activation, retained applied evidence, and a no-side-effect Worker failure
 between sandbox confirmation and user release. Remote same-commit platform
-acceptance remains C2A4.
+acceptance is completed by C2A4.
 
 Local verification on macOS passed formatting, TypeScript build/typechecking,
 Clippy with warnings as errors, 53 Rust tests, and the complete 627-test
@@ -360,11 +360,28 @@ executor, including Pipe/PTY, restart, fault, and v1→v3 compatibility cases.
 ### C2A4: clients and remote acceptance
 
 - Update previews, results, events, app-server, CLI, and TUI reporting.
-- Publish the revised execution-security guarantee.
-- Run real macOS negative side-effect and lifecycle matrices.
+  **Completed.** A shared evidence-derived sandbox summary distinguishes
+  expected admission from applied Seatbelt and is used by CLI diagnostics,
+  TUI activity history, and TUI process views; app-server schemas preserve the
+  complete v2 snapshot.
+- Publish the revised execution-security guarantee. **Completed.** The public
+  guarantee now describes the applied macOS boundary, client wording,
+  protected PTY lifecycle, and remaining platform limits.
+- Run real macOS negative side-effect and lifecycle matrices. **Completed.**
+  In addition to the Pipe/PTY deny and scratch tests, native acceptance proves
+  `network = inherit` with both protected filesystem modes and drives a
+  protected background PTY through attach, resize, detach, Supervisor restart,
+  reattach, input, and terminal evidence retention.
 - Close Phase 4C2A only when the same commit passes the macOS native job and
-  the shared Linux suite. Existing Windows jobs remain baseline regressions,
-  not a Windows sandbox acceptance requirement.
+  the shared Linux suite. **Completed as the release gate.** Existing Windows
+  jobs remain baseline regressions, not a Windows sandbox acceptance claim.
+
+Local C2A4 closure passed formatting, full build and TypeScript typechecking,
+Clippy with warnings as errors, all 53 Rust tests, and the complete 630-test
+TypeScript/integration suite (20 platform skips). The real macOS acceptance
+includes all 15 locally applicable execution-policy tests; the three pinned-v1
+compatibility cases remain part of the same-commit CI job where the legacy
+fixture is built explicitly.
 
 ## Acceptance matrix
 

@@ -20,14 +20,11 @@ import {
   type TuiInputController,
   type TuiState,
 } from "@koda/tui";
-import {
-  c1ExecutionCapabilities,
-  createExecutionLaunchSetupSnapshot,
-  resolveExecutionPolicy,
-} from "@koda/runtime-node";
 import { renderToString, type Key } from "ink";
 import { createElement } from "react";
 import { describe, expect, it, vi } from "vitest";
+
+import { macosProtectedLaunchSecurity } from "./execution-security-fixtures.js";
 
 describe("Koda Ink view", () => {
   it("renders immutable transcript rows and a bounded live region", () => {
@@ -402,10 +399,7 @@ describe("Koda Ink view", () => {
   it("renders process sessions and routes PTY keys without leaking into chat", () => {
     const controller = fakeInputController();
     const state = baseState();
-    const security = createExecutionLaunchSetupSnapshot(
-      resolveExecutionPolicy({ workspaceRoot: "/workspace" }),
-      c1ExecutionCapabilities("native_posix"),
-    );
+    const security = macosProtectedLaunchSecurity();
     const process = {
       jobId: "process-job-1",
       displayName: "Dev server",
@@ -445,7 +439,7 @@ describe("Koda Ink view", () => {
     expect(frame).toContain("Dev server · process-");
     expect(frame).toContain("server ready");
     expect(frame).toContain("Ctrl+C interrupt");
-    expect(frame).toContain("OS sandbox: none");
+    expect(frame).toContain("OS sandbox: macOS Seatbelt");
     expect(frame).toContain("native_posix");
 
     const requestExit = vi.fn();

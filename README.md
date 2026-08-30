@@ -6,7 +6,7 @@ The project is building the control plane around a coding model: typed conversat
 
 ## Current status
 
-The Phase 3 local-agent foundation, Phase 4A crash-safe workspace recovery, Phase 4B supervised native execution, Phase 4C1 execution policy/reporting, and Phase 4C2A1-A3 macOS Seatbelt runtime are complete. A verified macOS native executor now advertises and enforces protected Pipe/PTY execution; client-wide lifecycle acceptance remains Phase 4C2A4. Koda has an opt-in Rust execution supervisor with a versioned local protocol, reconnectable job observation, POSIX process groups, Windows Job Objects and ConPTY, bounded retained output, explicit native capability reporting, and end-to-end execution-policy evidence on top of those foundations:
+The Phase 3 local-agent foundation, Phase 4A crash-safe workspace recovery, Phase 4B supervised native execution, Phase 4C1 execution policy/reporting, and Phase 4C2A macOS Seatbelt delivery are complete. A verified macOS native executor now advertises and enforces protected Pipe/PTY execution, retains applied evidence across background-terminal and Supervisor lifecycles, and projects that evidence consistently through app-server, CLI, and TUI clients. Linux isolation is the next Phase 4C platform slice; Windows sandboxing remains deferred until the macOS and Linux paths are complete. Koda has an opt-in Rust execution supervisor with a versioned local protocol, reconnectable job observation, POSIX process groups, Windows Job Objects and ConPTY, bounded retained output, explicit native capability reporting, and end-to-end execution-policy evidence on top of those foundations:
 
 - Versioned Thread, Turn, Item, and Agent Event schemas.
 - A provider-neutral streaming model interface.

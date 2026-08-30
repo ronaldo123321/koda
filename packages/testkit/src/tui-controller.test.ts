@@ -75,6 +75,8 @@ import {
 } from "@koda/tui";
 import { describe, expect, it, vi } from "vitest";
 
+import { macosProtectedLaunchSecurity } from "./execution-security-fixtures.js";
+
 describe("TuiController", () => {
   it("lists, attaches, projects, writes, reacquires, and detaches terminal sessions", async () => {
     const client = new FakeAppServerClient();
@@ -719,6 +721,21 @@ describe("TuiController", () => {
           effect: "read",
         },
       }),
+      agentEventSchema.parse({
+        schemaVersion: 1,
+        sequence: 13,
+        timestamp: "2026-08-28T00:00:13.000Z",
+        threadId: "tui-thread",
+        turnId: "tui-turn-1",
+        type: "process.started",
+        payload: {
+          callId: "activity-call",
+          name: "exec_terminal",
+          pid: 42,
+          ownership: "posix_process_group",
+          security: macosProtectedLaunchSecurity(),
+        },
+      }),
     ];
     const olderEvents = [
       agentEventSchema.parse({
@@ -760,6 +777,7 @@ describe("TuiController", () => {
     expect(controller.getSnapshot().activityNavigation?.rows).toEqual([
       "#11 tool.started · read_file · call activity-call",
       "#12 tool.execution_started · read_file · read · call activity-call",
+      "#13 process.started · exec_terminal · pid 42 · posix_process_group · OS sandbox: macOS Seatbelt · native_posix · call activity-call",
     ]);
     expect(
       controller.getSnapshot().activityNavigation?.rows.join("\n"),

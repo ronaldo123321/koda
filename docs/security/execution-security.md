@@ -1,8 +1,8 @@
 # Koda Execution Security Guarantees
 
-- Scope: Phase 4C2A3
-- Status: macOS native Seatbelt enforcement implemented locally; C2A4
-  client/lifecycle and same-commit remote acceptance pending
+- Scope: Phase 4C2A
+- Status: Complete — macOS native Seatbelt enforcement, clients, lifecycle,
+  and platform acceptance delivered; Linux isolation is next
 - Last updated: 2026-08-30
 
 Koda separates execution admission, process supervision, and operating-system
@@ -104,12 +104,20 @@ command implicitly.
 
 ## Acceptance and CI
 
-Local C2A3 acceptance runs real macOS protected Pipe and PTY commands, proves
+Phase 4C2A acceptance runs real macOS protected Pipe and PTY commands, proves
 read-only and network-denied side effects, validates workspace/scratch-only
-writes, checks v2 applied evidence, and kills the Worker between sandbox
-confirmation and user release to prove that no user side effect occurs. C2A4
-will add the exhaustive protected background/attachment/resize/restart and
-client reporting matrices.
+writes, and verifies that inherited network access does not widen either
+filesystem policy. It checks v2 applied evidence, kills the Worker between
+sandbox confirmation and user release to prove that no user side effect
+occurs, and exercises a protected background PTY through attach, input
+ownership, resize, detach, Supervisor restart, reattach, and completion.
+
+Shared client tests require the same retained v2 evidence in app-server process
+summaries and require CLI diagnostics, TUI activity history, and TUI process
+views to derive their sandbox label from that evidence. A client cannot name
+Seatbelt merely because a protected policy was requested: admission reports
+say `expected OS sandbox`, launch reports require applied evidence, and missing
+or historical evidence remains explicitly unknown.
 
 The Linux full-suite job remains the shared regression gate. The macOS native
 job must require the real Seatbelt probe and protected matrices; the Windows
@@ -130,6 +138,7 @@ Local results do not substitute for a platform result. Implementation commit
 `4f8f4e9` passed the Linux `verify`, macOS `macos-native`, and Windows
 `windows-native` jobs in
 [GitHub Actions run 33294887963](https://github.com/ronaldo123321/koda/actions/runs/33294887963).
-That same-commit result closes Phase 4C1. Phase 4C2A is not closed until C2A4
-passes the revised macOS job and the unchanged Linux and Windows regression
-gates on the same commit.
+That same-commit result closes Phase 4C1. Phase 4C2A closes only with its own
+closing implementation commit passing the revised macOS job and the unchanged
+Linux and Windows regression gates. Windows remains a compile/runtime
+regression target here, not a Windows sandbox claim.

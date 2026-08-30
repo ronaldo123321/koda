@@ -1,5 +1,5 @@
 import type { EventSink } from "@koda/agent-core";
-import type { AgentEvent } from "@koda/protocol";
+import { executionOsSandboxSummary, type AgentEvent } from "@koda/protocol";
 
 export interface TextWriter {
   write(text: string): unknown;
@@ -85,9 +85,7 @@ export class ConsoleEventSink implements EventSink {
     if (event.type === "process.started") {
       const security = event.payload.security;
       this.writeDiagnostic(
-        security === undefined || security.kind === "legacy_unknown"
-          ? `process ${event.payload.pid} started; execution security: legacy evidence unknown`
-          : `process ${event.payload.pid} started; backend ${security.backend}; OS sandbox: none`,
+        `process ${event.payload.pid} started; ${executionOsSandboxSummary(security)}${security === undefined || security.kind === "legacy_unknown" ? "" : `; backend ${security.backend}`}`,
       );
       return;
     }

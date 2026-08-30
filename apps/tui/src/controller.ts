@@ -15,6 +15,7 @@ import {
   RUNTIME_SETTINGS_MODEL_BUDGET_BYTES,
   artifactIdSchema,
   approvalGrantIdSchema,
+  executionOsSandboxSummary,
   modelProviderIdSchema,
   runtimeSettingsModelSchema,
   threadIdSchema,
@@ -6507,7 +6508,7 @@ function activityEventDetail(event: AgentEvent): string | undefined {
     case "tool.completed":
       return `${event.payload.name} · ${event.payload.status} · call ${event.payload.callId}`;
     case "process.started":
-      return `${event.payload.name} · pid ${event.payload.pid} · ${event.payload.ownership} · ${event.payload.security === undefined || event.payload.security.kind === "legacy_unknown" ? "security unknown (legacy)" : `OS sandbox: none · ${event.payload.security.backend}`} · call ${event.payload.callId}`;
+      return `${event.payload.name} · pid ${event.payload.pid} · ${event.payload.ownership} · ${event.payload.security === undefined || event.payload.security.kind === "legacy_unknown" ? "security unknown (legacy)" : `${executionOsSandboxSummary(event.payload.security)} · ${event.payload.security.backend}`} · call ${event.payload.callId}`;
     case "process.exited":
       return `${event.payload.name} · pid ${event.payload.pid} · ${event.payload.signal ?? `exit ${event.payload.exitCode ?? "unknown"}`} · call ${event.payload.callId}`;
     case "process.termination_requested":

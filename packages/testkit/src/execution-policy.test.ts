@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import {
   executionCapabilitiesSchema,
+  executionOsSandboxSummary,
   executionPolicySchema,
   executionSecuritySnapshotSchema,
   isExecutionWorkspacePath,
@@ -498,12 +499,27 @@ describe("Phase 4C2A1 macOS Seatbelt contract", () => {
   );
 
   it("generates shared admission but reserves launch evidence for native confirmation", () => {
-    expect(
-      createExecutionAdmissionSnapshot(macosFixtures.policy, macosCaps),
-    ).toEqual(macosFixtures.snapshot_cases[0]!.input);
-    expect(
-      validateExecutionSecuritySnapshot(macosFixtures.snapshot_cases[1]!.input),
-    ).toEqual(macosFixtures.snapshot_cases[1]!.input);
+    const admission = createExecutionAdmissionSnapshot(
+      macosFixtures.policy,
+      macosCaps,
+    );
+    const launch = validateExecutionSecuritySnapshot(
+      macosFixtures.snapshot_cases[1]!.input,
+    );
+    expect(admission).toEqual(macosFixtures.snapshot_cases[0]!.input);
+    expect(launch).toEqual(macosFixtures.snapshot_cases[1]!.input);
+    expect(executionOsSandboxSummary(admission)).toBe(
+      "expected OS sandbox: macOS Seatbelt",
+    );
+    expect(executionPolicyPreview(admission)).toContain(
+      "expected OS sandbox: macOS Seatbelt",
+    );
+    expect(executionOsSandboxSummary(launch)).toBe(
+      "OS sandbox: macOS Seatbelt",
+    );
+    expect(executionPolicyPreview(launch)).toContain(
+      "OS sandbox: macOS Seatbelt",
+    );
     expectCode(
       () => createExecutionLaunchSetupSnapshot(macosFixtures.policy, macosCaps),
       "EXECUTION_POLICY_UNAVAILABLE",

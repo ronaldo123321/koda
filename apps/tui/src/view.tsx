@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useRef, useSyncExternalStore } from "react";
 import { Box, Static, Text, useApp, useInput, useStdout, type Key } from "ink";
-import type { ExecutionSecuritySnapshot } from "@koda/protocol";
+import {
+  executionOsSandboxSummary,
+  type ExecutionSecuritySnapshot,
+} from "@koda/protocol";
 
 import {
   TuiController,
@@ -1284,7 +1287,7 @@ function ProcessView({ state }: { state: TuiState }) {
 function compactExecutionSecurity(security: ExecutionSecuritySnapshot): string {
   return security.kind === "legacy_unknown"
     ? "security unknown (legacy)"
-    : `OS sandbox: none · ${security.backend} · fs ${security.policy.filesystem} · net ${security.policy.network}`;
+    : `${executionOsSandboxSummary(security)} · ${security.backend} · fs ${security.policy.filesystem} · net ${security.policy.network}`;
 }
 
 function ProcessTerminateConfirmation({ state }: { state: TuiState }) {

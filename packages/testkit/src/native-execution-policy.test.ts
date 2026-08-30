@@ -11,7 +11,7 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
-import { createConnection } from "node:net";
+import { createConnection, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -19,6 +19,7 @@ import {
   resolveExecutionPolicy,
   type NativeExecutorStartInput,
   type NativeJobSnapshot,
+  type NativePtyAttachment,
 } from "@koda/runtime-node";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -295,6 +296,168 @@ describe("Phase 4C2A native admission and evidence", () => {
       await expect(access(outsideMarker)).rejects.toMatchObject({
         code: "ENOENT",
       });
+    },
+  );
+
+  it
+    .runIf(process.platform === "darwin")
+    .each(["read_only", "workspace_write"] as const)(
+    "preserves inherited network without widening %s filesystem access",
+    async (filesystem) => {
+      const fixture = await setup();
+      const workspace = join(fixture.root, "workspace");
+      await mkdir(workspace);
+      const workspaceMarker = join(workspace, `${filesystem}-workspace.txt`);
+      const outsideMarker = join(fixture.root, `${filesystem}-outside.txt`);
+      const server = createServer((socket) => socket.end("network-ok"));
+      await new Promise<void>((resolvePromise, reject) => {
+        server.once("error", reject);
+        server.listen(0, "127.0.0.1", resolvePromise);
+      });
+      try {
+        const address = server.address();
+        if (address === null || typeof address === "string") {
+          throw new Error("Expected a TCP test port.");
+        }
+        const client = await open(fixture);
+        const code = [
+          "const fs=require('node:fs'),net=require('node:net');",
+          filesystem === "workspace_write"
+            ? `fs.writeFileSync(${JSON.stringify(workspaceMarker)},'workspace');`
+            : `try{fs.writeFileSync(${JSON.stringify(workspaceMarker)},'bad');process.exit(30)}catch(error){if(error.code!=='EPERM'&&error.code!=='EACCES')process.exit(31)}`,
+          `try{fs.writeFileSync(${JSON.stringify(outsideMarker)},'bad');process.exit(32)}catch(error){if(error.code!=='EPERM'&&error.code!=='EACCES')process.exit(33)}`,
+          "let output='';",
+          `const socket=net.connect(${address.port},'127.0.0.1');`,
+          "socket.on('data',(chunk)=>output+=chunk);",
+          "socket.on('end',()=>process.exit(output==='network-ok'?0:34));",
+          "socket.on('error',()=>process.exit(35));",
+        ].join("");
+        const input = await inputFor(workspace, code);
+        input.policy = {
+          ...input.policy!,
+          filesystem,
+          network: "inherit",
+        };
+        const terminal = await waitTerminal(
+          client,
+          (await client.start(input)).job_id,
+        );
+        expect(terminal).toMatchObject({
+          state: "exited",
+          exit_code: 0,
+          failure: null,
+          security: {
+            schema_version: 2,
+            stage: "launch_setup",
+            filesystem: {
+              status: "applied",
+              mechanism: "macos_seatbelt",
+              layer: "os",
+            },
+            network: { status: "not_requested" },
+          },
+        });
+        if (filesystem === "workspace_write") {
+          await expect(readFile(workspaceMarker, "utf8")).resolves.toBe(
+            "workspace",
+          );
+        } else {
+          await expect(access(workspaceMarker)).rejects.toMatchObject({
+            code: "ENOENT",
+          });
+        }
+        await expect(access(outsideMarker)).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+      } finally {
+        await new Promise<void>((resolvePromise, reject) =>
+          server.close((error) =>
+            error === undefined ? resolvePromise() : reject(error),
+          ),
+        );
+      }
+    },
+  );
+
+  it.runIf(process.platform === "darwin")(
+    "retains protected background PTY evidence through attach, resize, detach and Supervisor restart",
+    async () => {
+      const fixture = await setup();
+      let client = await open(fixture);
+      const input = await inputFor(
+        fixture.root,
+        [
+          "process.stdin.setEncoding('utf8');",
+          "console.log('READY:'+process.stdout.rows+'x'+process.stdout.columns);",
+          "process.on('SIGWINCH',()=>console.log('RESIZE:'+process.stdout.rows+'x'+process.stdout.columns));",
+          "process.stdin.once('data',(data)=>{console.log('INPUT:'+data.trim());process.exit(0)});",
+          "setInterval(()=>{},1000);",
+        ].join(""),
+      );
+      input.policy = {
+        ...input.policy!,
+        filesystem: "read_only",
+        network: "deny",
+      };
+      const started = await client.startPty({
+        ...input,
+        rows: 20,
+        cols: 70,
+        lifecycle: "background",
+      });
+      const original = await client.openAttachment(started.job_id);
+      await original.acquireInput();
+      await expect(readPtyUntil(original, "READY:20x70")).resolves.toContain(
+        "READY:20x70",
+      );
+      const active = await client.get(started.job_id);
+      expect(active).toMatchObject({
+        state: "running",
+        lifecycle: "background",
+        security: {
+          schema_version: 2,
+          stage: "launch_setup",
+          filesystem: {
+            status: "applied",
+            mechanism: "macos_seatbelt",
+            layer: "os",
+          },
+          network: {
+            status: "applied",
+            mechanism: "macos_seatbelt",
+            layer: "os",
+          },
+        },
+      });
+      await original.resize(31, 101);
+      await expect(readPtyUntil(original, "RESIZE:31x101")).resolves.toContain(
+        "RESIZE:31x101",
+      );
+      await original.close();
+
+      await client.closeOwnedSupervisorForTests();
+      client = await open(fixture);
+      const recovered = await client.get(started.job_id);
+      expect(recovered.security).toEqual(active.security);
+      expect((await client.list()).jobs[0]?.security).toEqual(active.security);
+
+      const reattached = await client.openAttachment(started.job_id);
+      await reattached.acquireInput();
+      await reattached.resize(42, 120);
+      await expect(
+        readPtyUntil(reattached, "RESIZE:42x120"),
+      ).resolves.toContain("RESIZE:42x120");
+      await reattached.write("continued\n");
+      const terminal = await waitTerminal(client, started.job_id);
+      const output = await readPtyToCompletion(reattached);
+      expect(output).toContain("INPUT:continued");
+      expect(terminal).toMatchObject({
+        state: "exited",
+        exit_code: 0,
+        lifecycle: "background",
+      });
+      expect(terminal.security).toEqual(active.security);
+      await reattached.close();
     },
   );
 
@@ -670,6 +833,40 @@ async function waitTerminal(
     await delay(20);
   }
   throw new Error("Job did not become terminal.");
+}
+
+async function readPtyUntil(
+  attachment: NativePtyAttachment,
+  expected: string,
+): Promise<string> {
+  const chunks: Buffer[] = [];
+  for (let attempt = 0; attempt < 300; attempt += 1) {
+    const result = await attachment.read();
+    if (result.status === "cursor_expired") {
+      chunks.length = 0;
+      continue;
+    }
+    chunks.push(result.data);
+    const output = Buffer.concat(chunks).toString("utf8");
+    if (output.includes(expected)) return output;
+    if (result.complete) break;
+    await delay(10);
+  }
+  throw new Error(`Protected PTY did not emit '${expected}'.`);
+}
+
+async function readPtyToCompletion(
+  attachment: NativePtyAttachment,
+): Promise<string> {
+  const chunks: Buffer[] = [];
+  for (let attempt = 0; attempt < 300; attempt += 1) {
+    const result = await attachment.read();
+    if (result.status === "cursor_expired") continue;
+    chunks.push(result.data);
+    if (result.complete) return Buffer.concat(chunks).toString("utf8");
+    await delay(10);
+  }
+  throw new Error("Protected PTY attachment did not complete.");
 }
 
 async function waitLegacyState(

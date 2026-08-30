@@ -390,3 +390,42 @@ export type ExecutionEnforcementEvidence = z.infer<
 export type ExecutionSecuritySnapshot = z.infer<
   typeof executionSecuritySnapshotSchema
 >;
+
+/** Produces the user-facing OS sandbox claim from retained evidence only.
+ * Admission snapshots describe an expected backend; launch snapshots must
+ * carry applied evidence before this function names an active sandbox.
+ */
+export function executionOsSandboxSummary(
+  security: ExecutionSecuritySnapshot | undefined,
+): string {
+  if (security === undefined || security.kind === "legacy_unknown") {
+    return "OS sandbox: unknown (legacy evidence)";
+  }
+
+  const requestedEvidence = [
+    ...(security.policy.filesystem === "unrestricted"
+      ? []
+      : [security.filesystem]),
+    ...(security.policy.network === "inherit" ? [] : [security.network]),
+  ];
+  if (security.schema_version !== 2 || requestedEvidence.length === 0) {
+    return "OS sandbox: none";
+  }
+  if (
+    requestedEvidence.every(
+      (evidence) =>
+        evidence.status === "applied" &&
+        evidence.mechanism === "macos_seatbelt" &&
+        evidence.layer === "os",
+    )
+  ) {
+    return "OS sandbox: macOS Seatbelt";
+  }
+  if (
+    security.stage === "admission" &&
+    requestedEvidence.every((evidence) => evidence.status === "not_applied")
+  ) {
+    return "expected OS sandbox: macOS Seatbelt";
+  }
+  return "OS sandbox: evidence unavailable";
+}

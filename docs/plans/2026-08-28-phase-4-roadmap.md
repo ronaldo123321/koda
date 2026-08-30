@@ -1,6 +1,6 @@
 # Koda Phase 4 Hardening Roadmap
 
-- Status: In progress — Phase 4B, Phase 4C1, and Phase 4C2A1-A3 complete; macOS C2A4 next
+- Status: In progress — Phase 4B, Phase 4C1, and macOS Phase 4C2A complete; Linux isolation next
 - Date: 2026-08-28
 - Depends on: completed Phase 3A through Phase 3I baseline
 
@@ -81,7 +81,7 @@ The completed Windows terminal contract and acceptance evidence are in [Phase 4B
 
 ### Phase 4C: sandbox, network, and secret policy
 
-Status: In progress — Phase 4C1 and C2A1-A3 complete; macOS C2A4 next
+Status: In progress — Phase 4C1 and macOS Phase 4C2A complete; Linux isolation next
 
 - Add explicit filesystem, process, environment, and network capabilities.
 - Implement available OS isolation mechanisms and expose their effective strength rather than a portable boolean claim.
@@ -133,10 +133,19 @@ denied operations through the exact system `sandbox-exec`. C2A3 is complete:
 verified macOS Supervisors now advertise v2, protected Pipe and PTY launches
 share the Seatbelt builder, `workspace_write` receives a private per-job
 scratch directory, and a two-way sandbox handshake keeps user code gated until
-PID/start identity and durable applied evidence are confirmed. C2A4 is next:
-finish client/lifecycle matrices, publish the final guarantee, and require the
-same commit to pass macOS, Linux, and Windows regression CI before closing
-Phase 4C2A.
+PID/start identity and durable applied evidence are confirmed. C2A4 is also
+complete: all clients derive their sandbox claim from retained evidence, real
+macOS acceptance covers protected background PTY attach/resize/detach/restart
+and typed inherited-network combinations, and the final guarantee is
+published. Phase 4C2A closes only with the same implementation commit passing
+macOS, Linux, and Windows regression CI.
+
+The next platform slice is Linux isolation against the same policy, evidence,
+Pipe/PTY, background-job, and client contracts. Its concrete mechanism and
+design remain to be approved before implementation. Secret injection and
+redaction, resource quotas, finer-grained network policy, provider/MCP/plugin
+sandboxing, shell syntax, and all Windows sandbox controls remain later Phase
+4C work rather than implicit parts of the macOS completion.
 
 Deferred Windows sandbox work remains explicit: restricted-token and privilege
 policy, filesystem workspace/scratch rules, network denial, launch confirmation,
