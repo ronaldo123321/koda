@@ -160,6 +160,9 @@ pub async fn run_worker(
     });
 
     let execution = execute_job(Arc::clone(&runtime)).await;
+    if let Err(error) = &execution {
+        runtime.publish_unhandled_prelaunch_failure(error).await?;
+    }
     let _ = shutdown_sender.send(true);
     let _ = server.await;
     if let Ok(endpoint) = runtime.record.worker_socket_path() {
@@ -275,6 +278,24 @@ impl WorkerRuntime {
             return Err(error);
         }
         next.state = JobState::CommandStarting;
+        *guard = self.record.transition(&guard, next)?;
+        Ok(())
+    }
+
+    async fn publish_unhandled_prelaunch_failure(
+        &self,
+        error: &ProtocolError,
+    ) -> Result<(), ProtocolError> {
+        let mut guard = self.state.lock().await;
+        if guard.state != JobState::CommandStarting || guard.command_pid.is_some() {
+            return Ok(());
+        }
+        let mut next = guard.clone();
+        next.state = JobState::StartFailed;
+        next.failure = Some(JobFailure {
+            code: error.code.to_owned(),
+            message: error.message.clone(),
+        });
         *guard = self.record.transition(&guard, next)?;
         Ok(())
     }
