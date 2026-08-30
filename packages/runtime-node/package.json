@@ -7,6 +7,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./native-executor-client": {
+      "types": "./dist/native-executor-client.d.ts",
+      "import": "./dist/native-executor-client.js"
     }
   },
   "files": [

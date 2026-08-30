@@ -40,11 +40,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy,rustfmt
-      - run: pnpm install --frozen-lockfile
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test -p koda-exec
-      - run: pnpm --filter @koda/runtime-node build
-      - run: pnpm --filter @koda/testkit build
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: pnpm --filter @koda/runtime-node... build
       - run: cargo build -p koda-exec
       - run: pnpm exec vitest run packages/testkit/src/native-executor-client.windows.test.ts

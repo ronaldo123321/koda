@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-import { NativeExecutorClient } from "@koda/runtime-node";
+import { NativeExecutorClient } from "@koda/runtime-node/native-executor-client";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 
 const windowsDescribe = process.platform === "win32" ? describe : describe.skip;
