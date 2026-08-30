@@ -5,12 +5,11 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-#[cfg(target_os = "linux")]
 use sha2::{Digest, Sha256};
 
 use crate::execution_policy::{
-    EnvironmentPolicy, ExecutionPolicy, ExecutionPolicyError, FilesystemPolicy,
-    LinuxBubblewrapRuntimeDescriptor, NetworkPolicy, ProcessIsolationPolicy,
+    EnvironmentPolicy, ExecutionCapabilities, ExecutionPolicy, ExecutionPolicyError,
+    FilesystemPolicy, LinuxBubblewrapRuntimeDescriptor, NetworkPolicy, ProcessIsolationPolicy,
 };
 
 pub const BUBBLEWRAP_OVERRIDE: &str = "KODA_BWRAP_PATH";
@@ -23,6 +22,7 @@ const MAX_CAPTURE_BYTES: usize = 4 * 1024;
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const CONFIRMATION_MAGIC: &[u8; 16] = b"KODA-LINUX-V001!";
 const CONFIRMATION_FRAME_BYTES: usize = 112;
+pub const LINUX_SANDBOX_FAULT_ENV: &str = "KODA_EXEC_TEST_FAULT_POINT";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BubblewrapUnavailableReason {
@@ -252,6 +252,26 @@ pub fn build_invocation(
     })
 }
 
+pub fn launch_confirmation_digest(
+    runtime: &LinuxBubblewrapRuntimeDescriptor,
+    policy: &ExecutionPolicy,
+    capabilities: &ExecutionCapabilities,
+) -> Result<[u8; 32], ExecutionPolicyError> {
+    runtime.validate()?;
+    policy.validate()?;
+    capabilities.validate()?;
+    if capabilities.schema_version != 3 || capabilities.sandbox_runtime.as_ref() != Some(runtime) {
+        return Err(ExecutionPolicyError::ExecutionPolicyUnavailable);
+    }
+    let mut digest = Sha256::new();
+    digest.update(BUILDER_REVISION);
+    digest.update([0]);
+    digest.update(policy.canonical_json()?.as_bytes());
+    digest.update([0]);
+    digest.update(capabilities.canonical_json()?.as_bytes());
+    Ok(digest.finalize().into())
+}
+
 fn validate_canonical_directory(path: &Path) -> Result<PathBuf, ExecutionPolicyError> {
     if !path.is_absolute() || path.to_str().is_none() {
         return Err(ExecutionPolicyError::InvalidExecutionPolicy);
@@ -435,8 +455,10 @@ pub fn run_sandbox_bootstrap(
     validate_pipe_descriptor(confirmation_fd)?;
     validate_pipe_descriptor(release_fd)?;
     let digest = parse_hex_digest(digest_hex)?;
+    linux_bootstrap_fault("after_linux_namespace_setup");
     close_inherited_descriptors(confirmation_fd, release_fd)?;
     install_seccomp(network_denied)?;
+    linux_bootstrap_fault("after_linux_seccomp");
     let confirmation = LinuxSandboxConfirmation {
         pid: std::process::id(),
         // SAFETY: getpgrp has no preconditions.
@@ -466,8 +488,17 @@ pub fn run_sandbox_bootstrap(
         ));
     }
     drop(release_pipe);
-    let error = CommandExt::exec(Command::new(&argv[0]).args(&argv[1..]));
+    let mut command = Command::new(&argv[0]);
+    command.args(&argv[1..]).env_remove(LINUX_SANDBOX_FAULT_ENV);
+    let error = CommandExt::exec(&mut command);
     Err(error)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_bootstrap_fault(name: &str) {
+    if std::env::var(LINUX_SANDBOX_FAULT_ENV).as_deref() == Ok(name) {
+        std::process::abort();
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -1282,7 +1313,59 @@ fn spawn_and_verify_probe(
 }
 
 #[cfg(target_os = "linux")]
-fn runtime_identity_matches(runtime: &LinuxBubblewrapRuntimeDescriptor) -> bool {
+pub fn wait_for_confirmation(
+    confirmation_read: crate::platform::bootstrap::BootstrapRead,
+    process_group_leader: u32,
+    network_denied: bool,
+    digest: [u8; 32],
+    runtime: &LinuxBubblewrapRuntimeDescriptor,
+    wait: std::time::Duration,
+) -> io::Result<LinuxSandboxConfirmation> {
+    use std::os::fd::AsRawFd;
+
+    let parent_mount = namespace_identity(Path::new("/proc/self/ns/mnt"))?;
+    let parent_user = namespace_identity(Path::new("/proc/self/ns/user"))?;
+    let parent_network = namespace_identity(Path::new("/proc/self/ns/net"))?;
+    let bytes = read_exact_with_timeout(
+        confirmation_read.as_raw_fd(),
+        CONFIRMATION_FRAME_BYTES,
+        wait,
+    )?;
+    let confirmation = parse_confirmation_frame(&bytes)?;
+    let leader = i32::try_from(process_group_leader)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid process-group leader"))?;
+    let confirmed_pid = i32::try_from(confirmation.pid)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid confirmed process ID"))?;
+    // SAFETY: getpgid performs bounded identity checks for live positive PIDs.
+    let outer_group = unsafe { libc::getpgid(leader) };
+    // SAFETY: getpgid performs bounded identity checks for live positive PIDs.
+    let confirmed_group = unsafe { libc::getpgid(confirmed_pid) };
+    let valid = confirmation.process_group_id == process_group_leader
+        && outer_group == leader
+        && confirmed_group == leader
+        && confirmation.mount_namespace != parent_mount
+        && confirmation.user_namespace != parent_user
+        && (if network_denied {
+            confirmation.network_namespace != parent_network
+        } else {
+            confirmation.network_namespace == parent_network
+        })
+        && confirmation.no_new_privs
+        && confirmation.seccomp_mode == 2
+        && confirmation.network_denied == network_denied
+        && confirmation.digest == digest
+        && runtime_identity_matches(runtime);
+    if !valid {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Linux sandbox confirmation did not match the prepared launch",
+        ));
+    }
+    Ok(confirmation)
+}
+
+#[cfg(target_os = "linux")]
+pub fn runtime_identity_matches(runtime: &LinuxBubblewrapRuntimeDescriptor) -> bool {
     runtime_descriptor(Path::new(&runtime.canonical_path), true)
         .map(|current| current == *runtime)
         .unwrap_or(false)
@@ -1682,6 +1765,51 @@ mod tests {
         let mut corrupt = frame;
         corrupt[75] = 1;
         assert!(parse_confirmation_frame(&corrupt).is_err());
+    }
+
+    #[test]
+    fn launch_digest_binds_policy_capability_runtime_and_builder() {
+        let workspace = TestDirectory::new("digest-workspace");
+        let runtime = descriptor();
+        let capabilities =
+            crate::execution_policy::linux_bubblewrap_execution_capabilities(&runtime).unwrap();
+        let read_only = policy(
+            &workspace.0,
+            FilesystemPolicy::ReadOnly,
+            NetworkPolicy::Deny,
+        );
+        let first = launch_confirmation_digest(&runtime, &read_only, &capabilities).unwrap();
+        assert_eq!(
+            first,
+            launch_confirmation_digest(&runtime, &read_only, &capabilities).unwrap()
+        );
+        let inherited_network = ExecutionPolicy {
+            network: NetworkPolicy::Inherit,
+            ..read_only
+        };
+        assert_ne!(
+            first,
+            launch_confirmation_digest(&runtime, &inherited_network, &capabilities).unwrap()
+        );
+
+        let mut changed_runtime = runtime;
+        changed_runtime.sha256 = "22".repeat(32);
+        let changed_capabilities =
+            crate::execution_policy::linux_bubblewrap_execution_capabilities(&changed_runtime)
+                .unwrap();
+        assert_ne!(
+            first,
+            launch_confirmation_digest(
+                &changed_runtime,
+                &inherited_network,
+                &changed_capabilities,
+            )
+            .unwrap()
+        );
+        assert!(
+            launch_confirmation_digest(&changed_runtime, &inherited_network, &capabilities)
+                .is_err()
+        );
     }
 
     #[test]

@@ -50,7 +50,6 @@ pub struct Supervisor {
     store: JobStore,
     binary_path: PathBuf,
     execution_capabilities: ExecutionCapabilities,
-    protected_linux_execution_enabled: bool,
     registry: Mutex<Registry>,
 }
 
@@ -70,7 +69,6 @@ impl Supervisor {
         state_dir: &Path,
         binary_path: PathBuf,
         execution_capabilities: ExecutionCapabilities,
-        protected_linux_execution_enabled: bool,
     ) -> Result<Arc<Self>, ProtocolError> {
         let store = JobStore::open(state_dir)?;
         let mut records = store.scan(MAX_SCANNED_JOBS)?;
@@ -115,7 +113,6 @@ impl Supervisor {
             store,
             binary_path,
             execution_capabilities,
-            protected_linux_execution_enabled,
             registry: Mutex::new(registry),
         });
         supervisor.recover_all().await;
@@ -190,18 +187,6 @@ impl Supervisor {
         params: StartParams,
     ) -> Result<JobSnapshot, ProtocolError> {
         validate_start(&params)?;
-        if self.execution_capabilities.schema_version == 3
-            && !self.protected_linux_execution_enabled
-            && params
-                .policy
-                .as_ref()
-                .is_some_and(crate::linux_bubblewrap::requires_bubblewrap)
-        {
-            return Err(ProtocolError::new(
-                "EXECUTION_POLICY_UNAVAILABLE",
-                "Protected Linux user execution remains disabled until Phase 4C2B3 enforcement is active.",
-            ));
-        }
         let request_bytes = serde_json::to_vec(&params).map_err(internal_json_error)?;
         let request_digest = crate::durable::sha256_hex(&request_bytes);
 

@@ -77,7 +77,6 @@ impl ExecutorRuntime {
             state_directory,
             binary_path,
             execution_capabilities.clone(),
-            false,
         )
         .await?;
         Ok(Arc::new(Self {

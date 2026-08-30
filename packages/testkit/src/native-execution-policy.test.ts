@@ -225,13 +225,14 @@ describe("Phase 4C2 native admission and evidence", () => {
     async (mode) => {
       const fixture = await setup();
       const client = await open(fixture);
+      const protectedContract = await activeProtectedContract(client);
       const marker = join(fixture.root, "must-not-run");
       const input = await inputFor(
         fixture.root,
         `require('fs').writeFileSync(${JSON.stringify(marker)},'bad')`,
       );
       const restrictions =
-        process.platform === "darwin"
+        protectedContract !== undefined
           ? ([{ process_isolation: "required" }] as const)
           : ([
               { filesystem: "read_only" },
@@ -262,11 +263,15 @@ describe("Phase 4C2 native admission and evidence", () => {
     },
   );
 
-  it.runIf(process.platform === "darwin").each(["pipe", "pty"] as const)(
+  it
+    .runIf(process.platform === "darwin" || process.platform === "linux")
+    .each(["pipe", "pty"] as const)(
     "enforces read-only filesystem and denied network before a %s command runs",
     async (mode) => {
       const fixture = await setup();
       const client = await open(fixture);
+      const contract = await activeProtectedContract(client);
+      if (contract === undefined) return;
       const allowed = join(fixture.root, "allowed.txt");
       const marker = join(fixture.root, `forbidden-${mode}`);
       await writeFile(allowed, "allowed", "utf8");
@@ -274,7 +279,7 @@ describe("Phase 4C2 native admission and evidence", () => {
         "const fs=require('node:fs'),net=require('node:net');",
         `if(fs.readFileSync(${JSON.stringify(allowed)},'utf8')!=='allowed')process.exit(10);`,
         "let denied=0;",
-        `try{fs.writeFileSync(${JSON.stringify(marker)},'bad')}catch(error){if(error.code==='EPERM'||error.code==='EACCES')denied+=1;else process.exit(11)}`,
+        `try{fs.writeFileSync(${JSON.stringify(marker)},'bad')}catch(error){if(error.code==='EPERM'||error.code==='EACCES'||error.code==='EROFS')denied+=1;else process.exit(11)}`,
         "const server=net.createServer();",
         "server.once('error',(error)=>{if(error.code==='EPERM'||error.code==='EACCES')denied+=1;else process.exit(12);process.exit(denied===2?0:13)});",
         "server.listen(0,'127.0.0.1',()=>server.close(()=>process.exit(14)));",
@@ -300,16 +305,16 @@ describe("Phase 4C2 native admission and evidence", () => {
         state: "exited",
         exit_code: 0,
         security: {
-          schema_version: 2,
+          schema_version: contract.schemaVersion,
           stage: "launch_setup",
           filesystem: {
             status: "applied",
-            mechanism: "macos_seatbelt",
+            mechanism: contract.filesystemMechanism,
             layer: "os",
           },
           network: {
             status: "applied",
-            mechanism: "macos_seatbelt",
+            mechanism: contract.networkMechanism,
             layer: "os",
           },
         },
@@ -318,7 +323,7 @@ describe("Phase 4C2 native admission and evidence", () => {
     },
   );
 
-  it.runIf(process.platform === "darwin")(
+  it.runIf(process.platform === "darwin" || process.platform === "linux")(
     "limits workspace-write to the workspace and private per-job scratch",
     async () => {
       const fixture = await setup();
@@ -328,12 +333,14 @@ describe("Phase 4C2 native admission and evidence", () => {
       const outsideMarker = join(fixture.root, "outside-write.txt");
       const scratchName = "scratch-write.txt";
       const client = await open(fixture);
+      const contract = await activeProtectedContract(client);
+      if (contract === undefined) return;
       const code = [
         "const fs=require('node:fs'),path=require('node:path');",
         "if(!process.env.TMPDIR||process.env.TMPDIR!==process.env.TMP||process.env.TMPDIR!==process.env.TEMP)process.exit(20);",
         `fs.writeFileSync(${JSON.stringify(workspaceMarker)},'workspace');`,
         `fs.writeFileSync(path.join(process.env.TMPDIR,${JSON.stringify(scratchName)}),'scratch');`,
-        `try{fs.writeFileSync(${JSON.stringify(outsideMarker)},'bad');process.exit(21)}catch(error){if(error.code!=='EPERM'&&error.code!=='EACCES')process.exit(22)}`,
+        `try{fs.writeFileSync(${JSON.stringify(outsideMarker)},'bad');process.exit(21)}catch(error){if(error.code!=='EPERM'&&error.code!=='EACCES'&&error.code!=='EROFS')process.exit(22)}`,
       ].join("");
       const input = await inputFor(workspace, code);
       input.policy = {
@@ -348,16 +355,16 @@ describe("Phase 4C2 native admission and evidence", () => {
         exit_code: 0,
         failure: null,
         security: {
-          schema_version: 2,
+          schema_version: contract.schemaVersion,
           stage: "launch_setup",
           filesystem: {
             status: "applied",
-            mechanism: "macos_seatbelt",
+            mechanism: contract.filesystemMechanism,
             layer: "os",
           },
           network: {
             status: "applied",
-            mechanism: "macos_seatbelt",
+            mechanism: contract.networkMechanism,
             layer: "os",
           },
         },
@@ -376,7 +383,7 @@ describe("Phase 4C2 native admission and evidence", () => {
   );
 
   it
-    .runIf(process.platform === "darwin")
+    .runIf(process.platform === "darwin" || process.platform === "linux")
     .each(["read_only", "workspace_write"] as const)(
     "preserves inherited network without widening %s filesystem access",
     async (filesystem) => {
@@ -396,12 +403,14 @@ describe("Phase 4C2 native admission and evidence", () => {
           throw new Error("Expected a TCP test port.");
         }
         const client = await open(fixture);
+        const contract = await activeProtectedContract(client);
+        if (contract === undefined) return;
         const code = [
           "const fs=require('node:fs'),net=require('node:net');",
           filesystem === "workspace_write"
             ? `fs.writeFileSync(${JSON.stringify(workspaceMarker)},'workspace');`
-            : `try{fs.writeFileSync(${JSON.stringify(workspaceMarker)},'bad');process.exit(30)}catch(error){if(error.code!=='EPERM'&&error.code!=='EACCES')process.exit(31)}`,
-          `try{fs.writeFileSync(${JSON.stringify(outsideMarker)},'bad');process.exit(32)}catch(error){if(error.code!=='EPERM'&&error.code!=='EACCES')process.exit(33)}`,
+            : `try{fs.writeFileSync(${JSON.stringify(workspaceMarker)},'bad');process.exit(30)}catch(error){if(error.code!=='EPERM'&&error.code!=='EACCES'&&error.code!=='EROFS')process.exit(31)}`,
+          `try{fs.writeFileSync(${JSON.stringify(outsideMarker)},'bad');process.exit(32)}catch(error){if(error.code!=='EPERM'&&error.code!=='EACCES'&&error.code!=='EROFS')process.exit(33)}`,
           "let output='';",
           `const socket=net.connect(${address.port},'127.0.0.1');`,
           "socket.on('data',(chunk)=>output+=chunk);",
@@ -423,11 +432,11 @@ describe("Phase 4C2 native admission and evidence", () => {
           exit_code: 0,
           failure: null,
           security: {
-            schema_version: 2,
+            schema_version: contract.schemaVersion,
             stage: "launch_setup",
             filesystem: {
               status: "applied",
-              mechanism: "macos_seatbelt",
+              mechanism: contract.filesystemMechanism,
               layer: "os",
             },
             network: { status: "not_requested" },
@@ -455,11 +464,13 @@ describe("Phase 4C2 native admission and evidence", () => {
     },
   );
 
-  it.runIf(process.platform === "darwin")(
+  it.runIf(process.platform === "darwin" || process.platform === "linux")(
     "retains protected background PTY evidence through attach, resize, detach and Supervisor restart",
     async () => {
       const fixture = await setup();
       let client = await open(fixture);
+      const contract = await activeProtectedContract(client);
+      if (contract === undefined) return;
       const input = await inputFor(
         fixture.root,
         [
@@ -491,16 +502,16 @@ describe("Phase 4C2 native admission and evidence", () => {
         state: "running",
         lifecycle: "background",
         security: {
-          schema_version: 2,
+          schema_version: contract.schemaVersion,
           stage: "launch_setup",
           filesystem: {
             status: "applied",
-            mechanism: "macos_seatbelt",
+            mechanism: contract.filesystemMechanism,
             layer: "os",
           },
           network: {
             status: "applied",
-            mechanism: "macos_seatbelt",
+            mechanism: contract.networkMechanism,
             layer: "os",
           },
         },
@@ -537,11 +548,13 @@ describe("Phase 4C2 native admission and evidence", () => {
     },
   );
 
-  it.runIf(process.platform === "darwin")(
+  it.runIf(process.platform === "darwin" || process.platform === "linux")(
     "keeps protected user code gated when the Worker dies after sandbox confirmation",
     async () => {
       const fixture = await setup();
       const client = await open(fixture, "after_sandbox_confirmation");
+      const contract = await activeProtectedContract(client);
+      if (contract === undefined) return;
       const marker = join(fixture.root, "confirmed-but-not-released");
       const input = await inputFor(
         fixture.root,
@@ -557,12 +570,90 @@ describe("Phase 4C2 native admission and evidence", () => {
       expect(terminal).toMatchObject({
         state: "termination_uncertain",
         security: {
-          schema_version: 2,
+          schema_version: contract.schemaVersion,
           stage: "admission",
           filesystem: { status: "not_applied" },
           network: { status: "not_applied" },
         },
       });
+      await expect(access(marker)).rejects.toMatchObject({ code: "ENOENT" });
+    },
+  );
+
+  it
+    .runIf(process.platform === "linux")
+    .each([
+      "before_linux_sandbox_spawn",
+      "after_linux_namespace_setup",
+      "after_linux_seccomp",
+      "after_linux_sandbox_confirmation",
+    ])(
+    "never releases protected Linux user code at fault boundary %s",
+    async (faultPoint) => {
+      const fixture = await setup();
+      const client = await open(fixture, faultPoint);
+      const contract = await activeProtectedContract(client);
+      if (contract?.schemaVersion !== 3) return;
+      const marker = join(fixture.root, `linux-not-released-${faultPoint}`);
+      const input = await inputFor(
+        fixture.root,
+        `require('fs').writeFileSync(${JSON.stringify(marker)},'bad')`,
+      );
+      input.policy = {
+        ...input.policy!,
+        filesystem: "workspace_write",
+        network: "deny",
+      };
+      const started = await client.start(input);
+      const terminal = await waitTerminal(client, started.job_id);
+      expect(["start_failed", "termination_uncertain"]).toContain(
+        terminal.state,
+      );
+      expect(terminal.security).toMatchObject({
+        schema_version: 3,
+        stage: "admission",
+        filesystem: { status: "not_applied" },
+        network: { status: "not_applied" },
+      });
+      await expect(access(marker)).rejects.toMatchObject({ code: "ENOENT" });
+    },
+  );
+
+  it
+    .runIf(process.platform === "linux")
+    .each(["after_linux_sandbox_evidence", "after_linux_sandbox_release"])(
+    "retains applied Linux evidence and cleans the group at fault boundary %s",
+    async (faultPoint) => {
+      const fixture = await setup();
+      const client = await open(fixture, faultPoint);
+      const contract = await activeProtectedContract(client);
+      if (contract?.schemaVersion !== 3) return;
+      const marker = join(fixture.root, `linux-cleaned-${faultPoint}`);
+      const input = await inputFor(
+        fixture.root,
+        `setTimeout(()=>require('fs').writeFileSync(${JSON.stringify(marker)},'bad'),500)`,
+      );
+      input.policy = {
+        ...input.policy!,
+        filesystem: "workspace_write",
+        network: "deny",
+      };
+      const started = await client.start(input);
+      const terminal = await waitTerminal(client, started.job_id);
+      expect(terminal.state).toBe("termination_uncertain");
+      expect(terminal.security).toMatchObject({
+        schema_version: 3,
+        stage: "launch_setup",
+        filesystem: {
+          status: "applied",
+          mechanism: "linux_bubblewrap_mount_namespace",
+        },
+        network: {
+          status: "applied",
+          mechanism: "linux_network_namespace_seccomp",
+        },
+      });
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 600));
       await expect(access(marker)).rejects.toMatchObject({ code: "ENOENT" });
     },
   );
@@ -768,6 +859,25 @@ describe.skipIf(legacyBinary === undefined || process.platform === "win32")(
     });
   },
 );
+
+async function activeProtectedContract(client: NativeExecutorClient) {
+  const security = (await client.hello()).execution_security;
+  if (security.schema_version === 2) {
+    return {
+      schemaVersion: 2,
+      filesystemMechanism: "macos_seatbelt",
+      networkMechanism: "macos_seatbelt",
+    } as const;
+  }
+  if (security.schema_version === 3) {
+    return {
+      schemaVersion: 3,
+      filesystemMechanism: "linux_bubblewrap_mount_namespace",
+      networkMechanism: "linux_network_namespace_seccomp",
+    } as const;
+  }
+  return undefined;
+}
 
 async function setup() {
   const root = await realpath(await mkdtemp(join(tmpdir(), "koda-policy-")));

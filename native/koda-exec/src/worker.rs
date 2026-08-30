@@ -1552,7 +1552,38 @@ fn is_windows_terminal_eof(error: &io::Error) -> bool {
 struct UnixLaunchPreparation {
     argv: Vec<std::ffi::OsString>,
     environment: std::collections::BTreeMap<String, String>,
-    sandbox: Option<UnixSandboxChannels>,
+    sandbox: Option<UnixSandboxLaunch>,
+}
+
+#[cfg(unix)]
+struct UnixSandboxLaunch {
+    channels: UnixSandboxChannels,
+    kind: UnixSandboxKind,
+}
+
+#[cfg(unix)]
+enum UnixSandboxKind {
+    MacosSeatbelt,
+    #[cfg(target_os = "linux")]
+    LinuxBubblewrap {
+        digest: [u8; 32],
+        network_denied: bool,
+        runtime: crate::execution_policy::LinuxBubblewrapRuntimeDescriptor,
+    },
+}
+
+#[cfg(unix)]
+impl UnixSandboxKind {
+    fn is_linux_bubblewrap(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            matches!(self, Self::LinuxBubblewrap { .. })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            false
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -1565,14 +1596,18 @@ struct UnixSandboxChannels {
 
 #[cfg(unix)]
 impl UnixSandboxChannels {
-    fn child_descriptors(&self) -> SandboxBootstrapChannels<'_> {
+    fn child_descriptors(
+        &self,
+        confirmation_target: RawFd,
+        release_target: RawFd,
+    ) -> SandboxBootstrapChannels<'_> {
         SandboxBootstrapChannels {
             confirmation_read: &self.confirmation_read,
             confirmation_write: &self.confirmation_write,
             release_read: &self.release_read,
             release_write: &self.release_write,
-            confirmation_target: crate::macos_seatbelt::SANDBOX_CONFIRMATION_FD,
-            release_target: crate::macos_seatbelt::SANDBOX_RELEASE_FD,
+            confirmation_target,
+            release_target,
         }
     }
 
@@ -1590,6 +1625,34 @@ impl UnixSandboxChannels {
 }
 
 #[cfg(unix)]
+impl UnixSandboxLaunch {
+    fn child_descriptors(&self) -> SandboxBootstrapChannels<'_> {
+        let (confirmation_target, release_target) = match self.kind {
+            UnixSandboxKind::MacosSeatbelt => (
+                crate::macos_seatbelt::SANDBOX_CONFIRMATION_FD,
+                crate::macos_seatbelt::SANDBOX_RELEASE_FD,
+            ),
+            #[cfg(target_os = "linux")]
+            UnixSandboxKind::LinuxBubblewrap { .. } => (
+                crate::linux_bubblewrap::LINUX_SANDBOX_CONFIRMATION_FD,
+                crate::linux_bubblewrap::LINUX_SANDBOX_RELEASE_FD,
+            ),
+        };
+        self.channels
+            .child_descriptors(confirmation_target, release_target)
+    }
+
+    fn is_linux_bubblewrap(&self) -> bool {
+        self.kind.is_linux_bubblewrap()
+    }
+
+    fn into_parent_channels(self) -> (BootstrapRead, BootstrapWrite, UnixSandboxKind) {
+        let (confirmation_read, release_write) = self.channels.into_parent_channels();
+        (confirmation_read, release_write, self.kind)
+    }
+}
+
+#[cfg(unix)]
 fn prepare_unix_launch(
     runtime: &WorkerRuntime,
     params: &crate::protocol::StartParams,
@@ -1601,20 +1664,14 @@ fn prepare_unix_launch(
         )
     })?;
     let mut environment = params.environment.clone();
-    if !crate::macos_seatbelt::requires_seatbelt(policy) {
+    let protected = policy.filesystem != FilesystemPolicy::Unrestricted
+        || policy.network != crate::execution_policy::NetworkPolicy::Inherit;
+    if !protected {
         return Ok(UnixLaunchPreparation {
             argv: params.argv.iter().map(std::ffi::OsString::from).collect(),
             environment,
             sandbox: None,
         });
-    }
-    if runtime.execution_capabilities
-        != crate::execution_policy::macos_seatbelt_execution_capabilities()
-        || !crate::macos_seatbelt::launch_available()
-    {
-        return Err(execution_security::policy_error(
-            crate::execution_policy::ExecutionPolicyError::ExecutionPolicyUnavailable,
-        ));
     }
 
     let scratch = if policy.filesystem == FilesystemPolicy::WorkspaceWrite {
@@ -1631,25 +1688,113 @@ fn prepare_unix_launch(
     } else {
         None
     };
-    let invocation = crate::macos_seatbelt::build_invocation(
-        policy,
-        Path::new(&policy.workspace_root),
-        scratch.as_deref(),
-    )
-    .map_err(execution_security::policy_error)?;
-    let mut sandbox_bootstrap = vec![
-        bootstrap.as_os_str().to_owned(),
-        std::ffi::OsString::from("sandbox-bootstrap"),
-        std::ffi::OsString::from("--confirm-fd"),
-        std::ffi::OsString::from(crate::macos_seatbelt::SANDBOX_CONFIRMATION_FD.to_string()),
-        std::ffi::OsString::from("--release-fd"),
-        std::ffi::OsString::from(crate::macos_seatbelt::SANDBOX_RELEASE_FD.to_string()),
-        std::ffi::OsString::from("--"),
-    ];
-    sandbox_bootstrap.extend(params.argv.iter().map(std::ffi::OsString::from));
-    let argv = invocation
-        .command_argv(&sandbox_bootstrap)
+    if runtime.execution_capabilities.schema_version == 2 {
+        if runtime.execution_capabilities
+            != crate::execution_policy::macos_seatbelt_execution_capabilities()
+            || !crate::macos_seatbelt::launch_available()
+        {
+            return Err(execution_security::policy_error(
+                crate::execution_policy::ExecutionPolicyError::ExecutionPolicyUnavailable,
+            ));
+        }
+        let invocation = crate::macos_seatbelt::build_invocation(
+            policy,
+            Path::new(&policy.workspace_root),
+            scratch.as_deref(),
+        )
         .map_err(execution_security::policy_error)?;
+        let mut sandbox_bootstrap = vec![
+            bootstrap.as_os_str().to_owned(),
+            std::ffi::OsString::from("sandbox-bootstrap"),
+            std::ffi::OsString::from("--confirm-fd"),
+            std::ffi::OsString::from(crate::macos_seatbelt::SANDBOX_CONFIRMATION_FD.to_string()),
+            std::ffi::OsString::from("--release-fd"),
+            std::ffi::OsString::from(crate::macos_seatbelt::SANDBOX_RELEASE_FD.to_string()),
+            std::ffi::OsString::from("--"),
+        ];
+        sandbox_bootstrap.extend(params.argv.iter().map(std::ffi::OsString::from));
+        let argv = invocation
+            .command_argv(&sandbox_bootstrap)
+            .map_err(execution_security::policy_error)?;
+        return Ok(UnixLaunchPreparation {
+            argv,
+            environment,
+            sandbox: Some(UnixSandboxLaunch {
+                channels: create_unix_sandbox_channels()?,
+                kind: UnixSandboxKind::MacosSeatbelt,
+            }),
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    if runtime.execution_capabilities.schema_version == 3 {
+        let sandbox_runtime = runtime
+            .execution_capabilities
+            .sandbox_runtime
+            .as_ref()
+            .ok_or_else(execution_security::corrupt)?;
+        if !crate::linux_bubblewrap::runtime_identity_matches(sandbox_runtime) {
+            return Err(execution_security::policy_error(
+                crate::execution_policy::ExecutionPolicyError::ExecutionPolicyChanged,
+            ));
+        }
+        let digest = crate::linux_bubblewrap::launch_confirmation_digest(
+            sandbox_runtime,
+            policy,
+            &runtime.execution_capabilities,
+        )
+        .map_err(execution_security::policy_error)?;
+        environment.remove(crate::linux_bubblewrap::LINUX_SANDBOX_FAULT_ENV);
+        if let Ok(point) = std::env::var(crate::linux_bubblewrap::LINUX_SANDBOX_FAULT_ENV)
+            && matches!(
+                point.as_str(),
+                "after_linux_namespace_setup" | "after_linux_seccomp"
+            )
+        {
+            environment.insert(
+                crate::linux_bubblewrap::LINUX_SANDBOX_FAULT_ENV.to_owned(),
+                point,
+            );
+        }
+        let user_argv = params
+            .argv
+            .iter()
+            .map(std::ffi::OsString::from)
+            .collect::<Vec<_>>();
+        let invocation = crate::linux_bubblewrap::build_invocation(
+            sandbox_runtime,
+            crate::linux_bubblewrap::BubblewrapLaunch {
+                binary_path: bootstrap,
+                policy,
+                workspace_root: Path::new(&policy.workspace_root),
+                cwd: Path::new(&params.cwd),
+                scratch_root: scratch.as_deref(),
+                confirmation_digest: &digest,
+                argv: &user_argv,
+            },
+        )
+        .map_err(execution_security::policy_error)?;
+        return Ok(UnixLaunchPreparation {
+            argv: invocation.command_argv(),
+            environment,
+            sandbox: Some(UnixSandboxLaunch {
+                channels: create_unix_sandbox_channels()?,
+                kind: UnixSandboxKind::LinuxBubblewrap {
+                    digest,
+                    network_denied: policy.network == crate::execution_policy::NetworkPolicy::Deny,
+                    runtime: sandbox_runtime.clone(),
+                },
+            }),
+        });
+    }
+
+    Err(execution_security::policy_error(
+        crate::execution_policy::ExecutionPolicyError::ExecutionPolicyUnavailable,
+    ))
+}
+
+#[cfg(unix)]
+fn create_unix_sandbox_channels() -> Result<UnixSandboxChannels, ProtocolError> {
     let (confirmation_read, confirmation_write) = create_bootstrap_channel().map_err(|error| {
         ProtocolError::new(
             "COMMAND_START_FAILED",
@@ -1662,15 +1807,11 @@ fn prepare_unix_launch(
             format!("Could not create the sandbox release channel: {error}"),
         )
     })?;
-    Ok(UnixLaunchPreparation {
-        argv,
-        environment,
-        sandbox: Some(UnixSandboxChannels {
-            confirmation_read,
-            confirmation_write,
-            release_read,
-            release_write,
-        }),
+    Ok(UnixSandboxChannels {
+        confirmation_read,
+        confirmation_write,
+        release_read,
+        release_write,
     })
 }
 
@@ -1683,6 +1824,29 @@ async fn wait_for_sandbox_confirmation(read: BootstrapRead, pid: u32) -> io::Res
     .map_err(|_| io::Error::other("sandbox confirmation task failed"))?
 }
 
+#[cfg(target_os = "linux")]
+async fn wait_for_linux_sandbox_confirmation(
+    read: BootstrapRead,
+    pid: u32,
+    network_denied: bool,
+    digest: [u8; 32],
+    runtime: crate::execution_policy::LinuxBubblewrapRuntimeDescriptor,
+) -> io::Result<()> {
+    tokio::task::spawn_blocking(move || {
+        crate::linux_bubblewrap::wait_for_confirmation(
+            read,
+            pid,
+            network_denied,
+            digest,
+            &runtime,
+            Duration::from_secs(3),
+        )
+        .map(|_| ())
+    })
+    .await
+    .map_err(|_| io::Error::other("Linux sandbox confirmation task failed"))?
+}
+
 #[cfg(unix)]
 async fn activate_unix_launch(
     runtime: &WorkerRuntime,
@@ -1690,7 +1854,7 @@ async fn activate_unix_launch(
     pid: u32,
     command_identity: String,
     gate_write: BootstrapWrite,
-    sandbox: Option<UnixSandboxChannels>,
+    sandbox: Option<UnixSandboxLaunch>,
     params: &crate::protocol::StartParams,
 ) -> Result<(), ProtocolError> {
     let Some(sandbox) = sandbox else {
@@ -1722,7 +1886,8 @@ async fn activate_unix_launch(
         return Ok(());
     };
 
-    let (confirmation_read, sandbox_release_write) = sandbox.into_parent_channels();
+    let (confirmation_read, sandbox_release_write, sandbox_kind) = sandbox.into_parent_channels();
+    let linux_bubblewrap = sandbox_kind.is_linux_bubblewrap();
     if let Err(error) = runtime
         .publish_command_identity(pid, command_identity.clone())
         .await
@@ -1753,7 +1918,27 @@ async fn activate_unix_launch(
         )
         .await;
     }
-    if let Err(error) = wait_for_sandbox_confirmation(confirmation_read, pid).await {
+    let confirmation = match &sandbox_kind {
+        UnixSandboxKind::MacosSeatbelt => {
+            wait_for_sandbox_confirmation(confirmation_read, pid).await
+        }
+        #[cfg(target_os = "linux")]
+        UnixSandboxKind::LinuxBubblewrap {
+            digest,
+            network_denied,
+            runtime: sandbox_runtime,
+        } => {
+            wait_for_linux_sandbox_confirmation(
+                confirmation_read,
+                pid,
+                *network_denied,
+                *digest,
+                sandbox_runtime.clone(),
+            )
+            .await
+        }
+    };
+    if let Err(error) = confirmation {
         drop(sandbox_release_write);
         return fail_unix_launch(runtime, child, pid, params, error).await;
     }
@@ -1779,6 +1964,9 @@ async fn activate_unix_launch(
         .await;
     }
     fault_point("after_sandbox_confirmation");
+    if linux_bubblewrap {
+        fault_point("after_linux_sandbox_confirmation");
+    }
     if let Err(error) = runtime.publish_running(pid, command_identity, true).await {
         drop(sandbox_release_write);
         let _ = terminate_child(
@@ -1790,6 +1978,9 @@ async fn activate_unix_launch(
         )
         .await;
         return Err(error);
+    }
+    if linux_bubblewrap {
+        fault_point("after_linux_sandbox_evidence");
     }
     if let Err(error) = release_gate(sandbox_release_write) {
         return fail_running_unix_launch(
@@ -1803,6 +1994,9 @@ async fn activate_unix_launch(
             ),
         )
         .await;
+    }
+    if linux_bubblewrap {
+        fault_point("after_linux_sandbox_release");
     }
     Ok(())
 }
@@ -1941,9 +2135,15 @@ async fn execute_pty_job(runtime: Arc<WorkerRuntime>) -> Result<(), ProtocolErro
         &master,
         &slave,
         COMMAND_GATE_FD,
-        sandbox.as_ref().map(UnixSandboxChannels::child_descriptors),
+        sandbox.as_ref().map(UnixSandboxLaunch::child_descriptors),
     );
 
+    if sandbox
+        .as_ref()
+        .is_some_and(UnixSandboxLaunch::is_linux_bubblewrap)
+    {
+        fault_point("before_linux_sandbox_spawn");
+    }
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => return runtime.publish_start_failed(error).await,
@@ -2258,9 +2458,15 @@ async fn execute_pipe_job(runtime: Arc<WorkerRuntime>) -> Result<(), ProtocolErr
         &gate_read,
         &gate_write,
         COMMAND_GATE_FD,
-        sandbox.as_ref().map(UnixSandboxChannels::child_descriptors),
+        sandbox.as_ref().map(UnixSandboxLaunch::child_descriptors),
     );
 
+    if sandbox
+        .as_ref()
+        .is_some_and(UnixSandboxLaunch::is_linux_bubblewrap)
+    {
+        fault_point("before_linux_sandbox_spawn");
+    }
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => return runtime.publish_start_failed(error).await,

@@ -135,7 +135,7 @@ pub fn launch_setup_with_capabilities(
     start: &StartParams,
     retained: &ExecutionSecuritySnapshot,
     capabilities: &ExecutionCapabilities,
-    macos_seatbelt_confirmed: bool,
+    os_sandbox_confirmed: bool,
 ) -> Result<ExecutionSecuritySnapshot, ProtocolError> {
     validate_worker_admission_with_capabilities(start, retained, capabilities)?;
     let mut snapshot = retained.clone();
@@ -144,18 +144,18 @@ pub fn launch_setup_with_capabilities(
     };
     let protected = security.policy.filesystem != FilesystemPolicy::Unrestricted
         || security.policy.network != NetworkPolicy::Inherit;
-    if security.schema_version == 1 && macos_seatbelt_confirmed {
+    if security.schema_version == 1 && os_sandbox_confirmed {
         return Err(corrupt());
     }
-    if security.schema_version == 2 && protected && !macos_seatbelt_confirmed {
+    if matches!(security.schema_version, 2 | 3) && protected && !os_sandbox_confirmed {
         return Err(policy_error(
             ExecutionPolicyError::ExecutionPolicyUnavailable,
         ));
     }
-    if security.schema_version == 2 && !protected && macos_seatbelt_confirmed {
+    if matches!(security.schema_version, 2 | 3) && !protected && os_sandbox_confirmed {
         return Err(corrupt());
     }
-    if security.schema_version == 2 && macos_seatbelt_confirmed {
+    if security.schema_version == 2 && os_sandbox_confirmed {
         if security.policy.filesystem != FilesystemPolicy::Unrestricted {
             security.filesystem = ExecutionEnforcementEvidence::Applied {
                 mechanism: EnforcementMechanism::MacosSeatbelt,
@@ -165,6 +165,20 @@ pub fn launch_setup_with_capabilities(
         if security.policy.network != NetworkPolicy::Inherit {
             security.network = ExecutionEnforcementEvidence::Applied {
                 mechanism: EnforcementMechanism::MacosSeatbelt,
+                layer: EnforcementLayer::Os,
+            };
+        }
+    }
+    if security.schema_version == 3 && os_sandbox_confirmed {
+        if security.policy.filesystem != FilesystemPolicy::Unrestricted {
+            security.filesystem = ExecutionEnforcementEvidence::Applied {
+                mechanism: EnforcementMechanism::LinuxBubblewrapMountNamespace,
+                layer: EnforcementLayer::Os,
+            };
+        }
+        if security.policy.network != NetworkPolicy::Inherit {
+            security.network = ExecutionEnforcementEvidence::Applied {
+                mechanism: EnforcementMechanism::LinuxNetworkNamespaceSeccomp,
                 layer: EnforcementLayer::Os,
             };
         }
@@ -185,4 +199,78 @@ pub fn launch_setup_with_capabilities(
 
 pub fn legacy_unknown() -> ExecutionSecuritySnapshot {
     ExecutionSecuritySnapshot::LegacyUnknown { schema_version: 1 }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+    use crate::execution_policy::{
+        EnvironmentPolicy, ExecutionPolicy, LinuxBubblewrapRuntimeDescriptor,
+        ProcessIsolationPolicy, linux_bubblewrap_execution_capabilities,
+    };
+    use crate::protocol::{IoMode, JobLifecycle};
+
+    #[test]
+    fn linux_launch_evidence_requires_confirmation_and_uses_typed_mechanisms() {
+        let cwd = std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap();
+        let runtime = LinuxBubblewrapRuntimeDescriptor {
+            schema_version: 1,
+            mechanism: EnforcementMechanism::LinuxBubblewrap,
+            canonical_path: "/usr/bin/bwrap".to_owned(),
+            device: "1".to_owned(),
+            inode: "2".to_owned(),
+            size: 3,
+            mtime_ns: "4".to_owned(),
+            sha256: "11".repeat(32),
+            version: "bubblewrap 1.0".to_owned(),
+            probe_revision: 1,
+        };
+        let capabilities = linux_bubblewrap_execution_capabilities(&runtime).unwrap();
+        let policy = ExecutionPolicy {
+            schema_version: 1,
+            workspace_root: cwd.to_string_lossy().into_owned(),
+            filesystem: FilesystemPolicy::ReadOnly,
+            network: NetworkPolicy::Deny,
+            process_isolation: ProcessIsolationPolicy::Inherit,
+            environment: EnvironmentPolicy::Explicit,
+        };
+        let start = StartParams {
+            argv: vec!["/usr/bin/true".to_owned()],
+            cwd: cwd.to_string_lossy().into_owned(),
+            display_name: None,
+            environment: BTreeMap::new(),
+            timeout_ms: 1_000,
+            output_limit_bytes: 1_024,
+            termination_grace_ms: 25,
+            termination_confirmation_ms: 1_000,
+            io_mode: IoMode::Pipe,
+            lifecycle: JobLifecycle::Foreground,
+            pty: None,
+            policy: Some(policy),
+        };
+        let admission = admit_with_capabilities(&start, &capabilities).unwrap();
+        assert!(launch_setup_with_capabilities(&start, &admission, &capabilities, false).is_err());
+        let applied =
+            launch_setup_with_capabilities(&start, &admission, &capabilities, true).unwrap();
+        let ExecutionSecuritySnapshot::Policy(applied) = applied else {
+            panic!("expected policy evidence");
+        };
+        assert_eq!(applied.stage, ExecutionSecurityStage::LaunchSetup);
+        assert_eq!(
+            applied.filesystem,
+            ExecutionEnforcementEvidence::Applied {
+                mechanism: EnforcementMechanism::LinuxBubblewrapMountNamespace,
+                layer: EnforcementLayer::Os,
+            }
+        );
+        assert_eq!(
+            applied.network,
+            ExecutionEnforcementEvidence::Applied {
+                mechanism: EnforcementMechanism::LinuxNetworkNamespaceSeccomp,
+                layer: EnforcementLayer::Os,
+            }
+        );
+    }
 }

@@ -1,6 +1,6 @@
 # Koda Phase 4C2B Linux Bubblewrap Design
 
-- Status: In progress — C2B1 and C2B2 complete, C2B3 next
+- Status: In progress — C2B1, C2B2, and C2B3 complete; C2B4 next
 - Date: 2026-08-30
 - Depends on: completed Phase 4C1 execution policy and Phase 4C2A macOS
   Seatbelt delivery
@@ -758,6 +758,8 @@ durable applied evidence remain C2B3.
 
 ### C2B3: protected Pipe and PTY enforcement
 
+Status: Complete (2026-08-30)
+
 - Route protected Pipe and PTY starts through the common Linux builder.
 - Revalidate workspace, scratch, binary identity, policy, and capability at the
   Worker boundary.
@@ -766,6 +768,26 @@ durable applied evidence remain C2B3.
   cancellation, output, PTY, background, and restart behavior.
 - Add deterministic faults before spawn, after namespace setup, after seccomp,
   after confirmation, after evidence persistence, and after release.
+
+Delivered through the shared Unix command-start and sandbox-release gates.
+Protected Linux Pipe and PTY jobs use the frozen Bubblewrap builder with direct
+argv and explicit environment, private validated scratch for `workspace_write`,
+and the existing Worker-owned process group or controlling terminal. The Worker
+reconstructs the retained schema-v3 capability, revalidates the selected
+Bubblewrap executable and launch paths, and verifies the fixed inner bootstrap
+confirmation against the outer process group, live bootstrap PID, mount/user/
+network namespaces, `no_new_privs`, seccomp mode, policy/capability/runtime
+digest, and current executable identity.
+
+Applied filesystem/network/environment/supervision evidence is committed with
+the durable `running` transition before the inner release byte is written.
+Closing either gate or losing the Worker before that point cannot execute user
+code; recovery retains admission-only or applied evidence according to the last
+completed durable transition and cleans the verified process group
+conservatively. Shared native acceptance now exercises protected Pipe/PTY,
+workspace/scratch writes, inherited network, background PTY attach/resize/
+detach/restart, and deterministic pre-spawn, namespace, seccomp, confirmation,
+evidence, and post-release fault boundaries on Linux-capable hosts.
 
 ### C2B4: clients and same-commit acceptance
 
