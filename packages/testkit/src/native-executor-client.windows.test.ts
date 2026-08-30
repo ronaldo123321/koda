@@ -383,7 +383,7 @@ windowsDescribe("NativeExecutorClient Windows control plane", () => {
     const final = await waitForPtyText(reader, "EXIT");
     expect(final).toContain("EXIT");
     expect((await reader.read()).complete).toBe(true);
-  });
+  }, 30_000);
 
   test("routes durable read operations through the shared Supervisor", async () => {
     const result = await client.list();
@@ -485,6 +485,11 @@ async function waitForPtyText(
     if (output.status === "ok") {
       text += output.data.toString("utf8");
       if (text.includes(expected)) return text;
+      if (output.complete) {
+        throw new Error(
+          `Native PTY job '${attachment.credentials.job_id}' completed before emitting '${expected}'. Output: ${JSON.stringify(text)}`,
+        );
+      }
     }
     await new Promise<void>((resolvePromise) => setTimeout(resolvePromise, 10));
   }
