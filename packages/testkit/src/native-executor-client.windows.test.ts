@@ -21,6 +21,15 @@ const windowsEnvironment: NodeJS.ProcessEnv = {
   TMP: process.env.TMP,
 };
 
+async function removeWindowsTree(path: string): Promise<void> {
+  await rm(path, {
+    force: true,
+    recursive: true,
+    maxRetries: 20,
+    retryDelay: 25,
+  });
+}
+
 windowsDescribe("NativeExecutorClient Windows control plane", () => {
   let root: string;
   let client: NativeExecutorClient;
@@ -35,7 +44,7 @@ windowsDescribe("NativeExecutorClient Windows control plane", () => {
 
   afterAll(async () => {
     await client.closeOwnedSupervisorForTests();
-    await rm(root, { force: true, recursive: true });
+    await removeWindowsTree(root);
   });
 
   test("opens only the verified Windows Job Object capabilities", async () => {
@@ -242,7 +251,7 @@ windowsDescribe("NativeExecutorClient Windows control plane", () => {
       });
     } finally {
       await restartClient.closeOwnedSupervisorForTests();
-      await rm(restartRoot, { force: true, recursive: true });
+      await removeWindowsTree(restartRoot);
     }
   });
 
@@ -281,7 +290,7 @@ windowsDescribe("NativeExecutorClient Windows control plane", () => {
       expect(() => process.kill(rootPid, 0)).toThrow();
     } finally {
       await faultClient.closeOwnedSupervisorForTests();
-      await rm(faultRoot, { force: true, recursive: true });
+      await removeWindowsTree(faultRoot);
     }
   });
 
@@ -315,7 +324,7 @@ windowsDescribe("NativeExecutorClient Windows control plane", () => {
       await expect(access(marker)).rejects.toMatchObject({ code: "ENOENT" });
     } finally {
       await faultClient.closeOwnedSupervisorForTests();
-      await rm(faultRoot, { force: true, recursive: true });
+      await removeWindowsTree(faultRoot);
     }
   });
 
@@ -586,7 +595,7 @@ windowsDescribe("NativeExecutorClient Windows control plane", () => {
         .terminate(started.job_id, "cancellation")
         .catch(() => undefined);
       await restartClient.closeOwnedSupervisorForTests();
-      await rm(restartRoot, { force: true, recursive: true });
+      await removeWindowsTree(restartRoot);
     }
   }, 30_000);
 
@@ -634,7 +643,7 @@ windowsDescribe("NativeExecutorClient Windows control plane", () => {
       expect((await attachment.read()).complete).toBe(true);
     } finally {
       await faultClient.closeOwnedSupervisorForTests();
-      await rm(faultRoot, { force: true, recursive: true });
+      await removeWindowsTree(faultRoot);
     }
   }, 30_000);
 
@@ -671,7 +680,7 @@ windowsDescribe("NativeExecutorClient Windows control plane", () => {
       await expect(access(marker)).rejects.toMatchObject({ code: "ENOENT" });
     } finally {
       await faultClient.closeOwnedSupervisorForTests();
-      await rm(faultRoot, { force: true, recursive: true });
+      await removeWindowsTree(faultRoot);
     }
   }, 30_000);
 
