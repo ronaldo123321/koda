@@ -1365,6 +1365,7 @@ where
 async fn sync_file(path: &Path) -> Result<(), String> {
     OpenOptions::new()
         .read(true)
+        .write(true)
         .open(path)
         .await
         .map_err(|error| error.to_string())?

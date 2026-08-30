@@ -34,7 +34,7 @@ use windows_sys::Win32::Security::{
     TOKEN_QUERY, TOKEN_USER, TokenUser, WELL_KNOWN_SID_TYPE, WinLocalSystemSid,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    FILE_ALL_ACCESS, FILE_ATTRIBUTE_REPARSE_POINT, MOVEFILE_REPLACE_EXISTING,
+    FILE_ALL_ACCESS, FILE_ATTRIBUTE_REPARSE_POINT, FILE_SHARE_DELETE, MOVEFILE_REPLACE_EXISTING,
     MOVEFILE_WRITE_THROUGH, MoveFileExW, WriteFile,
 };
 use windows_sys::Win32::System::Pipes::{
@@ -434,7 +434,9 @@ pub fn open_exclusive_lock(path: &Path) -> io::Result<Option<File>> {
     match OpenOptions::new()
         .read(true)
         .write(true)
-        .share_mode(0)
+        // Preserve exclusive read/write ownership while allowing the containing
+        // durable job directory to be atomically renamed during retention.
+        .share_mode(FILE_SHARE_DELETE)
         .open(path)
     {
         Ok(file) => Ok(Some(file)),

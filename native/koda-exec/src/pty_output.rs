@@ -96,6 +96,7 @@ impl PtyOutputStore {
         if let Some(segment) = self.segments.back() {
             OpenOptions::new()
                 .read(true)
+                .write(true)
                 .open(&segment.path)
                 .map_err(output_error)?
                 .sync_all()
