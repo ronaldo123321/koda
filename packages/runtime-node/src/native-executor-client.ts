@@ -67,6 +67,8 @@ export interface NativeExecutorStartInput {
   outputLimitBytes: number;
   terminationGraceMs: number;
   terminationConfirmationMs: number;
+  lifecycle?: "foreground" | "background";
+  displayName?: string;
   requestId?: string;
 }
 
@@ -97,6 +99,9 @@ export interface NativeTerminationAttempt {
   attempt: "graceful" | "force" | "identity_check";
   mechanism:
     | "posix_process_group_signal"
+    | "windows_console_ctrl_break"
+    | "windows_job_object_terminate"
+    | "windows_job_object_recovery_pending"
     | "process_start_identity_mismatch"
     | "command_identity_not_persisted";
 }
@@ -221,6 +226,9 @@ const terminationAttemptSchema = z
     attempt: z.enum(["graceful", "force", "identity_check"]),
     mechanism: z.enum([
       "posix_process_group_signal",
+      "windows_console_ctrl_break",
+      "windows_job_object_terminate",
+      "windows_job_object_recovery_pending",
       "process_start_identity_mismatch",
       "command_identity_not_persisted",
     ]),
@@ -570,7 +578,10 @@ export class NativeExecutorClient {
       termination_grace_ms: input.terminationGraceMs,
       termination_confirmation_ms: input.terminationConfirmationMs,
       io_mode: "pipe",
-      lifecycle: "foreground",
+      lifecycle: input.lifecycle ?? "foreground",
+      ...(input.displayName === undefined
+        ? {}
+        : { display_name: input.displayName }),
     };
     return this.startRequest(params, requestId);
   }

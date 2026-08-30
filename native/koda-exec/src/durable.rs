@@ -540,7 +540,15 @@ fn validate_transition(from: JobState, to: JobState) -> Result<(), ProtocolError
                 | JobState::StartFailed
                 | JobState::Quarantined
         ),
-        JobState::CommandStarting | JobState::Starting => matches!(
+        JobState::CommandStarting => matches!(
+            to,
+            JobState::CommandStarting
+                | JobState::Running
+                | JobState::StartFailed
+                | JobState::TerminationUncertain
+                | JobState::Quarantined
+        ),
+        JobState::Starting => matches!(
             to,
             JobState::Running
                 | JobState::StartFailed

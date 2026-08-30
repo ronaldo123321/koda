@@ -87,6 +87,11 @@ pub mod process {
     };
 }
 
+#[cfg(windows)]
+pub mod process {
+    pub use super::windows::{ManagedProcessTree, SuspendedManagedProcess};
+}
+
 #[cfg(unix)]
 pub mod terminal {
     pub use super::unix::{duplicate_terminal, is_terminal_eof, open_terminal, set_terminal_size};

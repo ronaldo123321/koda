@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, HashSet};
 use std::ffi::{OsStr, OsString, c_void};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read};
@@ -9,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::ptr::{null, null_mut};
 use std::slice;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use sha2::{Digest, Sha256};
@@ -19,8 +21,8 @@ use tokio::net::windows::named_pipe::{
 use tokio::sync::Mutex;
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_INSUFFICIENT_BUFFER, ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION,
-    ERROR_SUCCESS, GENERIC_ALL, GetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, LocalFree,
-    SetHandleInformation,
+    ERROR_SUCCESS, FILETIME, GENERIC_ALL, GetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT,
+    INVALID_HANDLE_VALUE, LocalFree, SetHandleInformation,
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
@@ -37,18 +39,28 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_ALL_ACCESS, FILE_ATTRIBUTE_REPARSE_POINT, FILE_SHARE_DELETE, MOVEFILE_REPLACE_EXISTING,
     MOVEFILE_WRITE_THROUGH, MoveFileExW, WriteFile,
 };
+use windows_sys::Win32::System::Console::{CTRL_BREAK_EVENT, GenerateConsoleCtrlEvent};
+use windows_sys::Win32::System::IO::{
+    CreateIoCompletionPort, GetQueuedCompletionStatus, PostQueuedCompletionStatus,
+};
+use windows_sys::Win32::System::JobObjects::{
+    CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_ASSOCIATE_COMPLETION_PORT,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectAssociateCompletionPortInformation,
+    JobObjectExtendedLimitInformation, SetInformationJobObject, TerminateJobObject,
+};
 use windows_sys::Win32::System::Pipes::{
     CreatePipe, GetNamedPipeClientProcessId, GetNamedPipeServerProcessId,
 };
 use windows_sys::Win32::System::SystemServices::{
-    ACCESS_ALLOWED_ACE_TYPE, SECURITY_DESCRIPTOR_REVISION,
+    ACCESS_ALLOWED_ACE_TYPE, JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO, SECURITY_DESCRIPTOR_REVISION,
 };
 use windows_sys::Win32::System::Threading::{
-    CREATE_NEW_PROCESS_GROUP, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
+    CREATE_NEW_PROCESS_GROUP, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
     DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess,
-    InitializeProcThreadAttributeList, OpenProcess, OpenProcessToken,
-    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
-    STARTF_USESTDHANDLES, STARTUPINFOEXW, UpdateProcThreadAttribute,
+    GetExitCodeProcess, GetProcessTimes, INFINITE, InitializeProcThreadAttributeList, OpenProcess,
+    OpenProcessToken, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_JOB_LIST,
+    PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, ResumeThread, STARTF_USESTDHANDLES,
+    STARTUPINFOEXW, UpdateProcThreadAttribute,
 };
 
 const PIPE_PREFIX: &str = r"\\.\pipe\koda-exec-";
@@ -132,6 +144,12 @@ impl Drop for OwnedHandle {
     }
 }
 
+impl OwnedHandle {
+    fn into_raw(mut self) -> HANDLE {
+        std::mem::take(&mut self.0)
+    }
+}
+
 struct SidBuffer {
     storage: Vec<usize>,
     bytes: usize,
@@ -176,10 +194,15 @@ pub type BootstrapHandle = usize;
 pub struct RestrictedHandleList {
     storage: Vec<usize>,
     handles: Vec<HANDLE>,
+    jobs: Vec<HANDLE>,
 }
 
 impl RestrictedHandleList {
     pub fn new(handles: &[HANDLE]) -> io::Result<Self> {
+        Self::with_job(handles, None)
+    }
+
+    fn with_job(handles: &[HANDLE], job: Option<HANDLE>) -> io::Result<Self> {
         if handles.is_empty() || handles.iter().any(|handle| handle.is_null()) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -200,10 +223,17 @@ impl RestrictedHandleList {
             }
         }
 
+        if job.is_some_and(|handle| handle.is_null()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "process Job Object handle is null",
+            ));
+        }
+        let attribute_count = if job.is_some() { 2 } else { 1 };
         let mut bytes = 0usize;
         // SAFETY: the documented sizing call uses a null list and fills `bytes`.
         unsafe {
-            InitializeProcThreadAttributeList(null_mut(), 1, 0, &mut bytes);
+            InitializeProcThreadAttributeList(null_mut(), attribute_count, 0, &mut bytes);
         }
         if bytes == 0 {
             return Err(io::Error::last_os_error());
@@ -211,7 +241,7 @@ impl RestrictedHandleList {
         let mut storage = vec![0usize; bytes.div_ceil(size_of::<usize>())];
         let list = storage.as_mut_ptr().cast();
         // SAFETY: storage is aligned, writable, and at least `bytes` long.
-        if unsafe { InitializeProcThreadAttributeList(list, 1, 0, &mut bytes) } == 0 {
+        if unsafe { InitializeProcThreadAttributeList(list, attribute_count, 0, &mut bytes) } == 0 {
             return Err(io::Error::last_os_error());
         }
         let handles = handles.to_vec();
@@ -234,7 +264,31 @@ impl RestrictedHandleList {
             }
             return Err(io::Error::last_os_error());
         }
-        Ok(Self { storage, handles })
+        let jobs = job.into_iter().collect::<Vec<_>>();
+        if !jobs.is_empty()
+            && unsafe {
+                UpdateProcThreadAttribute(
+                    list,
+                    0,
+                    PROC_THREAD_ATTRIBUTE_JOB_LIST as usize,
+                    jobs.as_ptr().cast(),
+                    size_of_val(jobs.as_slice()),
+                    null_mut(),
+                    null(),
+                )
+            } == 0
+        {
+            // SAFETY: list was initialized successfully above.
+            unsafe {
+                DeleteProcThreadAttributeList(list);
+            }
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self {
+            storage,
+            handles,
+            jobs,
+        })
     }
 
     pub fn as_raw(&mut self) -> *mut c_void {
@@ -243,6 +297,11 @@ impl RestrictedHandleList {
 
     pub fn handles(&self) -> &[HANDLE] {
         &self.handles
+    }
+
+    #[cfg(test)]
+    fn jobs(&self) -> &[HANDLE] {
+        &self.jobs
     }
 }
 
@@ -616,6 +675,414 @@ pub fn spawn_worker_process(
     let _process = OwnedHandle(process.hProcess);
     let _thread = OwnedHandle(process.hThread);
     Ok(())
+}
+
+pub struct SuspendedManagedProcess {
+    tree: ManagedProcessTree,
+    primary_thread: OwnedHandle,
+    stdout: Option<File>,
+    stderr: Option<File>,
+}
+
+#[derive(Clone)]
+pub struct ManagedProcessTree {
+    inner: Arc<ManagedProcessTreeInner>,
+}
+
+struct ManagedProcessTreeInner {
+    job: OwnedHandle,
+    process: OwnedHandle,
+    completion_port: OwnedHandle,
+    pid: u32,
+}
+
+impl SuspendedManagedProcess {
+    pub fn spawn(
+        argv: &[String],
+        cwd: &Path,
+        environment: &BTreeMap<String, String>,
+    ) -> io::Result<Self> {
+        if argv.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Windows command argv is empty",
+            ));
+        }
+        let executable = resolve_windows_executable(&argv[0], cwd, environment)?;
+        let environment_block = windows_environment_block(environment)?;
+        let current_directory = wide(cwd.as_os_str());
+
+        // SAFETY: null security attributes and name request an anonymous Job Object.
+        let job = unsafe { CreateJobObjectW(null(), null()) };
+        if job.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        let job = OwnedHandle(job);
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        // SAFETY: job is live and limits is a correctly sized initialized value.
+        if unsafe {
+            SetInformationJobObject(
+                job.0,
+                JobObjectExtendedLimitInformation,
+                (&raw const limits).cast(),
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+
+        // SAFETY: INVALID_HANDLE_VALUE requests a new standalone completion port.
+        let completion_port =
+            unsafe { CreateIoCompletionPort(INVALID_HANDLE_VALUE, null_mut(), 0, 1) };
+        if completion_port.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        let completion_port = OwnedHandle(completion_port);
+        let association = JOBOBJECT_ASSOCIATE_COMPLETION_PORT {
+            CompletionKey: JOB_COMPLETION_KEY as *mut c_void,
+            CompletionPort: completion_port.0,
+        };
+        // SAFETY: both kernel handles are live and association is correctly sized.
+        if unsafe {
+            SetInformationJobObject(
+                job.0,
+                JobObjectAssociateCompletionPortInformation,
+                (&raw const association).cast(),
+                size_of::<JOBOBJECT_ASSOCIATE_COMPLETION_PORT>() as u32,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+
+        let (stdout, stdout_child) = create_child_output_pipe()?;
+        let (stderr, stderr_child) = create_child_output_pipe()?;
+        let null_file = OpenOptions::new().read(true).write(true).open("NUL")?;
+        let null_handle = null_file.as_raw_handle() as HANDLE;
+        set_inheritable(null_handle, true)?;
+
+        let inherited = [null_handle, stdout_child.0, stderr_child.0];
+        let mut attributes = RestrictedHandleList::with_job(&inherited, Some(job.0))?;
+        let application = wide(executable.as_os_str());
+        let mut command_arguments = Vec::with_capacity(argv.len());
+        command_arguments.push(executable.as_os_str());
+        command_arguments.extend(argv[1..].iter().map(OsStr::new));
+        let mut command_line = windows_command_line(&command_arguments);
+        let mut startup = STARTUPINFOEXW::default();
+        startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
+        startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+        startup.StartupInfo.hStdInput = null_handle;
+        startup.StartupInfo.hStdOutput = stdout_child.0;
+        startup.StartupInfo.hStdError = stderr_child.0;
+        startup.lpAttributeList = attributes.as_raw().cast();
+        let mut process = PROCESS_INFORMATION::default();
+        // SAFETY: all pointers refer to live, correctly sized values. The process
+        // is born suspended and atomically assigned to `job` by the attribute list.
+        let created = unsafe {
+            CreateProcessW(
+                application.as_ptr(),
+                command_line.as_mut_ptr(),
+                null(),
+                null(),
+                1,
+                CREATE_SUSPENDED
+                    | CREATE_NEW_PROCESS_GROUP
+                    | CREATE_UNICODE_ENVIRONMENT
+                    | EXTENDED_STARTUPINFO_PRESENT,
+                environment_block.as_ptr().cast(),
+                current_directory.as_ptr(),
+                &startup.StartupInfo,
+                &mut process,
+            )
+        };
+        if created == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        drop((stdout_child, stderr_child, null_file, attributes));
+        let tree = ManagedProcessTree {
+            inner: Arc::new(ManagedProcessTreeInner {
+                job,
+                process: OwnedHandle(process.hProcess),
+                completion_port,
+                pid: process.dwProcessId,
+            }),
+        };
+        Ok(Self {
+            tree,
+            primary_thread: OwnedHandle(process.hThread),
+            stdout: Some(stdout),
+            stderr: Some(stderr),
+        })
+    }
+
+    pub fn pid(&self) -> u32 {
+        self.tree.pid()
+    }
+
+    pub fn process_identity(&self) -> io::Result<String> {
+        process_identity_from_handle(self.tree.inner.process.0)
+    }
+
+    pub fn resume(mut self) -> io::Result<(ManagedProcessTree, File, File)> {
+        // SAFETY: primary_thread is the live suspended main thread returned by CreateProcessW.
+        if unsafe { ResumeThread(self.primary_thread.0) } == u32::MAX {
+            return Err(io::Error::last_os_error());
+        }
+        let stdout = self.stdout.take().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "stdout ownership was already moved",
+            )
+        })?;
+        let stderr = self.stderr.take().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "stderr ownership was already moved",
+            )
+        })?;
+        Ok((self.tree.clone(), stdout, stderr))
+    }
+}
+
+impl ManagedProcessTree {
+    pub fn pid(&self) -> u32 {
+        self.inner.pid
+    }
+
+    pub fn wait_for_empty(&self) -> io::Result<()> {
+        loop {
+            let mut message = 0u32;
+            let mut key = 0usize;
+            let mut overlapped = null_mut();
+            // SAFETY: completion_port is live and all output slots are writable.
+            if unsafe {
+                GetQueuedCompletionStatus(
+                    self.inner.completion_port.0,
+                    &mut message,
+                    &mut key,
+                    &mut overlapped,
+                    INFINITE,
+                )
+            } == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            if key == JOB_COMPLETION_KEY && message == JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO {
+                return Ok(());
+            }
+            if key == JOB_COMPLETION_KEY && message == JOB_WAIT_CANCELLED {
+                return Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "Job Object completion wait was cancelled",
+                ));
+            }
+        }
+    }
+
+    pub fn root_exit_status(&self) -> io::Result<std::process::ExitStatus> {
+        let mut code = 0u32;
+        // SAFETY: process is a live query handle and code is writable.
+        if unsafe { GetExitCodeProcess(self.inner.process.0, &mut code) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        use std::os::windows::process::ExitStatusExt;
+        Ok(std::process::ExitStatus::from_raw(code))
+    }
+
+    pub fn cancel_wait(&self) -> io::Result<()> {
+        // SAFETY: the completion port is live and this private packet uses no OVERLAPPED value.
+        if unsafe {
+            PostQueuedCompletionStatus(
+                self.inner.completion_port.0,
+                JOB_WAIT_CANCELLED,
+                JOB_COMPLETION_KEY,
+                null_mut(),
+            )
+        } == 0
+        {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn request_console_break(&self) -> io::Result<()> {
+        // SAFETY: pid is the process-group ID created with CREATE_NEW_PROCESS_GROUP.
+        if unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, self.inner.pid) } == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn terminate(&self, exit_code: u32) -> io::Result<()> {
+        // SAFETY: job is live and owned by this Worker.
+        if unsafe { TerminateJobObject(self.inner.job.0, exit_code) } == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+const JOB_COMPLETION_KEY: usize = 0x4b4f4441;
+const JOB_WAIT_CANCELLED: u32 = u32::MAX;
+
+fn create_child_output_pipe() -> io::Result<(File, OwnedHandle)> {
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: null_mut(),
+        bInheritHandle: 1,
+    };
+    let mut read = null_mut();
+    let mut write = null_mut();
+    // SAFETY: output slots and security attributes are valid.
+    if unsafe { CreatePipe(&mut read, &mut write, &attributes, 0) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let read = OwnedHandle(read);
+    let write = OwnedHandle(write);
+    set_inheritable(read.0, false)?;
+    // SAFETY: read is uniquely owned and transferred into File exactly once.
+    let read = unsafe { File::from_raw_handle(read.into_raw() as RawHandle) };
+    Ok((read, write))
+}
+
+fn set_inheritable(handle: HANDLE, inheritable: bool) -> io::Result<()> {
+    let flags = if inheritable { HANDLE_FLAG_INHERIT } else { 0 };
+    // SAFETY: handle is live and only the inheritance flag is changed.
+    if unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, flags) } == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+fn process_identity_from_handle(process: HANDLE) -> io::Result<String> {
+    let mut created = FILETIME::default();
+    let mut exited = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    // SAFETY: process is queryable and every FILETIME slot is writable.
+    if unsafe { GetProcessTimes(process, &mut created, &mut exited, &mut kernel, &mut user) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let created = (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime);
+    if created == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Windows returned an empty process creation time",
+        ));
+    }
+    Ok(format!("windows-process-created:{created}"))
+}
+
+fn resolve_windows_executable(
+    program: &str,
+    cwd: &Path,
+    environment: &BTreeMap<String, String>,
+) -> io::Result<PathBuf> {
+    if program.is_empty() || program.contains('\0') {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Windows executable name is empty or contains NUL",
+        ));
+    }
+    let requested = Path::new(program);
+    let path_bearing = requested.is_absolute() || requested.components().count() > 1;
+    let mut roots = Vec::new();
+    if path_bearing {
+        roots.push(if requested.is_absolute() {
+            requested.to_owned()
+        } else {
+            cwd.join(requested)
+        });
+    } else {
+        roots.push(cwd.join(requested));
+        if let Some(path) = environment_value(environment, "PATH") {
+            roots.extend(std::env::split_paths(path).map(|root| root.join(requested)));
+        }
+    }
+    for root in roots {
+        for candidate in executable_candidates(&root) {
+            if is_shell_only_extension(&candidate) {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "batch and command scripts require an explicit shell and are unsupported",
+                ));
+            }
+            if std::fs::metadata(&candidate).is_ok_and(|metadata| metadata.is_file()) {
+                return std::fs::canonicalize(candidate);
+            }
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        format!("Windows executable '{program}' was not found"),
+    ))
+}
+
+fn executable_candidates(path: &Path) -> Vec<PathBuf> {
+    if path.extension().is_some() {
+        vec![path.to_owned()]
+    } else {
+        vec![path.to_owned(), path.with_extension("exe")]
+    }
+}
+
+fn is_shell_only_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(OsStr::to_str)
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("bat") || extension.eq_ignore_ascii_case("cmd")
+        })
+}
+
+fn environment_value<'a>(
+    environment: &'a BTreeMap<String, String>,
+    name: &str,
+) -> Option<&'a OsStr> {
+    environment
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(name))
+        .map(|(_, value)| OsStr::new(value))
+}
+
+fn windows_environment_block(environment: &BTreeMap<String, String>) -> io::Result<Vec<u16>> {
+    let mut normalized = HashSet::with_capacity(environment.len());
+    let mut entries = environment.iter().collect::<Vec<_>>();
+    for (key, value) in &entries {
+        if key.is_empty()
+            || key.contains('=')
+            || key.contains('\0')
+            || value.contains('\0')
+            || !normalized.insert(key.to_lowercase())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Windows environment contains an invalid or case-insensitively duplicate key",
+            ));
+        }
+    }
+    entries.sort_by(|(left, _), (right, _)| {
+        left.to_lowercase()
+            .cmp(&right.to_lowercase())
+            .then_with(|| left.cmp(right))
+    });
+    let mut block = Vec::new();
+    for (key, value) in entries {
+        block.extend(OsStr::new(key).encode_wide());
+        block.push(b'=' as u16);
+        block.extend(OsStr::new(value).encode_wide());
+        block.push(0);
+    }
+    block.push(0);
+    if environment.is_empty() {
+        block.push(0);
+    }
+    Ok(block)
 }
 
 fn windows_command_line(arguments: &[&OsStr]) -> Vec<u16> {
@@ -1066,6 +1533,65 @@ mod tests {
         assert_eq!(write_flags & HANDLE_FLAG_INHERIT, 0);
         let list = RestrictedHandleList::new(&[bootstrap_read_handle(&read)]).expect("list");
         assert_eq!(list.handles(), &[bootstrap_read_handle(&read)]);
+    }
+
+    #[test]
+    fn process_attributes_combine_restricted_handles_and_job_assignment() {
+        let (read, _write) = create_bootstrap_channel().expect("channel");
+        // SAFETY: null security attributes and name request an anonymous Job Object.
+        let job = unsafe { CreateJobObjectW(null(), null()) };
+        assert!(!job.is_null());
+        let job = OwnedHandle(job);
+        let list = RestrictedHandleList::with_job(&[bootstrap_read_handle(&read)], Some(job.0))
+            .expect("combined process attributes");
+        assert_eq!(list.handles(), &[bootstrap_read_handle(&read)]);
+        assert_eq!(list.jobs(), &[job.0]);
+    }
+
+    #[test]
+    fn environment_block_is_sorted_unicode_and_double_terminated() {
+        let environment = BTreeMap::from([
+            ("zeta".to_owned(), "last".to_owned()),
+            ("Alpha".to_owned(), "值".to_owned()),
+        ]);
+        let block = windows_environment_block(&environment).expect("environment block");
+        let expected = "Alpha=值\0zeta=last\0\0".encode_utf16().collect::<Vec<_>>();
+        assert_eq!(block, expected);
+        assert_eq!(
+            windows_environment_block(&BTreeMap::new()).expect("empty environment"),
+            vec![0, 0]
+        );
+    }
+
+    #[test]
+    fn environment_block_rejects_case_insensitive_duplicates_and_nuls() {
+        let duplicate = BTreeMap::from([
+            ("Path".to_owned(), "first".to_owned()),
+            ("PATH".to_owned(), "second".to_owned()),
+        ]);
+        assert!(windows_environment_block(&duplicate).is_err());
+        assert!(
+            windows_environment_block(&BTreeMap::from([(
+                "KODA".to_owned(),
+                "bad\0value".to_owned(),
+            )]))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn executable_resolution_accepts_an_explicit_native_binary() {
+        let current = std::env::current_exe().expect("current executable");
+        let resolved = resolve_windows_executable(
+            current.to_str().expect("Unicode test executable"),
+            current.parent().expect("test executable parent"),
+            &BTreeMap::new(),
+        )
+        .expect("resolved executable");
+        assert_eq!(
+            resolved,
+            std::fs::canonicalize(current).expect("canonical executable")
+        );
     }
 
     #[test]

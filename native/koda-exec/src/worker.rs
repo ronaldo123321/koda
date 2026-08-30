@@ -9,12 +9,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use tokio::fs::OpenOptions;
-#[cfg(unix)]
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 #[cfg(unix)]
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, mpsc, watch};
-#[cfg(unix)]
 use tokio::time::{sleep, timeout};
 
 use crate::attachment::AttachmentRegistry;
@@ -32,6 +30,8 @@ use crate::platform::bootstrap::{
     raw_handle, release_gate,
 };
 use crate::platform::identity::current_process_identity;
+#[cfg(windows)]
+use crate::platform::process::{ManagedProcessTree, SuspendedManagedProcess};
 #[cfg(unix)]
 use crate::platform::process::{
     ProcessTreeSignal, exit_signal_name, process_group_exists, signal_process_group,
@@ -53,7 +53,6 @@ use crate::protocol::{
 };
 use crate::pty_output::PtyOutputStore;
 
-#[cfg(unix)]
 const OUTPUT_BUFFER_BYTES: usize = 16_384;
 const PTY_COMMAND_QUEUE_DEPTH: usize = 64;
 
@@ -179,7 +178,6 @@ impl WorkerRuntime {
         Ok(())
     }
 
-    #[cfg(unix)]
     async fn publish_command_starting(&self) -> Result<(), ProtocolError> {
         let mut guard = self.state.lock().await;
         let mut next = guard.clone();
@@ -188,7 +186,6 @@ impl WorkerRuntime {
         Ok(())
     }
 
-    #[cfg(unix)]
     async fn publish_running(&self, pid: u32, identity: String) -> Result<(), ProtocolError> {
         let mut guard = self.state.lock().await;
         let mut next = guard.clone();
@@ -199,7 +196,21 @@ impl WorkerRuntime {
         Ok(())
     }
 
-    #[cfg(unix)]
+    #[cfg(windows)]
+    async fn publish_command_identity(
+        &self,
+        pid: u32,
+        identity: String,
+    ) -> Result<(), ProtocolError> {
+        let mut guard = self.state.lock().await;
+        let mut next = guard.clone();
+        next.state = JobState::CommandStarting;
+        next.command_pid = Some(pid);
+        next.command_start_identity = Some(identity);
+        *guard = self.record.transition(&guard, next)?;
+        Ok(())
+    }
+
     async fn publish_terminating(&self) -> Result<(), ProtocolError> {
         let mut guard = self.state.lock().await;
         let mut next = guard.clone();
@@ -208,7 +219,6 @@ impl WorkerRuntime {
         Ok(())
     }
 
-    #[cfg(unix)]
     async fn publish_start_failed(&self, error: io::Error) -> Result<(), ProtocolError> {
         self.stdout_complete.store(true, Ordering::Release);
         self.stderr_complete.store(true, Ordering::Release);
@@ -231,7 +241,6 @@ impl WorkerRuntime {
         Ok(())
     }
 
-    #[cfg(unix)]
     async fn publish_terminal(
         &self,
         state: JobState,
@@ -257,7 +266,14 @@ impl WorkerRuntime {
         next.stderr_retained_bytes = self.stderr_retained.load(Ordering::Acquire);
         if let Some(status) = status {
             next.exit_code = status.code();
-            next.signal = exit_signal_name(&status);
+            #[cfg(unix)]
+            {
+                next.signal = exit_signal_name(&status);
+            }
+            #[cfg(windows)]
+            {
+                next.signal = None;
+            }
         }
         *guard = self.record.transition(&guard, next)?;
         Ok(())
@@ -764,7 +780,268 @@ async fn execute_job(runtime: Arc<WorkerRuntime>) -> Result<(), ProtocolError> {
 
 #[cfg(windows)]
 async fn execute_job(runtime: Arc<WorkerRuntime>) -> Result<(), ProtocolError> {
-    runtime.publish_platform_unavailable().await
+    match runtime.record.manifest.start.io_mode {
+        IoMode::Pipe => execute_windows_pipe_job(runtime).await,
+        IoMode::Pty => runtime.publish_platform_unavailable().await,
+    }
+}
+
+#[cfg(windows)]
+async fn execute_windows_pipe_job(runtime: Arc<WorkerRuntime>) -> Result<(), ProtocolError> {
+    runtime.publish_command_starting().await?;
+    fault_point("after_command_starting");
+    let params = runtime.record.manifest.start.clone();
+    let suspended = match SuspendedManagedProcess::spawn(
+        &params.argv,
+        Path::new(&params.cwd),
+        &params.environment,
+    ) {
+        Ok(process) => process,
+        Err(error) => return runtime.publish_start_failed(error).await,
+    };
+    let pid = suspended.pid();
+    let identity = match suspended.process_identity() {
+        Ok(identity) => identity,
+        Err(error) => return runtime.publish_start_failed(error).await,
+    };
+    runtime
+        .publish_command_identity(pid, identity.clone())
+        .await?;
+    fault_point("after_command_spawn");
+    let (tree, stdout, stderr) = match suspended.resume() {
+        Ok(process) => process,
+        Err(error) => return runtime.publish_start_failed(error).await,
+    };
+    if let Err(error) = runtime.publish_running(pid, identity).await {
+        let _ = tree.terminate(1);
+        return Err(error);
+    }
+    fault_point("after_running");
+
+    let (output_failure_sender, mut output_failure_receiver) = mpsc::channel(2);
+    let stdout_runtime = Arc::clone(&runtime);
+    let stdout_failure_sender = output_failure_sender.clone();
+    let mut stdout_task = tokio::spawn(async move {
+        let source = tokio::fs::File::from_std(stdout);
+        if let Err(error) = capture_output(
+            source,
+            &stdout_runtime.record.stdout_path(),
+            stdout_runtime.record.manifest.start.output_limit_bytes,
+            &stdout_runtime.stdout_total,
+            &stdout_runtime.stdout_retained,
+        )
+        .await
+        {
+            let _ = stdout_failure_sender.send(error.to_string()).await;
+        }
+    });
+    let stderr_runtime = Arc::clone(&runtime);
+    let mut stderr_task = tokio::spawn(async move {
+        let source = tokio::fs::File::from_std(stderr);
+        if let Err(error) = capture_output(
+            source,
+            &stderr_runtime.record.stderr_path(),
+            stderr_runtime.record.manifest.start.output_limit_bytes,
+            &stderr_runtime.stderr_total,
+            &stderr_runtime.stderr_retained,
+        )
+        .await
+        {
+            let _ = output_failure_sender.send(error.to_string()).await;
+        }
+    });
+    let wait_tree = tree.clone();
+    let mut empty_task = tokio::task::spawn_blocking(move || wait_tree.wait_for_empty());
+    let mut terminate_receiver = runtime.take_termination_receiver().await?;
+    let trigger = tokio::select! {
+        empty = &mut empty_task => WindowsJobTrigger::Empty(flatten_job_wait(empty)),
+        reason = terminate_receiver.recv() => WindowsJobTrigger::Terminate(
+            reason.unwrap_or(TerminationReason::Cancellation)
+        ),
+        Some(failure) = output_failure_receiver.recv() => WindowsJobTrigger::OutputFailed(failure),
+        _ = sleep(Duration::from_millis(params.timeout_ms)) => {
+            WindowsJobTrigger::Terminate(TerminationReason::Timeout)
+        }
+    };
+
+    let mut failure = None;
+    let (status, termination, state, timed_out) = match trigger {
+        WindowsJobTrigger::Empty(Ok(())) => match tree.root_exit_status() {
+            Ok(status) => (Some(status), None, JobState::Exited, false),
+            Err(error) => {
+                failure = Some(JobFailure {
+                    code: "COMMAND_WAIT_FAILED".to_owned(),
+                    message: format!("Could not read the root process exit status: {error}"),
+                });
+                (None, None, JobState::Exited, false)
+            }
+        },
+        WindowsJobTrigger::Empty(Err(error)) => {
+            failure = Some(JobFailure {
+                code: "JOB_OBJECT_WAIT_FAILED".to_owned(),
+                message: format!("Could not observe Job Object completion: {error}"),
+            });
+            let _ = tree.terminate(1);
+            (
+                None,
+                Some(TerminationSnapshot {
+                    reason: TerminationReason::OutputFailure.as_str().to_owned(),
+                    outcome: "uncertain".to_owned(),
+                    attempts: vec![TerminationAttempt {
+                        attempt: "force".to_owned(),
+                        mechanism: "windows_job_object_terminate".to_owned(),
+                    }],
+                }),
+                JobState::TerminationUncertain,
+                false,
+            )
+        }
+        WindowsJobTrigger::Terminate(reason) => {
+            runtime.publish_terminating().await?;
+            fault_point("after_terminating");
+            let termination = terminate_windows_tree(
+                &tree,
+                &mut empty_task,
+                reason,
+                params.termination_grace_ms,
+                params.termination_confirmation_ms,
+            )
+            .await;
+            let state = if termination.outcome == "uncertain" {
+                JobState::TerminationUncertain
+            } else {
+                JobState::Exited
+            };
+            let status = if state == JobState::Exited {
+                tree.root_exit_status().ok()
+            } else {
+                None
+            };
+            (
+                status,
+                Some(termination),
+                state,
+                reason == TerminationReason::Timeout,
+            )
+        }
+        WindowsJobTrigger::OutputFailed(message) => {
+            runtime.publish_terminating().await?;
+            failure = Some(JobFailure {
+                code: "OUTPUT_CAPTURE_FAILED".to_owned(),
+                message,
+            });
+            let termination = terminate_windows_tree(
+                &tree,
+                &mut empty_task,
+                TerminationReason::OutputFailure,
+                params.termination_grace_ms,
+                params.termination_confirmation_ms,
+            )
+            .await;
+            let state = if termination.outcome == "uncertain" {
+                JobState::TerminationUncertain
+            } else {
+                JobState::Exited
+            };
+            let status = if state == JobState::Exited {
+                tree.root_exit_status().ok()
+            } else {
+                None
+            };
+            (status, Some(termination), state, false)
+        }
+    };
+
+    if !empty_task.is_finished() {
+        let _ = tree.cancel_wait();
+    }
+
+    let drain_timeout =
+        Duration::from_millis(params.termination_confirmation_ms.clamp(2_000, 30_000));
+    if timeout(drain_timeout, async {
+        let _ = (&mut stdout_task).await;
+        let _ = (&mut stderr_task).await;
+    })
+    .await
+    .is_err()
+    {
+        stdout_task.abort();
+        stderr_task.abort();
+        let _ = stdout_task.await;
+        let _ = stderr_task.await;
+        failure.get_or_insert(JobFailure {
+            code: "OUTPUT_DRAIN_TIMEOUT".to_owned(),
+            message: "Windows output pipes did not reach EOF after process-tree completion."
+                .to_owned(),
+        });
+    }
+    runtime.stdout_complete.store(true, Ordering::Release);
+    runtime.stderr_complete.store(true, Ordering::Release);
+    runtime
+        .publish_terminal(state, status, timed_out, termination, failure)
+        .await?;
+    fault_point("after_terminal");
+    Ok(())
+}
+
+#[cfg(windows)]
+enum WindowsJobTrigger {
+    Empty(io::Result<()>),
+    Terminate(TerminationReason),
+    OutputFailed(String),
+}
+
+#[cfg(windows)]
+fn flatten_job_wait(result: Result<io::Result<()>, tokio::task::JoinError>) -> io::Result<()> {
+    result.map_err(|error| io::Error::other(format!("Job wait task failed: {error}")))?
+}
+
+#[cfg(windows)]
+async fn terminate_windows_tree(
+    tree: &ManagedProcessTree,
+    empty_task: &mut tokio::task::JoinHandle<io::Result<()>>,
+    reason: TerminationReason,
+    grace_ms: u64,
+    confirmation_ms: u64,
+) -> TerminationSnapshot {
+    let mut attempts = vec![TerminationAttempt {
+        attempt: "graceful".to_owned(),
+        mechanism: "windows_console_ctrl_break".to_owned(),
+    }];
+    if tree.request_console_break().is_ok()
+        && let Ok(result) = timeout(Duration::from_millis(grace_ms), &mut *empty_task).await
+    {
+        let outcome = if flatten_job_wait(result).is_ok() {
+            "terminated"
+        } else {
+            let _ = tree.terminate(1);
+            "uncertain"
+        };
+        return TerminationSnapshot {
+            reason: reason.as_str().to_owned(),
+            outcome: outcome.to_owned(),
+            attempts,
+        };
+    }
+    attempts.push(TerminationAttempt {
+        attempt: "force".to_owned(),
+        mechanism: "windows_job_object_terminate".to_owned(),
+    });
+    if tree.terminate(1).is_err() {
+        return TerminationSnapshot {
+            reason: reason.as_str().to_owned(),
+            outcome: "uncertain".to_owned(),
+            attempts,
+        };
+    }
+    let confirmed = timeout(Duration::from_millis(confirmation_ms), &mut *empty_task)
+        .await
+        .is_ok_and(|result| flatten_job_wait(result).is_ok());
+    TerminationSnapshot {
+        reason: reason.as_str().to_owned(),
+        outcome: if confirmed { "terminated" } else { "uncertain" }.to_owned(),
+        attempts,
+    }
 }
 
 #[cfg(unix)]
@@ -1332,7 +1609,6 @@ struct TerminationResult {
     snapshot: TerminationSnapshot,
 }
 
-#[cfg(unix)]
 async fn capture_output<R>(
     mut source: R,
     path: &Path,
