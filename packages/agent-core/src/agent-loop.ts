@@ -727,16 +727,21 @@ export class AgentLoop {
               await recording;
             },
           });
-          result =
-            preparation.status === "error"
-              ? preparation.result
-              : await this.authorizeAndExecute(
-                  recorder,
-                  items,
-                  call,
-                  preparation.invocation,
-                  signal,
-                );
+          if (preparation.status === "error") {
+            result = preparation.result;
+          } else {
+            try {
+              result = await this.authorizeAndExecute(
+                recorder,
+                items,
+                call,
+                preparation.invocation,
+                signal,
+              );
+            } finally {
+              await preparation.invocation.dispose();
+            }
+          }
         } catch (error) {
           if (signal.aborted) {
             return this.cancel(
@@ -894,7 +899,10 @@ export class AgentLoop {
         error: { code: "POLICY_DENIED", message: policyDecision.reason },
       };
     }
-    if (policyDecision.decision === "allow") {
+    if (
+      policyDecision.decision === "allow" &&
+      !prepared.freshApprovalRequired
+    ) {
       return this.executePrepared(recorder, call, prepared);
     }
     if (prepared.approval === undefined) {
@@ -928,7 +936,10 @@ export class AgentLoop {
     const request = {
       callId: call.callId,
       name: call.name,
-      reason: policyDecision.reason,
+      reason:
+        policyDecision.decision === "ask"
+          ? policyDecision.reason
+          : "This tool requires a fresh approval for this exact invocation.",
       ...prepared.approval,
     };
     await recorder.record({

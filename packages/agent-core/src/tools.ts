@@ -144,13 +144,17 @@ interface ErasedToolRegistration {
 
 export interface PreparedToolHandler {
   approval: ToolApprovalPreview;
+  freshApprovalRequired?: boolean;
   execute(): Promise<JsonValue>;
+  dispose?(): void | Promise<void>;
 }
 
 export interface PreparedToolInvocation {
   effect: ToolEffect;
   approval?: ToolApprovalPreview;
+  freshApprovalRequired: boolean;
   execute(): Promise<ToolExecutionResult>;
+  dispose(): Promise<void>;
 }
 
 export type ToolPreparationResult =
@@ -285,7 +289,9 @@ export class ToolRegistry {
       const toolContext = { ...context, callId: invocation.callId };
       const prepared: {
         approval?: ToolApprovalPreview;
+        freshApprovalRequired?: boolean;
         execute(): Promise<JsonValue>;
+        dispose?(): void | Promise<void>;
       } =
         tool.prepare === undefined
           ? {
@@ -298,6 +304,12 @@ export class ToolRegistry {
             }
           : await tool.prepare(toolContext, parsed.data);
       let executed = false;
+      let disposed = false;
+      const dispose = async (): Promise<void> => {
+        if (disposed) return;
+        disposed = true;
+        await prepared.dispose?.();
+      };
       return {
         status: "ready",
         invocation: {
@@ -305,6 +317,8 @@ export class ToolRegistry {
           ...(prepared.approval === undefined
             ? {}
             : { approval: prepared.approval }),
+          freshApprovalRequired: prepared.freshApprovalRequired ?? false,
+          dispose,
           execute: async () => {
             if (executed) {
               return {
@@ -316,8 +330,8 @@ export class ToolRegistry {
               };
             }
             executed = true;
-            context.signal.throwIfAborted();
             try {
+              context.signal.throwIfAborted();
               const output = await prepared.execute();
               context.signal.throwIfAborted();
               const parsedOutput = jsonValueSchema.safeParse(output);
@@ -342,6 +356,8 @@ export class ToolRegistry {
                 status: "error",
                 error: toToolError(error, "TOOL_EXECUTION_FAILED"),
               };
+            } finally {
+              await dispose();
             }
           },
         },

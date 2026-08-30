@@ -75,6 +75,7 @@ describe("AgentLoop approvals", () => {
 
   it("returns a rejected approval to the model without executing", async () => {
     let executed = false;
+    let disposed = 0;
     const events = new MemoryEventStore();
     const result = await runWriteTurn({
       events,
@@ -88,6 +89,9 @@ describe("AgentLoop approvals", () => {
       onExecute: () => {
         executed = true;
       },
+      onDispose: () => {
+        disposed += 1;
+      },
       assertToolResult: (toolResult) => {
         expect(toolResult).toMatchObject({
           status: "error",
@@ -98,6 +102,7 @@ describe("AgentLoop approvals", () => {
 
     expect(result.status).toBe("completed");
     expect(executed).toBe(false);
+    expect(disposed).toBe(1);
     expect(
       events.events.some((event) => event.type === "tool.execution_started"),
     ).toBe(false);
@@ -106,6 +111,7 @@ describe("AgentLoop approvals", () => {
   it("never mode denies writes without invoking the approval broker", async () => {
     let approvalCalls = 0;
     let executed = false;
+    let disposed = 0;
     const events = new MemoryEventStore();
     const result = await runWriteTurn({
       events,
@@ -119,6 +125,9 @@ describe("AgentLoop approvals", () => {
       onExecute: () => {
         executed = true;
       },
+      onDispose: () => {
+        disposed += 1;
+      },
       assertToolResult: (toolResult) => {
         expect(toolResult).toMatchObject({
           status: "error",
@@ -130,6 +139,7 @@ describe("AgentLoop approvals", () => {
     expect(result.status).toBe("completed");
     expect(approvalCalls).toBe(0);
     expect(executed).toBe(false);
+    expect(disposed).toBe(1);
     expect(
       events.events.some((event) => event.type === "tool.execution_started"),
     ).toBe(false);
@@ -157,6 +167,7 @@ interface WriteTurnOptions {
   approvals: ApprovalBroker;
   approvalMode: "on-request" | "never";
   onExecute(): void;
+  onDispose?(): void;
   assertToolResult(result: ToolResultItem): void;
 }
 
@@ -180,6 +191,9 @@ async function runWriteTurn(options: WriteTurnOptions) {
       execute: async () => {
         options.onExecute();
         return { changed: true };
+      },
+      dispose: async () => {
+        options.onDispose?.();
       },
     }),
   });

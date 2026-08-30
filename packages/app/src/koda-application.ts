@@ -81,6 +81,7 @@ import {
   type PlanGetResult,
   type PlanStateItem,
   type RuntimeProviderMetadata,
+  type SecretCatalog,
   type SettingsGetResult,
   type SettingsUpdateParams,
   type SettingsUpdateResult,
@@ -107,6 +108,7 @@ import {
   ArtifactMaintenanceLease,
   ArtifactStore,
   JsonlEventStore,
+  HostEnvironmentSecretResolver,
   type InteractiveProcessService,
   NativeExecutorClient,
   ProjectCommandTemplateError,
@@ -144,6 +146,8 @@ import {
   registerStructuredPatchTool,
   registerUpdatePlanTool,
   resolveExecutionPolicy,
+  SecretLeaseManager,
+  SecretPolicyError,
   type RepositoryInstructionSet,
   type ProjectSkillCatalog,
   type ThreadIndexDiagnostic,
@@ -358,6 +362,7 @@ export interface KodaApplicationOptions {
   approvalGrantRegistry?: ApprovalGrantRegistry;
   interactiveProcessService?: InteractiveProcessService;
   executionPolicy?: ExecutionPolicyConfig;
+  secretCatalog?: SecretCatalog;
 }
 
 export interface KodaApplicationDependencies {
@@ -399,6 +404,7 @@ export class KodaApplication {
     InteractiveProcessService | undefined;
   private readonly executionPolicyConfig: ExecutionPolicyConfig | undefined;
   private readonly executionProfile: ExecutionProfile | undefined;
+  private readonly secretLeaseManager: SecretLeaseManager;
 
   public constructor(options: KodaApplicationOptions) {
     this.environment = options.environment;
@@ -407,6 +413,20 @@ export class KodaApplication {
     this.approvalGrantRegistry =
       options.approvalGrantRegistry ?? new ApprovalGrantRegistry();
     this.interactiveProcessService = options.interactiveProcessService;
+    try {
+      this.secretLeaseManager = new SecretLeaseManager(
+        options.secretCatalog ?? { schema_version: 1, declarations: [] },
+        new HostEnvironmentSecretResolver(options.environment),
+        { targetEnvironment: options.environment },
+      );
+    } catch (error) {
+      if (error instanceof SecretPolicyError) {
+        throw new ConfigurationError(
+          "Secret declaration configuration is invalid.",
+        );
+      }
+      throw error;
+    }
     if (options.executionPolicy !== undefined) {
       const parsed = executionPolicyConfigSchema.safeParse(
         options.executionPolicy,
@@ -1658,8 +1678,12 @@ export class KodaApplication {
           ? {}
           : { interactiveProcessService: this.interactiveProcessService }),
       });
-      registerExecCommandTool(tools, commandRunner);
-      registerExecTerminalTool(tools, commandRunner);
+      registerExecCommandTool(tools, commandRunner, {
+        secretLeaseManager: this.secretLeaseManager,
+      });
+      registerExecTerminalTool(tools, commandRunner, {
+        secretLeaseManager: this.secretLeaseManager,
+      });
       pluginSession.registerTools(tools);
       mcpSession = await McpTurnSession.open({
         environment: this.environment,

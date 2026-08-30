@@ -1,7 +1,12 @@
 import type { ToolRegistry } from "@koda/agent-core";
-import type { JsonValue } from "@koda/protocol";
+import { secretAliasSelectionSchema, type JsonValue } from "@koda/protocol";
 import { z } from "zod";
 
+import {
+  SecretLeaseManager,
+  SecretPolicyError,
+  type SecretCommandBinding,
+} from "./secret-policy.js";
 import { WorkspaceCommandRunner } from "./workspace-command-runner.js";
 
 const MAX_ARGUMENTS = 64;
@@ -60,19 +65,27 @@ const execTerminalInput = z
         "Must fit in 128 UTF-8 bytes without control characters.",
       )
       .optional(),
+    secrets: secretAliasSelectionSchema.optional(),
   })
   .strict();
+
+export interface ExecTerminalToolOptions {
+  secretLeaseManager?: SecretLeaseManager;
+}
 
 export function registerExecTerminalTool(
   registry: ToolRegistry,
   runner: WorkspaceCommandRunner,
+  options: ExecTerminalToolOptions = {},
 ): void {
   if (!runner.supportsInteractiveProcesses) return;
+  const configuredSecretAliases =
+    options.secretLeaseManager?.aliasesFor("exec_terminal") ?? [];
   registry.register({
     spec: {
       name: "exec_terminal",
       description:
-        "Start one durable interactive PTY process with structured arguments and return its job handle without waiting for exit. Koda does not parse shell syntax, and direct shell interpreters, pipelines, or redirection are unsupported. Every start requires visible approval; use the process pane to attach, send input, resize, detach, or terminate it.",
+        "Start one durable interactive PTY process with structured arguments and return its job handle without waiting for exit. Koda does not parse shell syntax, and direct shell interpreters, pipelines, or redirection are unsupported. A secrets list may request only aliases exposed by trusted Koda configuration; secret-bearing execution always needs a fresh approval. Every start requires visible approval; use the process pane to attach, send input, resize, detach, or terminate it.",
       inputJsonSchema: {
         type: "object",
         properties: {
@@ -108,12 +121,31 @@ export function registerExecTerminalTool(
             description: "Optional safe label shown in the process pane.",
             maxLength: MAX_DISPLAY_NAME_CHARACTERS,
           },
+          secrets: {
+            type: "array",
+            description:
+              "Optional trusted secret aliases. Values and host environment names are never accepted here.",
+            items: {
+              type: "string",
+              ...(configuredSecretAliases.length === 0
+                ? {}
+                : { enum: [...configuredSecretAliases] }),
+            },
+            maxItems: 16,
+            uniqueItems: true,
+          },
         },
         required: ["argv", "timeout_ms", "lifecycle"],
         additionalProperties: false,
       },
     },
     inputSchema: execTerminalInput,
+    ...(options.secretLeaseManager === undefined
+      ? {}
+      : {
+          catalogIdentity:
+            options.secretLeaseManager.catalogIdentity("exec_terminal"),
+        }),
     concurrency: "exclusive",
     effect: "execute",
     prepare: async (context, input) => {
@@ -127,15 +159,48 @@ export function registerExecTerminalTool(
           ? {}
           : { displayName: input.display_name }),
       });
+      const secretBinding: SecretCommandBinding = {
+        toolName: "exec_terminal",
+        workspaceRoot: runner.root,
+        cwd: command.cwd,
+        argv: command.argv,
+        timeoutMs: command.timeoutMs,
+        lifecycle: command.lifecycle,
+        displayName: command.displayName,
+        security: command.security,
+      };
+      const requestedSecrets = input.secrets ?? [];
+      const secretLease =
+        requestedSecrets.length === 0
+          ? undefined
+          : options.secretLeaseManager === undefined
+            ? (() => {
+                throw new SecretPolicyError("SECRET_ALIAS_NOT_CONFIGURED");
+              })()
+            : await options.secretLeaseManager.prepare(
+                "exec_terminal",
+                requestedSecrets,
+                secretBinding,
+              );
       return {
+        freshApprovalRequired: secretLease !== undefined,
         approval: {
           title: command.title,
           summary: command.summary,
-          details: command.preview,
+          details:
+            secretLease === undefined
+              ? command.preview
+              : secretLease.approvalDetails(command.preview),
         },
-        execute: async (): Promise<JsonValue> => ({
-          ...(await command.execute(context.signal)),
-        }),
+        ...(secretLease === undefined
+          ? {}
+          : { dispose: () => secretLease.destroy() }),
+        execute: async (): Promise<JsonValue> => {
+          if (secretLease !== undefined) {
+            secretLease.rejectUnavailable(secretBinding);
+          }
+          return { ...(await command.execute(context.signal)) };
+        },
       };
     },
   });
