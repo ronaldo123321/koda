@@ -26,7 +26,7 @@ use windows_sys::Win32::Security::{
     DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetAclInformation, GetLengthSid,
     GetSecurityDescriptorDacl, GetTokenInformation, IsValidSid, OWNER_SECURITY_INFORMATION,
     PROTECTED_DACL_SECURITY_INFORMATION, PSID, SECURITY_ATTRIBUTES, SECURITY_MAX_SID_SIZE,
-    TOKEN_QUERY, TOKEN_USER, TokenUser, WinLocalSystemSid,
+    TOKEN_QUERY, TOKEN_USER, TokenUser, WELL_KNOWN_SID_TYPE, WinLocalSystemSid,
 };
 use windows_sys::Win32::Storage::FileSystem::{FILE_ALL_ACCESS, FILE_ATTRIBUTE_REPARSE_POINT};
 use windows_sys::Win32::System::Pipes::{CreatePipe, GetNamedPipeClientProcessId};
@@ -266,6 +266,10 @@ pub fn verify_local_peer(stream: &LocalStream) -> io::Result<()> {
     }
     let peer = process_user_sid(pid)?;
     let current = current_user_sid()?;
+    verify_same_user_sid(&peer, &current)
+}
+
+fn verify_same_user_sid(peer: &SidBuffer, current: &SidBuffer) -> io::Result<()> {
     // SAFETY: both buffers contain validated SIDs.
     if unsafe { EqualSid(peer.as_ptr(), current.as_ptr()) } == 0 {
         return Err(io::Error::new(
@@ -458,10 +462,14 @@ fn token_user_sid(process: HANDLE) -> io::Result<SidBuffer> {
 }
 
 fn local_system_sid() -> io::Result<SidBuffer> {
+    well_known_sid(WinLocalSystemSid)
+}
+
+fn well_known_sid(kind: WELL_KNOWN_SID_TYPE) -> io::Result<SidBuffer> {
     let mut sid = SidBuffer::with_bytes(SECURITY_MAX_SID_SIZE as usize);
     let mut bytes = SECURITY_MAX_SID_SIZE;
     // SAFETY: sid storage is large enough for every well-known SID.
-    if unsafe { CreateWellKnownSid(WinLocalSystemSid, null_mut(), sid.as_ptr(), &mut bytes) } == 0 {
+    if unsafe { CreateWellKnownSid(kind, null_mut(), sid.as_ptr(), &mut bytes) } == 0 {
         return Err(io::Error::last_os_error());
     }
     sid.bytes = bytes as usize;
@@ -710,6 +718,7 @@ fn wide(value: impl AsRef<OsStr>) -> Vec<u16> {
 mod tests {
     use super::*;
     use serde_json::json;
+    use tokio::io::AsyncWriteExt;
     use tokio::net::windows::named_pipe::ClientOptions;
     use windows_sys::Win32::Foundation::GetHandleInformation;
 
@@ -761,6 +770,14 @@ mod tests {
         assert_eq!(list.handles(), &[bootstrap_read_handle(&read)]);
     }
 
+    #[test]
+    fn peer_identity_rejects_a_different_sid() {
+        let current = current_user_sid().expect("current user");
+        let world = well_known_sid(windows_sys::Win32::Security::WinWorldSid).expect("world SID");
+        verify_same_user_sid(&current, &current).expect("same user");
+        assert!(verify_same_user_sid(&world, &current).is_err());
+    }
+
     #[tokio::test]
     async fn named_pipe_is_exclusive_authenticated_and_framed() {
         let root =
@@ -782,6 +799,64 @@ mod tests {
             .expect("frame");
         assert_eq!(value, json!({ "ping": true }));
         drop((client, server, listener));
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[tokio::test]
+    async fn named_pipe_frames_fail_closed_on_invalid_or_partial_input() {
+        let root =
+            std::env::temp_dir().join(format!("koda-frame-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&root).expect("state root");
+        let endpoint = default_local_endpoint(&root).expect("endpoint");
+        let listener = bind_local_endpoint(&endpoint).await.expect("listener");
+
+        let mut oversized_client = ClientOptions::new().open(&endpoint).expect("client");
+        let mut oversized_server = accept_local_connection(&listener).await.expect("accept");
+        oversized_client
+            .write_all(&((crate::protocol::MAX_FRAME_BYTES as u32) + 1).to_be_bytes())
+            .await
+            .expect("oversized header");
+        let oversized_error = crate::framing::read_frame(&mut oversized_server)
+            .await
+            .expect_err("oversized frame must fail");
+        assert_eq!(oversized_error.kind(), io::ErrorKind::InvalidData);
+        drop((oversized_client, oversized_server));
+
+        let mut malformed_client = ClientOptions::new().open(&endpoint).expect("client");
+        let mut malformed_server = accept_local_connection(&listener).await.expect("accept");
+        malformed_client
+            .write_all(&1u32.to_be_bytes())
+            .await
+            .expect("malformed length");
+        malformed_client
+            .write_all(b"{")
+            .await
+            .expect("malformed payload");
+        let malformed_error =
+            crate::framing::read_json_frame::<serde_json::Value>(&mut malformed_server)
+                .await
+                .expect_err("malformed JSON must fail");
+        assert_eq!(malformed_error.kind(), io::ErrorKind::InvalidData);
+        drop((malformed_client, malformed_server));
+
+        let mut partial_client = ClientOptions::new().open(&endpoint).expect("client");
+        let mut partial_server = accept_local_connection(&listener).await.expect("accept");
+        partial_client
+            .write_all(&[0, 0])
+            .await
+            .expect("partial header");
+        drop(partial_client);
+        match crate::framing::read_frame(&mut partial_server).await {
+            Ok(None) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::UnexpectedEof | io::ErrorKind::BrokenPipe
+                ) => {}
+            other => panic!("partial frame did not fail closed: {other:?}"),
+        }
+
+        drop((partial_server, listener));
         std::fs::remove_dir_all(root).expect("cleanup");
     }
 }
