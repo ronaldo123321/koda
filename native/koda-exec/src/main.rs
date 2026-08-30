@@ -322,15 +322,30 @@ async fn handle_connection(
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    const TEST_ENDPOINT: &str = "/tmp/koda.sock";
+    #[cfg(windows)]
+    const TEST_ENDPOINT: &str = r"\\.\pipe\koda-exec-test";
+
+    #[cfg(unix)]
+    const TEST_STATE_DIRECTORY: &str = "/tmp/koda-exec";
+    #[cfg(windows)]
+    const TEST_STATE_DIRECTORY: &str = r"C:\koda-exec";
+
+    #[cfg(unix)]
+    const TEST_JOB_DIRECTORY: &str = "/tmp/job";
+    #[cfg(windows)]
+    const TEST_JOB_DIRECTORY: &str = r"C:\koda-job";
+
     #[test]
     fn arguments_require_absolute_paths() {
         let result = parse_arguments(
             [
                 "serve",
-                "--socket",
-                "relative.sock",
+                "--endpoint",
+                TEST_ENDPOINT,
                 "--state-dir",
-                "/tmp/koda-exec",
+                "relative",
             ]
             .into_iter()
             .map(str::to_owned),
@@ -345,9 +360,9 @@ mod tests {
                 [
                     "serve",
                     name,
-                    "/tmp/koda.sock",
+                    TEST_ENDPOINT,
                     "--state-dir",
-                    "/tmp/koda-exec",
+                    TEST_STATE_DIRECTORY,
                 ]
                 .into_iter()
                 .map(str::to_owned),
@@ -359,11 +374,11 @@ mod tests {
             [
                 "serve",
                 "--endpoint",
-                "/tmp/koda.sock",
+                TEST_ENDPOINT,
                 "--socket",
-                "/tmp/legacy.sock",
+                TEST_ENDPOINT,
                 "--state-dir",
-                "/tmp/koda-exec",
+                TEST_STATE_DIRECTORY,
             ]
             .into_iter()
             .map(str::to_owned),
@@ -374,7 +389,7 @@ mod tests {
     #[test]
     fn worker_requires_inherited_descriptor() {
         let result = parse_arguments(
-            ["worker", "--job-dir", "/tmp/job", "--token-fd", "2"]
+            ["worker", "--job-dir", TEST_JOB_DIRECTORY, "--token-fd", "2"]
                 .into_iter()
                 .map(str::to_owned),
         );
