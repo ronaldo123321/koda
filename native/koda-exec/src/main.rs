@@ -12,6 +12,8 @@ mod macos_seatbelt;
 mod platform;
 mod protocol;
 mod pty_output;
+pub mod secret_policy;
+pub mod secret_redactor;
 mod supervisor;
 mod worker;
 

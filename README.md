@@ -8,6 +8,11 @@ The project is building the control plane around a coding model: typed conversat
 
 The Phase 3 local-agent foundation, Phase 4A crash-safe workspace recovery, Phase 4B supervised native execution, Phase 4C1 execution policy/reporting, Phase 4C2A macOS Seatbelt delivery, and Phase 4C2B Linux Bubblewrap delivery are complete. Verified macOS and Linux native executors advertise and enforce protected Pipe/PTY execution. On Linux, Koda discovers only trusted Bubblewrap paths, freezes and revalidates binary identity, constructs a read-only mount/user/network namespace plus Koda-owned seccomp bootstrap, verifies a fixed PID/PGID/namespace/security confirmation, durably records applied evidence, and only then releases user code. Native protocol v4, durable format v4, legacy compatibility, grant binding, background PTY recovery, evidence-derived client projection, adversarial syscall/network tests, and a dedicated `linux-native` gate are shared or explicitly verified; Windows sandboxing remains deferred. Koda has an opt-in Rust execution supervisor with a versioned local protocol, reconnectable job observation, POSIX process groups, Windows Job Objects and ConPTY, bounded retained output, explicit native capability reporting, and end-to-end execution-policy evidence on top of those foundations:
 
+Phase 4C3A now provides strict value-free secret declarations/evidence, stable
+cross-language digests and limits, and matching TypeScript/Rust exact-byte
+streaming redactors with shared binary fixtures. Runtime secret resolution and
+injection remain disabled until Phase 4C3B/C3C.
+
 - Versioned Thread, Turn, Item, and Agent Event schemas.
 - A provider-neutral streaming model interface.
 - A runtime-validated tool registry.

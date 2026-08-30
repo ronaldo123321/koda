@@ -86,6 +86,11 @@ network allowlists, secret injection or output redaction, or isolation for
 providers, MCP servers, and plugins. `process_isolation = required` remains
 unsupported.
 
+Phase 4C3A defines value-free secret declarations/evidence and matching
+TypeScript/Rust exact-byte streaming-redaction primitives, but no command path
+can resolve, inject, or activate them yet. Their presence does not change this
+published runtime guarantee; Phase 4C3B through C3D remain required.
+
 `workspace_write` is path based. A pre-existing hard link inside the workspace
 still names the same inode as an outside path, so writes through that workspace
 name can modify the aliased inode. Koda does not currently copy, de-alias, or
