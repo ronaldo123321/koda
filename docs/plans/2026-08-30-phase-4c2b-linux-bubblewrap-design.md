@@ -808,15 +808,37 @@ durable applied evidence remain C2B3.
     MCP, app-server, CLI, TUI, native POSIX, Job Object, and ConPTY regression
     suites remain green.
 
+## Linux host prerequisites
+
+Koda never installs Bubblewrap, changes kernel namespace policy, disables
+AppArmor, or loads a host security profile at runtime. A Linux installation
+must provide a trusted Bubblewrap executable at one of the fixed discovery
+paths (or through the explicit administrator-selected override) and must allow
+that executable to create the user, mount, IPC, and optional network
+namespaces used by the verified profiles. If either condition is absent, the
+startup probe fails closed and schema-v3 protection is not advertised.
+
+Ubuntu 24.04 restricts unprivileged user namespaces through AppArmor. On a
+clean host where no other Bubblewrap profile is attached, the supported setup
+is to install Ubuntu's `apparmor-profiles` and `apparmor-utils` packages, place
+the packaged `bwrap-userns-restrict` profile under `/etc/apparmor.d`, and load
+it with `apparmor_parser`. Koda's CI performs that scoped setup and then runs a
+namespace preflight before the full real-probe suite. It does not disable
+`kernel.apparmor_restrict_unprivileged_userns` globally. Administrators must
+inspect existing profiles before changing a non-clean host because two
+profiles targeting `/usr/bin/bwrap` can conflict.
+
 ## CI plan
 
 The existing Linux `verify` job is already the shared full-suite gate. C2B2
-installs the distro Bubblewrap package there and runs with
+pins Ubuntu 24.04, installs the distro Bubblewrap and AppArmor tooling, loads
+the distro's scoped `bwrap-userns-restrict` profile, performs a fixed namespace
+preflight, and runs with
 `KODA_REQUIRE_LINUX_BUBBLEWRAP=1`, so schema-v3 advertisement cannot pass from
 pure fixtures. Phase 4C2B4 adds a separate `linux-native` job on
-`ubuntu-latest` for the complete protected Pipe/PTY matrix:
+`ubuntu-24.04` for the complete protected Pipe/PTY matrix:
 
-1. install the distro Bubblewrap package explicitly;
+1. install the distro Bubblewrap and scoped AppArmor profile explicitly;
 2. record `/usr/bin/bwrap` and its version in diagnostics;
 3. set `KODA_REQUIRE_LINUX_BUBBLEWRAP=1`;
 4. build the current native executor and pinned legacy fixture;
