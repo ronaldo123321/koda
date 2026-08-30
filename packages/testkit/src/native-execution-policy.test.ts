@@ -555,9 +555,11 @@ describe("Phase 4C2 native admission and evidence", () => {
       const client = await open(fixture, "after_sandbox_confirmation");
       const contract = await activeProtectedContract(client);
       if (contract === undefined) return;
-      const marker = join(fixture.root, "confirmed-but-not-released");
+      const workspace = join(fixture.root, "workspace");
+      await mkdir(workspace);
+      const marker = join(workspace, "confirmed-but-not-released");
       const input = await inputFor(
-        fixture.root,
+        workspace,
         `require('fs').writeFileSync(${JSON.stringify(marker)},'bad')`,
       );
       input.policy = {
@@ -594,9 +596,11 @@ describe("Phase 4C2 native admission and evidence", () => {
       const client = await open(fixture, faultPoint);
       const contract = await activeProtectedContract(client);
       if (contract?.schemaVersion !== 3) return;
-      const marker = join(fixture.root, `linux-not-released-${faultPoint}`);
+      const workspace = join(fixture.root, "workspace");
+      await mkdir(workspace);
+      const marker = join(workspace, `linux-not-released-${faultPoint}`);
       const input = await inputFor(
-        fixture.root,
+        workspace,
         `require('fs').writeFileSync(${JSON.stringify(marker)},'bad')`,
       );
       input.policy = {
@@ -629,9 +633,11 @@ describe("Phase 4C2 native admission and evidence", () => {
       const client = await open(fixture, faultPoint);
       const contract = await activeProtectedContract(client);
       if (contract?.schemaVersion !== 3) return;
-      const marker = join(fixture.root, `linux-cleaned-${faultPoint}`);
+      const workspace = join(fixture.root, "workspace");
+      await mkdir(workspace);
+      const marker = join(workspace, `linux-cleaned-${faultPoint}`);
       const input = await inputFor(
-        fixture.root,
+        workspace,
         `setTimeout(()=>require('fs').writeFileSync(${JSON.stringify(marker)},'bad'),500)`,
       );
       input.policy = {
