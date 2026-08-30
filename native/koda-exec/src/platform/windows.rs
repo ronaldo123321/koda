@@ -14,7 +14,7 @@ use tokio::net::windows::named_pipe::{NamedPipeServer, PipeMode, ServerOptions};
 use tokio::sync::Mutex;
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_INSUFFICIENT_BUFFER, ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION,
-    ERROR_SUCCESS, GetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, LocalFree,
+    ERROR_SUCCESS, GENERIC_ALL, GetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, LocalFree,
     SetHandleInformation,
 };
 use windows_sys::Win32::Security::Authorization::{
@@ -28,7 +28,7 @@ use windows_sys::Win32::Security::{
     PROTECTED_DACL_SECURITY_INFORMATION, PSID, SECURITY_ATTRIBUTES, SECURITY_MAX_SID_SIZE,
     TOKEN_QUERY, TOKEN_USER, TokenUser, WinLocalSystemSid,
 };
-use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+use windows_sys::Win32::Storage::FileSystem::{FILE_ALL_ACCESS, FILE_ATTRIBUTE_REPARSE_POINT};
 use windows_sys::Win32::System::Pipes::{CreatePipe, GetNamedPipeClientProcessId};
 use windows_sys::Win32::System::SystemServices::{
     ACCESS_ALLOWED_ACE_TYPE, SECURITY_DESCRIPTOR_REVISION,
@@ -626,10 +626,10 @@ fn validate_private_acl(path: &Path) -> io::Result<()> {
     }
     let mut saw_user = false;
     let mut saw_system = false;
-    if information.AceCount != 2 {
+    if information.AceCount == 0 {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "private object DACL contains unexpected principals",
+            "private object DACL has no access entries",
         ));
     }
     for index in 0..information.AceCount {
@@ -644,6 +644,16 @@ fn validate_private_acl(path: &Path) -> io::Result<()> {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "private object DACL contains a non-allow ACE",
+            ));
+        }
+        // Windows may normalize one inheritable full-control grant into several
+        // ACEs. Validate the grant and principal of every normalized entry
+        // instead of relying on an implementation-specific ACE count.
+        let mask = unsafe { (*ace).Mask };
+        if mask & GENERIC_ALL != GENERIC_ALL && mask & FILE_ALL_ACCESS != FILE_ALL_ACCESS {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "private object DACL contains a partial access grant",
             ));
         }
         // SAFETY: ACCESS_ALLOWED_ACE stores its SID beginning at SidStart.
