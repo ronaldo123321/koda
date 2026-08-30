@@ -2,6 +2,7 @@ import {
   ArtifactStore,
   c1ExecutionCapabilities,
   type NativeExecutorClient,
+  type NativeJobSnapshot,
   WorkspaceCommandRunner,
   resolveExecutionPolicy,
 } from "@koda/runtime-node";
@@ -18,6 +19,11 @@ import {
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+
+import {
+  linuxProtectedExecutionCapabilities,
+  linuxProtectedLaunchSecurity,
+} from "./execution-security-fixtures.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -98,6 +104,78 @@ describe("WorkspaceCommandRunner", () => {
       type: "process.started",
       payload: {
         security: { kind: "policy", stage: "launch_setup" },
+      },
+    });
+  });
+
+  it("retains schema-v3 Linux evidence from approval preview through result and process event", async () => {
+    const root = await createWorkspace();
+    const canonicalRoot = await realpath(root);
+    const capabilities = linuxProtectedExecutionCapabilities();
+    const launchSecurity = linuxProtectedLaunchSecurity(canonicalRoot);
+    const terminal: NativeJobSnapshot = {
+      job_id: "linux-protected-job",
+      state: "exited",
+      io_mode: "pipe",
+      lifecycle: "foreground",
+      pid: 4242,
+      exit_code: 0,
+      signal: null,
+      timed_out: false,
+      duration_ms: 1,
+      stdout_bytes: 0,
+      stderr_bytes: 0,
+      stdout_retained_bytes: 0,
+      stderr_retained_bytes: 0,
+      stdout_truncated: false,
+      stderr_truncated: false,
+      termination: null,
+      failure: null,
+      security: launchSecurity,
+    };
+    const nativeExecutor = {
+      hello: async () => ({ execution_security: capabilities }),
+      start: async () => terminal,
+      readOutput: async () => {
+        throw new Error("empty output must not be read");
+      },
+    } as unknown as NativeExecutorClient;
+    const runner = await WorkspaceCommandRunner.open(root, {
+      nativeExecutor,
+      executionPolicy: resolveExecutionPolicy({
+        workspaceRoot: canonicalRoot,
+        environmentProfile: "workspace-write",
+      }),
+    });
+    const command = await runner.prepare({
+      argv: [process.execPath, "--version"],
+    });
+
+    expect(command.preview).toContain(
+      "expected OS sandbox: Linux Bubblewrap + seccomp",
+    );
+    expect(command.security).toMatchObject({
+      schema_version: 3,
+      platform: "linux",
+      stage: "admission",
+      sandbox_runtime: { mechanism: "linux_bubblewrap" },
+      filesystem: { status: "not_applied" },
+      network: { status: "not_applied" },
+    });
+    const events: ToolOperationalEvent[] = [];
+    const result = await command.execute(
+      new AbortController().signal,
+      async (event) => {
+        events.push(event);
+      },
+    );
+    expect(result.security).toEqual(launchSecurity);
+    expect(events).toContainEqual({
+      type: "process.started",
+      payload: {
+        pid: 4242,
+        ownership: "posix_process_group",
+        security: launchSecurity,
       },
     });
   });

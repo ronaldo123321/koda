@@ -118,6 +118,105 @@ jobs:
             exit "$test_status"
           fi
 
+  linux-native:
+    runs-on: ubuntu-24.04
+    env:
+      KODA_REQUIRE_LINUX_BUBBLEWRAP: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+      - name: Install and verify Linux sandbox prerequisites
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes apparmor-profiles apparmor-utils bubblewrap ripgrep
+
+          profile=/etc/apparmor.d/bwrap-userns-restrict
+          packaged_profile=/usr/share/apparmor/extra-profiles/bwrap-userns-restrict
+          if [[ ! -e "$profile" ]]; then
+            if [[ ! -f "$packaged_profile" ]]; then
+              echo "::error title=Bubblewrap AppArmor profile unavailable::The Ubuntu runner does not provide the scoped bwrap-userns-restrict profile."
+              exit 1
+            fi
+            sudo install -m 0644 "$packaged_profile" "$profile"
+          fi
+          sudo apparmor_parser -r "$profile"
+
+          echo "Bubblewrap path: $(realpath /usr/bin/bwrap)"
+          echo "Bubblewrap version: $(/usr/bin/bwrap --version)"
+          stat --format='Bubblewrap identity: device=%d inode=%i size=%s mtime=%Y mode=%a owner=%u' /usr/bin/bwrap
+          if ! /usr/bin/bwrap \
+            --die-with-parent \
+            --unshare-user \
+            --disable-userns \
+            --unshare-ipc \
+            --unshare-net \
+            --ro-bind / / \
+            -- /usr/bin/true >/dev/null 2>&1; then
+            echo "::error title=Bubblewrap namespace preflight failed::The Ubuntu runner cannot create Koda's required user, mount, IPC, and network namespaces."
+            exit 1
+          fi
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: pnpm --filter @koda/runtime-node... build
+      - run: cargo build -p koda-exec
+      - name: Build pinned Phase 4C1 legacy executor fixture
+        shell: bash
+        run: |
+          legacy_binary="$RUNNER_TEMP/koda-exec-v1"
+          ./scripts/build-phase-4c1-v1-executor.sh "$legacy_binary"
+          echo "KODA_LEGACY_EXECUTOR_BINARY=$legacy_binary" >> "$GITHUB_ENV"
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Run Linux native Rust acceptance
+        shell: bash
+        run: |
+          set +e
+          cargo test -p koda-exec -- --nocapture 2>&1 | tee /tmp/koda-linux-native-rust.log
+          test_status=${PIPESTATUS[0]}
+          set -e
+          if (( test_status != 0 )); then
+            summary="$(tail -n 60 /tmp/koda-linux-native-rust.log)"
+            summary="${summary//'%'/'%25'}"
+            summary="${summary//$'\r'/'%0D'}"
+            summary="${summary//$'\n'/'%0A'}"
+            echo "::error title=Linux native Rust acceptance failed::$summary"
+            exit "$test_status"
+          fi
+      - name: Run Linux protected execution and client acceptance
+        shell: bash
+        run: |
+          set +e
+          pnpm exec vitest run --no-file-parallelism \
+            packages/testkit/src/native-executor-client.test.ts \
+            packages/testkit/src/native-execution-policy.test.ts \
+            packages/testkit/src/workspace-command-runner.test.ts \
+            packages/testkit/src/execution-policy.test.ts \
+            packages/testkit/src/app-server-protocol.test.ts \
+            packages/testkit/src/cli.test.ts \
+            packages/testkit/src/tui-view.test.ts \
+            2>&1 | tee /tmp/koda-linux-native-vitest.log
+          test_status=${PIPESTATUS[0]}
+          set -e
+          if (( test_status != 0 )); then
+            summary="$(tail -n 80 /tmp/koda-linux-native-vitest.log)"
+            summary="${summary//'%'/'%25'}"
+            summary="${summary//$'\r'/'%0D'}"
+            summary="${summary//$'\n'/'%0A'}"
+            echo "::error title=Linux protected execution acceptance failed::$summary"
+            exit "$test_status"
+          fi
+
   macos-native:
     runs-on: macos-latest
     steps:

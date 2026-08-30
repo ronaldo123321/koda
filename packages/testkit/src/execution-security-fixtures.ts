@@ -34,22 +34,30 @@ const linuxBubblewrapRuntime = {
   probe_revision: 1 as const,
 };
 
-export function linuxProtectedAdmissionSecurity(): ExecutionSecuritySnapshot {
+export function linuxProtectedExecutionCapabilities() {
+  return linuxBubblewrapExecutionCapabilities(linuxBubblewrapRuntime);
+}
+
+export function linuxProtectedAdmissionSecurity(
+  workspaceRoot = "/workspace",
+): ExecutionSecuritySnapshot {
   return createExecutionAdmissionSnapshot(
     normalizeExecutionPolicy({
       schema_version: 1,
-      workspace_root: "/workspace",
+      workspace_root: workspaceRoot,
       filesystem: "workspace_write",
       network: "deny",
       process_isolation: "inherit",
       environment: "explicit",
     }),
-    linuxBubblewrapExecutionCapabilities(linuxBubblewrapRuntime),
+    linuxProtectedExecutionCapabilities(),
   );
 }
 
-export function linuxProtectedLaunchSecurity(): ExecutionSecuritySnapshot {
-  const admission = linuxProtectedAdmissionSecurity();
+export function linuxProtectedLaunchSecurity(
+  workspaceRoot = "/workspace",
+): ExecutionSecuritySnapshot {
+  const admission = linuxProtectedAdmissionSecurity(workspaceRoot);
   if (admission.kind !== "policy" || admission.schema_version !== 3) {
     throw new Error("Expected Linux v3 admission evidence.");
   }

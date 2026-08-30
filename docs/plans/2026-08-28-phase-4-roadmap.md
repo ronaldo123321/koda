@@ -81,7 +81,9 @@ The completed Windows terminal contract and acceptance evidence are in [Phase 4B
 
 ### Phase 4C: sandbox, network, and secret policy
 
-Status: In progress — Phase 4C1, macOS Phase 4C2A, and Linux Phase 4C2B1/C2B2/C2B3 complete; C2B4 next
+Status: In progress — Phase 4C1 and macOS Phase 4C2A complete; Linux Phase
+4C2B1 through C2B4 implemented with final same-commit platform acceptance
+pending
 
 - Add explicit filesystem, process, environment, and network capabilities.
 - Implement available OS isolation mechanisms and expose their effective strength rather than a portable boolean claim.
@@ -158,8 +160,11 @@ the Worker boundary, verifies the inner PID/PGID/namespace/seccomp confirmation,
 persists typed applied evidence before release, and preserves process-group,
 timeout, cancellation, output, background PTY, attachment, resize, and restart
 behavior. Deterministic faults cover every boundary from pre-spawn through
-post-release. C2B4 remains the dedicated Linux-native gate, extended adversarial
-matrix, client acceptance, and final guarantee publication.
+post-release. C2B4 adds the dedicated Linux-native gate, expanded real socket,
+descriptor, syscall, Pipe/PTY, runtime-replacement and recovery matrices,
+schema-v3 client projection, and the revised guarantee. Linux closes only after
+one implementation commit passes `verify`, `linux-native`, `macos-native`, and
+`windows-native`.
 
 Secret injection and redaction, resource quotas, finer-grained network policy,
 provider/MCP/plugin sandboxing, shell syntax, Landlock fallback, bundled

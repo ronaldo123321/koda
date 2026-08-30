@@ -1,7 +1,9 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { createSocket, type Socket as DatagramSocket } from "node:dgram";
 import {
   access,
+  chmod,
   mkdir,
   mkdtemp,
   readFile,
@@ -11,7 +13,11 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
-import { createConnection, createServer } from "node:net";
+import {
+  createConnection,
+  createServer,
+  type Server as NetServer,
+} from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -143,6 +149,66 @@ describe("Phase 4C2 native admission and evidence", () => {
       expect(runtime.sha256).toMatch(/^[0-9a-f]{64}$/u);
       expect(runtime.version.length).toBeGreaterThan(0);
       expect(runtime.version.length).toBeLessThanOrEqual(256);
+    },
+  );
+
+  it.runIf(process.platform === "linux")(
+    "fails closed when the verified Bubblewrap launcher is replaced before execution",
+    async () => {
+      const fixture = await setup();
+      const wrapper = join(fixture.root, "bwrap-launcher");
+      const wrapperSource = '#!/bin/sh\nexec /usr/bin/bwrap "$@"\n';
+      await writeFile(wrapper, wrapperSource, "utf8");
+      await chmod(wrapper, 0o755);
+      const previousPath = process.env.KODA_BWRAP_PATH;
+      const previousRequired = process.env.KODA_REQUIRE_LINUX_BUBBLEWRAP;
+      let client: NativeExecutorClient;
+      try {
+        process.env.KODA_BWRAP_PATH = wrapper;
+        process.env.KODA_REQUIRE_LINUX_BUBBLEWRAP = "1";
+        client = await open(fixture);
+      } finally {
+        if (previousPath === undefined) delete process.env.KODA_BWRAP_PATH;
+        else process.env.KODA_BWRAP_PATH = previousPath;
+        if (previousRequired === undefined)
+          delete process.env.KODA_REQUIRE_LINUX_BUBBLEWRAP;
+        else process.env.KODA_REQUIRE_LINUX_BUBBLEWRAP = previousRequired;
+      }
+      expect((await client!.hello()).execution_security).toMatchObject({
+        schema_version: 3,
+        sandbox_runtime: { canonical_path: wrapper },
+      });
+
+      await writeFile(
+        wrapper,
+        '#!/bin/sh\n# changed after the verified startup probe\nexec /usr/bin/bwrap "$@"\n',
+        "utf8",
+      );
+      await chmod(wrapper, 0o755);
+      const workspace = join(fixture.root, "workspace");
+      await mkdir(workspace);
+      const marker = join(workspace, "replaced-runtime-must-not-run");
+      const input = await inputFor(
+        workspace,
+        `require('fs').writeFileSync(${JSON.stringify(marker)},'bad')`,
+      );
+      input.policy = {
+        ...input.policy!,
+        filesystem: "workspace_write",
+        network: "deny",
+      };
+      const started = await client!.start(input);
+      const terminal = await waitTerminal(client!, started.job_id);
+      expect(["start_failed", "termination_uncertain"]).toContain(
+        terminal.state,
+      );
+      expect(terminal.security).toMatchObject({
+        schema_version: 3,
+        stage: "admission",
+        filesystem: { status: "not_applied" },
+        network: { status: "not_applied" },
+      });
+      await expect(access(marker)).rejects.toMatchObject({ code: "ENOENT" });
     },
   );
 
@@ -323,9 +389,11 @@ describe("Phase 4C2 native admission and evidence", () => {
     },
   );
 
-  it.runIf(process.platform === "darwin" || process.platform === "linux")(
-    "limits workspace-write to the workspace and private per-job scratch",
-    async () => {
+  it
+    .runIf(process.platform === "darwin" || process.platform === "linux")
+    .each(["pipe", "pty"] as const)(
+    "limits a %s workspace-write command to the workspace and private per-job scratch",
+    async (mode) => {
       const fixture = await setup();
       const workspace = join(fixture.root, "workspace");
       await mkdir(workspace);
@@ -348,7 +416,15 @@ describe("Phase 4C2 native admission and evidence", () => {
         filesystem: "workspace_write",
         network: "deny",
       };
-      const started = await client.start(input);
+      const started =
+        mode === "pipe"
+          ? await client.start(input)
+          : await client.startPty({
+              ...input,
+              rows: 24,
+              cols: 80,
+              outputLimitBytes: 65_536,
+            });
       const terminal = await waitTerminal(client, started.job_id);
       expect(terminal).toMatchObject({
         state: "exited",
@@ -379,6 +455,59 @@ describe("Phase 4C2 native admission and evidence", () => {
       await expect(access(outsideMarker)).rejects.toMatchObject({
         code: "ENOENT",
       });
+    },
+  );
+
+  it.runIf(process.platform === "linux").each(["pipe", "pty"] as const)(
+    "passes the complete Linux descriptor and syscall probe through a protected %s Worker",
+    async (mode) => {
+      const fixture = await setup();
+      const workspace = join(fixture.root, "workspace");
+      await mkdir(workspace);
+      await writeFile(join(workspace, "readable.txt"), "koda-linux-probe");
+      const external = join(fixture.root, `external-probe-${mode}`);
+      const client = await open(fixture);
+      const contract = await activeProtectedContract(client);
+      if (contract?.schemaVersion !== 3) return;
+      const input = await inputFor(workspace, "process.exit(99)");
+      input.argv = [
+        binaryPath,
+        "linux-bubblewrap-probe",
+        "--kind",
+        "read-only-deny",
+        "--workspace",
+        workspace,
+        "--external",
+        external,
+      ];
+      input.policy = {
+        ...input.policy!,
+        filesystem: "read_only",
+        network: "deny",
+      };
+      const started =
+        mode === "pipe"
+          ? await client.start(input)
+          : await client.startPty({
+              ...input,
+              rows: 24,
+              cols: 80,
+              outputLimitBytes: 65_536,
+            });
+      await expect(waitTerminal(client, started.job_id)).resolves.toMatchObject(
+        {
+          state: "exited",
+          exit_code: 0,
+          failure: null,
+          security: {
+            schema_version: 3,
+            stage: "launch_setup",
+            filesystem: { status: "applied" },
+            network: { status: "applied" },
+          },
+        },
+      );
+      await expect(access(external)).rejects.toMatchObject({ code: "ENOENT" });
     },
   );
 
@@ -460,6 +589,108 @@ describe("Phase 4C2 native admission and evidence", () => {
             error === undefined ? resolvePromise() : reject(error),
           ),
         );
+      }
+    },
+  );
+
+  it.runIf(process.platform === "linux").each([
+    ["read_only", "pipe"],
+    ["read_only", "pty"],
+    ["workspace_write", "pipe"],
+    ["workspace_write", "pty"],
+  ] as const)(
+    "preserves TCP, UDP, pathname Unix, and abstract Unix sockets for %s + inherit in %s mode",
+    async (filesystem, mode) => {
+      const fixture = await setup();
+      const workspace = join(fixture.root, "workspace");
+      await mkdir(workspace);
+      const workspaceMarker = join(workspace, `${filesystem}-${mode}.txt`);
+      const outsideMarker = join(fixture.root, `${filesystem}-${mode}.txt`);
+      const tcpServer = createServer((socket) => socket.end("tcp-ok"));
+      const udpServer = createSocket("udp4");
+      udpServer.on("message", (_message, remote) => {
+        udpServer.send("udp-ok", remote.port, remote.address);
+      });
+      const pathnameSocket = join(fixture.root, `pathname-${mode}.sock`);
+      const abstractSocket = `\0koda-${randomUUID()}`;
+      const pathnameServer = createServer((socket) =>
+        socket.end("pathname-ok"),
+      );
+      const abstractServer = createServer((socket) =>
+        socket.end("abstract-ok"),
+      );
+      await Promise.all([
+        listenTcp(tcpServer),
+        listenUdp(udpServer),
+        listenUnix(pathnameServer, pathnameSocket),
+        listenUnix(abstractServer, abstractSocket),
+      ]);
+      try {
+        const tcpAddress = tcpServer.address();
+        const udpAddress = udpServer.address();
+        if (tcpAddress === null || typeof tcpAddress === "string") {
+          throw new Error("Expected a TCP test port.");
+        }
+        const client = await open(fixture);
+        const contract = await activeProtectedContract(client);
+        if (contract?.schemaVersion !== 3) return;
+        const code = [
+          "const fs=require('node:fs'),net=require('node:net'),dgram=require('node:dgram');",
+          filesystem === "workspace_write"
+            ? `fs.writeFileSync(${JSON.stringify(workspaceMarker)},'workspace');`
+            : `try{fs.writeFileSync(${JSON.stringify(workspaceMarker)},'bad');process.exit(40)}catch(error){if(!['EPERM','EACCES','EROFS'].includes(error.code))process.exit(41)}`,
+          `try{fs.writeFileSync(${JSON.stringify(outsideMarker)},'bad');process.exit(42)}catch(error){if(!['EPERM','EACCES','EROFS'].includes(error.code))process.exit(43)}`,
+          "const stream=(target,expected)=>new Promise((resolve,reject)=>{let value='';const socket=net.connect(target);socket.on('data',chunk=>value+=chunk);socket.on('end',()=>value===expected?resolve():reject(new Error('stream token')));socket.on('error',reject)});",
+          "const datagram=(port)=>new Promise((resolve,reject)=>{const socket=dgram.createSocket('udp4');const timer=setTimeout(()=>{socket.close();reject(new Error('udp timeout'))},2000);socket.on('message',message=>{clearTimeout(timer);const value=message.toString();socket.close();value==='udp-ok'?resolve():reject(new Error('udp token'))});socket.on('error',reject);socket.send('probe',port,'127.0.0.1')});",
+          `Promise.all([stream({port:${tcpAddress.port},host:'127.0.0.1'},'tcp-ok'),datagram(${udpAddress.port}),stream(${JSON.stringify(pathnameSocket)},'pathname-ok'),stream(${JSON.stringify(abstractSocket)},'abstract-ok')]).then(()=>process.exit(0),()=>process.exit(44));`,
+        ].join("");
+        const input = await inputFor(workspace, code);
+        input.policy = {
+          ...input.policy!,
+          filesystem,
+          network: "inherit",
+        };
+        const started =
+          mode === "pipe"
+            ? await client.start(input)
+            : await client.startPty({
+                ...input,
+                rows: 24,
+                cols: 80,
+                outputLimitBytes: 65_536,
+              });
+        await expect(
+          waitTerminal(client, started.job_id),
+        ).resolves.toMatchObject({
+          state: "exited",
+          exit_code: 0,
+          failure: null,
+          security: {
+            schema_version: 3,
+            stage: "launch_setup",
+            filesystem: { status: "applied" },
+            network: { status: "not_requested" },
+          },
+        });
+        if (filesystem === "workspace_write") {
+          await expect(readFile(workspaceMarker, "utf8")).resolves.toBe(
+            "workspace",
+          );
+        } else {
+          await expect(access(workspaceMarker)).rejects.toMatchObject({
+            code: "ENOENT",
+          });
+        }
+        await expect(access(outsideMarker)).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+      } finally {
+        await Promise.all([
+          closeServer(tcpServer),
+          closeDatagram(udpServer),
+          closeServer(pathnameServer),
+          closeServer(abstractServer),
+        ]);
       }
     },
   );
@@ -1085,6 +1316,39 @@ async function waitLegacyState(
     await delay(20);
   }
   throw new Error(`Legacy job did not enter ${expected}.`);
+}
+
+async function listenTcp(server: NetServer): Promise<void> {
+  await new Promise<void>((resolvePromise, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolvePromise);
+  });
+}
+
+async function listenUnix(server: NetServer, path: string): Promise<void> {
+  await new Promise<void>((resolvePromise, reject) => {
+    server.once("error", reject);
+    server.listen(path, resolvePromise);
+  });
+}
+
+async function listenUdp(socket: DatagramSocket): Promise<void> {
+  await new Promise<void>((resolvePromise, reject) => {
+    socket.once("error", reject);
+    socket.bind(0, "127.0.0.1", resolvePromise);
+  });
+}
+
+async function closeServer(server: NetServer): Promise<void> {
+  await new Promise<void>((resolvePromise, reject) => {
+    server.close((error) =>
+      error === undefined ? resolvePromise() : reject(error),
+    );
+  });
+}
+
+async function closeDatagram(socket: DatagramSocket): Promise<void> {
+  await new Promise<void>((resolvePromise) => socket.close(resolvePromise));
 }
 
 async function stop(child: ChildProcess) {

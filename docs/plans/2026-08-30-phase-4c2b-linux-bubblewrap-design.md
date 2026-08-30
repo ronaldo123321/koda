@@ -1,6 +1,7 @@
 # Koda Phase 4C2B Linux Bubblewrap Design
 
-- Status: In progress — C2B1, C2B2, and C2B3 complete; C2B4 next
+- Status: Closure candidate — C2B1 through C2B4 implemented; final same-commit
+  four-job acceptance pending
 - Date: 2026-08-30
 - Depends on: completed Phase 4C1 execution policy and Phase 4C2A macOS
   Seatbelt delivery
@@ -791,11 +792,13 @@ evidence, and post-release fault boundaries on Linux-capable hosts.
 
 ### C2B4: clients and same-commit acceptance
 
-- Complete preview/result/event/app-server/CLI/TUI schema-v3 reporting tests.
-- Run the real side-effect, descriptor, syscall, PTY, background, and restart
-  matrices.
-- Publish the revised execution-security guarantee.
-- Add a required `linux-native` CI job.
+- Completed preview/result/event/app-server/CLI/TUI schema-v3 reporting tests.
+- Added the real side-effect, descriptor, syscall, network, Pipe/PTY,
+  background, runtime-replacement, and restart matrices.
+- Published the revised execution-security guarantee with explicit limits.
+- Added the dedicated `linux-native` CI job with fail-closed capability
+  requirements and bounded diagnostics. Repository owners must configure that
+  job as a required branch-protection check where branch protection is used.
 - Close Phase 4C2B only when the same implementation commit passes shared
   Linux verify, Linux native, macOS native, and Windows native jobs.
 

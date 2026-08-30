@@ -1556,6 +1556,51 @@ pub fn run_probe_contract(
         libc::EPERM,
         "nested user namespace was not denied",
     )?;
+    expect_scalar_errno(
+        // SAFETY: an invalid descriptor would return EBADF unless seccomp rejects setns first.
+        unsafe { libc::syscall(libc::SYS_setns, -1, 0) },
+        libc::EPERM,
+        "setns was not denied",
+    )?;
+    // Re-applying the current credentials is harmless without seccomp and therefore
+    // distinguishes a filter denial from ordinary kernel permission checks.
+    for (syscall, arguments, failure) in [
+        (
+            libc::SYS_setuid,
+            [unsafe { libc::geteuid() } as libc::c_long, 0, 0],
+            "setuid was not denied",
+        ),
+        (
+            libc::SYS_setresuid,
+            [
+                unsafe { libc::getuid() } as libc::c_long,
+                unsafe { libc::geteuid() } as libc::c_long,
+                unsafe { libc::geteuid() } as libc::c_long,
+            ],
+            "setresuid was not denied",
+        ),
+        (
+            libc::SYS_setgid,
+            [unsafe { libc::getegid() } as libc::c_long, 0, 0],
+            "setgid was not denied",
+        ),
+        (
+            libc::SYS_setresgid,
+            [
+                unsafe { libc::getgid() } as libc::c_long,
+                unsafe { libc::getegid() } as libc::c_long,
+                unsafe { libc::getegid() } as libc::c_long,
+            ],
+            "setresgid was not denied",
+        ),
+    ] {
+        expect_scalar_errno(
+            // SAFETY: the scalar syscall arguments contain only the current credentials.
+            unsafe { libc::syscall(syscall, arguments[0], arguments[1], arguments[2]) },
+            libc::EPERM,
+            failure,
+        )?;
+    }
     let tty = fs::File::open("/dev/null")
         .map_err(|_| io::Error::other("read-only device view is unavailable"))?;
     use std::os::fd::AsRawFd;
@@ -1566,18 +1611,36 @@ pub fn run_probe_contract(
         "TIOCSTI was not denied",
     )?;
     if kind.ends_with("deny") {
-        for (domain, socket_type) in [
-            (libc::AF_INET, libc::SOCK_STREAM),
-            (libc::AF_INET, libc::SOCK_DGRAM),
-            (libc::AF_UNIX, libc::SOCK_STREAM),
+        for (domain, socket_type, protocol) in [
+            (libc::AF_INET, libc::SOCK_STREAM, 0),
+            (libc::AF_INET, libc::SOCK_DGRAM, 0),
+            (libc::AF_INET, libc::SOCK_RAW, libc::IPPROTO_RAW),
+            (libc::AF_INET6, libc::SOCK_STREAM, 0),
+            (libc::AF_NETLINK, libc::SOCK_RAW, 0),
+            (libc::AF_UNIX, libc::SOCK_STREAM, 0),
+            (libc::AF_UNIX, libc::SOCK_DGRAM, 0),
         ] {
             expect_errno(
                 // SAFETY: socket creation is the operation under test.
-                unsafe { libc::socket(domain, socket_type, 0) },
+                unsafe { libc::socket(domain, socket_type, protocol) },
                 libc::EPERM,
                 "socket creation was not denied",
             )?;
         }
+        let mut socket_pair = [-1; 2];
+        expect_scalar_errno(
+            // SAFETY: socket_pair points to storage for exactly two descriptors.
+            unsafe {
+                libc::socketpair(
+                    libc::AF_UNIX,
+                    libc::SOCK_STREAM,
+                    0,
+                    socket_pair.as_mut_ptr(),
+                )
+            } as libc::c_long,
+            libc::EPERM,
+            "socketpair creation was not denied",
+        )?;
         expect_errno(
             // SAFETY: a null params pointer would produce EFAULT without the seccomp denial.
             unsafe {
@@ -1590,6 +1653,20 @@ pub fn run_probe_contract(
             libc::EPERM,
             "io_uring setup was not denied",
         )?;
+        for (syscall, failure) in [
+            (libc::SYS_io_uring_enter, "io_uring enter was not denied"),
+            (
+                libc::SYS_io_uring_register,
+                "io_uring register was not denied",
+            ),
+        ] {
+            expect_scalar_errno(
+                // SAFETY: invalid scalar arguments would fail normally unless seccomp rejects first.
+                unsafe { libc::syscall(syscall, -1, 0, 0, 0, 0, 0) },
+                libc::EPERM,
+                failure,
+            )?;
+        }
     } else {
         let port =
             port.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "port missing"))?;
@@ -1654,6 +1731,15 @@ fn expect_errno(result: i32, expected: i32, message: &str) -> io::Result<()> {
             // SAFETY: the successful syscall returned a descriptor.
             unsafe { libc::close(result) };
         }
+        Err(io::Error::other(message))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn expect_scalar_errno(result: libc::c_long, expected: i32, message: &str) -> io::Result<()> {
+    if result == -1 && io::Error::last_os_error().raw_os_error() == Some(expected) {
+        Ok(())
+    } else {
         Err(io::Error::other(message))
     }
 }
@@ -1809,6 +1895,33 @@ mod tests {
         assert!(
             launch_confirmation_digest(&changed_runtime, &inherited_network, &capabilities)
                 .is_err()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn runtime_identity_rejects_replacement_and_malformed_version() {
+        let directory = TestDirectory::new("runtime-identity");
+        let launcher = directory.0.join("bwrap");
+        fs::write(&launcher, "#!/bin/sh\nprintf 'bubblewrap 1.0\\n'\n").unwrap();
+        fs::set_permissions(&launcher, fs::Permissions::from_mode(0o755)).unwrap();
+        let runtime = runtime_descriptor(&launcher, true).unwrap();
+        assert!(runtime_identity_matches(&runtime));
+
+        fs::write(
+            &launcher,
+            "#!/bin/sh\n# replacement\nprintf 'bubblewrap 1.0\\n'\n",
+        )
+        .unwrap();
+        fs::set_permissions(&launcher, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(!runtime_identity_matches(&runtime));
+
+        let malformed = directory.0.join("malformed-bwrap");
+        fs::write(&malformed, "#!/bin/sh\nprintf '\\n'\n").unwrap();
+        fs::set_permissions(&malformed, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            runtime_descriptor(&malformed, true).unwrap_err(),
+            BubblewrapUnavailableReason::VersionInvalid,
         );
     }
 
