@@ -1,16 +1,20 @@
-#![cfg_attr(not(unix), allow(dead_code, unused_imports))]
+#![cfg_attr(windows, allow(dead_code))]
 
-#[cfg(not(unix))]
-compile_error!("Phase 4B2 koda-exec currently supports POSIX systems only.");
-
+#[cfg(unix)]
 mod attachment;
+#[cfg(unix)]
 mod durable;
+mod executor_runtime;
 mod framing;
+#[cfg(unix)]
 mod internal_protocol;
 mod platform;
 mod protocol;
+#[cfg(unix)]
 mod pty_output;
+#[cfg(unix)]
 mod supervisor;
+#[cfg(unix)]
 mod worker;
 
 use std::io;
@@ -22,8 +26,8 @@ use protocol::{
     validate_hello, validate_request,
 };
 use serde_json::json;
-use supervisor::Supervisor;
 
+use crate::executor_runtime::ExecutorRuntime;
 use crate::platform::{LocalStream, capabilities};
 
 #[tokio::main(flavor = "multi_thread")]
@@ -40,14 +44,45 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             endpoint,
             state_dir,
         } => serve(endpoint, state_dir).await,
-        Arguments::Worker { job_dir, token_fd } => worker::run_worker(&job_dir, token_fd)
-            .await
-            .map_err(|error| format!("{}: {}", error.code, error.message).into()),
-        Arguments::CommandBootstrap { gate_fd, argv } => {
-            worker::run_command_bootstrap(gate_fd, argv)?;
+        Arguments::Endpoint { state_dir } => {
+            println!(
+                "{}",
+                platform::default_local_endpoint(&state_dir)?.display()
+            );
             Ok(())
         }
+        Arguments::Worker { job_dir, token_fd } => run_worker(job_dir, token_fd).await,
+        Arguments::CommandBootstrap { gate_fd, argv } => run_command_bootstrap(gate_fd, argv),
     }
+}
+
+#[cfg(unix)]
+async fn run_worker(job_dir: PathBuf, token_fd: i32) -> Result<(), Box<dyn std::error::Error>> {
+    worker::run_worker(&job_dir, token_fd)
+        .await
+        .map_err(|error| format!("{}: {}", error.code, error.message).into())
+}
+
+#[cfg(windows)]
+async fn run_worker(_job_dir: PathBuf, _token_fd: i32) -> Result<(), Box<dyn std::error::Error>> {
+    Err("PLATFORM_CAPABILITY_UNAVAILABLE: Windows Worker startup requires Phase 4B4B".into())
+}
+
+#[cfg(unix)]
+fn run_command_bootstrap(
+    gate_fd: i32,
+    argv: Vec<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    worker::run_command_bootstrap(gate_fd, argv)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn run_command_bootstrap(
+    _gate_fd: i32,
+    _argv: Vec<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    Err("PLATFORM_CAPABILITY_UNAVAILABLE: Windows command startup requires Phase 4B4B".into())
 }
 
 async fn serve(endpoint: PathBuf, state_dir: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
@@ -55,19 +90,19 @@ async fn serve(endpoint: PathBuf, state_dir: PathBuf) -> Result<(), Box<dyn std:
     // Binding first serializes recovery: only one Supervisor may inspect and adopt Workers.
     let listener = platform::bind_local_endpoint(&endpoint).await?;
     let binary_path = std::env::current_exe()?;
-    let supervisor = Supervisor::open(&state_dir, binary_path)
+    let runtime = ExecutorRuntime::open(&state_dir, binary_path)
         .await
         .map_err(|error| format!("{}: {}", error.code, error.message))?;
 
     loop {
-        let (stream, _) = listener.accept().await?;
+        let stream = platform::accept_local_connection(&listener).await?;
         if let Err(error) = platform::verify_local_peer(&stream) {
             eprintln!("koda-exec: rejected local peer: {error}");
             continue;
         }
-        let connection_supervisor = Arc::clone(&supervisor);
+        let connection_runtime = Arc::clone(&runtime);
         tokio::spawn(async move {
-            if let Err(error) = handle_connection(stream, connection_supervisor).await {
+            if let Err(error) = handle_connection(stream, connection_runtime).await {
                 let ordinary_disconnect = matches!(
                     error.kind(),
                     io::ErrorKind::UnexpectedEof
@@ -85,6 +120,9 @@ async fn serve(endpoint: PathBuf, state_dir: PathBuf) -> Result<(), Box<dyn std:
 enum Arguments {
     Serve {
         endpoint: PathBuf,
+        state_dir: PathBuf,
+    },
+    Endpoint {
         state_dir: PathBuf,
     },
     Worker {
@@ -113,6 +151,14 @@ fn parse_arguments(
                 endpoint,
                 state_dir,
             })
+        }
+        Some("endpoint") => {
+            let values = parse_named_arguments(arguments)?;
+            let state_dir = required_path(&values, "--state-dir")?;
+            if !state_dir.is_absolute() {
+                return Err("--state-dir must be an absolute path".into());
+            }
+            Ok(Arguments::Endpoint { state_dir })
         }
         Some("worker") => {
             let values = parse_named_arguments(arguments)?;
@@ -147,7 +193,7 @@ fn parse_arguments(
             Ok(Arguments::CommandBootstrap { gate_fd, argv })
         }
         _ => Err(
-            "usage: koda-exec serve --endpoint ENDPOINT --state-dir PATH | koda-exec worker --job-dir PATH --token-fd FD"
+            "usage: koda-exec serve --endpoint ENDPOINT --state-dir PATH | koda-exec endpoint --state-dir PATH | koda-exec worker --job-dir PATH --token-fd FD"
                 .into(),
         ),
     }
@@ -189,7 +235,10 @@ fn local_endpoint_argument(
     }
 }
 
-async fn handle_connection(mut stream: LocalStream, supervisor: Arc<Supervisor>) -> io::Result<()> {
+async fn handle_connection(
+    mut stream: LocalStream,
+    runtime: Arc<ExecutorRuntime>,
+) -> io::Result<()> {
     let mut handshaken = false;
     loop {
         let payload = match framing::read_frame(&mut stream).await? {
@@ -257,7 +306,7 @@ async fn handle_connection(mut stream: LocalStream, supervisor: Arc<Supervisor>)
                     "system/hello must succeed before other executor methods.",
                 ),
             ),
-            Ok(()) => match supervisor
+            Ok(()) => match runtime
                 .dispatch(request_id.clone(), &request.method, request.params)
                 .await
             {

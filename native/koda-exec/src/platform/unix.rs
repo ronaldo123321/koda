@@ -31,6 +31,10 @@ pub fn validate_local_endpoint(endpoint: &Path) -> io::Result<()> {
     }
 }
 
+pub fn default_local_endpoint(state_directory: &Path) -> io::Result<PathBuf> {
+    Ok(state_directory.join("koda-exec.sock"))
+}
+
 pub fn prepare_local_endpoint_parent(path: &Path) -> io::Result<()> {
     let parent = path
         .parent()
@@ -87,6 +91,10 @@ pub async fn bind_local_endpoint(path: &Path) -> io::Result<LocalListener> {
     let listener = UnixListener::bind(path)?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     Ok(listener)
+}
+
+pub async fn accept_local_connection(listener: &LocalListener) -> io::Result<LocalStream> {
+    listener.accept().await.map(|(stream, _)| stream)
 }
 
 pub async fn connect_local_endpoint(path: &Path) -> io::Result<LocalStream> {
