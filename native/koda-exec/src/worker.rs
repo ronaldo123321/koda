@@ -22,7 +22,8 @@ use crate::durable::{JobLock, JobRecord, JobStore, StoredJobState, sha256_hex};
 #[cfg(unix)]
 use crate::execution_policy::FilesystemPolicy;
 use crate::execution_policy::{
-    ExecutionCapabilities, ExecutionSecuritySnapshot, macos_seatbelt_execution_capabilities,
+    ExecutionCapabilities, ExecutionSecuritySnapshot, linux_bubblewrap_execution_capabilities,
+    macos_seatbelt_execution_capabilities,
 };
 use crate::execution_security;
 use crate::framing::{read_json_frame, write_json_frame};
@@ -168,14 +169,20 @@ pub async fn run_worker(
 fn worker_execution_capabilities(
     retained: Option<&ExecutionSecuritySnapshot>,
 ) -> ExecutionCapabilities {
-    let requires_v2 = matches!(
-        retained,
-        Some(ExecutionSecuritySnapshot::Policy(security)) if security.schema_version == 2
-    );
-    if requires_v2 && crate::macos_seatbelt::launch_available() {
-        macos_seatbelt_execution_capabilities()
-    } else {
-        execution_security::native_capabilities()
+    match retained {
+        Some(ExecutionSecuritySnapshot::Policy(security))
+            if security.schema_version == 2 && crate::macos_seatbelt::launch_available() =>
+        {
+            macos_seatbelt_execution_capabilities()
+        }
+        Some(ExecutionSecuritySnapshot::Policy(security)) if security.schema_version == 3 => {
+            security
+                .sandbox_runtime
+                .as_ref()
+                .and_then(|runtime| linux_bubblewrap_execution_capabilities(runtime).ok())
+                .unwrap_or_else(execution_security::native_capabilities)
+        }
+        _ => execution_security::native_capabilities(),
     }
 }
 

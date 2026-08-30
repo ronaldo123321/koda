@@ -12,6 +12,8 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    env:
+      KODA_REQUIRE_LINUX_BUBBLEWRAP: "1"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -24,7 +26,7 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: sudo apt-get update
-      - run: sudo apt-get install --yes ripgrep
+      - run: sudo apt-get install --yes bubblewrap ripgrep
       - run: pnpm install --frozen-lockfile
       - name: Build pinned Phase 4C1 legacy executor fixture
         shell: bash

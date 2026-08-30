@@ -65,7 +65,7 @@ afterEach(async () => {
   }
 });
 
-describe("Phase 4C2A native admission and evidence", () => {
+describe("Phase 4C2 native admission and evidence", () => {
   it.runIf(process.platform === "darwin")(
     "advertises v2 only after the real macOS Seatbelt self-test succeeds",
     async () => {
@@ -95,21 +95,82 @@ describe("Phase 4C2A native admission and evidence", () => {
     },
   );
 
+  it.runIf(process.platform === "linux")(
+    "advertises v3 only after the real Linux Bubblewrap self-test succeeds",
+    async () => {
+      const fixture = await setup();
+      const previous = process.env.KODA_REQUIRE_LINUX_BUBBLEWRAP;
+      let client: NativeExecutorClient;
+      try {
+        process.env.KODA_REQUIRE_LINUX_BUBBLEWRAP = "1";
+        client = await open(fixture);
+      } finally {
+        if (previous === undefined)
+          delete process.env.KODA_REQUIRE_LINUX_BUBBLEWRAP;
+        else process.env.KODA_REQUIRE_LINUX_BUBBLEWRAP = previous;
+      }
+      const hello = await client!.hello();
+      expect(hello).toMatchObject({
+        protocol_version: 4,
+        platform: "linux",
+        execution_security: {
+          schema_version: 3,
+          platform: "linux",
+          backend: "native_posix",
+          sandbox_runtime: {
+            schema_version: 1,
+            mechanism: "linux_bubblewrap",
+            probe_revision: 1,
+          },
+          filesystem: {
+            supported: ["unrestricted", "read_only", "workspace_write"],
+            mechanism: "linux_bubblewrap_mount_namespace",
+          },
+          network: {
+            supported: ["inherit", "deny"],
+            mechanism: "linux_network_namespace_seccomp",
+          },
+        },
+      });
+      if (hello.execution_security.schema_version !== 3) {
+        throw new Error("Expected Linux execution-security schema v3.");
+      }
+      const runtime = hello.execution_security.sandbox_runtime;
+      expect(runtime.canonical_path).toMatch(/^\/(?!\/)/u);
+      expect(runtime.device).toMatch(/^(0|[1-9][0-9]*)$/u);
+      expect(runtime.inode).toMatch(/^(0|[1-9][0-9]*)$/u);
+      expect(runtime.mtime_ns).toMatch(/^(0|[1-9][0-9]*)$/u);
+      expect(runtime.sha256).toMatch(/^[0-9a-f]{64}$/u);
+      expect(runtime.version.length).toBeGreaterThan(0);
+      expect(runtime.version.length).toBeLessThanOrEqual(256);
+    },
+  );
+
   it("retains the active platform security contract through restart and idempotency", async () => {
     const fixture = await setup();
     const client = await open(fixture);
     const hello = await client.hello();
     expect(hello.protocol_version).toBe(4);
-    expect(hello.execution_security.schema_version).toBe(
-      process.platform === "darwin" ? 2 : 1,
-    );
+    const expectedSchema =
+      process.platform === "darwin"
+        ? 2
+        : process.platform === "linux" &&
+            hello.execution_security.schema_version === 3
+          ? 3
+          : 1;
+    expect(hello.execution_security.schema_version).toBe(expectedSchema);
     expect(hello.execution_security.filesystem).toEqual(
       process.platform === "darwin"
         ? {
             supported: ["unrestricted", "read_only", "workspace_write"],
             mechanism: "macos_seatbelt",
           }
-        : { supported: ["unrestricted"], mechanism: "none" },
+        : expectedSchema === 3
+          ? {
+              supported: ["unrestricted", "read_only", "workspace_write"],
+              mechanism: "linux_bubblewrap_mount_namespace",
+            }
+          : { supported: ["unrestricted"], mechanism: "none" },
     );
     const input = await inputFor(fixture.root, "console.log('policy-ok')");
     const started = await client.start(input);

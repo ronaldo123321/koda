@@ -7,6 +7,7 @@ mod execution_security;
 mod executor_runtime;
 mod framing;
 mod internal_protocol;
+mod linux_bubblewrap;
 mod macos_seatbelt;
 mod platform;
 mod protocol;
@@ -27,20 +28,19 @@ use serde_json::json;
 use crate::executor_runtime::ExecutorRuntime;
 use crate::platform::{LocalStream, capabilities};
 
-#[tokio::main(flavor = "multi_thread")]
-async fn main() {
-    if let Err(error) = run().await {
+fn main() {
+    if let Err(error) = run() {
         eprintln!("koda-exec: {error}");
         std::process::exit(1);
     }
 }
 
-async fn run() -> Result<(), Box<dyn std::error::Error>> {
+fn run() -> Result<(), Box<dyn std::error::Error>> {
     match parse_arguments(std::env::args().skip(1))? {
         Arguments::Serve {
             endpoint,
             state_dir,
-        } => serve(endpoint, state_dir).await,
+        } => async_runtime()?.block_on(serve(endpoint, state_dir)),
         Arguments::Endpoint { state_dir } => {
             println!(
                 "{}",
@@ -51,7 +51,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         Arguments::Worker {
             job_dir,
             token_handle,
-        } => run_worker(job_dir, token_handle).await,
+        } => async_runtime()?.block_on(run_worker(job_dir, token_handle)),
         Arguments::CommandBootstrap { gate_fd, argv } => run_command_bootstrap(gate_fd, argv),
         Arguments::SandboxBootstrap {
             confirmation_fd,
@@ -68,7 +68,45 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             macos_seatbelt::run_probe_contract(&allowed_path, &denied_path)?;
             Ok(())
         }
+        Arguments::LinuxSandboxBootstrap {
+            confirmation_fd,
+            release_fd,
+            network_denied,
+            digest,
+            argv,
+        } => {
+            linux_bubblewrap::run_sandbox_bootstrap(
+                confirmation_fd,
+                release_fd,
+                network_denied,
+                &digest,
+                argv,
+            )?;
+            Ok(())
+        }
+        Arguments::LinuxBubblewrapProbe {
+            kind,
+            workspace,
+            scratch,
+            external,
+            port,
+        } => {
+            linux_bubblewrap::run_probe_contract(
+                &kind,
+                &workspace,
+                scratch.as_deref(),
+                &external,
+                port,
+            )?;
+            Ok(())
+        }
     }
+}
+
+fn async_runtime() -> Result<tokio::runtime::Runtime, Box<dyn std::error::Error>> {
+    Ok(tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?)
 }
 
 async fn run_worker(
@@ -153,6 +191,20 @@ enum Arguments {
     SeatbeltProbe {
         allowed_path: PathBuf,
         denied_path: PathBuf,
+    },
+    LinuxSandboxBootstrap {
+        confirmation_fd: i32,
+        release_fd: i32,
+        network_denied: bool,
+        digest: String,
+        argv: Vec<String>,
+    },
+    LinuxBubblewrapProbe {
+        kind: String,
+        workspace: PathBuf,
+        scratch: Option<PathBuf>,
+        external: PathBuf,
+        port: Option<u16>,
     },
 }
 
@@ -252,6 +304,97 @@ fn parse_arguments(
             Ok(Arguments::SeatbeltProbe {
                 allowed_path,
                 denied_path,
+            })
+        }
+        Some("linux-sandbox-bootstrap") => {
+            if arguments.next().as_deref() != Some("--confirm-fd") {
+                return Err("Linux sandbox bootstrap requires --confirm-fd".into());
+            }
+            let confirmation_fd = arguments
+                .next()
+                .ok_or("--confirm-fd is required")?
+                .parse::<i32>()?;
+            if arguments.next().as_deref() != Some("--release-fd") {
+                return Err("Linux sandbox bootstrap requires --release-fd".into());
+            }
+            let release_fd = arguments
+                .next()
+                .ok_or("--release-fd is required")?
+                .parse::<i32>()?;
+            if arguments.next().as_deref() != Some("--network") {
+                return Err("Linux sandbox bootstrap requires --network".into());
+            }
+            let network_denied = match arguments.next().as_deref() {
+                Some("deny") => true,
+                Some("inherit") => false,
+                _ => return Err("Linux sandbox bootstrap network mode is invalid".into()),
+            };
+            if arguments.next().as_deref() != Some("--digest") {
+                return Err("Linux sandbox bootstrap requires --digest".into());
+            }
+            let digest = arguments.next().ok_or("--digest is required")?;
+            if confirmation_fd < 3
+                || release_fd < 3
+                || confirmation_fd == release_fd
+                || digest.len() != 64
+                || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+                || arguments.next().as_deref() != Some("--")
+            {
+                return Err("Linux sandbox bootstrap arguments are invalid".into());
+            }
+            let argv = arguments.collect::<Vec<_>>();
+            if argv.is_empty() {
+                return Err("Linux sandbox bootstrap argv is required".into());
+            }
+            Ok(Arguments::LinuxSandboxBootstrap {
+                confirmation_fd,
+                release_fd,
+                network_denied,
+                digest,
+                argv,
+            })
+        }
+        Some("linux-bubblewrap-probe") => {
+            let values = parse_named_arguments(arguments)?;
+            if !values.keys().all(|name| {
+                matches!(
+                    name.as_str(),
+                    "--kind" | "--workspace" | "--scratch" | "--external" | "--port"
+                )
+            }) {
+                return Err("Linux Bubblewrap probe argument is unknown".into());
+            }
+            let kind = values
+                .get("--kind")
+                .filter(|kind| {
+                    matches!(
+                        kind.as_str(),
+                        "read-only-deny" | "workspace-write-deny" | "read-only-inherit"
+                    )
+                })
+                .cloned()
+                .ok_or("Linux Bubblewrap probe kind is invalid")?;
+            let workspace = required_path(&values, "--workspace")?;
+            let external = required_path(&values, "--external")?;
+            let scratch = values.get("--scratch").map(PathBuf::from);
+            let port = values
+                .get("--port")
+                .map(|value| value.parse::<u16>())
+                .transpose()?;
+            if !workspace.is_absolute()
+                || !external.is_absolute()
+                || scratch.as_ref().is_some_and(|path| !path.is_absolute())
+                || (kind == "workspace-write-deny") != scratch.is_some()
+                || (kind == "read-only-inherit") != port.is_some()
+            {
+                return Err("Linux Bubblewrap probe arguments are invalid".into());
+            }
+            Ok(Arguments::LinuxBubblewrapProbe {
+                kind,
+                workspace,
+                scratch,
+                external,
+                port,
             })
         }
         _ => Err(
@@ -530,6 +673,70 @@ mod tests {
             .map(str::to_owned),
         );
         assert!(relative_probe.is_err());
+    }
+
+    #[test]
+    fn internal_linux_sandbox_commands_are_strict_and_typed() {
+        let digest = "11".repeat(32);
+        let bootstrap = parse_arguments(
+            [
+                "linux-sandbox-bootstrap",
+                "--confirm-fd",
+                "4",
+                "--release-fd",
+                "5",
+                "--network",
+                "deny",
+                "--digest",
+                &digest,
+                "--",
+                "/usr/bin/true",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        );
+        assert!(matches!(
+            bootstrap,
+            Ok(Arguments::LinuxSandboxBootstrap {
+                network_denied: true,
+                ..
+            })
+        ));
+        let malformed = parse_arguments(
+            [
+                "linux-sandbox-bootstrap",
+                "--confirm-fd",
+                "4",
+                "--release-fd",
+                "4",
+                "--network",
+                "deny",
+                "--digest",
+                &digest,
+                "--",
+                "/usr/bin/true",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        );
+        assert!(malformed.is_err());
+
+        let probe = parse_arguments(
+            [
+                "linux-bubblewrap-probe",
+                "--kind",
+                "read-only-inherit",
+                "--workspace",
+                TEST_STATE_DIRECTORY,
+                "--external",
+                TEST_JOB_DIRECTORY,
+                "--port",
+                "1234",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        );
+        assert!(matches!(probe, Ok(Arguments::LinuxBubblewrapProbe { .. })));
     }
 
     #[cfg(windows)]

@@ -1,6 +1,6 @@
 # Koda Phase 4C2B Linux Bubblewrap Design
 
-- Status: In progress — C2B1 complete, C2B2 next
+- Status: In progress — C2B1 and C2B2 complete, C2B3 next
 - Date: 2026-08-30
 - Depends on: completed Phase 4C1 execution policy and Phase 4C2A macOS
   Seatbelt delivery
@@ -376,6 +376,10 @@ The initial builder is equivalent to:
   --unshare-ipc
   --cap-drop ALL
   --ro-bind / /
+  --remount-ro /
+  --dev /dev
+  --remount-ro /dev
+  --remount-ro /dev/shm
   [--bind <workspace> <workspace>]
   [--bind <scratch> <scratch>]
   [--unshare-net]
@@ -402,11 +406,15 @@ PID namespaces would alter process observation and reaping. A new session would
 alter current PTY/process-group behavior. `TIOCSTI` is denied by the inner
 seccomp filter instead, and PTY escape behavior is covered by native tests.
 
-The exact `/dev` and `/proc` view is finalized by the C2B2 real prototype. It
-must preserve required CLI functionality without introducing a general
-writable temporary filesystem. Any fixed `/dev` construction is remounted
-read-only after required device nodes exist. `/proc` does not count as process
-isolation and must not be presented that way.
+The C2B2 prototype retains the host `/proc` view beneath the read-only root and
+constructs Bubblewrap's fixed minimal `/dev` view so ordinary device access
+such as `/dev/null` remains usable without importing arbitrary host device
+mounts. Fixed remounts make `/`, `/dev`, and `/dev/shm` read-only, closing
+writable child mounts such as `/dev/shm`, `/run`, and `/var/tmp` before the
+validated workspace/scratch binds are reopened. The startup probe verifies
+those locations cannot become general writable temporary storage. `/proc` is
+used only for namespace, process-group, and descriptor verification; it does
+not count as process isolation and is not presented that way.
 
 ## Filesystem semantics
 
@@ -711,6 +719,8 @@ probe.
 
 ### C2B2: binary trust and real capability probe
 
+Status: Complete (2026-08-30)
+
 - Implement frozen Bubblewrap discovery and identity checks.
 - Implement the fixed command builder and inner bootstrap prototype.
 - Implement `no_new_privs`, architecture-specific seccomp, and namespace
@@ -719,6 +729,27 @@ probe.
 - Run the complete real startup self-test.
 - Advertise schema-v3 capability only after the self-test succeeds.
 - Keep protected user execution unavailable until C2B3.
+
+Delivered with trusted override/system-path discovery that never searches
+`PATH`, canonical owner/mode/type checks, frozen device/inode/size/mtime/SHA-256
+and bounded version identity, a typed fixed Bubblewrap builder, minimal
+read-only `/dev`, recursive root/temp-path write closure, and a dedicated
+synchronous internal-command entry that does not initialize an async runtime
+inside seccomp. The architecture-specific bootstrap applies `no_new_privs`,
+baseline user-namespace/credential/TIOCSTI rules, and deny-mode socket,
+socketpair, and io_uring rules before emitting its fixed PID/PGID/namespace/
+security/digest confirmation frame.
+
+The startup self-test runs real `read_only + deny`, `workspace_write + deny`,
+and `read_only + inherit` invocations through the selected executable. It
+checks normal reads, workspace/scratch writes, external and general-temp write
+denial, TCP/UDP/Unix socket denial, loopback inherited networking, namespace
+identity, `no_new_privs`, seccomp, nested user namespaces, TIOCSTI, descriptor
+closure, and release-channel abort. A verified Supervisor advertises schema v3;
+`KODA_REQUIRE_LINUX_BUBBLEWRAP=1` makes failure fatal. C2B2 deliberately keeps
+the pre-job protected-start gate closed, while schema-v3 unconfined jobs retain
+and reconstruct the frozen capability normally. Protected Pipe/PTY launch and
+durable applied evidence remain C2B3.
 
 ### C2B3: protected Pipe and PTY enforcement
 
@@ -774,8 +805,11 @@ probe.
 
 ## CI plan
 
-The existing Linux `verify` job remains the shared full-suite gate. Phase 4C2B
-adds `linux-native` on `ubuntu-latest`:
+The existing Linux `verify` job is already the shared full-suite gate. C2B2
+installs the distro Bubblewrap package there and runs with
+`KODA_REQUIRE_LINUX_BUBBLEWRAP=1`, so schema-v3 advertisement cannot pass from
+pure fixtures. Phase 4C2B4 adds a separate `linux-native` job on
+`ubuntu-latest` for the complete protected Pipe/PTY matrix:
 
 1. install the distro Bubblewrap package explicitly;
 2. record `/usr/bin/bwrap` and its version in diagnostics;

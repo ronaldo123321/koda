@@ -1,6 +1,6 @@
 # Koda Phase 4 Hardening Roadmap
 
-- Status: In progress — Phase 4B, Phase 4C1, macOS Phase 4C2A, and Linux Phase 4C2B1 complete
+- Status: In progress — Phase 4B, Phase 4C1, macOS Phase 4C2A, and Linux Phase 4C2B1/C2B2 complete
 - Date: 2026-08-28
 - Depends on: completed Phase 3A through Phase 3I baseline
 
@@ -81,7 +81,7 @@ The completed Windows terminal contract and acceptance evidence are in [Phase 4B
 
 ### Phase 4C: sandbox, network, and secret policy
 
-Status: In progress — Phase 4C1, macOS Phase 4C2A, and Linux Phase 4C2B1 complete; C2B2 next
+Status: In progress — Phase 4C1, macOS Phase 4C2A, and Linux Phase 4C2B1/C2B2 complete; C2B3 next
 
 - Add explicit filesystem, process, environment, and network capabilities.
 - Implement available OS isolation mechanisms and expose their effective strength rather than a portable boolean claim.
@@ -147,10 +147,14 @@ Koda-owned `no_new_privs`/seccomp bootstrap and the same two-way durable release
 gate as macOS. C2B1 is complete with execution-security schema v3, native
 protocol v4, durable format v4, runtime fingerprints, shared fixtures,
 formats 1–3 compatibility, grant binding, and client projections. App-server
-protocol v15 remains compatible. C2B2 is next: frozen Bubblewrap discovery,
-identity verification, the fixed builder, bootstrap/seccomp prototype, and a
-real capability self-test. Protected user execution remains unavailable until
-C2B3.
+protocol v15 remains compatible. C2B2 is also complete: trusted fixed-path
+Bubblewrap discovery freezes executable identity, the typed builder creates a
+read-only root/minimal-device view, a synchronous inner bootstrap applies
+`no_new_privs` and architecture-specific seccomp, and a fixed confirmation/
+release protocol drives a real multi-profile startup self-test. Linux now
+advertises schema v3 only after that test, while the explicit pre-job gate keeps
+protected user execution unavailable until C2B3 wires the same builder into
+Pipe and PTY launches and persists applied evidence.
 
 Secret injection and redaction, resource quotas, finer-grained network policy,
 provider/MCP/plugin sandboxing, shell syntax, Landlock fallback, bundled
