@@ -24,18 +24,6 @@ impl ExecutorRuntime {
         method: &str,
         params: Value,
     ) -> Result<Value, ProtocolError> {
-        #[cfg(windows)]
-        if method == "job/start" {
-            let start: crate::protocol::StartParams =
-                crate::protocol::parse_params(params.clone())?;
-            if start.io_mode == crate::protocol::IoMode::Pty {
-                return Err(ProtocolError::new(
-                    "PLATFORM_CAPABILITY_UNAVAILABLE",
-                    "Windows PTY execution remains unavailable until Phase 4B4C ConPTY support is verified.",
-                ));
-            }
-        }
-
         self.supervisor.dispatch(request_id, method, params).await
     }
 }
