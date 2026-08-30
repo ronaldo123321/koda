@@ -6,7 +6,7 @@ The project is building the control plane around a coding model: typed conversat
 
 ## Current status
 
-The Phase 3 local-agent foundation, Phase 4A crash-safe workspace recovery, Phase 4B supervised native execution, Phase 4C1 execution policy/reporting, and Phase 4C2A1/A2 macOS Seatbelt contract and verified runtime infrastructure are complete. Protected Pipe/PTY enforcement remains Phase 4C2A3, so public execution capability still honestly reports the C1 unconfined boundary. Koda now has an opt-in Rust execution supervisor with a versioned local protocol, reconnectable job observation, POSIX process groups, Windows Job Objects and ConPTY, bounded retained output, explicit native capability reporting, and end-to-end execution-policy evidence on top of those foundations:
+The Phase 3 local-agent foundation, Phase 4A crash-safe workspace recovery, Phase 4B supervised native execution, Phase 4C1 execution policy/reporting, and Phase 4C2A1-A3 macOS Seatbelt runtime are complete. A verified macOS native executor now advertises and enforces protected Pipe/PTY execution; client-wide lifecycle acceptance remains Phase 4C2A4. Koda has an opt-in Rust execution supervisor with a versioned local protocol, reconnectable job observation, POSIX process groups, Windows Job Objects and ConPTY, bounded retained output, explicit native capability reporting, and end-to-end execution-policy evidence on top of those foundations:
 
 - Versioned Thread, Turn, Item, and Agent Event schemas.
 - A provider-neutral streaming model interface.
@@ -342,13 +342,14 @@ When Koda proposes a patch or command, it prints the exact action and asks for a
 
 The TypeScript compatibility backend runs commands without stdin, has a 30-second default timeout, and retains at most 64 KiB from each output stream. On POSIX, each command owns a process group; timeout, cancellation, output failure, or unsupported surviving descendants trigger `SIGTERM`, a grace period, and then `SIGKILL` when needed. Its Windows fallback uses tree-aware `taskkill` with explicit uncertainty when termination cannot be confirmed. These guardrails are not a security sandbox: an approved executable or repository script still runs with the current user's operating-system permissions.
 
-Execution policy defaults to `unconfined` and may be selected before startup with `KODA_EXECUTION_PROFILE`. The `read-only` and `workspace-write` names are recognized, but Koda deliberately rejects them before requesting approval until a matching operating-system sandbox is implemented. This prevents a policy label from overstating the protection actually applied:
+Execution policy defaults to `unconfined` and may be selected before startup with `KODA_EXECUTION_PROFILE`. On macOS, a native executor that passes Koda's real Seatbelt startup self-test supports `read-only` and `workspace-write`; other backends reject those profiles before approval or job creation. There is no silent downgrade:
 
 ```bash
-export KODA_EXECUTION_PROFILE=unconfined
+export KODA_EXEC_PATH="$PWD/target/debug/koda-exec"
+export KODA_EXECUTION_PROFILE=read-only
 ```
 
-Every prepared command records its requested policy dimensions, selected backend, capability digest, and expected launch controls. A successful start retains the launch-time security snapshot in process events, command results, app-server v15 process summaries, CLI output, and TUI views. Current Phase 4C1 snapshots therefore state `OS sandbox: none` literally; process-tree supervision and environment filtering are reported separately and are not presented as filesystem or network isolation. Exact-command approval grants are bound to the policy digest, backend, and capability digest, so changing any of them invalidates the grant before execution.
+Every prepared command records its requested policy dimensions, selected backend, capability digest, and expected launch controls. A protected macOS start publishes `running` and applied filesystem/network evidence only after a sandbox-internal confirmation, process-identity recheck, and a second release gate; user code cannot run during that validation window. Unconfined, Linux, Windows, and TypeScript snapshots continue to state `OS sandbox: none` literally. Process-tree supervision and environment filtering are reported separately and are not presented as filesystem or network isolation. Exact-command approval grants are bound to the policy, backend, and capability digests, so changing any of them invalidates the grant before execution.
 
 The complete guarantee, evidence, failure, legacy-compatibility, and platform acceptance contract is documented in [Koda execution security guarantees](docs/security/execution-security.md).
 

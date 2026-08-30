@@ -55,9 +55,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         Arguments::CommandBootstrap { gate_fd, argv } => run_command_bootstrap(gate_fd, argv),
         Arguments::SandboxBootstrap {
             confirmation_fd,
+            release_fd,
             argv,
         } => {
-            macos_seatbelt::run_sandbox_bootstrap(confirmation_fd, argv)?;
+            macos_seatbelt::run_sandbox_bootstrap(confirmation_fd, release_fd, argv)?;
             Ok(())
         }
         Arguments::SeatbeltProbe {
@@ -146,6 +147,7 @@ enum Arguments {
     },
     SandboxBootstrap {
         confirmation_fd: i32,
+        release_fd: i32,
         argv: Vec<String>,
     },
     SeatbeltProbe {
@@ -216,7 +218,18 @@ fn parse_arguments(
                 .next()
                 .ok_or("--confirm-fd is required")?
                 .parse::<i32>()?;
-            if confirmation_fd < 3 || arguments.next().as_deref() != Some("--") {
+            if arguments.next().as_deref() != Some("--release-fd") {
+                return Err("sandbox bootstrap requires --release-fd".into());
+            }
+            let release_fd = arguments
+                .next()
+                .ok_or("--release-fd is required")?
+                .parse::<i32>()?;
+            if confirmation_fd < 3
+                || release_fd < 3
+                || confirmation_fd == release_fd
+                || arguments.next().as_deref() != Some("--")
+            {
                 return Err("sandbox bootstrap descriptor or separator is invalid".into());
             }
             let argv = arguments.collect::<Vec<_>>();
@@ -225,6 +238,7 @@ fn parse_arguments(
             }
             Ok(Arguments::SandboxBootstrap {
                 confirmation_fd,
+                release_fd,
                 argv,
             })
         }
@@ -481,6 +495,8 @@ mod tests {
                 "sandbox-bootstrap",
                 "--confirm-fd",
                 "3",
+                "--release-fd",
+                "4",
                 "--",
                 "/usr/bin/true",
             ]
@@ -493,6 +509,8 @@ mod tests {
                 "sandbox-bootstrap",
                 "--confirm-fd",
                 "2",
+                "--release-fd",
+                "4",
                 "--",
                 "/usr/bin/true",
             ]

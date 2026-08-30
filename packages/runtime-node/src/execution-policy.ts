@@ -344,8 +344,11 @@ export function executionPolicyPreview(snapshotInput: unknown): string {
     return "Execution security: legacy evidence unknown";
   }
   const supervision = executionSupervision(snapshot.backend);
+  const sandboxRequested =
+    snapshot.policy.filesystem !== "unrestricted" ||
+    snapshot.policy.network !== "inherit";
   const sandbox =
-    snapshot.schema_version === 2
+    snapshot.schema_version === 2 && sandboxRequested
       ? snapshot.stage === "launch_setup"
         ? "OS sandbox: macOS Seatbelt"
         : "expected OS sandbox: macOS Seatbelt"

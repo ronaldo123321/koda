@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 use crate::attachment::{create_stateless_attachment, verify_capability};
 use crate::durable::{JobRecord, JobStore};
+use crate::execution_policy::ExecutionCapabilities;
 use crate::execution_security;
 use crate::framing::{read_json_frame, write_json_frame};
 use crate::internal_protocol::{
@@ -48,6 +49,7 @@ const START_WAIT_ATTEMPTS: usize = 100;
 pub struct Supervisor {
     store: JobStore,
     binary_path: PathBuf,
+    execution_capabilities: ExecutionCapabilities,
     registry: Mutex<Registry>,
 }
 
@@ -63,7 +65,11 @@ struct StartRequestRecord {
 }
 
 impl Supervisor {
-    pub async fn open(state_dir: &Path, binary_path: PathBuf) -> Result<Arc<Self>, ProtocolError> {
+    pub async fn open(
+        state_dir: &Path,
+        binary_path: PathBuf,
+        execution_capabilities: ExecutionCapabilities,
+    ) -> Result<Arc<Self>, ProtocolError> {
         let store = JobStore::open(state_dir)?;
         let mut records = store.scan(MAX_SCANNED_JOBS)?;
         // A v1 Worker launches autonomously: never pretend a new Supervisor can
@@ -106,6 +112,7 @@ impl Supervisor {
         let supervisor = Arc::new(Self {
             store,
             binary_path,
+            execution_capabilities,
             registry: Mutex::new(registry),
         });
         supervisor.recover_all().await;
@@ -196,8 +203,11 @@ impl Supervisor {
             return self.get(&job_id).await;
         }
 
-        execution_security::admit(&params)?;
-        let (record, _) = self.store.create_job(&request_id, params)?;
+        let (record, _) = self.store.create_job_with_capabilities(
+            &request_id,
+            params,
+            &self.execution_capabilities,
+        )?;
         let job_id = record.manifest.job_id.clone();
         registry.requests.insert(
             request_id,

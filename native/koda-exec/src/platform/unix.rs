@@ -14,6 +14,15 @@ pub type BootstrapHandle = RawFd;
 pub type BootstrapRead = OwnedFd;
 pub type BootstrapWrite = OwnedFd;
 
+pub struct SandboxBootstrapChannels<'a> {
+    pub confirmation_read: &'a BootstrapRead,
+    pub confirmation_write: &'a BootstrapWrite,
+    pub release_read: &'a BootstrapRead,
+    pub release_write: &'a BootstrapWrite,
+    pub confirmation_target: RawFd,
+    pub release_target: RawFd,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProcessTreeSignal {
     Graceful,
@@ -249,10 +258,6 @@ pub fn read_inherited_secret(
     Ok(bytes)
 }
 
-pub fn raw_handle(handle: &BootstrapRead) -> BootstrapHandle {
-    handle.as_raw_fd()
-}
-
 pub fn release_gate(write: BootstrapWrite) -> io::Result<()> {
     let descriptor = write.as_raw_fd();
     let byte = 1u8;
@@ -333,15 +338,16 @@ pub fn configure_pipe_command(
     read: &BootstrapRead,
     write: &BootstrapWrite,
     target: RawFd,
+    sandbox: Option<SandboxBootstrapChannels<'_>>,
 ) {
     let read = read.as_raw_fd();
     let write = write.as_raw_fd();
+    let sandbox = sandbox.map(raw_sandbox_channels);
     CommandExt::process_group(command.as_std_mut(), 0);
     // SAFETY: the closure performs only async-signal-safe descriptor operations before exec.
     unsafe {
         CommandExt::pre_exec(command.as_std_mut(), move || {
-            libc::close(write);
-            inherit_descriptor(read, target)
+            inherit_launch_descriptors(read, write, target, sandbox)
         });
     }
 }
@@ -352,34 +358,198 @@ pub fn configure_pty_command(
     write: &BootstrapWrite,
     master: &OwnedFd,
     slave: &OwnedFd,
+    gate_target: RawFd,
+    sandbox: Option<SandboxBootstrapChannels<'_>>,
 ) {
     let read = read.as_raw_fd();
     let write = write.as_raw_fd();
     let master = master.as_raw_fd();
     let slave = slave.as_raw_fd();
+    let sandbox = sandbox.map(raw_sandbox_channels);
     // SAFETY: the closure performs only async-signal-safe session, ioctl, and descriptor
     // operations before exec. All descriptors are Worker-owned.
     unsafe {
         CommandExt::pre_exec(command.as_std_mut(), move || {
+            // PTY setup closes the original master/slave descriptors and may reuse
+            // low descriptor numbers. Preserve every bootstrap source first, then
+            // install the fixed child descriptors only after the controlling TTY
+            // has been configured.
+            let launch_descriptors = prepare_launch_descriptors(read, gate_target, sandbox)
+                .map_err(|error| {
+                    launch_descriptor_error("preserve PTY bootstrap channels", error)
+                })?;
             libc::close(write);
+            if let Some(sandbox) = sandbox {
+                libc::close(sandbox.confirmation_read);
+                libc::close(sandbox.release_write);
+            }
             libc::close(master);
             if libc::setsid() < 0 {
-                return Err(io::Error::last_os_error());
+                return Err(launch_descriptor_error(
+                    "create PTY session",
+                    io::Error::last_os_error(),
+                ));
             }
             if libc::ioctl(slave, libc::TIOCSCTTY as _, 0) < 0 {
-                return Err(io::Error::last_os_error());
+                return Err(launch_descriptor_error(
+                    "assign controlling PTY",
+                    io::Error::last_os_error(),
+                ));
             }
             for target in [libc::STDIN_FILENO, libc::STDOUT_FILENO, libc::STDERR_FILENO] {
                 if slave != target && libc::dup2(slave, target) < 0 {
-                    return Err(io::Error::last_os_error());
+                    return Err(launch_descriptor_error(
+                        "connect PTY standard stream",
+                        io::Error::last_os_error(),
+                    ));
                 }
             }
             if slave > libc::STDERR_FILENO {
                 libc::close(slave);
             }
-            clear_close_on_exec(read)
+            install_launch_descriptors(launch_descriptors)
+                .map_err(|error| launch_descriptor_error("install PTY bootstrap channels", error))
         });
     }
+}
+
+#[derive(Clone, Copy)]
+struct RawSandboxBootstrapChannels {
+    confirmation_read: RawFd,
+    confirmation_write: RawFd,
+    release_read: RawFd,
+    release_write: RawFd,
+    confirmation_target: RawFd,
+    release_target: RawFd,
+}
+
+#[derive(Clone, Copy)]
+struct PreparedSandboxBootstrapChannels {
+    confirmation_copy: RawFd,
+    release_copy: RawFd,
+    confirmation_target: RawFd,
+    release_target: RawFd,
+}
+
+#[derive(Clone, Copy)]
+struct PreparedLaunchDescriptors {
+    gate_copy: RawFd,
+    gate_target: RawFd,
+    sandbox: Option<PreparedSandboxBootstrapChannels>,
+}
+
+fn raw_sandbox_channels(channels: SandboxBootstrapChannels<'_>) -> RawSandboxBootstrapChannels {
+    RawSandboxBootstrapChannels {
+        confirmation_read: channels.confirmation_read.as_raw_fd(),
+        confirmation_write: channels.confirmation_write.as_raw_fd(),
+        release_read: channels.release_read.as_raw_fd(),
+        release_write: channels.release_write.as_raw_fd(),
+        confirmation_target: channels.confirmation_target,
+        release_target: channels.release_target,
+    }
+}
+
+fn inherit_launch_descriptors(
+    gate_read: RawFd,
+    gate_write: RawFd,
+    gate_target: RawFd,
+    sandbox: Option<RawSandboxBootstrapChannels>,
+) -> io::Result<()> {
+    let Some(sandbox) = sandbox else {
+        // SAFETY: the child never reads the Worker's gate endpoint.
+        unsafe { libc::close(gate_write) };
+        return inherit_descriptor(gate_read, gate_target);
+    };
+    let launch_descriptors = prepare_launch_descriptors(gate_read, gate_target, Some(sandbox))?;
+    // SAFETY: these are the parent-only ends of dedicated Worker-owned pipes.
+    unsafe {
+        libc::close(gate_write);
+        libc::close(sandbox.confirmation_read);
+        libc::close(sandbox.release_write);
+    }
+    install_launch_descriptors(launch_descriptors)
+}
+
+fn prepare_launch_descriptors(
+    gate_read: RawFd,
+    gate_target: RawFd,
+    sandbox: Option<RawSandboxBootstrapChannels>,
+) -> io::Result<PreparedLaunchDescriptors> {
+    let sandbox = if let Some(sandbox) = sandbox {
+        validate_launch_targets(gate_target, sandbox)?;
+        Some(PreparedSandboxBootstrapChannels {
+            confirmation_copy: duplicate_descriptor(sandbox.confirmation_write)?,
+            release_copy: duplicate_descriptor(sandbox.release_read)?,
+            confirmation_target: sandbox.confirmation_target,
+            release_target: sandbox.release_target,
+        })
+    } else {
+        None
+    };
+    Ok(PreparedLaunchDescriptors {
+        gate_copy: duplicate_descriptor(gate_read)?,
+        gate_target,
+        sandbox,
+    })
+}
+
+fn install_launch_descriptors(descriptors: PreparedLaunchDescriptors) -> io::Result<()> {
+    let result =
+        inherit_descriptor(descriptors.gate_copy, descriptors.gate_target).and_then(|_| {
+            let Some(sandbox) = descriptors.sandbox else {
+                return Ok(());
+            };
+            inherit_descriptor(sandbox.confirmation_copy, sandbox.confirmation_target)
+                .and_then(|_| inherit_descriptor(sandbox.release_copy, sandbox.release_target))
+        });
+    // SAFETY: the duplicated sources are no longer needed after target assignment.
+    unsafe {
+        libc::close(descriptors.gate_copy);
+        if let Some(sandbox) = descriptors.sandbox {
+            libc::close(sandbox.confirmation_copy);
+            libc::close(sandbox.release_copy);
+        }
+    }
+    result
+}
+
+fn validate_launch_targets(
+    gate_target: RawFd,
+    sandbox: RawSandboxBootstrapChannels,
+) -> io::Result<()> {
+    if [
+        gate_target,
+        sandbox.confirmation_target,
+        sandbox.release_target,
+    ]
+    .iter()
+    .any(|target| *target < 3)
+        || gate_target == sandbox.confirmation_target
+        || gate_target == sandbox.release_target
+        || sandbox.confirmation_target == sandbox.release_target
+    {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "sandbox bootstrap targets must be distinct non-standard descriptors",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn duplicate_descriptor(source: RawFd) -> io::Result<RawFd> {
+    // SAFETY: fcntl duplicates the valid descriptor and marks the temporary
+    // source close-on-exec; the caller closes it before returning from pre_exec.
+    let duplicated = unsafe { libc::fcntl(source, libc::F_DUPFD_CLOEXEC, 10) };
+    if duplicated < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(duplicated)
+    }
+}
+
+fn launch_descriptor_error(step: &str, error: io::Error) -> io::Error {
+    io::Error::new(error.kind(), format!("{step}: {error}"))
 }
 
 fn inherit_descriptor(source: RawFd, target: RawFd) -> io::Result<()> {

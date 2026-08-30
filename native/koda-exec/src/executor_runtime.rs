@@ -40,18 +40,31 @@ impl ExecutorRuntime {
                 format!("The macOS Seatbelt capability probe failed because {reason}."),
             ));
         }
-        let supervisor = crate::supervisor::Supervisor::open(state_directory, binary_path).await?;
+        let execution_capabilities = if macos_seatbelt.is_verified() {
+            crate::execution_policy::macos_seatbelt_execution_capabilities()
+        } else {
+            crate::execution_security::native_capabilities()
+        };
+        let supervisor = crate::supervisor::Supervisor::open(
+            state_directory,
+            binary_path,
+            execution_capabilities,
+        )
+        .await?;
         Ok(Arc::new(Self {
             supervisor,
             macos_seatbelt,
         }))
     }
 
-    /// C2A2 retains the verified result for C2A3, but capability advertisement
-    /// stays at C1 until protected Pipe and PTY launches are confirmation-gated.
+    /// Capability advertisement is bound to the startup probe retained for this
+    /// Supervisor lifetime; it never broadens in place after startup.
     pub fn execution_capabilities(&self) -> ExecutionCapabilities {
-        let _seatbelt_ready_for_c2a3 = self.macos_seatbelt.is_verified();
-        crate::execution_security::native_capabilities()
+        if self.macos_seatbelt.is_verified() {
+            crate::execution_policy::macos_seatbelt_execution_capabilities()
+        } else {
+            crate::execution_security::native_capabilities()
+        }
     }
 
     pub async fn dispatch(

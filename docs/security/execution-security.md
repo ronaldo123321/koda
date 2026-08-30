@@ -1,28 +1,28 @@
 # Koda Execution Security Guarantees
 
-- Scope: Phase 4C1
-- Status: Phase 4C1 complete; application and native enforcement contracts
-  accepted on Linux, macOS, and Windows
+- Scope: Phase 4C2A3
+- Status: macOS native Seatbelt enforcement implemented locally; C2A4
+  client/lifecycle and same-commit remote acceptance pending
 - Last updated: 2026-08-30
 
 Koda separates execution admission, process supervision, and operating-system
 isolation. A successful command does not imply that a filesystem or network
-sandbox was present. Current clients state `OS sandbox: none` explicitly.
+sandbox was present. Unconfined clients state `OS sandbox: none` explicitly.
 
-Phase 4C2A2 has completed the macOS Seatbelt builder, trusted bootstrap
-confirmation frame, and real startup capability self-test. That infrastructure
-is deliberately not advertised as protection yet: C2A3 must route actual Pipe
-and PTY user commands through it and move running/applied evidence publication
-behind the confirmation. The C1 tables and guarantees below therefore remain
-the current public contract without inference or downgrade.
+On macOS, the native Supervisor advertises protected capability only after a
+real startup self-test through the exact system `/usr/bin/sandbox-exec` proves
+an allowed read, denied write, denied network operation, and sandbox-internal
+confirmation. Protected Pipe and PTY jobs then use that same builder and a
+two-way launch handshake. There is no inference from the host name and no
+fallback from a protected policy to unconfined execution.
 
 ## Supported profiles
 
-| Profile           | Filesystem request | Network request | C1 result                |
-| ----------------- | ------------------ | --------------- | ------------------------ |
-| `unconfined`      | unrestricted       | inherited       | supported                |
-| `read-only`       | read only          | denied          | rejected before approval |
-| `workspace-write` | workspace only     | denied          | rejected before approval |
+| Profile           | Filesystem request | Network request | Verified macOS native | Other current backends   |
+| ----------------- | ------------------ | --------------- | --------------------- | ------------------------ |
+| `unconfined`      | unrestricted       | inherited       | supported             | supported                |
+| `read-only`       | read only          | denied          | supported             | rejected before approval |
+| `workspace-write` | workspace only     | denied          | supported             | rejected before approval |
 
 `KODA_EXECUTION_PROFILE` is read and validated when `KodaApplication` is
 constructed. A typed `KodaApplicationOptions.executionPolicy` takes precedence
@@ -31,43 +31,49 @@ plugins, MCP tools, and later environment mutation cannot change the captured
 selection. The canonical workspace root is added only after trusted workspace
 opening.
 
-The protected profiles are intentionally unavailable in C1 because none of the
-four current backends can enforce their filesystem and network requirements.
-Koda returns `EXECUTION_POLICY_UNAVAILABLE` before approval, grant matching,
-native job creation, or user-process launch. It never silently downgrades a
-protected profile to `unconfined`.
+If the macOS self-test fails, or the selected backend is TypeScript, Linux, or
+Windows, Koda returns `EXECUTION_POLICY_UNAVAILABLE` before approval, grant
+matching, native job creation, or user-process launch. It never silently
+downgrades a protected profile to `unconfined`.
 
 ## Backend guarantees
 
-| Backend              | Process-tree supervision | Durable across supervisor restart | Filesystem/network/process sandbox |
-| -------------------- | ------------------------ | --------------------------------- | ---------------------------------- |
-| `typescript_posix`   | POSIX process group      | no                                | none                               |
-| `typescript_windows` | `taskkill` tree fallback | no                                | none                               |
-| `native_posix`       | POSIX process group      | yes                               | none                               |
-| `native_windows`     | Windows Job Object       | yes                               | none                               |
+| Platform/backend              | Process-tree supervision | Durable across supervisor restart | Filesystem/network sandbox              |
+| ----------------------------- | ------------------------ | --------------------------------- | --------------------------------------- |
+| macOS `native_posix` verified | POSIX process group      | yes                               | macOS Seatbelt for requested dimensions |
+| Linux `native_posix`          | POSIX process group      | yes                               | none                                    |
+| `native_windows`              | Windows Job Object       | yes                               | none                                    |
+| `typescript_posix`            | POSIX process group      | no                                | none                                    |
+| `typescript_windows`          | `taskkill` tree fallback | no                                | none                                    |
 
 All backends launch an explicit argument vector without reconstructing a shell
 string and apply Koda's allowlisted environment. Process supervision supports
 timeouts, cancellation, and tree cleanup; it is not filesystem, network, or
-process-namespace isolation. An approved executable or repository script still
-runs with the current operating-system user's authority.
+process-namespace isolation. Seatbelt process inheritance is likewise not
+reported as a process namespace. `process_isolation = required` remains
+unsupported.
 
 Koda does not currently guarantee read privacy, secret output redaction,
-resource quotas, domain-level network policy, temporary-directory isolation, or
-protection from an already-approved malicious executable. Those remain later
-Phase 4C work.
+resource quotas, domain/port-level network policy, or sandboxing for providers,
+MCP servers, and plugins. Those remain later Phase 4C work.
 
 ## Evidence lifecycle
 
 Preparation creates an `admission` snapshot containing the frozen policy,
-backend, capability digest, and requested dimensions. The approval preview
-shows that snapshot's contract and states `OS sandbox: none`. Immediately
-before execution Koda revalidates the workspace identity, policy digest,
-backend, and capability digest. Any change fails with
-`EXECUTION_POLICY_CHANGED` before launch.
+backend, capability digest, requested dimensions, and expected mechanism. The
+approval preview still distinguishes expected protection from applied
+evidence. Immediately before execution Koda revalidates the workspace identity,
+policy digest, backend, and capability digest. Any change fails before launch.
 
-After process-tree ownership and explicit environment setup succeed, Koda
-records a `launch_setup` snapshot. Current command results,
+For protected macOS execution, the sandbox bootstrap first confirms its PID
+from inside Seatbelt and then waits on a second release pipe. The Worker checks
+the retained process-start identity, records `launch_setup`, publishes
+`running`, and only then permits user `exec`. A failure before release creates
+no applied filesystem/network evidence and cannot run user code. For
+`workspace_write`, `TMPDIR`, `TMP`, and `TEMP` point to one private mode-0700
+per-job scratch directory; its lifecycle follows the durable job.
+
+Current command results,
 `process.started` events, native job state, PTY process summaries, app-server
 v15 responses, CLI diagnostics, and TUI process views retain or display this
 evidence. A failed launch never upgrades admission evidence to applied launch
@@ -98,12 +104,17 @@ command implicitly.
 
 ## Acceptance and CI
 
-The Linux full-suite job runs application, TypeScript fallback, native Pipe and
-PTY, negative-launch, restart, and real v1→v2 compatibility tests. The macOS
-native job additionally requires the real Seatbelt startup probe while still
-checking that public capability remains C1, then runs the POSIX native and real
-legacy matrices. The Windows native job runs Job Object/ConPTY tests plus the
-shared policy-negative and retained evidence suite.
+Local C2A3 acceptance runs real macOS protected Pipe and PTY commands, proves
+read-only and network-denied side effects, validates workspace/scratch-only
+writes, checks v2 applied evidence, and kills the Worker between sandbox
+confirmation and user release to prove that no user side effect occurs. C2A4
+will add the exhaustive protected background/attachment/resize/restart and
+client reporting matrices.
+
+The Linux full-suite job remains the shared regression gate. The macOS native
+job must require the real Seatbelt probe and protected matrices; the Windows
+native job remains a Job Object/ConPTY and shared-contract regression gate, not
+a Windows sandbox acceptance claim.
 
 The legacy executable is built from pinned commit `3aa84ee`, whose public
 executor protocol is version 1. The fixture is created outside the working
@@ -119,5 +130,6 @@ Local results do not substitute for a platform result. Implementation commit
 `4f8f4e9` passed the Linux `verify`, macOS `macos-native`, and Windows
 `windows-native` jobs in
 [GitHub Actions run 33294887963](https://github.com/ronaldo123321/koda/actions/runs/33294887963).
-That same-commit result closes Phase 4C1. It does not change the guarantee
-matrix above: every current backend still reports no Koda-enforced OS sandbox.
+That same-commit result closes Phase 4C1. Phase 4C2A is not closed until C2A4
+passes the revised macOS job and the unchanged Linux and Windows regression
+gates on the same commit.

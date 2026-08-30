@@ -9,6 +9,7 @@ import {
   realpath,
   rename,
   rm,
+  writeFile,
 } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
@@ -63,9 +64,9 @@ afterEach(async () => {
   }
 });
 
-describe("Phase 4C1B native admission and evidence", () => {
+describe("Phase 4C2A native admission and evidence", () => {
   it.runIf(process.platform === "darwin")(
-    "verifies the real macOS Seatbelt self-test while keeping public capability at C1",
+    "advertises v2 only after the real macOS Seatbelt self-test succeeds",
     async () => {
       const fixture = await setup();
       const previous = process.env.KODA_REQUIRE_MACOS_SEATBELT;
@@ -82,26 +83,30 @@ describe("Phase 4C1B native admission and evidence", () => {
         protocol_version: 3,
         platform: "macos",
         execution_security: {
-          schema_version: 1,
+          schema_version: 2,
           backend: "native_posix",
           filesystem: {
-            supported: ["unrestricted"],
-            mechanism: "none",
+            supported: ["unrestricted", "read_only", "workspace_write"],
+            mechanism: "macos_seatbelt",
           },
         },
       });
     },
   );
 
-  it("reports native protocol v3 with C1 security until C2A3 and retains it through restart and idempotency", async () => {
+  it("retains the active platform security contract through restart and idempotency", async () => {
     const fixture = await setup();
     const client = await open(fixture);
     const hello = await client.hello();
     expect(hello.protocol_version).toBe(3);
-    expect(hello.execution_security.filesystem).toEqual({
-      supported: ["unrestricted"],
-      mechanism: "none",
-    });
+    expect(hello.execution_security.filesystem).toEqual(
+      process.platform === "darwin"
+        ? {
+            supported: ["unrestricted", "read_only", "workspace_write"],
+            mechanism: "macos_seatbelt",
+          }
+        : { supported: ["unrestricted"], mechanism: "none" },
+    );
     const input = await inputFor(fixture.root, "console.log('policy-ok')");
     const started = await client.start(input);
     const terminal = await waitTerminal(client, started.job_id);
@@ -148,12 +153,16 @@ describe("Phase 4C1B native admission and evidence", () => {
         fixture.root,
         `require('fs').writeFileSync(${JSON.stringify(marker)},'bad')`,
       );
-      for (const restriction of [
-        { filesystem: "read_only" },
-        { filesystem: "workspace_write" },
-        { network: "deny" },
-        { process_isolation: "required" },
-      ] as const) {
+      const restrictions =
+        process.platform === "darwin"
+          ? ([{ process_isolation: "required" }] as const)
+          : ([
+              { filesystem: "read_only" },
+              { filesystem: "workspace_write" },
+              { network: "deny" },
+              { process_isolation: "required" },
+            ] as const);
+      for (const restriction of restrictions) {
         const denied = {
           ...input,
           requestId: randomUUID(),
@@ -172,6 +181,149 @@ describe("Phase 4C1B native admission and evidence", () => {
       }
       expect((await client.list()).jobs).toEqual([]);
       expect(await readdir(join(fixture.root, "state", "jobs"))).toEqual([]);
+      await expect(access(marker)).rejects.toMatchObject({ code: "ENOENT" });
+    },
+  );
+
+  it.runIf(process.platform === "darwin").each(["pipe", "pty"] as const)(
+    "enforces read-only filesystem and denied network before a %s command runs",
+    async (mode) => {
+      const fixture = await setup();
+      const client = await open(fixture);
+      const allowed = join(fixture.root, "allowed.txt");
+      const marker = join(fixture.root, `forbidden-${mode}`);
+      await writeFile(allowed, "allowed", "utf8");
+      const code = [
+        "const fs=require('node:fs'),net=require('node:net');",
+        `if(fs.readFileSync(${JSON.stringify(allowed)},'utf8')!=='allowed')process.exit(10);`,
+        "let denied=0;",
+        `try{fs.writeFileSync(${JSON.stringify(marker)},'bad')}catch(error){if(error.code==='EPERM'||error.code==='EACCES')denied+=1;else process.exit(11)}`,
+        "const server=net.createServer();",
+        "server.once('error',(error)=>{if(error.code==='EPERM'||error.code==='EACCES')denied+=1;else process.exit(12);process.exit(denied===2?0:13)});",
+        "server.listen(0,'127.0.0.1',()=>server.close(()=>process.exit(14)));",
+      ].join("");
+      const input = await inputFor(fixture.root, code);
+      input.policy = {
+        ...input.policy!,
+        filesystem: "read_only",
+        network: "deny",
+      };
+      const started =
+        mode === "pipe"
+          ? await client.start(input)
+          : await client.startPty({
+              ...input,
+              rows: 24,
+              cols: 80,
+              outputLimitBytes: 65_536,
+            });
+      const terminal = await waitTerminal(client, started.job_id);
+      expect(terminal.failure).toBeNull();
+      expect(terminal).toMatchObject({
+        state: "exited",
+        exit_code: 0,
+        security: {
+          schema_version: 2,
+          stage: "launch_setup",
+          filesystem: {
+            status: "applied",
+            mechanism: "macos_seatbelt",
+            layer: "os",
+          },
+          network: {
+            status: "applied",
+            mechanism: "macos_seatbelt",
+            layer: "os",
+          },
+        },
+      });
+      await expect(access(marker)).rejects.toMatchObject({ code: "ENOENT" });
+    },
+  );
+
+  it.runIf(process.platform === "darwin")(
+    "limits workspace-write to the workspace and private per-job scratch",
+    async () => {
+      const fixture = await setup();
+      const workspace = join(fixture.root, "workspace");
+      await mkdir(workspace);
+      const workspaceMarker = join(workspace, "workspace-write.txt");
+      const outsideMarker = join(fixture.root, "outside-write.txt");
+      const scratchName = "scratch-write.txt";
+      const client = await open(fixture);
+      const code = [
+        "const fs=require('node:fs'),path=require('node:path');",
+        "if(!process.env.TMPDIR||process.env.TMPDIR!==process.env.TMP||process.env.TMPDIR!==process.env.TEMP)process.exit(20);",
+        `fs.writeFileSync(${JSON.stringify(workspaceMarker)},'workspace');`,
+        `fs.writeFileSync(path.join(process.env.TMPDIR,${JSON.stringify(scratchName)}),'scratch');`,
+        `try{fs.writeFileSync(${JSON.stringify(outsideMarker)},'bad');process.exit(21)}catch(error){if(error.code!=='EPERM'&&error.code!=='EACCES')process.exit(22)}`,
+      ].join("");
+      const input = await inputFor(workspace, code);
+      input.policy = {
+        ...input.policy!,
+        filesystem: "workspace_write",
+        network: "deny",
+      };
+      const started = await client.start(input);
+      const terminal = await waitTerminal(client, started.job_id);
+      expect(terminal).toMatchObject({
+        state: "exited",
+        exit_code: 0,
+        failure: null,
+        security: {
+          schema_version: 2,
+          stage: "launch_setup",
+          filesystem: {
+            status: "applied",
+            mechanism: "macos_seatbelt",
+            layer: "os",
+          },
+          network: {
+            status: "applied",
+            mechanism: "macos_seatbelt",
+            layer: "os",
+          },
+        },
+      });
+      const manifest = await onlyManifest(fixture.root);
+      await expect(readFile(workspaceMarker, "utf8")).resolves.toBe(
+        "workspace",
+      );
+      await expect(
+        readFile(join(manifest.directory, "scratch", scratchName), "utf8"),
+      ).resolves.toBe("scratch");
+      await expect(access(outsideMarker)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    },
+  );
+
+  it.runIf(process.platform === "darwin")(
+    "keeps protected user code gated when the Worker dies after sandbox confirmation",
+    async () => {
+      const fixture = await setup();
+      const client = await open(fixture, "after_sandbox_confirmation");
+      const marker = join(fixture.root, "confirmed-but-not-released");
+      const input = await inputFor(
+        fixture.root,
+        `require('fs').writeFileSync(${JSON.stringify(marker)},'bad')`,
+      );
+      input.policy = {
+        ...input.policy!,
+        filesystem: "workspace_write",
+        network: "deny",
+      };
+      const started = await client.start(input);
+      const terminal = await waitTerminal(client, started.job_id);
+      expect(terminal).toMatchObject({
+        state: "termination_uncertain",
+        security: {
+          schema_version: 2,
+          stage: "admission",
+          filesystem: { status: "not_applied" },
+          network: { status: "not_applied" },
+        },
+      });
       await expect(access(marker)).rejects.toMatchObject({ code: "ENOENT" });
     },
   );

@@ -19,8 +19,8 @@ const WORKSPACE_PARAMETER: &str = "WORKSPACE_ROOT";
 const SCRATCH_PARAMETER: &str = "SCRATCH_ROOT";
 const CONFIRMATION_MARKER: &[u8; 16] = b"KODA-SEATBELT-V1";
 const CONFIRMATION_FRAME_BYTES: usize = 20;
-#[cfg(target_os = "macos")]
-const PROBE_CONFIRMATION_FD: i32 = 3;
+pub const SANDBOX_CONFIRMATION_FD: i32 = 4;
+pub const SANDBOX_RELEASE_FD: i32 = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SeatbeltInvocation {
@@ -70,7 +70,7 @@ pub fn build_invocation(
     policy.validate()?;
     if policy.process_isolation != ProcessIsolationPolicy::Inherit
         || policy.environment != EnvironmentPolicy::Explicit
-        || policy.filesystem == FilesystemPolicy::Unrestricted
+        || !requires_seatbelt(policy)
     {
         return Err(ExecutionPolicyError::ExecutionPolicyUnavailable);
     }
@@ -81,7 +81,7 @@ pub fn build_invocation(
     }
 
     let scratch = match (policy.filesystem, scratch_root) {
-        (FilesystemPolicy::ReadOnly, None) => None,
+        (FilesystemPolicy::Unrestricted | FilesystemPolicy::ReadOnly, None) => None,
         (FilesystemPolicy::WorkspaceWrite, Some(path)) => {
             let canonical = validate_private_empty_directory(path)?;
             if canonical == workspace
@@ -109,6 +109,8 @@ pub fn build_invocation(
              (deny file-write-unlink (literal (param \"WORKSPACE_ROOT\")))\n\
              (deny file-write-unlink (literal (param \"SCRATCH_ROOT\")))\n",
         );
+    } else if policy.filesystem == FilesystemPolicy::Unrestricted {
+        profile.push_str("; Filesystem access was explicitly unrestricted.\n(allow file-write*)\n");
     }
     if policy.network == NetworkPolicy::Inherit {
         profile.push_str("; Network access was explicitly inherited.\n(allow network*)\n");
@@ -129,6 +131,10 @@ pub fn build_invocation(
         profile,
         parameters,
     })
+}
+
+pub fn requires_seatbelt(policy: &ExecutionPolicy) -> bool {
+    policy.filesystem != FilesystemPolicy::Unrestricted || policy.network != NetworkPolicy::Inherit
 }
 
 fn validate_canonical_directory(path: &Path) -> Result<PathBuf, ExecutionPolicyError> {
@@ -235,6 +241,20 @@ pub fn probe(binary_path: &Path) -> MacosSeatbeltAvailability {
     probe_platform(binary_path)
 }
 
+pub fn launch_available() -> bool {
+    launch_available_platform()
+}
+
+#[cfg(target_os = "macos")]
+fn launch_available_platform() -> bool {
+    validate_system_sandbox_executable(Path::new(SANDBOX_EXEC_PATH)).is_ok()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn launch_available_platform() -> bool {
+    false
+}
+
 #[cfg(not(target_os = "macos"))]
 fn probe_platform(_binary_path: &Path) -> MacosSeatbeltAvailability {
     MacosSeatbeltAvailability::Unavailable(SeatbeltUnavailableReason::UnsupportedPlatform)
@@ -270,22 +290,62 @@ pub fn parse_confirmation_frame(bytes: &[u8]) -> io::Result<u32> {
 }
 
 #[cfg(unix)]
-pub fn run_sandbox_bootstrap(confirmation_fd: i32, argv: Vec<String>) -> io::Result<()> {
+pub fn run_sandbox_bootstrap(
+    confirmation_fd: i32,
+    release_fd: i32,
+    argv: Vec<String>,
+) -> io::Result<()> {
     use std::fs::File;
-    use std::io::Write;
+    use std::io::{Read, Write};
     use std::os::fd::FromRawFd;
     use std::os::unix::process::CommandExt;
     use std::process::Command;
 
-    if confirmation_fd < 3 || argv.is_empty() {
+    if confirmation_fd < 3 || release_fd < 3 || confirmation_fd == release_fd || argv.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "sandbox bootstrap arguments are invalid",
         ));
     }
+    validate_pipe_descriptor(confirmation_fd)?;
+    validate_pipe_descriptor(release_fd)?;
+    // SAFETY: this bootstrap exclusively owns the inherited descriptor.
+    let mut confirmation = unsafe { File::from_raw_fd(confirmation_fd) };
+    // SAFETY: this bootstrap exclusively owns the distinct inherited descriptor.
+    let mut release = unsafe { File::from_raw_fd(release_fd) };
+    confirmation.write_all(&confirmation_frame(std::process::id()))?;
+    drop(confirmation);
+    let mut byte = [0u8; 1];
+    release.read_exact(&mut byte)?;
+    if byte[0] != 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "sandbox release gate value is invalid",
+        ));
+    }
+    drop(release);
+
+    let error = CommandExt::exec(Command::new(&argv[0]).args(&argv[1..]));
+    Err(error)
+}
+
+#[cfg(windows)]
+pub fn run_sandbox_bootstrap(
+    _confirmation_fd: i32,
+    _release_fd: i32,
+    _argv: Vec<String>,
+) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "macOS sandbox bootstrap is unavailable",
+    ))
+}
+
+#[cfg(unix)]
+fn validate_pipe_descriptor(descriptor: i32) -> io::Result<()> {
     let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
     // SAFETY: fstat initializes `stat` for a valid descriptor and does not retain pointers.
-    if unsafe { libc::fstat(confirmation_fd, stat.as_mut_ptr()) } != 0 {
+    if unsafe { libc::fstat(descriptor, stat.as_mut_ptr()) } != 0 {
         return Err(io::Error::last_os_error());
     }
     // SAFETY: fstat succeeded and initialized the value.
@@ -293,24 +353,10 @@ pub fn run_sandbox_bootstrap(confirmation_fd: i32, argv: Vec<String>) -> io::Res
     if stat.st_mode & libc::S_IFMT != libc::S_IFIFO {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "sandbox confirmation descriptor is not a pipe",
+            "sandbox bootstrap descriptor is not a pipe",
         ));
     }
-    // SAFETY: this bootstrap exclusively owns the inherited descriptor.
-    let mut confirmation = unsafe { File::from_raw_fd(confirmation_fd) };
-    confirmation.write_all(&confirmation_frame(std::process::id()))?;
-    drop(confirmation);
-
-    let error = CommandExt::exec(Command::new(&argv[0]).args(&argv[1..]));
-    Err(error)
-}
-
-#[cfg(windows)]
-pub fn run_sandbox_bootstrap(_confirmation_fd: i32, _argv: Vec<String>) -> io::Result<()> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "macOS sandbox bootstrap is unavailable",
-    ))
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -368,7 +414,9 @@ fn run_probe(binary_path: &Path) -> Result<(), SeatbeltUnavailableReason> {
         binary.clone().into_os_string(),
         OsString::from("sandbox-bootstrap"),
         OsString::from("--confirm-fd"),
-        OsString::from(PROBE_CONFIRMATION_FD.to_string()),
+        OsString::from(SANDBOX_CONFIRMATION_FD.to_string()),
+        OsString::from("--release-fd"),
+        OsString::from(SANDBOX_RELEASE_FD.to_string()),
         OsString::from("--"),
         binary.clone().into_os_string(),
         OsString::from("seatbelt-probe"),
@@ -383,8 +431,12 @@ fn run_probe(binary_path: &Path) -> Result<(), SeatbeltUnavailableReason> {
     let (confirmation_read, confirmation_write) =
         crate::platform::bootstrap::create_bootstrap_channel()
             .map_err(|_| SeatbeltUnavailableReason::ProbeSetupFailed)?;
-    let read_fd = confirmation_read.as_raw_fd();
-    let write_fd = confirmation_write.as_raw_fd();
+    let (release_read, release_write) = crate::platform::bootstrap::create_bootstrap_channel()
+        .map_err(|_| SeatbeltUnavailableReason::ProbeSetupFailed)?;
+    let confirmation_read_fd = confirmation_read.as_raw_fd();
+    let confirmation_write_fd = confirmation_write.as_raw_fd();
+    let release_read_fd = release_read.as_raw_fd();
+    let release_write_fd = release_write.as_raw_fd();
 
     let mut command = Command::new(&argv[0]);
     command
@@ -395,18 +447,34 @@ fn run_probe(binary_path: &Path) -> Result<(), SeatbeltUnavailableReason> {
     // SAFETY: the closure uses only async-signal-safe descriptor operations before exec.
     unsafe {
         command.pre_exec(move || {
-            if libc::dup2(write_fd, PROBE_CONFIRMATION_FD) < 0 {
+            // Preserve both sources before assigning fixed low descriptors so
+            // one target can never clobber the other pipe's source.
+            let confirmation_copy = libc::fcntl(confirmation_write_fd, libc::F_DUPFD_CLOEXEC, 10);
+            let release_copy = libc::fcntl(release_read_fd, libc::F_DUPFD_CLOEXEC, 10);
+            if confirmation_copy < 0
+                || release_copy < 0
+                || libc::dup2(confirmation_copy, SANDBOX_CONFIRMATION_FD) < 0
+                || libc::dup2(release_copy, SANDBOX_RELEASE_FD) < 0
+            {
                 return Err(io::Error::last_os_error());
             }
-            if libc::fcntl(PROBE_CONFIRMATION_FD, libc::F_SETFD, 0) < 0 {
+            if libc::fcntl(SANDBOX_CONFIRMATION_FD, libc::F_SETFD, 0) < 0
+                || libc::fcntl(SANDBOX_RELEASE_FD, libc::F_SETFD, 0) < 0
+            {
                 return Err(io::Error::last_os_error());
             }
-            if read_fd != PROBE_CONFIRMATION_FD {
-                libc::close(read_fd);
+            for descriptor in [
+                confirmation_read_fd,
+                confirmation_write_fd,
+                release_read_fd,
+                release_write_fd,
+            ] {
+                if descriptor != SANDBOX_CONFIRMATION_FD && descriptor != SANDBOX_RELEASE_FD {
+                    libc::close(descriptor);
+                }
             }
-            if write_fd != PROBE_CONFIRMATION_FD {
-                libc::close(write_fd);
-            }
+            libc::close(confirmation_copy);
+            libc::close(release_copy);
             Ok(())
         });
     }
@@ -414,6 +482,7 @@ fn run_probe(binary_path: &Path) -> Result<(), SeatbeltUnavailableReason> {
         .spawn()
         .map_err(|_| SeatbeltUnavailableReason::ProfileRejected)?;
     drop(confirmation_write);
+    drop(release_read);
 
     let confirmation = match read_exact_with_timeout(
         confirmation_read.as_raw_fd(),
@@ -432,6 +501,11 @@ fn run_probe(binary_path: &Path) -> Result<(), SeatbeltUnavailableReason> {
         let _ = child.wait();
         return Err(SeatbeltUnavailableReason::ConfirmationFailed);
     }
+    crate::platform::bootstrap::release_gate(release_write).map_err(|_| {
+        let _ = child.kill();
+        let _ = child.wait();
+        SeatbeltUnavailableReason::ConfirmationFailed
+    })?;
 
     let deadline = Instant::now() + Duration::from_secs(5);
     let status = loop {
@@ -540,6 +614,37 @@ fn read_exact_with_timeout(
         offset += read as usize;
     }
     Ok(bytes)
+}
+
+#[cfg(target_os = "macos")]
+pub fn wait_for_confirmation(
+    read: crate::platform::bootstrap::BootstrapRead,
+    expected_pid: u32,
+    timeout: std::time::Duration,
+) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    let bytes = read_exact_with_timeout(read.as_raw_fd(), CONFIRMATION_FRAME_BYTES, timeout)?;
+    let actual_pid = parse_confirmation_frame(&bytes)?;
+    if actual_pid != expected_pid {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "sandbox confirmation PID does not match the owned process",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn wait_for_confirmation(
+    _read: crate::platform::bootstrap::BootstrapRead,
+    _expected_pid: u32,
+    _timeout: std::time::Duration,
+) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "macOS sandbox confirmation is unavailable",
+    ))
 }
 
 #[cfg(target_os = "macos")]
@@ -669,7 +774,8 @@ mod tests {
 
     #[test]
     fn bootstrap_rejects_standard_descriptors_before_exec() {
-        assert!(run_sandbox_bootstrap(2, vec!["/usr/bin/true".into()]).is_err());
+        assert!(run_sandbox_bootstrap(2, 3, vec!["/usr/bin/true".into()]).is_err());
+        assert!(run_sandbox_bootstrap(3, 3, vec!["/usr/bin/true".into()]).is_err());
     }
 
     #[test]
@@ -732,6 +838,24 @@ mod tests {
         assert!(invocation.profile().contains("(allow network*)"));
         assert_eq!(invocation.parameters().len(), 2);
         assert!(invocation.profile().len() <= MAX_PROFILE_BYTES);
+    }
+
+    #[test]
+    fn network_only_profile_preserves_unrestricted_filesystem() {
+        let workspace = TestDirectory::new("network-only");
+        let invocation = build_invocation(
+            &policy(
+                &workspace.0,
+                FilesystemPolicy::Unrestricted,
+                NetworkPolicy::Deny,
+            ),
+            &workspace.0,
+            None,
+        )
+        .unwrap();
+        assert!(invocation.profile().contains("(allow file-write*)"));
+        assert!(!invocation.profile().contains("(allow network*)"));
+        assert_eq!(invocation.parameters().len(), 1);
     }
 
     #[test]

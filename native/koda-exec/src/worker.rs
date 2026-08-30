@@ -19,6 +19,10 @@ use tokio::time::{sleep, timeout};
 
 use crate::attachment::AttachmentRegistry;
 use crate::durable::{JobLock, JobRecord, JobStore, StoredJobState, sha256_hex};
+use crate::execution_policy::{
+    ExecutionCapabilities, ExecutionSecuritySnapshot, FilesystemPolicy,
+    macos_seatbelt_execution_capabilities,
+};
 use crate::execution_security;
 use crate::framing::{read_json_frame, write_json_frame};
 use crate::internal_protocol::{
@@ -29,8 +33,8 @@ use crate::internal_protocol::{
 use crate::platform::bootstrap::{BootstrapHandle, read_inherited_secret};
 #[cfg(unix)]
 use crate::platform::bootstrap::{
-    await_gate_and_exec, configure_pipe_command, configure_pty_command, create_bootstrap_channel,
-    raw_handle, release_gate,
+    BootstrapRead, BootstrapWrite, SandboxBootstrapChannels, await_gate_and_exec,
+    configure_pipe_command, configure_pty_command, create_bootstrap_channel, release_gate,
 };
 use crate::platform::identity::current_process_identity;
 #[cfg(windows)]
@@ -62,6 +66,8 @@ use crate::pty_output::PtyOutputStore;
 
 const OUTPUT_BUFFER_BYTES: usize = 16_384;
 const PTY_COMMAND_QUEUE_DEPTH: usize = 64;
+#[cfg(unix)]
+const COMMAND_GATE_FD: RawFd = 3;
 #[cfg(windows)]
 const WINDOWS_PTY_FAULT_MARKER: &[u8] = b"RETAINED-BEFORE-WORKER-LOSS";
 
@@ -90,6 +96,7 @@ pub async fn run_worker(
             format!("Worker cannot start from state {:?}.", current.state),
         ));
     }
+    let execution_capabilities = worker_execution_capabilities(record.manifest.security.as_ref());
     let admission = if record.manifest.format_version == 1 {
         Err(ProtocolError::new(
             "INVALID_EXECUTION_POLICY",
@@ -102,7 +109,11 @@ pub async fn run_worker(
             .as_ref()
             .ok_or_else(execution_security::corrupt)
             .and_then(|security| {
-                execution_security::validate_worker_admission(&record.manifest.start, security)
+                execution_security::validate_worker_admission_with_capabilities(
+                    &record.manifest.start,
+                    security,
+                    &execution_capabilities,
+                )
             })
     };
     if let Err(error) = admission {
@@ -120,7 +131,12 @@ pub async fn run_worker(
     let listener = bind_local_endpoint(&endpoint)
         .await
         .map_err(worker_socket_error)?;
-    let runtime = Arc::new(WorkerRuntime::new(record, current, token.clone())?);
+    let runtime = Arc::new(WorkerRuntime::new(
+        record,
+        current,
+        token.clone(),
+        execution_capabilities,
+    )?);
     runtime.publish_worker_ready(&worker_identity).await?;
     fault_point("after_worker_ready");
 
@@ -148,6 +164,20 @@ pub async fn run_worker(
     execution
 }
 
+fn worker_execution_capabilities(
+    retained: Option<&ExecutionSecuritySnapshot>,
+) -> ExecutionCapabilities {
+    let requires_v2 = matches!(
+        retained,
+        Some(ExecutionSecuritySnapshot::Policy(security)) if security.schema_version == 2
+    );
+    if requires_v2 && crate::macos_seatbelt::launch_available() {
+        macos_seatbelt_execution_capabilities()
+    } else {
+        execution_security::native_capabilities()
+    }
+}
+
 struct WorkerRuntime {
     record: JobRecord,
     state: Mutex<StoredJobState>,
@@ -161,6 +191,7 @@ struct WorkerRuntime {
     terminate_sender: mpsc::Sender<TerminationReason>,
     terminate_receiver: Mutex<Option<mpsc::Receiver<TerminationReason>>>,
     pty: Option<PtyRuntime>,
+    execution_capabilities: ExecutionCapabilities,
 }
 
 impl WorkerRuntime {
@@ -168,6 +199,7 @@ impl WorkerRuntime {
         record: JobRecord,
         state: StoredJobState,
         token: Vec<u8>,
+        execution_capabilities: ExecutionCapabilities,
     ) -> Result<Self, ProtocolError> {
         let (terminate_sender, terminate_receiver) = mpsc::channel(1);
         let pty = if record.manifest.start.io_mode == IoMode::Pty {
@@ -199,6 +231,7 @@ impl WorkerRuntime {
             terminate_sender,
             terminate_receiver: Mutex::new(Some(terminate_receiver)),
             pty,
+            execution_capabilities,
         })
     }
 
@@ -215,12 +248,13 @@ impl WorkerRuntime {
     async fn publish_command_starting(&self) -> Result<(), ProtocolError> {
         let mut guard = self.state.lock().await;
         let mut next = guard.clone();
-        if let Err(error) = execution_security::validate_worker_admission(
+        if let Err(error) = execution_security::validate_worker_admission_with_capabilities(
             &self.record.manifest.start,
             guard
                 .security
                 .as_ref()
                 .ok_or_else(execution_security::corrupt)?,
+            &self.execution_capabilities,
         ) {
             next.state = JobState::StartFailed;
             next.failure = Some(JobFailure {
@@ -235,17 +269,24 @@ impl WorkerRuntime {
         Ok(())
     }
 
-    async fn publish_running(&self, pid: u32, identity: String) -> Result<(), ProtocolError> {
+    async fn publish_running(
+        &self,
+        pid: u32,
+        identity: String,
+        macos_seatbelt_confirmed: bool,
+    ) -> Result<(), ProtocolError> {
         let mut guard = self.state.lock().await;
         let mut next = guard.clone();
         #[cfg(unix)]
         {
-            next.security = Some(execution_security::launch_setup(
+            next.security = Some(execution_security::launch_setup_with_capabilities(
                 &self.record.manifest.start,
                 guard
                     .security
                     .as_ref()
                     .ok_or_else(execution_security::corrupt)?,
+                &self.execution_capabilities,
+                macos_seatbelt_confirmed,
             )?);
         }
         next.state = JobState::Running;
@@ -254,6 +295,21 @@ impl WorkerRuntime {
         *guard = self.record.transition(&guard, next)?;
         #[cfg(unix)]
         fault_point("after_security_setup");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    async fn publish_command_identity(
+        &self,
+        pid: u32,
+        identity: String,
+    ) -> Result<(), ProtocolError> {
+        let mut guard = self.state.lock().await;
+        let mut next = guard.clone();
+        next.state = JobState::CommandStarting;
+        next.command_pid = Some(pid);
+        next.command_start_identity = Some(identity);
+        *guard = self.record.transition(&guard, next)?;
         Ok(())
     }
 
@@ -870,7 +926,7 @@ async fn execute_windows_pipe_job(runtime: Arc<WorkerRuntime>) -> Result<(), Pro
         Ok(process) => process,
         Err(error) => return runtime.publish_start_failed(error).await,
     };
-    if let Err(error) = runtime.publish_running(pid, identity).await {
+    if let Err(error) = runtime.publish_running(pid, identity, false).await {
         let _ = tree.terminate(1);
         return Err(error);
     }
@@ -1084,7 +1140,7 @@ async fn execute_windows_pty_job(runtime: Arc<WorkerRuntime>) -> Result<(), Prot
             let _ = reader_failure_sender.send(error.to_string()).await;
         }
     });
-    if let Err(error) = runtime.publish_running(pid, identity).await {
+    if let Err(error) = runtime.publish_running(pid, identity, false).await {
         drop(input);
         let _ = tree.terminate(1);
         let _ = close_windows_pseudo_console(tree.clone(), Duration::from_secs(2)).await;
@@ -1483,6 +1539,344 @@ fn is_windows_terminal_eof(error: &io::Error) -> bool {
 }
 
 #[cfg(unix)]
+struct UnixLaunchPreparation {
+    argv: Vec<std::ffi::OsString>,
+    environment: std::collections::BTreeMap<String, String>,
+    sandbox: Option<UnixSandboxChannels>,
+}
+
+#[cfg(unix)]
+struct UnixSandboxChannels {
+    confirmation_read: BootstrapRead,
+    confirmation_write: BootstrapWrite,
+    release_read: BootstrapRead,
+    release_write: BootstrapWrite,
+}
+
+#[cfg(unix)]
+impl UnixSandboxChannels {
+    fn child_descriptors(&self) -> SandboxBootstrapChannels<'_> {
+        SandboxBootstrapChannels {
+            confirmation_read: &self.confirmation_read,
+            confirmation_write: &self.confirmation_write,
+            release_read: &self.release_read,
+            release_write: &self.release_write,
+            confirmation_target: crate::macos_seatbelt::SANDBOX_CONFIRMATION_FD,
+            release_target: crate::macos_seatbelt::SANDBOX_RELEASE_FD,
+        }
+    }
+
+    fn into_parent_channels(self) -> (BootstrapRead, BootstrapWrite) {
+        let Self {
+            confirmation_read,
+            confirmation_write,
+            release_read,
+            release_write,
+        } = self;
+        drop(confirmation_write);
+        drop(release_read);
+        (confirmation_read, release_write)
+    }
+}
+
+#[cfg(unix)]
+fn prepare_unix_launch(
+    runtime: &WorkerRuntime,
+    params: &crate::protocol::StartParams,
+    bootstrap: &Path,
+) -> Result<UnixLaunchPreparation, ProtocolError> {
+    let policy = params.policy.as_ref().ok_or_else(|| {
+        execution_security::policy_error(
+            crate::execution_policy::ExecutionPolicyError::InvalidExecutionPolicy,
+        )
+    })?;
+    let mut environment = params.environment.clone();
+    if !crate::macos_seatbelt::requires_seatbelt(policy) {
+        return Ok(UnixLaunchPreparation {
+            argv: params.argv.iter().map(std::ffi::OsString::from).collect(),
+            environment,
+            sandbox: None,
+        });
+    }
+    if runtime.execution_capabilities
+        != crate::execution_policy::macos_seatbelt_execution_capabilities()
+        || !crate::macos_seatbelt::launch_available()
+    {
+        return Err(execution_security::policy_error(
+            crate::execution_policy::ExecutionPolicyError::ExecutionPolicyUnavailable,
+        ));
+    }
+
+    let scratch = if policy.filesystem == FilesystemPolicy::WorkspaceWrite {
+        let path = runtime.record.scratch_path();
+        let text = path.to_str().ok_or_else(|| {
+            execution_security::policy_error(
+                crate::execution_policy::ExecutionPolicyError::InvalidExecutionPolicy,
+            )
+        })?;
+        for name in ["TMPDIR", "TMP", "TEMP"] {
+            environment.insert(name.to_owned(), text.to_owned());
+        }
+        Some(path)
+    } else {
+        None
+    };
+    let invocation = crate::macos_seatbelt::build_invocation(
+        policy,
+        Path::new(&policy.workspace_root),
+        scratch.as_deref(),
+    )
+    .map_err(execution_security::policy_error)?;
+    let mut sandbox_bootstrap = vec![
+        bootstrap.as_os_str().to_owned(),
+        std::ffi::OsString::from("sandbox-bootstrap"),
+        std::ffi::OsString::from("--confirm-fd"),
+        std::ffi::OsString::from(crate::macos_seatbelt::SANDBOX_CONFIRMATION_FD.to_string()),
+        std::ffi::OsString::from("--release-fd"),
+        std::ffi::OsString::from(crate::macos_seatbelt::SANDBOX_RELEASE_FD.to_string()),
+        std::ffi::OsString::from("--"),
+    ];
+    sandbox_bootstrap.extend(params.argv.iter().map(std::ffi::OsString::from));
+    let argv = invocation
+        .command_argv(&sandbox_bootstrap)
+        .map_err(execution_security::policy_error)?;
+    let (confirmation_read, confirmation_write) = create_bootstrap_channel().map_err(|error| {
+        ProtocolError::new(
+            "COMMAND_START_FAILED",
+            format!("Could not create the sandbox confirmation channel: {error}"),
+        )
+    })?;
+    let (release_read, release_write) = create_bootstrap_channel().map_err(|error| {
+        ProtocolError::new(
+            "COMMAND_START_FAILED",
+            format!("Could not create the sandbox release channel: {error}"),
+        )
+    })?;
+    Ok(UnixLaunchPreparation {
+        argv,
+        environment,
+        sandbox: Some(UnixSandboxChannels {
+            confirmation_read,
+            confirmation_write,
+            release_read,
+            release_write,
+        }),
+    })
+}
+
+#[cfg(unix)]
+async fn wait_for_sandbox_confirmation(read: BootstrapRead, pid: u32) -> io::Result<()> {
+    tokio::task::spawn_blocking(move || {
+        crate::macos_seatbelt::wait_for_confirmation(read, pid, Duration::from_secs(3))
+    })
+    .await
+    .map_err(|_| io::Error::other("sandbox confirmation task failed"))?
+}
+
+#[cfg(unix)]
+async fn activate_unix_launch(
+    runtime: &WorkerRuntime,
+    child: &mut Child,
+    pid: u32,
+    command_identity: String,
+    gate_write: BootstrapWrite,
+    sandbox: Option<UnixSandboxChannels>,
+    params: &crate::protocol::StartParams,
+) -> Result<(), ProtocolError> {
+    let Some(sandbox) = sandbox else {
+        if let Err(error) = runtime.publish_running(pid, command_identity, false).await {
+            drop(gate_write);
+            let _ = terminate_child(
+                child,
+                pid,
+                TerminationReason::OutputFailure,
+                params.termination_grace_ms,
+                params.termination_confirmation_ms,
+            )
+            .await;
+            return Err(error);
+        }
+        if let Err(error) = release_gate(gate_write) {
+            return fail_running_unix_launch(
+                runtime,
+                child,
+                pid,
+                params,
+                io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    format!("Could not release the command start gate: {error}"),
+                ),
+            )
+            .await;
+        }
+        return Ok(());
+    };
+
+    let (confirmation_read, sandbox_release_write) = sandbox.into_parent_channels();
+    if let Err(error) = runtime
+        .publish_command_identity(pid, command_identity.clone())
+        .await
+    {
+        drop(gate_write);
+        drop(sandbox_release_write);
+        let _ = terminate_child(
+            child,
+            pid,
+            TerminationReason::OutputFailure,
+            params.termination_grace_ms,
+            params.termination_confirmation_ms,
+        )
+        .await;
+        return Err(error);
+    }
+    if let Err(error) = release_gate(gate_write) {
+        drop(sandbox_release_write);
+        return fail_unix_launch(
+            runtime,
+            child,
+            pid,
+            params,
+            io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                format!("Could not release the sandbox start gate: {error}"),
+            ),
+        )
+        .await;
+    }
+    if let Err(error) = wait_for_sandbox_confirmation(confirmation_read, pid).await {
+        drop(sandbox_release_write);
+        return fail_unix_launch(runtime, child, pid, params, error).await;
+    }
+    let current_identity = match crate::platform::identity::process_start_identity(pid) {
+        Ok(identity) => identity,
+        Err(error) => {
+            drop(sandbox_release_write);
+            return fail_unix_launch(runtime, child, pid, params, error).await;
+        }
+    };
+    if current_identity.as_deref() != Some(command_identity.as_str()) {
+        drop(sandbox_release_write);
+        return fail_unix_launch(
+            runtime,
+            child,
+            pid,
+            params,
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "sandbox confirmation process identity changed",
+            ),
+        )
+        .await;
+    }
+    fault_point("after_sandbox_confirmation");
+    if let Err(error) = runtime.publish_running(pid, command_identity, true).await {
+        drop(sandbox_release_write);
+        let _ = terminate_child(
+            child,
+            pid,
+            TerminationReason::OutputFailure,
+            params.termination_grace_ms,
+            params.termination_confirmation_ms,
+        )
+        .await;
+        return Err(error);
+    }
+    if let Err(error) = release_gate(sandbox_release_write) {
+        return fail_running_unix_launch(
+            runtime,
+            child,
+            pid,
+            params,
+            io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                format!("Could not release the sandboxed command: {error}"),
+            ),
+        )
+        .await;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn fail_unix_launch(
+    runtime: &WorkerRuntime,
+    child: &mut Child,
+    pid: u32,
+    params: &crate::protocol::StartParams,
+    error: io::Error,
+) -> Result<(), ProtocolError> {
+    let failure_message = format!("Command could not start: {error}");
+    let termination = terminate_child(
+        child,
+        pid,
+        TerminationReason::OutputFailure,
+        params.termination_grace_ms,
+        params.termination_confirmation_ms,
+    )
+    .await;
+    if termination.snapshot.outcome == "uncertain" {
+        runtime
+            .publish_terminal(
+                JobState::TerminationUncertain,
+                termination.status,
+                false,
+                Some(termination.snapshot),
+                Some(JobFailure {
+                    code: "COMMAND_START_FAILED".to_owned(),
+                    message: failure_message,
+                }),
+            )
+            .await?;
+    } else {
+        runtime.publish_start_failed(error).await?;
+    }
+    Err(ProtocolError::new(
+        "COMMAND_START_FAILED",
+        "The command launch could not be validated before user code was released.",
+    ))
+}
+
+#[cfg(unix)]
+async fn fail_running_unix_launch(
+    runtime: &WorkerRuntime,
+    child: &mut Child,
+    pid: u32,
+    params: &crate::protocol::StartParams,
+    error: io::Error,
+) -> Result<(), ProtocolError> {
+    let failure_message = error.to_string();
+    let termination = terminate_child(
+        child,
+        pid,
+        TerminationReason::OutputFailure,
+        params.termination_grace_ms,
+        params.termination_confirmation_ms,
+    )
+    .await;
+    let state = if termination.snapshot.outcome == "uncertain" {
+        JobState::TerminationUncertain
+    } else {
+        JobState::Exited
+    };
+    runtime
+        .publish_terminal(
+            state,
+            termination.status,
+            false,
+            Some(termination.snapshot),
+            Some(JobFailure {
+                code: "COMMAND_START_FAILED".to_owned(),
+                message: failure_message,
+            }),
+        )
+        .await?;
+    Err(ProtocolError::new(
+        "COMMAND_START_FAILED",
+        "The command start gate could not be released.",
+    ))
+}
+
+#[cfg(unix)]
 async fn execute_pty_job(runtime: Arc<WorkerRuntime>) -> Result<(), ProtocolError> {
     runtime.publish_command_starting().await?;
     fault_point("after_command_starting");
@@ -1503,29 +1897,42 @@ async fn execute_pty_job(runtime: Arc<WorkerRuntime>) -> Result<(), ProtocolErro
             format!("Could not create the command start gate: {error}"),
         )
     })?;
-    let gate_read_fd = raw_handle(&gate_read);
     let bootstrap = std::env::current_exe().map_err(|error| {
         ProtocolError::new(
             "COMMAND_START_FAILED",
             format!("Could not locate the command bootstrap: {error}"),
         )
     })?;
-    let mut command = Command::new(bootstrap);
+    let launch = prepare_unix_launch(&runtime, &params, &bootstrap)?;
+    let UnixLaunchPreparation {
+        argv,
+        environment,
+        sandbox,
+    } = launch;
+    let mut command = Command::new(&bootstrap);
     command
         .arg("command-bootstrap")
         .arg("--gate-fd")
-        .arg(gate_read_fd.to_string())
+        .arg(COMMAND_GATE_FD.to_string())
         .arg("--")
-        .args(&params.argv)
+        .args(&argv)
         .current_dir(&params.cwd)
         .env_clear()
-        .envs(&params.environment)
+        .envs(&environment)
         .env("TERM", &pty_config.term)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .kill_on_drop(false);
-    configure_pty_command(&mut command, &gate_read, &gate_write, &master, &slave);
+    configure_pty_command(
+        &mut command,
+        &gate_read,
+        &gate_write,
+        &master,
+        &slave,
+        COMMAND_GATE_FD,
+        sandbox.as_ref().map(UnixSandboxChannels::child_descriptors),
+    );
 
     let mut child = match command.spawn() {
         Ok(child) => child,
@@ -1539,41 +1946,48 @@ async fn execute_pty_job(runtime: Arc<WorkerRuntime>) -> Result<(), ProtocolErro
             .publish_start_failed(io::Error::other("operating system returned no process ID"))
             .await;
     };
-    let command_identity = crate::platform::identity::process_start_identity(pid)
-        .map_err(identity_error)?
-        .ok_or_else(|| ProtocolError::new("COMMAND_START_FAILED", "Process identity vanished."))?;
-    let reader = duplicate_terminal(&master).map_err(|error| {
-        ProtocolError::new(
-            "COMMAND_START_FAILED",
-            format!("Could not duplicate the PTY master: {error}"),
-        )
-    })?;
-    if let Err(error) = runtime.publish_running(pid, command_identity).await {
-        drop(gate_write);
-        let _ = terminate_child(
-            &mut child,
-            pid,
-            TerminationReason::OutputFailure,
-            params.termination_grace_ms,
-            params.termination_confirmation_ms,
-        )
-        .await;
-        return Err(error);
-    }
-    if let Err(error) = release_gate(gate_write) {
-        let _ = terminate_child(
-            &mut child,
-            pid,
-            TerminationReason::OutputFailure,
-            params.termination_grace_ms,
-            params.termination_confirmation_ms,
-        )
-        .await;
-        return Err(ProtocolError::new(
-            "COMMAND_START_FAILED",
-            format!("Could not release the command start gate: {error}"),
-        ));
-    }
+    let command_identity = match crate::platform::identity::process_start_identity(pid) {
+        Ok(Some(identity)) => identity,
+        Ok(None) => {
+            return fail_unix_launch(
+                &runtime,
+                &mut child,
+                pid,
+                &params,
+                io::Error::new(io::ErrorKind::NotFound, "Process identity vanished"),
+            )
+            .await;
+        }
+        Err(error) => {
+            return fail_unix_launch(&runtime, &mut child, pid, &params, error).await;
+        }
+    };
+    let reader = match duplicate_terminal(&master) {
+        Ok(reader) => reader,
+        Err(error) => {
+            return fail_unix_launch(
+                &runtime,
+                &mut child,
+                pid,
+                &params,
+                io::Error::new(
+                    error.kind(),
+                    format!("Could not duplicate the PTY master: {error}"),
+                ),
+            )
+            .await;
+        }
+    };
+    activate_unix_launch(
+        &runtime,
+        &mut child,
+        pid,
+        command_identity,
+        gate_write,
+        sandbox,
+        &params,
+    )
+    .await?;
     fault_point("after_running");
 
     let (output_failure_sender, mut output_failure_receiver) = mpsc::channel(2);
@@ -1809,21 +2223,33 @@ async fn execute_pipe_job(runtime: Arc<WorkerRuntime>) -> Result<(), ProtocolErr
             format!("Could not locate the command bootstrap: {error}"),
         )
     })?;
-    let mut command = Command::new(bootstrap);
+    let launch = prepare_unix_launch(&runtime, &params, &bootstrap)?;
+    let UnixLaunchPreparation {
+        argv,
+        environment,
+        sandbox,
+    } = launch;
+    let mut command = Command::new(&bootstrap);
     command
         .arg("command-bootstrap")
         .arg("--gate-fd")
-        .arg("3")
+        .arg(COMMAND_GATE_FD.to_string())
         .arg("--")
-        .args(&params.argv)
+        .args(&argv)
         .current_dir(&params.cwd)
         .env_clear()
-        .envs(&params.environment)
+        .envs(&environment)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(false);
-    configure_pipe_command(&mut command, &gate_read, &gate_write, 3);
+    configure_pipe_command(
+        &mut command,
+        &gate_read,
+        &gate_write,
+        COMMAND_GATE_FD,
+        sandbox.as_ref().map(UnixSandboxChannels::child_descriptors),
+    );
 
     let mut child = match command.spawn() {
         Ok(child) => child,
@@ -1836,47 +2262,52 @@ async fn execute_pipe_job(runtime: Arc<WorkerRuntime>) -> Result<(), ProtocolErr
             .publish_start_failed(io::Error::other("operating system returned no process ID"))
             .await;
     };
-    let command_identity = crate::platform::identity::process_start_identity(pid)
-        .map_err(identity_error)?
-        .ok_or_else(|| ProtocolError::new("COMMAND_START_FAILED", "Process identity vanished."))?;
-    let Some(stdout) = child.stdout.take() else {
-        let _ = signal_process_group(pid, ProcessTreeSignal::Force);
-        return runtime
-            .publish_start_failed(io::Error::other("stdout was not captured"))
+    let command_identity = match crate::platform::identity::process_start_identity(pid) {
+        Ok(Some(identity)) => identity,
+        Ok(None) => {
+            return fail_unix_launch(
+                &runtime,
+                &mut child,
+                pid,
+                &params,
+                io::Error::new(io::ErrorKind::NotFound, "Process identity vanished"),
+            )
             .await;
+        }
+        Err(error) => {
+            return fail_unix_launch(&runtime, &mut child, pid, &params, error).await;
+        }
+    };
+    let Some(stdout) = child.stdout.take() else {
+        return fail_unix_launch(
+            &runtime,
+            &mut child,
+            pid,
+            &params,
+            io::Error::other("stdout was not captured"),
+        )
+        .await;
     };
     let Some(stderr) = child.stderr.take() else {
-        let _ = signal_process_group(pid, ProcessTreeSignal::Force);
-        return runtime
-            .publish_start_failed(io::Error::other("stderr was not captured"))
-            .await;
+        return fail_unix_launch(
+            &runtime,
+            &mut child,
+            pid,
+            &params,
+            io::Error::other("stderr was not captured"),
+        )
+        .await;
     };
-    if let Err(error) = runtime.publish_running(pid, command_identity).await {
-        drop(gate_write);
-        let _ = terminate_child(
-            &mut child,
-            pid,
-            TerminationReason::OutputFailure,
-            params.termination_grace_ms,
-            params.termination_confirmation_ms,
-        )
-        .await;
-        return Err(error);
-    }
-    if let Err(error) = release_gate(gate_write) {
-        let _ = terminate_child(
-            &mut child,
-            pid,
-            TerminationReason::OutputFailure,
-            params.termination_grace_ms,
-            params.termination_confirmation_ms,
-        )
-        .await;
-        return Err(ProtocolError::new(
-            "COMMAND_START_FAILED",
-            format!("Could not release the command start gate: {error}"),
-        ));
-    }
+    activate_unix_launch(
+        &runtime,
+        &mut child,
+        pid,
+        command_identity,
+        gate_write,
+        sandbox,
+        &params,
+    )
+    .await?;
     fault_point("after_running");
 
     let (output_failure_sender, mut output_failure_receiver) = mpsc::channel(1);

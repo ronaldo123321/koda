@@ -1,6 +1,6 @@
 # Koda Phase 4C2A macOS Seatbelt Design
 
-- Status: In progress — C2A1 and C2A2 complete; C2A3 next
+- Status: In progress — C2A1 through C2A3 complete; C2A4 next
 - Date: 2026-08-30
 - Depends on: completed Phase 4C1 execution policy and isolation reporting
 - Platform order: macOS first, Linux second, Windows sandboxing last
@@ -214,19 +214,20 @@ Pipe and PTY execution share one preparation path:
 
 1. The Worker revalidates stored policy, capability digest, workspace identity,
    and job scratch directory.
-2. It builds the Seatbelt argv and creates the existing command gate plus a new
-   one-way launch-confirmation channel.
+2. It builds the Seatbelt argv and creates the existing command gate plus a
+   sandbox confirmation channel and a sandbox-to-user release gate.
 3. It spawns the current Koda executable as the unsandboxed command bootstrap
    inside the already-owned POSIX process group.
 4. After durable command identity is recorded, the Worker releases the command
    gate.
 5. The command bootstrap `exec`s `/usr/bin/sandbox-exec`, which starts a Koda
    sandbox bootstrap under the generated policy.
-6. The sandbox bootstrap verifies its inherited descriptor, sends a bounded
-   confirmation containing its PID and protocol marker, closes the descriptor,
-   and `exec`s the user argv.
+6. The sandbox bootstrap verifies both inherited pipes, sends a bounded
+   confirmation containing its PID and protocol marker, closes that endpoint,
+   and waits without executing user code.
 7. The Worker verifies that the confirmed PID and start identity still match
-   the owned process, then records launch-setup evidence and publishes running.
+   the owned process, records launch-setup evidence, publishes running, and
+   only then releases the sandbox bootstrap to `exec` the user argv.
 
 The sandbox bootstrap does not read the job manifest, token, repository
 configuration, or ambient environment. It receives only inherited descriptors
@@ -306,9 +307,9 @@ has already loaded the preceding `state.json` revision.
   canonical 4 KiB path parameters, and passes paths only through `-D`; user
   path text and argv are never reconstructed into SBPL or a shell string.
 - Add the sandbox bootstrap command and confirmation framing. **Completed.**
-  The bootstrap accepts only a non-standard inherited pipe, emits the fixed
-  20-byte `KODA-SEATBELT-V1` plus big-endian PID frame, closes the channel, and
-  then `exec`s the prepared argv.
+  C2A2 introduced the fixed 20-byte `KODA-SEATBELT-V1` plus big-endian PID
+  frame. C2A3 extended the bootstrap with a distinct one-byte release pipe so
+  confirmation and durable evidence validation finish before user `exec`.
 - Add the startup capability probe and no-capability fallback for protected
   admission. **Completed.** Each Supervisor probes the exact root-owned
   `/usr/bin/sandbox-exec` once, retains the result, and requires a sandboxed
@@ -332,10 +333,29 @@ remain the same-commit release gate.
 ### C2A3: Pipe and PTY enforcement
 
 - Route macOS protected Pipe and PTY starts through the common builder.
-- Add private scratch lifecycle and filtered temp environment.
-- Move applied evidence publication behind sandbox confirmation.
+  **Completed.** Both modes share the same direct argv, environment, Seatbelt,
+  descriptor inheritance, confirmation, identity, and release flow.
+- Add private scratch lifecycle and filtered temp environment. **Completed.**
+  `workspace_write` jobs own a validated mode-0700 scratch directory and bind
+  `TMPDIR`, `TMP`, and `TEMP` to it; other profiles cannot acquire that grant.
+- Move applied evidence publication behind sandbox confirmation. **Completed.**
+  A two-way handshake keeps user code stopped until confirmation, identity
+  revalidation, and durable `running`/`launch_setup` publication succeed.
 - Preserve cancellation, timeout, background, attachment, resize, restart, and
-  output contracts.
+  output contracts. **Implemented on the shared Worker path; the exhaustive
+  protected lifecycle matrix remains C2A4 acceptance.**
+
+Local C2A3 tests prove real read-only/network-denied Pipe and PTY execution,
+workspace-plus-private-scratch write confinement, public v2 capability
+activation, retained applied evidence, and a no-side-effect Worker failure
+between sandbox confirmation and user release. Remote same-commit platform
+acceptance remains C2A4.
+
+Local verification on macOS passed formatting, TypeScript build/typechecking,
+Clippy with warnings as errors, 53 Rust tests, and the complete 627-test
+TypeScript/integration suite (20 platform skips). The CI-equivalent macOS
+native matrix also passed all 34 tests with the real pinned protocol-v1
+executor, including Pipe/PTY, restart, fault, and v1→v3 compatibility cases.
 
 ### C2A4: clients and remote acceptance
 

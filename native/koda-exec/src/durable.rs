@@ -3,7 +3,9 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::execution_policy::{ExecutionSecuritySnapshot, ExecutionSecurityStage};
+use crate::execution_policy::{
+    ExecutionCapabilities, ExecutionSecuritySnapshot, ExecutionSecurityStage, FilesystemPolicy,
+};
 use crate::execution_security;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -106,13 +108,27 @@ impl JobStore {
         })
     }
 
+    #[cfg(test)]
     pub fn create_job(
         &self,
         request_id: &str,
         start: StartParams,
     ) -> Result<(JobRecord, Vec<u8>), ProtocolError> {
+        self.create_job_with_capabilities(
+            request_id,
+            start,
+            &execution_security::native_capabilities(),
+        )
+    }
+
+    pub fn create_job_with_capabilities(
+        &self,
+        request_id: &str,
+        start: StartParams,
+        capabilities: &ExecutionCapabilities,
+    ) -> Result<(JobRecord, Vec<u8>), ProtocolError> {
         crate::protocol::validate_start(&start)?;
-        let security = execution_security::admit(&start)?;
+        let security = execution_security::admit_with_capabilities(&start, capabilities)?;
         let directory_name = sha256_hex(request_id.as_bytes());
         let directory = self.jobs_root.join(directory_name);
         std::fs::create_dir(&directory).map_err(|error| {
@@ -139,6 +155,13 @@ impl JobStore {
         create_new_private_file(&directory.join("stderr.bin"))?;
         if start.io_mode == IoMode::Pty {
             create_private_directory(&directory.join("pty-output"))?;
+        }
+        if start
+            .policy
+            .as_ref()
+            .is_some_and(|policy| policy.filesystem == FilesystemPolicy::WorkspaceWrite)
+        {
+            create_private_directory(&directory.join("scratch"))?;
         }
 
         let request_bytes = serde_json::to_vec(&start).map_err(json_encode_error)?;
@@ -248,6 +271,16 @@ impl JobStore {
         if manifest.start.io_mode == IoMode::Pty {
             crate::pty_output::validate_directory(&directory.join("pty-output"))?;
         }
+        let has_scratch = manifest
+            .start
+            .policy
+            .as_ref()
+            .is_some_and(|policy| policy.filesystem == FilesystemPolicy::WorkspaceWrite);
+        if has_scratch {
+            validate_private_directory(&directory.join("scratch"))?;
+        } else if std::fs::symlink_metadata(directory.join("scratch")).is_ok() {
+            return Err(corrupt("Unexpected sandbox scratch directory is present."));
+        }
         validate_private_file(&directory.join("state.head"), None)?;
         let record = JobRecord {
             directory: directory.to_owned(),
@@ -332,6 +365,10 @@ impl JobRecord {
 
     pub fn pty_output_path(&self) -> PathBuf {
         self.directory.join("pty-output")
+    }
+
+    pub fn scratch_path(&self) -> PathBuf {
+        self.directory.join("scratch")
     }
 
     pub fn lock_path(&self) -> PathBuf {

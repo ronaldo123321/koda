@@ -1,6 +1,6 @@
 # Koda Phase 4 Hardening Roadmap
 
-- Status: In progress — Phase 4B, Phase 4C1, and Phase 4C2A1/A2 complete; macOS C2A3 next
+- Status: In progress — Phase 4B, Phase 4C1, and Phase 4C2A1-A3 complete; macOS C2A4 next
 - Date: 2026-08-28
 - Depends on: completed Phase 3A through Phase 3I baseline
 
@@ -81,7 +81,7 @@ The completed Windows terminal contract and acceptance evidence are in [Phase 4B
 
 ### Phase 4C: sandbox, network, and secret policy
 
-Status: In progress — Phase 4C1 and 4C2A1/A2 complete; macOS C2A3 next
+Status: In progress — Phase 4C1 and C2A1-A3 complete; macOS C2A4 next
 
 - Add explicit filesystem, process, environment, and network capabilities.
 - Implement available OS isolation mechanisms and expose their effective strength rather than a portable boolean claim.
@@ -129,10 +129,14 @@ store are version 3, and durable v1/v2 history remains readable without
 implicit upgrade. C2A2 is also complete: Koda now owns a bounded fixed SBPL
 builder, `-D`-only canonical path parameters, a pipe/PID sandbox-bootstrap
 confirmation protocol, and a startup probe that verifies real allowed and
-denied operations through the exact system `sandbox-exec`. The verified result
-is retained but runtime advertisement intentionally remains on C1 unconfined
-capability. C2A3 is the next slice: wire that confirmation into protected Pipe
-and PTY launch before publishing running state or applied evidence.
+denied operations through the exact system `sandbox-exec`. C2A3 is complete:
+verified macOS Supervisors now advertise v2, protected Pipe and PTY launches
+share the Seatbelt builder, `workspace_write` receives a private per-job
+scratch directory, and a two-way sandbox handshake keeps user code gated until
+PID/start identity and durable applied evidence are confirmed. C2A4 is next:
+finish client/lifecycle matrices, publish the final guarantee, and require the
+same commit to pass macOS, Linux, and Windows regression CI before closing
+Phase 4C2A.
 
 Deferred Windows sandbox work remains explicit: restricted-token and privilege
 policy, filesystem workspace/scratch rules, network denial, launch confirmation,

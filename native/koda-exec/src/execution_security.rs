@@ -1,11 +1,11 @@
-//! Trusted native admission and retained-evidence validation. No OS sandbox.
+//! Trusted native admission, launch evidence, and retained-evidence validation.
 use std::path::{Path, PathBuf};
 
 use crate::execution_policy::{
     EnforcementLayer, EnforcementMechanism, ExecutionBackend, ExecutionCapabilities,
     ExecutionEnforcementEvidence, ExecutionPolicyError, ExecutionSecuritySnapshot,
-    ExecutionSecurityStage, c1_execution_capabilities, create_execution_admission_snapshot,
-    execution_supervision,
+    ExecutionSecurityStage, FilesystemPolicy, NetworkPolicy, c1_execution_capabilities,
+    create_execution_admission_snapshot, execution_supervision,
 };
 use crate::protocol::{ProtocolError, StartParams};
 
@@ -25,13 +25,16 @@ pub fn native_capabilities() -> ExecutionCapabilities {
     })
 }
 
-pub fn admit(start: &StartParams) -> Result<ExecutionSecuritySnapshot, ProtocolError> {
+pub fn admit_with_capabilities(
+    start: &StartParams,
+    capabilities: &ExecutionCapabilities,
+) -> Result<ExecutionSecuritySnapshot, ProtocolError> {
     let policy = start
         .policy
         .as_ref()
         .ok_or_else(|| policy_error(ExecutionPolicyError::InvalidExecutionPolicy))?;
-    let snapshot = create_execution_admission_snapshot(policy, &native_capabilities())
-        .map_err(policy_error)?;
+    let snapshot =
+        create_execution_admission_snapshot(policy, capabilities).map_err(policy_error)?;
     validate_launch_paths(start)?;
     Ok(snapshot)
 }
@@ -98,12 +101,13 @@ pub fn validate_retained(
     Ok(())
 }
 
-pub fn validate_worker_admission(
+pub fn validate_worker_admission_with_capabilities(
     start: &StartParams,
     retained: &ExecutionSecuritySnapshot,
+    capabilities: &ExecutionCapabilities,
 ) -> Result<(), ProtocolError> {
     validate_retained(start, retained)?;
-    let admitted = admit(start)?;
+    let admitted = admit_with_capabilities(start, capabilities)?;
     let (ExecutionSecuritySnapshot::Policy(expected), ExecutionSecuritySnapshot::Policy(actual)) =
         (admitted, retained)
     else {
@@ -119,21 +123,51 @@ pub fn validate_worker_admission(
 
 /// Called only after the native launch object was created with explicit env and
 /// an owned process group/Job Object, while its gate/thread is still suspended.
+#[cfg(any(test, windows))]
 pub fn launch_setup(
     start: &StartParams,
     retained: &ExecutionSecuritySnapshot,
 ) -> Result<ExecutionSecuritySnapshot, ProtocolError> {
-    validate_worker_admission(start, retained)?;
+    launch_setup_with_capabilities(start, retained, &native_capabilities(), false)
+}
+
+pub fn launch_setup_with_capabilities(
+    start: &StartParams,
+    retained: &ExecutionSecuritySnapshot,
+    capabilities: &ExecutionCapabilities,
+    macos_seatbelt_confirmed: bool,
+) -> Result<ExecutionSecuritySnapshot, ProtocolError> {
+    validate_worker_admission_with_capabilities(start, retained, capabilities)?;
     let mut snapshot = retained.clone();
     let ExecutionSecuritySnapshot::Policy(security) = &mut snapshot else {
         return Err(corrupt());
     };
-    // C2A1 defines v2 evidence, but only C2A2 may construct launch evidence
-    // after the native Seatbelt wrapper has actually been installed.
-    if security.schema_version != 1 {
+    let protected = security.policy.filesystem != FilesystemPolicy::Unrestricted
+        || security.policy.network != NetworkPolicy::Inherit;
+    if security.schema_version == 1 && macos_seatbelt_confirmed {
+        return Err(corrupt());
+    }
+    if security.schema_version == 2 && protected && !macos_seatbelt_confirmed {
         return Err(policy_error(
             ExecutionPolicyError::ExecutionPolicyUnavailable,
         ));
+    }
+    if security.schema_version == 2 && !protected && macos_seatbelt_confirmed {
+        return Err(corrupt());
+    }
+    if security.schema_version == 2 && macos_seatbelt_confirmed {
+        if security.policy.filesystem != FilesystemPolicy::Unrestricted {
+            security.filesystem = ExecutionEnforcementEvidence::Applied {
+                mechanism: EnforcementMechanism::MacosSeatbelt,
+                layer: EnforcementLayer::Os,
+            };
+        }
+        if security.policy.network != NetworkPolicy::Inherit {
+            security.network = ExecutionEnforcementEvidence::Applied {
+                mechanism: EnforcementMechanism::MacosSeatbelt,
+                layer: EnforcementLayer::Os,
+            };
+        }
     }
     security.stage = ExecutionSecurityStage::LaunchSetup;
     security.environment = ExecutionEnforcementEvidence::Applied {
