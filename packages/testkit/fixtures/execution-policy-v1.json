@@ -1,0 +1,1200 @@
+{
+  "policy_cases": [
+    {
+      "name": "posix",
+      "policy": {
+        "schema_version": 1,
+        "workspace_root": "/workspace",
+        "filesystem": "unrestricted",
+        "network": "inherit",
+        "process_isolation": "inherit",
+        "environment": "explicit"
+      },
+      "canonical": "{\"schema_version\":1,\"workspace_root\":\"/workspace\",\"filesystem\":\"unrestricted\",\"network\":\"inherit\",\"process_isolation\":\"inherit\",\"environment\":\"explicit\"}",
+      "sha256": "0adf83b71bf46615fdf5eea265082c95b440fe1f3cc2529ab8b0aa02479c5de2"
+    },
+    {
+      "name": "unicode",
+      "policy": {
+        "schema_version": 1,
+        "workspace_root": "/工作区/模型🚀",
+        "filesystem": "workspace_write",
+        "network": "deny",
+        "process_isolation": "inherit",
+        "environment": "explicit"
+      },
+      "canonical": "{\"schema_version\":1,\"workspace_root\":\"/工作区/模型🚀\",\"filesystem\":\"workspace_write\",\"network\":\"deny\",\"process_isolation\":\"inherit\",\"environment\":\"explicit\"}",
+      "sha256": "9522edffe022d9d7f21515ff827c94d8da95437bcbaa79ea08a72dac4a4fd68b"
+    },
+    {
+      "name": "escaping",
+      "policy": {
+        "schema_version": 1,
+        "workspace_root": "/workspace/quote\"/back\\slash/\b\t\n\f\r\u0001",
+        "filesystem": "unrestricted",
+        "network": "inherit",
+        "process_isolation": "inherit",
+        "environment": "explicit"
+      },
+      "canonical": "{\"schema_version\":1,\"workspace_root\":\"/workspace/quote\\\"/back\\\\slash/\\b\\t\\n\\f\\r\\u0001\",\"filesystem\":\"unrestricted\",\"network\":\"inherit\",\"process_isolation\":\"inherit\",\"environment\":\"explicit\"}",
+      "sha256": "3125f368539c08ba03fbbda021cc7b4e40aecd9778607bc19b87d7befcc3a23a"
+    },
+    {
+      "name": "unicode-composed",
+      "policy": {
+        "schema_version": 1,
+        "workspace_root": "/café",
+        "filesystem": "unrestricted",
+        "network": "inherit",
+        "process_isolation": "inherit",
+        "environment": "explicit"
+      },
+      "canonical": "{\"schema_version\":1,\"workspace_root\":\"/café\",\"filesystem\":\"unrestricted\",\"network\":\"inherit\",\"process_isolation\":\"inherit\",\"environment\":\"explicit\"}",
+      "sha256": "c13bbc10f4f6c2b145b48169f05e798bc36ff0aa0177c901dc692b70687c796a"
+    },
+    {
+      "name": "unicode-decomposed",
+      "policy": {
+        "schema_version": 1,
+        "workspace_root": "/café",
+        "filesystem": "unrestricted",
+        "network": "inherit",
+        "process_isolation": "inherit",
+        "environment": "explicit"
+      },
+      "canonical": "{\"schema_version\":1,\"workspace_root\":\"/café\",\"filesystem\":\"unrestricted\",\"network\":\"inherit\",\"process_isolation\":\"inherit\",\"environment\":\"explicit\"}",
+      "sha256": "67e655fc4f900d519e3f645a23e8e78da4b58d091edea3782196330480abdf6c"
+    },
+    {
+      "name": "windows-drive",
+      "policy": {
+        "schema_version": 1,
+        "workspace_root": "C:\\工作区\\koda",
+        "filesystem": "read_only",
+        "network": "deny",
+        "process_isolation": "inherit",
+        "environment": "explicit"
+      },
+      "canonical": "{\"schema_version\":1,\"workspace_root\":\"C:\\\\工作区\\\\koda\",\"filesystem\":\"read_only\",\"network\":\"deny\",\"process_isolation\":\"inherit\",\"environment\":\"explicit\"}",
+      "sha256": "b3c33c91de2ca7794c2393419e1d77f0988677f6f07783d767c63a30371f6a06"
+    },
+    {
+      "name": "windows-unc",
+      "policy": {
+        "schema_version": 1,
+        "workspace_root": "\\\\server\\share\\koda",
+        "filesystem": "unrestricted",
+        "network": "inherit",
+        "process_isolation": "inherit",
+        "environment": "explicit"
+      },
+      "canonical": "{\"schema_version\":1,\"workspace_root\":\"\\\\\\\\server\\\\share\\\\koda\",\"filesystem\":\"unrestricted\",\"network\":\"inherit\",\"process_isolation\":\"inherit\",\"environment\":\"explicit\"}",
+      "sha256": "f5da5fe5c625c917165767d836bf55665df4f626fd79c967185d0f521b987941"
+    },
+    {
+      "name": "windows-extended-drive",
+      "policy": {
+        "schema_version": 1,
+        "workspace_root": "\\\\?\\C:\\工作区\\koda",
+        "filesystem": "unrestricted",
+        "network": "inherit",
+        "process_isolation": "inherit",
+        "environment": "explicit"
+      },
+      "canonical": "{\"schema_version\":1,\"workspace_root\":\"\\\\\\\\?\\\\C:\\\\工作区\\\\koda\",\"filesystem\":\"unrestricted\",\"network\":\"inherit\",\"process_isolation\":\"inherit\",\"environment\":\"explicit\"}",
+      "sha256": "afd4f3315129aaa87d3065ee0c45dd5c39eb2f4cb72c0de9f19badda5f910cd7"
+    },
+    {
+      "name": "windows-extended-unc",
+      "policy": {
+        "schema_version": 1,
+        "workspace_root": "\\\\?\\UNC\\server\\share\\koda",
+        "filesystem": "unrestricted",
+        "network": "inherit",
+        "process_isolation": "inherit",
+        "environment": "explicit"
+      },
+      "canonical": "{\"schema_version\":1,\"workspace_root\":\"\\\\\\\\?\\\\UNC\\\\server\\\\share\\\\koda\",\"filesystem\":\"unrestricted\",\"network\":\"inherit\",\"process_isolation\":\"inherit\",\"environment\":\"explicit\"}",
+      "sha256": "3e7caa2f478dbfbae16a06367bce4ce091a86e9d196ba5668a15d911c2d23b71"
+    },
+    {
+      "name": "all-requirements",
+      "policy": {
+        "schema_version": 1,
+        "workspace_root": "/",
+        "filesystem": "workspace_write",
+        "network": "deny",
+        "process_isolation": "required",
+        "environment": "explicit"
+      },
+      "canonical": "{\"schema_version\":1,\"workspace_root\":\"/\",\"filesystem\":\"workspace_write\",\"network\":\"deny\",\"process_isolation\":\"required\",\"environment\":\"explicit\"}",
+      "sha256": "de046148b0f5c926cb363e4ea68d5a8783e47b1f4314daa54d0ee58beca0d1c4"
+    }
+  ],
+  "capability_cases": [
+    {
+      "backend": "native_posix",
+      "capabilities": {
+        "schema_version": 1,
+        "backend": "native_posix",
+        "filesystem": {
+          "supported": ["unrestricted"],
+          "mechanism": "none"
+        },
+        "network": {
+          "supported": ["inherit"],
+          "mechanism": "none"
+        },
+        "process_isolation": {
+          "supported": ["inherit"],
+          "mechanism": "none"
+        },
+        "environment": {
+          "supported": ["explicit"],
+          "mechanism": "explicit_environment",
+          "layer": "application"
+        },
+        "supervision": {
+          "mechanism": "posix_process_group",
+          "layer": "os",
+          "durable": true
+        }
+      },
+      "canonical": "{\"schema_version\":1,\"backend\":\"native_posix\",\"filesystem\":{\"supported\":[\"unrestricted\"],\"mechanism\":\"none\"},\"network\":{\"supported\":[\"inherit\"],\"mechanism\":\"none\"},\"process_isolation\":{\"supported\":[\"inherit\"],\"mechanism\":\"none\"},\"environment\":{\"supported\":[\"explicit\"],\"mechanism\":\"explicit_environment\",\"layer\":\"application\"},\"supervision\":{\"mechanism\":\"posix_process_group\",\"layer\":\"os\",\"durable\":true}}",
+      "sha256": "ad137d3ff7e3add3e2bd77c0a7c0ec71982b00fb741322ff97d51dfc1c5ccdc4"
+    },
+    {
+      "backend": "native_windows",
+      "capabilities": {
+        "schema_version": 1,
+        "backend": "native_windows",
+        "filesystem": {
+          "supported": ["unrestricted"],
+          "mechanism": "none"
+        },
+        "network": {
+          "supported": ["inherit"],
+          "mechanism": "none"
+        },
+        "process_isolation": {
+          "supported": ["inherit"],
+          "mechanism": "none"
+        },
+        "environment": {
+          "supported": ["explicit"],
+          "mechanism": "explicit_environment",
+          "layer": "application"
+        },
+        "supervision": {
+          "mechanism": "windows_job_object",
+          "layer": "os",
+          "durable": true
+        }
+      },
+      "canonical": "{\"schema_version\":1,\"backend\":\"native_windows\",\"filesystem\":{\"supported\":[\"unrestricted\"],\"mechanism\":\"none\"},\"network\":{\"supported\":[\"inherit\"],\"mechanism\":\"none\"},\"process_isolation\":{\"supported\":[\"inherit\"],\"mechanism\":\"none\"},\"environment\":{\"supported\":[\"explicit\"],\"mechanism\":\"explicit_environment\",\"layer\":\"application\"},\"supervision\":{\"mechanism\":\"windows_job_object\",\"layer\":\"os\",\"durable\":true}}",
+      "sha256": "5ca4d9ea343fb0a72c1f0972ef99b9d2f0cfcfa1d82ff11413740bbfeb685d4b"
+    },
+    {
+      "backend": "typescript_posix",
+      "capabilities": {
+        "schema_version": 1,
+        "backend": "typescript_posix",
+        "filesystem": {
+          "supported": ["unrestricted"],
+          "mechanism": "none"
+        },
+        "network": {
+          "supported": ["inherit"],
+          "mechanism": "none"
+        },
+        "process_isolation": {
+          "supported": ["inherit"],
+          "mechanism": "none"
+        },
+        "environment": {
+          "supported": ["explicit"],
+          "mechanism": "explicit_environment",
+          "layer": "application"
+        },
+        "supervision": {
+          "mechanism": "posix_process_group",
+          "layer": "os",
+          "durable": false
+        }
+      },
+      "canonical": "{\"schema_version\":1,\"backend\":\"typescript_posix\",\"filesystem\":{\"supported\":[\"unrestricted\"],\"mechanism\":\"none\"},\"network\":{\"supported\":[\"inherit\"],\"mechanism\":\"none\"},\"process_isolation\":{\"supported\":[\"inherit\"],\"mechanism\":\"none\"},\"environment\":{\"supported\":[\"explicit\"],\"mechanism\":\"explicit_environment\",\"layer\":\"application\"},\"supervision\":{\"mechanism\":\"posix_process_group\",\"layer\":\"os\",\"durable\":false}}",
+      "sha256": "2a23eb359234966714656185409f7ee4a3fa8aa96b19852b842c331a05bb3dc2"
+    },
+    {
+      "backend": "typescript_windows",
+      "capabilities": {
+        "schema_version": 1,
+        "backend": "typescript_windows",
+        "filesystem": {
+          "supported": ["unrestricted"],
+          "mechanism": "none"
+        },
+        "network": {
+          "supported": ["inherit"],
+          "mechanism": "none"
+        },
+        "process_isolation": {
+          "supported": ["inherit"],
+          "mechanism": "none"
+        },
+        "environment": {
+          "supported": ["explicit"],
+          "mechanism": "explicit_environment",
+          "layer": "application"
+        },
+        "supervision": {
+          "mechanism": "windows_taskkill_tree",
+          "layer": "application",
+          "durable": false
+        }
+      },
+      "canonical": "{\"schema_version\":1,\"backend\":\"typescript_windows\",\"filesystem\":{\"supported\":[\"unrestricted\"],\"mechanism\":\"none\"},\"network\":{\"supported\":[\"inherit\"],\"mechanism\":\"none\"},\"process_isolation\":{\"supported\":[\"inherit\"],\"mechanism\":\"none\"},\"environment\":{\"supported\":[\"explicit\"],\"mechanism\":\"explicit_environment\",\"layer\":\"application\"},\"supervision\":{\"mechanism\":\"windows_taskkill_tree\",\"layer\":\"application\",\"durable\":false}}",
+      "sha256": "f342a21cdeec575aed13f109f8067b93fe2b3a5f38dd02cbc6aec5c677ce6381"
+    }
+  ],
+  "path_cases": [
+    {
+      "path": "/",
+      "valid": true
+    },
+    {
+      "path": "/workspace",
+      "valid": true
+    },
+    {
+      "path": "/a\\b",
+      "valid": true
+    },
+    {
+      "path": "/工作区/🚀",
+      "valid": true
+    },
+    {
+      "path": "C:\\",
+      "valid": true
+    },
+    {
+      "path": "c:\\koda",
+      "valid": true
+    },
+    {
+      "path": "\\\\server\\share",
+      "valid": true
+    },
+    {
+      "path": "\\\\server\\share\\",
+      "valid": true
+    },
+    {
+      "path": "\\\\server\\share\\folder",
+      "valid": true
+    },
+    {
+      "path": "\\\\?\\C:\\",
+      "valid": true
+    },
+    {
+      "path": "\\\\?\\UNC\\server\\share\\",
+      "valid": true
+    },
+    {
+      "path": "",
+      "valid": false
+    },
+    {
+      "path": ".",
+      "valid": false
+    },
+    {
+      "path": "workspace",
+      "valid": false
+    },
+    {
+      "path": "/a/../b",
+      "valid": false
+    },
+    {
+      "path": "/a/./b",
+      "valid": false
+    },
+    {
+      "path": "/a//b",
+      "valid": false
+    },
+    {
+      "path": "/a/",
+      "valid": false
+    },
+    {
+      "path": "//a/b",
+      "valid": false
+    },
+    {
+      "path": "/a\u0000b",
+      "valid": false
+    },
+    {
+      "path": "C:relative",
+      "valid": false
+    },
+    {
+      "path": "C:/workspace",
+      "valid": false
+    },
+    {
+      "path": "C:\\folder\\",
+      "valid": false
+    },
+    {
+      "path": "C:\\a\\..\\b",
+      "valid": false
+    },
+    {
+      "path": "C:\\a\\\\b",
+      "valid": false
+    },
+    {
+      "path": "C:\\bad:name",
+      "valid": false
+    },
+    {
+      "path": "C:\\bad.\\b",
+      "valid": false
+    },
+    {
+      "path": "C:\\bad \\b",
+      "valid": false
+    },
+    {
+      "path": "C:\\CON",
+      "valid": false
+    },
+    {
+      "path": "C:\\nul.txt",
+      "valid": false
+    },
+    {
+      "path": "C:\\LPT1",
+      "valid": false
+    },
+    {
+      "path": "C:\\a\nb",
+      "valid": false
+    },
+    {
+      "path": "\\\\server",
+      "valid": false
+    },
+    {
+      "path": "\\\\server\\",
+      "valid": false
+    },
+    {
+      "path": "\\\\.\\pipe\\foo",
+      "valid": false
+    },
+    {
+      "path": "\\\\?\\relative",
+      "valid": false
+    },
+    {
+      "path": "\\\\?\\Volume{123}\\",
+      "valid": false
+    },
+    {
+      "path": "\\\\server\\share\\..",
+      "valid": false
+    },
+    {
+      "path": "\\\\?\\UNC\\server",
+      "valid": false
+    }
+  ],
+  "invalid_policy_cases": [
+    {
+      "name": "unknown-field",
+      "input": {
+        "schema_version": 1,
+        "workspace_root": "/workspace",
+        "filesystem": "unrestricted",
+        "network": "inherit",
+        "process_isolation": "inherit",
+        "environment": "explicit",
+        "secret": "fixture-secret-marker"
+      }
+    },
+    {
+      "name": "missing-field",
+      "input": {
+        "schema_version": 1,
+        "workspace_root": "/workspace",
+        "filesystem": "unrestricted",
+        "network": "inherit",
+        "process_isolation": "inherit"
+      }
+    },
+    {
+      "name": "future-version",
+      "input": {
+        "schema_version": 2,
+        "workspace_root": "/workspace",
+        "filesystem": "unrestricted",
+        "network": "inherit",
+        "process_isolation": "inherit",
+        "environment": "explicit"
+      }
+    },
+    {
+      "name": "fractional-version",
+      "input": {
+        "schema_version": 1.5,
+        "workspace_root": "/workspace",
+        "filesystem": "unrestricted",
+        "network": "inherit",
+        "process_isolation": "inherit",
+        "environment": "explicit"
+      }
+    },
+    {
+      "name": "invalid-filesystem",
+      "input": {
+        "schema_version": 1,
+        "workspace_root": "/workspace",
+        "filesystem": "write_all",
+        "network": "inherit",
+        "process_isolation": "inherit",
+        "environment": "explicit"
+      }
+    },
+    {
+      "name": "invalid-network",
+      "input": {
+        "schema_version": 1,
+        "workspace_root": "/workspace",
+        "filesystem": "unrestricted",
+        "network": "allow",
+        "process_isolation": "inherit",
+        "environment": "explicit"
+      }
+    },
+    {
+      "name": "invalid-process-isolation",
+      "input": {
+        "schema_version": 1,
+        "workspace_root": "/workspace",
+        "filesystem": "unrestricted",
+        "network": "inherit",
+        "process_isolation": "none",
+        "environment": "explicit"
+      }
+    },
+    {
+      "name": "ambient-environment",
+      "input": {
+        "schema_version": 1,
+        "workspace_root": "/workspace",
+        "filesystem": "unrestricted",
+        "network": "inherit",
+        "process_isolation": "inherit",
+        "environment": "inherit"
+      }
+    },
+    {
+      "name": "null-policy",
+      "input": null
+    }
+  ],
+  "snapshot_cases": [
+    {
+      "name": "native_posix-admission",
+      "valid": true,
+      "input": {
+        "schema_version": 1,
+        "kind": "policy",
+        "stage": "admission",
+        "policy": {
+          "schema_version": 1,
+          "workspace_root": "/workspace",
+          "filesystem": "unrestricted",
+          "network": "inherit",
+          "process_isolation": "inherit",
+          "environment": "explicit"
+        },
+        "policy_digest": "0adf83b71bf46615fdf5eea265082c95b440fe1f3cc2529ab8b0aa02479c5de2",
+        "capabilities_digest": "ad137d3ff7e3add3e2bd77c0a7c0ec71982b00fb741322ff97d51dfc1c5ccdc4",
+        "backend": "native_posix",
+        "filesystem": {
+          "status": "not_requested"
+        },
+        "network": {
+          "status": "not_requested"
+        },
+        "process_isolation": {
+          "status": "not_requested"
+        },
+        "environment": {
+          "status": "not_applied"
+        },
+        "supervision": {
+          "status": "not_applied"
+        }
+      }
+    },
+    {
+      "name": "native_windows-admission",
+      "valid": true,
+      "input": {
+        "schema_version": 1,
+        "kind": "policy",
+        "stage": "admission",
+        "policy": {
+          "schema_version": 1,
+          "workspace_root": "/workspace",
+          "filesystem": "unrestricted",
+          "network": "inherit",
+          "process_isolation": "inherit",
+          "environment": "explicit"
+        },
+        "policy_digest": "0adf83b71bf46615fdf5eea265082c95b440fe1f3cc2529ab8b0aa02479c5de2",
+        "capabilities_digest": "5ca4d9ea343fb0a72c1f0972ef99b9d2f0cfcfa1d82ff11413740bbfeb685d4b",
+        "backend": "native_windows",
+        "filesystem": {
+          "status": "not_requested"
+        },
+        "network": {
+          "status": "not_requested"
+        },
+        "process_isolation": {
+          "status": "not_requested"
+        },
+        "environment": {
+          "status": "not_applied"
+        },
+        "supervision": {
+          "status": "not_applied"
+        }
+      }
+    },
+    {
+      "name": "typescript_posix-admission",
+      "valid": true,
+      "input": {
+        "schema_version": 1,
+        "kind": "policy",
+        "stage": "admission",
+        "policy": {
+          "schema_version": 1,
+          "workspace_root": "/workspace",
+          "filesystem": "unrestricted",
+          "network": "inherit",
+          "process_isolation": "inherit",
+          "environment": "explicit"
+        },
+        "policy_digest": "0adf83b71bf46615fdf5eea265082c95b440fe1f3cc2529ab8b0aa02479c5de2",
+        "capabilities_digest": "2a23eb359234966714656185409f7ee4a3fa8aa96b19852b842c331a05bb3dc2",
+        "backend": "typescript_posix",
+        "filesystem": {
+          "status": "not_requested"
+        },
+        "network": {
+          "status": "not_requested"
+        },
+        "process_isolation": {
+          "status": "not_requested"
+        },
+        "environment": {
+          "status": "not_applied"
+        },
+        "supervision": {
+          "status": "not_applied"
+        }
+      }
+    },
+    {
+      "name": "typescript_windows-admission",
+      "valid": true,
+      "input": {
+        "schema_version": 1,
+        "kind": "policy",
+        "stage": "admission",
+        "policy": {
+          "schema_version": 1,
+          "workspace_root": "/workspace",
+          "filesystem": "unrestricted",
+          "network": "inherit",
+          "process_isolation": "inherit",
+          "environment": "explicit"
+        },
+        "policy_digest": "0adf83b71bf46615fdf5eea265082c95b440fe1f3cc2529ab8b0aa02479c5de2",
+        "capabilities_digest": "f342a21cdeec575aed13f109f8067b93fe2b3a5f38dd02cbc6aec5c677ce6381",
+        "backend": "typescript_windows",
+        "filesystem": {
+          "status": "not_requested"
+        },
+        "network": {
+          "status": "not_requested"
+        },
+        "process_isolation": {
+          "status": "not_requested"
+        },
+        "environment": {
+          "status": "not_applied"
+        },
+        "supervision": {
+          "status": "not_applied"
+        }
+      }
+    },
+    {
+      "name": "legacy-unknown",
+      "valid": true,
+      "input": {
+        "schema_version": 1,
+        "kind": "legacy_unknown"
+      }
+    },
+    {
+      "name": "setup-evidence",
+      "valid": true,
+      "input": {
+        "schema_version": 1,
+        "kind": "policy",
+        "stage": "launch_setup",
+        "policy": {
+          "schema_version": 1,
+          "workspace_root": "/workspace",
+          "filesystem": "unrestricted",
+          "network": "inherit",
+          "process_isolation": "inherit",
+          "environment": "explicit"
+        },
+        "policy_digest": "0adf83b71bf46615fdf5eea265082c95b440fe1f3cc2529ab8b0aa02479c5de2",
+        "capabilities_digest": "ad137d3ff7e3add3e2bd77c0a7c0ec71982b00fb741322ff97d51dfc1c5ccdc4",
+        "backend": "native_posix",
+        "filesystem": {
+          "status": "not_requested"
+        },
+        "network": {
+          "status": "not_requested"
+        },
+        "process_isolation": {
+          "status": "not_requested"
+        },
+        "environment": {
+          "status": "applied",
+          "mechanism": "explicit_environment",
+          "layer": "application"
+        },
+        "supervision": {
+          "status": "applied",
+          "mechanism": "posix_process_group",
+          "layer": "os"
+        }
+      }
+    },
+    {
+      "name": "extra-secret",
+      "valid": false,
+      "input": {
+        "schema_version": 1,
+        "kind": "policy",
+        "stage": "admission",
+        "policy": {
+          "schema_version": 1,
+          "workspace_root": "/workspace",
+          "filesystem": "unrestricted",
+          "network": "inherit",
+          "process_isolation": "inherit",
+          "environment": "explicit"
+        },
+        "policy_digest": "0adf83b71bf46615fdf5eea265082c95b440fe1f3cc2529ab8b0aa02479c5de2",
+        "capabilities_digest": "ad137d3ff7e3add3e2bd77c0a7c0ec71982b00fb741322ff97d51dfc1c5ccdc4",
+        "backend": "native_posix",
+        "filesystem": {
+          "status": "not_requested"
+        },
+        "network": {
+          "status": "not_requested"
+        },
+        "process_isolation": {
+          "status": "not_requested"
+        },
+        "environment": {
+          "status": "not_applied"
+        },
+        "supervision": {
+          "status": "not_applied"
+        },
+        "secret": "fixture-secret-marker"
+      }
+    },
+    {
+      "name": "policy-digest-mismatch",
+      "valid": false,
+      "input": {
+        "schema_version": 1,
+        "kind": "policy",
+        "stage": "admission",
+        "policy": {
+          "schema_version": 1,
+          "workspace_root": "/workspace",
+          "filesystem": "unrestricted",
+          "network": "inherit",
+          "process_isolation": "inherit",
+          "environment": "explicit"
+        },
+        "policy_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "capabilities_digest": "ad137d3ff7e3add3e2bd77c0a7c0ec71982b00fb741322ff97d51dfc1c5ccdc4",
+        "backend": "native_posix",
+        "filesystem": {
+          "status": "not_requested"
+        },
+        "network": {
+          "status": "not_requested"
+        },
+        "process_isolation": {
+          "status": "not_requested"
+        },
+        "environment": {
+          "status": "not_applied"
+        },
+        "supervision": {
+          "status": "not_applied"
+        }
+      }
+    },
+    {
+      "name": "capability-digest-mismatch",
+      "valid": false,
+      "input": {
+        "schema_version": 1,
+        "kind": "policy",
+        "stage": "admission",
+        "policy": {
+          "schema_version": 1,
+          "workspace_root": "/workspace",
+          "filesystem": "unrestricted",
+          "network": "inherit",
+          "process_isolation": "inherit",
+          "environment": "explicit"
+        },
+        "policy_digest": "0adf83b71bf46615fdf5eea265082c95b440fe1f3cc2529ab8b0aa02479c5de2",
+        "capabilities_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "backend": "native_posix",
+        "filesystem": {
+          "status": "not_requested"
+        },
+        "network": {
+          "status": "not_requested"
+        },
+        "process_isolation": {
+          "status": "not_requested"
+        },
+        "environment": {
+          "status": "not_applied"
+        },
+        "supervision": {
+          "status": "not_applied"
+        }
+      }
+    },
+    {
+      "name": "changed-backend",
+      "valid": false,
+      "input": {
+        "schema_version": 1,
+        "kind": "policy",
+        "stage": "admission",
+        "policy": {
+          "schema_version": 1,
+          "workspace_root": "/workspace",
+          "filesystem": "unrestricted",
+          "network": "inherit",
+          "process_isolation": "inherit",
+          "environment": "explicit"
+        },
+        "policy_digest": "0adf83b71bf46615fdf5eea265082c95b440fe1f3cc2529ab8b0aa02479c5de2",
+        "capabilities_digest": "ad137d3ff7e3add3e2bd77c0a7c0ec71982b00fb741322ff97d51dfc1c5ccdc4",
+        "backend": "typescript_posix",
+        "filesystem": {
+          "status": "not_requested"
+        },
+        "network": {
+          "status": "not_requested"
+        },
+        "process_isolation": {
+          "status": "not_requested"
+        },
+        "environment": {
+          "status": "not_applied"
+        },
+        "supervision": {
+          "status": "not_applied"
+        }
+      }
+    },
+    {
+      "name": "applied-before-setup",
+      "valid": false,
+      "input": {
+        "schema_version": 1,
+        "kind": "policy",
+        "stage": "admission",
+        "policy": {
+          "schema_version": 1,
+          "workspace_root": "/workspace",
+          "filesystem": "unrestricted",
+          "network": "inherit",
+          "process_isolation": "inherit",
+          "environment": "explicit"
+        },
+        "policy_digest": "0adf83b71bf46615fdf5eea265082c95b440fe1f3cc2529ab8b0aa02479c5de2",
+        "capabilities_digest": "ad137d3ff7e3add3e2bd77c0a7c0ec71982b00fb741322ff97d51dfc1c5ccdc4",
+        "backend": "native_posix",
+        "filesystem": {
+          "status": "not_requested"
+        },
+        "network": {
+          "status": "not_requested"
+        },
+        "process_isolation": {
+          "status": "not_requested"
+        },
+        "environment": {
+          "status": "applied",
+          "mechanism": "explicit_environment",
+          "layer": "application"
+        },
+        "supervision": {
+          "status": "not_applied"
+        }
+      }
+    },
+    {
+      "name": "fabricated-os-isolation",
+      "valid": false,
+      "input": {
+        "schema_version": 1,
+        "kind": "policy",
+        "stage": "launch_setup",
+        "policy": {
+          "schema_version": 1,
+          "workspace_root": "/workspace",
+          "filesystem": "unrestricted",
+          "network": "inherit",
+          "process_isolation": "inherit",
+          "environment": "explicit"
+        },
+        "policy_digest": "0adf83b71bf46615fdf5eea265082c95b440fe1f3cc2529ab8b0aa02479c5de2",
+        "capabilities_digest": "ad137d3ff7e3add3e2bd77c0a7c0ec71982b00fb741322ff97d51dfc1c5ccdc4",
+        "backend": "native_posix",
+        "filesystem": {
+          "status": "applied",
+          "mechanism": "posix_process_group",
+          "layer": "os"
+        },
+        "network": {
+          "status": "not_requested"
+        },
+        "process_isolation": {
+          "status": "not_requested"
+        },
+        "environment": {
+          "status": "not_applied"
+        },
+        "supervision": {
+          "status": "not_applied"
+        }
+      }
+    },
+    {
+      "name": "supervision-is-not-isolation",
+      "valid": false,
+      "input": {
+        "schema_version": 1,
+        "kind": "policy",
+        "stage": "launch_setup",
+        "policy": {
+          "schema_version": 1,
+          "workspace_root": "/workspace",
+          "filesystem": "unrestricted",
+          "network": "inherit",
+          "process_isolation": "inherit",
+          "environment": "explicit"
+        },
+        "policy_digest": "0adf83b71bf46615fdf5eea265082c95b440fe1f3cc2529ab8b0aa02479c5de2",
+        "capabilities_digest": "ad137d3ff7e3add3e2bd77c0a7c0ec71982b00fb741322ff97d51dfc1c5ccdc4",
+        "backend": "native_posix",
+        "filesystem": {
+          "status": "not_requested"
+        },
+        "network": {
+          "status": "not_requested"
+        },
+        "process_isolation": {
+          "status": "applied",
+          "mechanism": "posix_process_group",
+          "layer": "os"
+        },
+        "environment": {
+          "status": "not_applied"
+        },
+        "supervision": {
+          "status": "not_applied"
+        }
+      }
+    },
+    {
+      "name": "applied-missing-mechanism",
+      "valid": false,
+      "input": {
+        "schema_version": 1,
+        "kind": "policy",
+        "stage": "launch_setup",
+        "policy": {
+          "schema_version": 1,
+          "workspace_root": "/workspace",
+          "filesystem": "unrestricted",
+          "network": "inherit",
+          "process_isolation": "inherit",
+          "environment": "explicit"
+        },
+        "policy_digest": "0adf83b71bf46615fdf5eea265082c95b440fe1f3cc2529ab8b0aa02479c5de2",
+        "capabilities_digest": "ad137d3ff7e3add3e2bd77c0a7c0ec71982b00fb741322ff97d51dfc1c5ccdc4",
+        "backend": "native_posix",
+        "filesystem": {
+          "status": "not_requested"
+        },
+        "network": {
+          "status": "not_requested"
+        },
+        "process_isolation": {
+          "status": "not_requested"
+        },
+        "environment": {
+          "status": "applied",
+          "layer": "application"
+        },
+        "supervision": {
+          "status": "not_applied"
+        }
+      }
+    },
+    {
+      "name": "environment-is-not-os",
+      "valid": false,
+      "input": {
+        "schema_version": 1,
+        "kind": "policy",
+        "stage": "launch_setup",
+        "policy": {
+          "schema_version": 1,
+          "workspace_root": "/workspace",
+          "filesystem": "unrestricted",
+          "network": "inherit",
+          "process_isolation": "inherit",
+          "environment": "explicit"
+        },
+        "policy_digest": "0adf83b71bf46615fdf5eea265082c95b440fe1f3cc2529ab8b0aa02479c5de2",
+        "capabilities_digest": "ad137d3ff7e3add3e2bd77c0a7c0ec71982b00fb741322ff97d51dfc1c5ccdc4",
+        "backend": "native_posix",
+        "filesystem": {
+          "status": "not_requested"
+        },
+        "network": {
+          "status": "not_requested"
+        },
+        "process_isolation": {
+          "status": "not_requested"
+        },
+        "environment": {
+          "status": "applied",
+          "mechanism": "explicit_environment",
+          "layer": "os"
+        },
+        "supervision": {
+          "status": "not_applied"
+        }
+      }
+    },
+    {
+      "name": "wrong-owner",
+      "valid": false,
+      "input": {
+        "schema_version": 1,
+        "kind": "policy",
+        "stage": "launch_setup",
+        "policy": {
+          "schema_version": 1,
+          "workspace_root": "/workspace",
+          "filesystem": "unrestricted",
+          "network": "inherit",
+          "process_isolation": "inherit",
+          "environment": "explicit"
+        },
+        "policy_digest": "0adf83b71bf46615fdf5eea265082c95b440fe1f3cc2529ab8b0aa02479c5de2",
+        "capabilities_digest": "ad137d3ff7e3add3e2bd77c0a7c0ec71982b00fb741322ff97d51dfc1c5ccdc4",
+        "backend": "native_posix",
+        "filesystem": {
+          "status": "not_requested"
+        },
+        "network": {
+          "status": "not_requested"
+        },
+        "process_isolation": {
+          "status": "not_requested"
+        },
+        "environment": {
+          "status": "not_applied"
+        },
+        "supervision": {
+          "status": "applied",
+          "mechanism": "windows_job_object",
+          "layer": "os"
+        }
+      }
+    },
+    {
+      "name": "evidence-extra-field",
+      "valid": false,
+      "input": {
+        "schema_version": 1,
+        "kind": "policy",
+        "stage": "admission",
+        "policy": {
+          "schema_version": 1,
+          "workspace_root": "/workspace",
+          "filesystem": "unrestricted",
+          "network": "inherit",
+          "process_isolation": "inherit",
+          "environment": "explicit"
+        },
+        "policy_digest": "0adf83b71bf46615fdf5eea265082c95b440fe1f3cc2529ab8b0aa02479c5de2",
+        "capabilities_digest": "ad137d3ff7e3add3e2bd77c0a7c0ec71982b00fb741322ff97d51dfc1c5ccdc4",
+        "backend": "native_posix",
+        "filesystem": {
+          "status": "not_requested"
+        },
+        "network": {
+          "status": "not_requested",
+          "secret": "fixture-secret-marker"
+        },
+        "process_isolation": {
+          "status": "not_requested"
+        },
+        "environment": {
+          "status": "not_applied"
+        },
+        "supervision": {
+          "status": "not_applied"
+        }
+      }
+    },
+    {
+      "name": "evidence-misplaced-mechanism",
+      "valid": false,
+      "input": {
+        "schema_version": 1,
+        "kind": "policy",
+        "stage": "admission",
+        "policy": {
+          "schema_version": 1,
+          "workspace_root": "/workspace",
+          "filesystem": "unrestricted",
+          "network": "inherit",
+          "process_isolation": "inherit",
+          "environment": "explicit"
+        },
+        "policy_digest": "0adf83b71bf46615fdf5eea265082c95b440fe1f3cc2529ab8b0aa02479c5de2",
+        "capabilities_digest": "ad137d3ff7e3add3e2bd77c0a7c0ec71982b00fb741322ff97d51dfc1c5ccdc4",
+        "backend": "native_posix",
+        "filesystem": {
+          "status": "not_requested"
+        },
+        "network": {
+          "status": "not_requested",
+          "mechanism": "none"
+        },
+        "process_isolation": {
+          "status": "not_requested"
+        },
+        "environment": {
+          "status": "not_applied"
+        },
+        "supervision": {
+          "status": "not_applied"
+        }
+      }
+    },
+    {
+      "name": "future-version",
+      "valid": false,
+      "input": {
+        "schema_version": 2,
+        "kind": "policy",
+        "stage": "admission",
+        "policy": {
+          "schema_version": 1,
+          "workspace_root": "/workspace",
+          "filesystem": "unrestricted",
+          "network": "inherit",
+          "process_isolation": "inherit",
+          "environment": "explicit"
+        },
+        "policy_digest": "0adf83b71bf46615fdf5eea265082c95b440fe1f3cc2529ab8b0aa02479c5de2",
+        "capabilities_digest": "ad137d3ff7e3add3e2bd77c0a7c0ec71982b00fb741322ff97d51dfc1c5ccdc4",
+        "backend": "native_posix",
+        "filesystem": {
+          "status": "not_requested"
+        },
+        "network": {
+          "status": "not_requested"
+        },
+        "process_isolation": {
+          "status": "not_requested"
+        },
+        "environment": {
+          "status": "not_applied"
+        },
+        "supervision": {
+          "status": "not_applied"
+        }
+      }
+    },
+    {
+      "name": "legacy-extra-policy",
+      "valid": false,
+      "input": {
+        "schema_version": 1,
+        "kind": "legacy_unknown",
+        "policy": {
+          "schema_version": 1,
+          "workspace_root": "/workspace",
+          "filesystem": "unrestricted",
+          "network": "inherit",
+          "process_isolation": "inherit",
+          "environment": "explicit"
+        }
+      }
+    },
+    {
+      "name": "legacy-extra-secret",
+      "valid": false,
+      "input": {
+        "schema_version": 1,
+        "kind": "legacy_unknown",
+        "secret": "fixture-secret-marker"
+      }
+    },
+    {
+      "name": "missing-evidence-is-not-legacy",
+      "valid": false,
+      "input": null
+    }
+  ]
+}

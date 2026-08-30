@@ -4,6 +4,7 @@ export * from "./artifact-tools.js";
 export * from "./change-set-tool.js";
 export * from "./exec-command-tool.js";
 export * from "./exec-terminal-tool.js";
+export * from "./execution-policy.js";
 export * from "./interactive-process-service.js";
 export * from "./jsonl-event-store.js";
 export * from "./native-executor-client.js";

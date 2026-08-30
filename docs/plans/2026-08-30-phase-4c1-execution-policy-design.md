@@ -1,6 +1,6 @@
 # Koda Phase 4C1 Execution Policy and Isolation Reporting Design
 
-- Status: Approved — C1A implementation in progress; C1B–C1D pending
+- Status: Approved — C1A complete; C1B–C1D pending
 - Date: 2026-08-30
 - Depends on: completed Phase 4B supervised native execution
 
@@ -254,6 +254,88 @@ test that application filtering or process ownership never changes it to
 
 Implement on `main` unless a later platform sandbox requires a separately
 approved major refactor. Do not mark Phase 4C complete when C1 finishes.
+
+## C1A implementation record — 2026-08-30
+
+C1A is complete as a standalone contract; it is not connected to real command
+launch. The native public protocol and durable format are still v1, the
+app-server protocol and existing grants are unchanged, and setting
+`KODA_EXECUTION_PROFILE` does not yet affect CLI/TUI execution. Native v2,
+Supervisor/Worker admission, and durable evidence are C1B. Application option
+and environment wiring, grants, events, and client rendering are C1C.
+
+- [Protocol contract](../../packages/protocol/src/execution-policy.ts): strict
+  policy/configuration, capability, and evidence schemas. Profile configuration
+  cannot supply a workspace root or schema version. Version 1 capabilities
+  describe four explicit backend identities: `native_posix`, `native_windows`,
+  `typescript_posix`, and `typescript_windows`. All reject OS-isolation claims;
+  only the native identities advertise durable supervision.
+- [Node pure helpers](../../packages/runtime-node/src/execution-policy.ts):
+  profile resolution from explicit arguments, normalization, capability
+  generation, evaluation, canonical JSON/digests, and admission snapshots.
+  There are no environment reads, OS probes, process launches, or filesystem
+  mutations. Returned policies and generated reports are frozen copies.
+- [Matching Rust contract](../../native/koda-exec/src/execution_policy.rs):
+  strict serde records plus semantic validators and matching pure functions.
+  Call validated `parse` helpers or `validate` after deserialization; serde
+  deserialization alone does not verify versions, bounds, or fingerprints.
+  Empty evidence branches use empty struct variants to reject unknown fields,
+  rather than serde unit variants that silently discard them.
+- [Shared golden fixtures](../../packages/testkit/fixtures/execution-policy-v1.json):
+  compact JSON and SHA-256 for policies and all four capability reports, plus
+  portable path and valid/corrupt evidence cases, consumed by both test suites.
+
+### Exact C1A wire details
+
+Policy hashing uses field order `schema_version`, `workspace_root`, `filesystem`,
+`network`, `process_isolation`, `environment`. Capability hashing uses
+`schema_version`, `backend`, `filesystem`, `network`, `process_isolation`,
+`environment`, `supervision`. Capability dimension objects order `supported`,
+`mechanism`, then `layer` when present; supervision orders `mechanism`, `layer`,
+`durable`. JSON is compact UTF-8 with ordinary JSON escaping and no trailing
+newline. The golden fixtures pin those exact bytes independently of incoming
+object key order.
+
+Path checks are **lexical only**, not proof of canonicalization or confinement.
+They accept canonical-form POSIX paths and native Windows drive/UNC paths,
+including extended `\\?\` drive/UNC spellings. Relative paths, dot segments,
+duplicate separators, invalid Windows components/device paths, NUL, lone UTF-16
+surrogates, and oversized paths fail. POSIX control characters other than NUL
+remain valid filename characters; the separate 16 KiB encoded-report limit
+also catches JSON-escaping expansion. Trusted callers must resolve the real
+workspace root and revalidate it at the later launch boundaries. No generic
+Unicode normalization, path case folding, or symlink resolution occurs here.
+
+Policy-backed snapshots have `kind: policy`, `schema_version: 1`, and stage
+`admission` or `launch_setup`. The admission factory emits no `applied` claims.
+Launch-setup records may retain explicit environment or supervision evidence
+with their matching mechanism/layer, but still cannot claim filesystem,
+network, or host-process isolation. The stage never means that user code ran.
+Legacy absence has a separate strict `{schema_version: 1, kind: legacy_unknown}`
+record; parsers do not turn null/missing/corrupt new records into legacy ones.
+C1B must additionally require policy-backed evidence on every new-format job.
+
+The protocol schema checks structure and evidence consistency. The runtime
+`validateExecutionSecuritySnapshot` helper additionally checks policy and
+capability digests. Capability verification uses the immutable **v1 contract**,
+not current host capabilities; extending the contract requires version-aware
+validation that retains old semantics. Digest consistency alone does not
+authenticate a record: durable integrity and trusted setup evidence are C1B.
+
+### C1A verification
+
+The focused suites check profile precedence, strict missing/extra-field
+rejection, UTF-8 bounds, Unicode/Windows/JSON escaping, all 48 backend-policy
+combinations, non-secret error messages, evidence size, and refusal to turn
+supervision or capability advertisements into isolation evidence. OS-enforced
+negative launch tests and new-format restart/legacy matrices remain C1B/C1D;
+this pure-helper acceptance does not establish OS isolation.
+
+Verified locally on macOS: `pnpm test` passed 601 Vitest tests (17 Windows-only
+tests skipped); final `cargo test --workspace` passed 32 native tests. C1A adds
+97 TypeScript and 10 Rust tests, including the shared-fixture loops.
+`pnpm typecheck`, `pnpm format:check`, `cargo clippy --workspace --all-targets -- -D warnings`,
+and `git diff --check` passed. This change has not been run on Windows CI yet.
 
 ## Acceptance matrix
 

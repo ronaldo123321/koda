@@ -1,0 +1,383 @@
+import { readFileSync } from "node:fs";
+import {
+  executionCapabilitiesSchema,
+  executionPolicySchema,
+  executionSecuritySnapshotSchema,
+  isExecutionWorkspacePath,
+  type ExecutionBackend,
+  type ExecutionCapabilities,
+  type ExecutionPolicy,
+  type ExecutionPolicyConfig,
+} from "@koda/protocol";
+import {
+  canonicalExecutionCapabilities,
+  canonicalExecutionPolicy,
+  c1ExecutionCapabilities,
+  createExecutionAdmissionSnapshot,
+  evaluateExecutionPolicy,
+  executionCapabilitiesDigest,
+  executionPolicyDigest,
+  ExecutionPolicyError,
+  normalizeExecutionPolicy,
+  resolveExecutionPolicy,
+  validateExecutionSecuritySnapshot,
+} from "@koda/runtime-node";
+import { describe, expect, it } from "vitest";
+
+interface Fixtures {
+  policy_cases: {
+    name: string;
+    policy: ExecutionPolicy;
+    canonical: string;
+    sha256: string;
+  }[];
+  capability_cases: {
+    backend: ExecutionBackend;
+    capabilities: ExecutionCapabilities;
+    canonical: string;
+    sha256: string;
+  }[];
+  path_cases: { path: string; valid: boolean }[];
+  invalid_policy_cases: { name: string; input: unknown }[];
+  snapshot_cases: { name: string; input: unknown; valid: boolean }[];
+}
+
+const fixtures: Fixtures = JSON.parse(
+  readFileSync(
+    new URL("../fixtures/execution-policy-v1.json", import.meta.url),
+    "utf8",
+  ),
+);
+const base = fixtures.policy_cases[0]!.policy;
+const caps = c1ExecutionCapabilities("native_posix");
+
+describe("Phase 4C1A execution policy contract", () => {
+  it.each(fixtures.policy_cases)(
+    "matches cross-language policy bytes and SHA-256: $name",
+    ({ policy, canonical, sha256 }) => {
+      expect(canonicalExecutionPolicy(reverseKeys(policy))).toBe(canonical);
+      expect(executionPolicyDigest(policy)).toBe(sha256);
+      expect(executionPolicySchema.parse(policy)).toEqual(policy);
+    },
+  );
+
+  it.each(fixtures.capability_cases)(
+    "matches cross-language capability bytes and SHA-256: $backend",
+    ({ backend, capabilities, canonical, sha256 }) => {
+      expect(c1ExecutionCapabilities(backend)).toEqual(capabilities);
+      expect(canonicalExecutionCapabilities(reverseKeys(capabilities))).toBe(
+        canonical,
+      );
+      expect(executionCapabilitiesDigest(capabilities)).toBe(sha256);
+      expect(capabilities.filesystem.mechanism).toBe("none");
+      expect(capabilities.network.mechanism).toBe("none");
+      expect(capabilities.process_isolation.mechanism).toBe("none");
+    },
+  );
+
+  it.each(fixtures.path_cases)(
+    "checks portable canonical-path syntax: $path ($valid)",
+    ({ path, valid }) => {
+      expect(isExecutionWorkspacePath(path)).toBe(valid);
+      expect(
+        executionPolicySchema.safeParse({ ...base, workspace_root: path })
+          .success,
+      ).toBe(valid);
+    },
+  );
+
+  it.each(fixtures.invalid_policy_cases)(
+    "rejects malformed policy without echoing it: $name",
+    ({ input }) => {
+      expect(executionPolicySchema.safeParse(input).success).toBe(false);
+      expectCode(
+        () => normalizeExecutionPolicy(input),
+        "INVALID_EXECUTION_POLICY",
+      );
+    },
+  );
+
+  it("rejects any omitted policy field rather than applying defaults", () => {
+    for (const field of Object.keys(base)) {
+      const input = { ...base } as Record<string, unknown>;
+      delete input[field];
+      expectCode(
+        () => normalizeExecutionPolicy(input),
+        "INVALID_EXECUTION_POLICY",
+      );
+    }
+  });
+
+  it("bounds paths in UTF-8 bytes and rejects lone surrogates", () => {
+    expect(isExecutionWorkspacePath("/" + "a".repeat(4095))).toBe(true);
+    expect(isExecutionWorkspacePath("/" + "a".repeat(4096))).toBe(false);
+    expect(isExecutionWorkspacePath("/" + "中".repeat(1365))).toBe(true);
+    expect(isExecutionWorkspacePath("/" + "中".repeat(1366))).toBe(false);
+    for (const path of ["/\ud800", "/\udc00", "/\ud800x"]) {
+      expectCode(
+        () => normalizeExecutionPolicy({ ...base, workspace_root: path }),
+        "INVALID_EXECUTION_POLICY",
+      );
+    }
+  });
+
+  it("binds every restriction and preserves spelling, Unicode and case", () => {
+    const inputs = [
+      base,
+      { ...base, filesystem: "read_only" },
+      { ...base, filesystem: "workspace_write" },
+      { ...base, network: "deny" },
+      { ...base, process_isolation: "required" },
+      { ...base, workspace_root: "/Workspace" },
+      { ...base, workspace_root: "/café" },
+      { ...base, workspace_root: "/cafe\u0301" },
+    ];
+    expect(new Set(inputs.map(executionPolicyDigest)).size).toBe(inputs.length);
+    expect(
+      new Set(
+        fixtures.capability_cases.map(({ capabilities }) =>
+          executionCapabilitiesDigest(capabilities),
+        ),
+      ).size,
+    ).toBe(4);
+  });
+
+  it("resolves default, named profiles, and explicit configuration priority", () => {
+    expect(resolveExecutionPolicy({ workspaceRoot: "/workspace" })).toEqual(
+      base,
+    );
+    expect(
+      resolveExecutionPolicy({
+        workspaceRoot: "/workspace",
+        environmentProfile: "unconfined",
+      }),
+    ).toEqual(base);
+    expect(
+      resolveExecutionPolicy({
+        workspaceRoot: "/workspace",
+        environmentProfile: "read-only",
+      }),
+    ).toMatchObject({ filesystem: "read_only", network: "deny" });
+    expect(
+      resolveExecutionPolicy({
+        workspaceRoot: "/workspace",
+        environmentProfile: "workspace-write",
+      }),
+    ).toMatchObject({ filesystem: "workspace_write", network: "deny" });
+    const config: ExecutionPolicyConfig = {
+      filesystem: "read_only",
+      network: "inherit",
+      process_isolation: "required",
+      environment: "explicit",
+    };
+    const resolved = resolveExecutionPolicy({
+      workspaceRoot: "/workspace",
+      policy: config,
+      environmentProfile: "invalid-ignored-by-explicit-option",
+    });
+    expect(resolved).toMatchObject(config);
+    config.filesystem = "unrestricted";
+    expect(resolved.filesystem).toBe("read_only");
+    expect(Object.isFrozen(resolved)).toBe(true);
+  });
+
+  it("never falls back on invalid configured values or accepts a workspace override", () => {
+    for (const environmentProfile of [
+      "",
+      "READ-ONLY",
+      "read_only",
+      "unconfined ",
+      "fixture-secret-marker",
+      null,
+      1,
+    ]) {
+      expectCode(
+        () =>
+          resolveExecutionPolicy({
+            workspaceRoot: "/workspace",
+            environmentProfile: environmentProfile as string,
+          }),
+        "INVALID_EXECUTION_POLICY",
+      );
+    }
+    for (const policy of [{ filesystem: "unrestricted" }, null, base]) {
+      expectCode(
+        () =>
+          resolveExecutionPolicy({
+            workspaceRoot: "/workspace",
+            policy: policy as ExecutionPolicyConfig,
+            environmentProfile: "unconfined",
+          }),
+        "INVALID_EXECUTION_POLICY",
+      );
+    }
+  });
+
+  it.each(fixtures.capability_cases)(
+    "refuses all unsupported combinations without a fallback: $backend",
+    ({ capabilities }) => {
+      for (const filesystem of [
+        "unrestricted",
+        "read_only",
+        "workspace_write",
+      ] as const) {
+        for (const network of ["inherit", "deny"] as const) {
+          for (const process_isolation of ["inherit", "required"] as const) {
+            const policy = { ...base, filesystem, network, process_isolation };
+            const expected = [
+              ...(filesystem === "unrestricted" ? [] : ["filesystem"]),
+              ...(network === "inherit" ? [] : ["network"]),
+              ...(process_isolation === "inherit" ? [] : ["process_isolation"]),
+            ].map((dimension) => ({ dimension, reason: "not_implemented" }));
+            expect(evaluateExecutionPolicy(policy, capabilities)).toEqual({
+              allowed: expected.length === 0,
+              unmet: expected,
+            });
+            if (expected.length)
+              expectCode(
+                () => createExecutionAdmissionSnapshot(policy, capabilities),
+                "EXECUTION_POLICY_UNAVAILABLE",
+              );
+            else {
+              const snapshot = createExecutionAdmissionSnapshot(
+                policy,
+                capabilities,
+              );
+              expect(snapshot).toMatchObject({
+                stage: "admission",
+                environment: { status: "not_applied" },
+                supervision: { status: "not_applied" },
+              });
+              expect(JSON.stringify(snapshot)).not.toContain('"applied"');
+            }
+          }
+        }
+      }
+    },
+  );
+
+  it("refuses fabricated or mismatched capabilities and freezes built-in reports", () => {
+    const mutations = [
+      { ...caps, schema_version: 2 },
+      { ...caps, secret: "fixture-secret-marker" },
+      {
+        ...caps,
+        filesystem: {
+          supported: ["unrestricted", "read_only"],
+          mechanism: "none",
+        },
+      },
+      { ...caps, network: { supported: ["deny"], mechanism: "none" } },
+      {
+        ...caps,
+        process_isolation: {
+          supported: ["required"],
+          mechanism: "posix_process_group",
+        },
+      },
+      { ...caps, environment: { ...caps.environment, layer: "os" } },
+      { ...caps, supervision: { ...caps.supervision, durable: false } },
+      { ...caps, backend: "native_windows" },
+    ];
+    for (const input of mutations) {
+      expect(executionCapabilitiesSchema.safeParse(input).success).toBe(false);
+      expectCode(
+        () => evaluateExecutionPolicy(base, input),
+        "INVALID_EXECUTION_POLICY",
+      );
+    }
+    expect(Object.isFrozen(caps.filesystem.supported)).toBe(true);
+    expect(Object.isFrozen(caps.supervision)).toBe(true);
+  });
+
+  it.each(fixtures.snapshot_cases)(
+    "validates shared retained-evidence cases: $name",
+    ({ input, valid }) => {
+      if (valid)
+        expect(validateExecutionSecuritySnapshot(input)).toEqual(input);
+      else
+        expectCode(
+          () => validateExecutionSecuritySnapshot(input),
+          "EXECUTION_SECURITY_CORRUPT",
+        );
+    },
+  );
+
+  it("checks semantic digests in addition to structural report schemas", () => {
+    const snapshot = {
+      ...createExecutionAdmissionSnapshot(base, caps),
+      policy_digest: "a".repeat(64),
+    };
+    expect(executionSecuritySnapshotSchema.safeParse(snapshot).success).toBe(
+      true,
+    );
+    expectCode(
+      () => validateExecutionSecuritySnapshot(snapshot),
+      "EXECUTION_SECURITY_CORRUPT",
+    );
+  });
+
+  it("rejects omitted report fields and extra fields on every empty evidence variant", () => {
+    const snapshot = createExecutionAdmissionSnapshot(base, caps);
+    for (const field of Object.keys(snapshot)) {
+      const input = { ...snapshot } as Record<string, unknown>;
+      delete input[field];
+      expectCode(
+        () => validateExecutionSecuritySnapshot(input),
+        "EXECUTION_SECURITY_CORRUPT",
+      );
+    }
+    for (const status of ["not_requested", "not_applied", "unknown"]) {
+      const field = status === "not_requested" ? "network" : "environment";
+      const input = { ...snapshot, [field]: { status } };
+      expect(validateExecutionSecuritySnapshot(input)).toEqual(input);
+      expectCode(
+        () =>
+          validateExecutionSecuritySnapshot({
+            ...input,
+            [field]: { status, secret: "fixture-secret-marker" },
+          }),
+        "EXECUTION_SECURITY_CORRUPT",
+      );
+    }
+  });
+
+  it("bounds serialized evidence, including JSON escaping expansion", () => {
+    const policy = normalizeExecutionPolicy({
+      ...base,
+      workspace_root: "/" + "\u0001".repeat(3000),
+    });
+    expectCode(
+      () => createExecutionAdmissionSnapshot(policy, caps),
+      "EXECUTION_SECURITY_CORRUPT",
+    );
+    const snapshot = createExecutionAdmissionSnapshot(base, caps);
+    expect(Object.isFrozen(snapshot)).toBe(true);
+    if (snapshot.kind === "policy")
+      expect(Object.isFrozen(snapshot.policy)).toBe(true);
+  });
+});
+
+function expectCode(operation: () => unknown, code: string): void {
+  expect(operation).toThrow(ExecutionPolicyError);
+  try {
+    operation();
+  } catch (error) {
+    expect(error).toMatchObject({ code });
+    expect(String(error)).not.toContain("fixture-secret-marker");
+    expect(String(error)).not.toContain("/workspace");
+    expect(String(error).length).toBeLessThan(256);
+    expect(error).not.toHaveProperty("cause");
+  }
+}
+
+function reverseKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(reverseKeys);
+  if (value !== null && typeof value === "object")
+    return Object.fromEntries(
+      Object.entries(value)
+        .reverse()
+        .map(([key, nested]) => [key, reverseKeys(nested)]),
+    );
+  return value;
+}

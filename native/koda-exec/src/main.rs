@@ -2,6 +2,7 @@
 
 mod attachment;
 mod durable;
+pub mod execution_policy;
 mod executor_runtime;
 mod framing;
 mod internal_protocol;

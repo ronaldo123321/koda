@@ -5,6 +5,7 @@ export * from "./change-sets.js";
 export * from "./command-templates.js";
 export * from "./context.js";
 export * from "./events.js";
+export * from "./execution-policy.js";
 export * from "./extensions.js";
 export * from "./ids.js";
 export * from "./items.js";
