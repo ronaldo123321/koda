@@ -1,8 +1,8 @@
 # Koda Execution Security Guarantees
 
 - Scope: Phase 4C1, Phase 4C2A, and Phase 4C2B
-- Status: Linux closure candidate — implementation and acceptance gates are in
-  place; final status requires one commit to pass all four platform jobs
+- Status: Complete — Linux Bubblewrap enforcement and same-commit four-platform
+  acceptance delivered
 - Last updated: 2026-08-30
 
 Koda separates execution admission, process supervision, and operating-system
@@ -174,6 +174,12 @@ Phase 4C2B closes only when one implementation commit passes all four jobs:
   compatibility.
 
 The Windows job remains a regression target, not a Windows sandbox claim.
+
+Implementation commit `abd6d3c` passed all four jobs in
+[GitHub Actions run 33312729690](https://github.com/ronaldo123321/koda/actions/runs/33312729690).
+That same-commit result closes Phase 4C2B. It does not complete the deferred
+secret, resource, provider/MCP/plugin, finer network, bundled Bubblewrap,
+Landlock, PID-namespace, or Windows sandbox work listed above.
 
 The legacy executable is built from pinned commit `3aa84ee` outside the working
 tree:

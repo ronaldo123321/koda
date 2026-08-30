@@ -1,7 +1,7 @@
 # Koda Phase 4C2B Linux Bubblewrap Design
 
-- Status: Closure candidate — C2B1 through C2B4 implemented; final same-commit
-  four-job acceptance pending
+- Status: Complete — C2B1 through C2B4 delivered; implementation commit
+  `abd6d3c` passed all four required platform jobs
 - Date: 2026-08-30
 - Depends on: completed Phase 4C1 execution policy and Phase 4C2A macOS
   Seatbelt delivery
@@ -884,6 +884,10 @@ The same commit must also pass:
 
 Windows remains a regression target only. No Phase 4C2B result is a Windows
 sandbox claim.
+
+The closing implementation commit `abd6d3c` passed `verify`, `linux-native`,
+`macos-native`, and `windows-native` in
+[GitHub Actions run 33312729690](https://github.com/ronaldo123321/koda/actions/runs/33312729690).
 
 ## Deferred backlog
 
