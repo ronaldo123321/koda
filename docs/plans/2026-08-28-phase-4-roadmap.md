@@ -1,6 +1,6 @@
 # Koda Phase 4 Hardening Roadmap
 
-- Status: In progress — Phase 4B and Phase 4C1 complete; later Phase 4C hardening pending
+- Status: In progress — Phase 4B and Phase 4C1 complete; Phase 4C2A macOS Seatbelt approved
 - Date: 2026-08-28
 - Depends on: completed Phase 3A through Phase 3I baseline
 
@@ -113,6 +113,21 @@ to Windows CI, adds native macOS CI, and publishes the explicit
 closed after implementation commit `4f8f4e9` passed the Linux `verify`, macOS
 `macos-native`, and Windows `windows-native` jobs in
 [GitHub Actions run 33294887963](https://github.com/ronaldo123321/koda/actions/runs/33294887963).
+
+The approved next slice is
+[Phase 4C2A macOS Seatbelt](2026-08-30-phase-4c2a-macos-seatbelt-design.md).
+Platform delivery is deliberately ordered **macOS → Linux → Windows**. macOS
+must first close protected Pipe/PTY execution and reporting against the C1
+contract; Linux follows on the same contract. Windows sandbox enforcement is
+deferred until both are complete. Existing Windows CI remains a regression gate
+for the shipped Job Object, ConPTY, protocol, and durable runtime, but Windows
+sandbox acceptance is not a Phase 4C2A completion condition.
+
+Deferred Windows sandbox work remains explicit: restricted-token and privilege
+policy, filesystem workspace/scratch rules, network denial, launch confirmation,
+Job Object and ConPTY integration, durable evidence, reparse-point and Named
+Pipe escape tests, client reporting, and same-commit platform acceptance. None
+of these items is considered complete when macOS or Linux closes.
 
 ### Phase 4D: authenticated remote operation
 
