@@ -1,12 +1,14 @@
-use std::io;
+use std::io::{self, Write};
 #[cfg(unix)]
 use std::os::fd::RawFd;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 #[cfg(unix)]
 use std::process::Stdio;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::fs::OpenOptions;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
@@ -14,8 +16,9 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
 #[cfg(windows)]
 use tokio::sync::oneshot;
-use tokio::sync::{Mutex, mpsc, watch};
+use tokio::sync::{Mutex, mpsc, oneshot, watch};
 use tokio::time::{sleep, timeout};
+use uuid::Uuid;
 
 use crate::attachment::AttachmentRegistry;
 use crate::durable::{JobLock, JobRecord, JobStore, StoredJobState, sha256_hex};
@@ -65,6 +68,10 @@ use crate::protocol::{
     TerminationSnapshot,
 };
 use crate::pty_output::PtyOutputStore;
+use crate::secret_policy::{
+    SecretCleanup, SecretLeaseEnvelope, SecretLifecycle, SecretPolicyError,
+};
+use crate::secret_redactor::StreamingSecretRedactor;
 
 const OUTPUT_BUFFER_BYTES: usize = 16_384;
 const PTY_COMMAND_QUEUE_DEPTH: usize = 64;
@@ -189,6 +196,55 @@ fn worker_execution_capabilities(
     }
 }
 
+struct SecretRuntime {
+    directory: std::path::PathBuf,
+    files: Vec<std::path::PathBuf>,
+    environment: Vec<(String, String)>,
+    values: StdMutex<Vec<Vec<u8>>>,
+    cleaned: AtomicBool,
+}
+
+impl SecretRuntime {
+    fn redactor(&self) -> Result<StreamingSecretRedactor, ProtocolError> {
+        let values = self
+            .values
+            .lock()
+            .map_err(|_| {
+                crate::protocol::secret_policy_error(SecretPolicyError::SecretRedactionFailed)
+            })?
+            .clone();
+        StreamingSecretRedactor::new(values).map_err(crate::protocol::secret_policy_error)
+    }
+
+    fn cleanup(&self) -> Result<(), ProtocolError> {
+        if self.cleaned.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        match std::fs::remove_dir_all(&self.directory) {
+            Ok(()) if std::fs::symlink_metadata(&self.directory).is_err() => {
+                self.cleaned.store(true, Ordering::Release);
+                crate::durable::sync_directory(
+                    self.directory.parent().unwrap_or_else(|| Path::new("/")),
+                );
+                Ok(())
+            }
+            _ => Err(crate::protocol::secret_policy_error(
+                SecretPolicyError::SecretCleanupFailed,
+            )),
+        }
+    }
+}
+
+impl Drop for SecretRuntime {
+    fn drop(&mut self) {
+        if let Ok(values) = self.values.get_mut() {
+            for value in values {
+                value.fill(0);
+            }
+        }
+    }
+}
+
 struct WorkerRuntime {
     record: JobRecord,
     state: Mutex<StoredJobState>,
@@ -203,6 +259,12 @@ struct WorkerRuntime {
     terminate_receiver: Mutex<Option<mpsc::Receiver<TerminationReason>>>,
     pty: Option<PtyRuntime>,
     execution_capabilities: ExecutionCapabilities,
+    secret_sender: Mutex<Option<oneshot::Sender<SecretLeaseEnvelope>>>,
+    secret_receiver: Mutex<Option<oneshot::Receiver<SecretLeaseEnvelope>>>,
+    secrets: OnceLock<SecretRuntime>,
+    secret_stdout_redactions: AtomicU64,
+    secret_stderr_redactions: AtomicU64,
+    secret_pty_redactions: AtomicU64,
 }
 
 impl WorkerRuntime {
@@ -213,6 +275,12 @@ impl WorkerRuntime {
         execution_capabilities: ExecutionCapabilities,
     ) -> Result<Self, ProtocolError> {
         let (terminate_sender, terminate_receiver) = mpsc::channel(1);
+        let (secret_sender, secret_receiver) = if record.manifest.start.secrets.is_some() {
+            let (sender, receiver) = oneshot::channel();
+            (Some(sender), Some(receiver))
+        } else {
+            (None, None)
+        };
         let pty = if record.manifest.start.io_mode == IoMode::Pty {
             let output_limit = record
                 .manifest
@@ -243,6 +311,12 @@ impl WorkerRuntime {
             terminate_receiver: Mutex::new(Some(terminate_receiver)),
             pty,
             execution_capabilities,
+            secret_sender: Mutex::new(secret_sender),
+            secret_receiver: Mutex::new(secret_receiver),
+            secrets: OnceLock::new(),
+            secret_stdout_redactions: AtomicU64::new(0),
+            secret_stderr_redactions: AtomicU64::new(0),
+            secret_pty_redactions: AtomicU64::new(0),
         })
     }
 
@@ -285,7 +359,11 @@ impl WorkerRuntime {
         error: &ProtocolError,
     ) -> Result<(), ProtocolError> {
         let mut guard = self.state.lock().await;
-        if guard.state != JobState::CommandStarting || guard.command_pid.is_some() {
+        if !matches!(
+            guard.state,
+            JobState::WorkerReady | JobState::CommandStarting
+        ) || guard.command_pid.is_some()
+        {
             return Ok(());
         }
         let mut next = guard.clone();
@@ -294,6 +372,15 @@ impl WorkerRuntime {
             code: error.code.to_owned(),
             message: error.message.clone(),
         });
+        if error.code == SecretPolicyError::SecretLeaseExpired.code() {
+            let _ = std::fs::remove_dir_all(self.record.secret_path());
+            if let Some(evidence) = next.secrets.as_mut() {
+                evidence.lifecycle = SecretLifecycle::Expired;
+                evidence.cleanup = SecretCleanup::Completed;
+            }
+        } else {
+            self.finalize_secret_evidence(&mut next, false);
+        }
         *guard = self.record.transition(&guard, next)?;
         Ok(())
     }
@@ -393,6 +480,7 @@ impl WorkerRuntime {
             },
             message: format!("Command could not start: {error}"),
         });
+        self.finalize_secret_evidence(&mut next, false);
         *guard = self.record.transition(&guard, next)?;
         Ok(())
     }
@@ -420,6 +508,17 @@ impl WorkerRuntime {
         next.stderr_bytes = self.stderr_total.load(Ordering::Acquire);
         next.stdout_retained_bytes = self.stdout_retained.load(Ordering::Acquire);
         next.stderr_retained_bytes = self.stderr_retained.load(Ordering::Acquire);
+        self.finalize_secret_evidence(&mut next, state == JobState::TerminationUncertain);
+        if next
+            .secrets
+            .as_ref()
+            .is_some_and(|evidence| evidence.lifecycle == SecretLifecycle::CleanupFailed)
+        {
+            next.failure = Some(JobFailure {
+                code: SecretPolicyError::SecretCleanupFailed.code().to_owned(),
+                message: SecretPolicyError::SecretCleanupFailed.to_string(),
+            });
+        }
         if let Some(status) = status {
             next.exit_code = status.code();
             #[cfg(unix)]
@@ -433,6 +532,37 @@ impl WorkerRuntime {
         }
         *guard = self.record.transition(&guard, next)?;
         Ok(())
+    }
+
+    fn finalize_secret_evidence(&self, state: &mut StoredJobState, uncertain: bool) {
+        let Some(evidence) = state.secrets.as_mut() else {
+            return;
+        };
+        evidence.redactions.stdout = self.secret_stdout_redactions.load(Ordering::Acquire);
+        evidence.redactions.stderr = self.secret_stderr_redactions.load(Ordering::Acquire);
+        evidence.redactions.pty = self.secret_pty_redactions.load(Ordering::Acquire);
+        if uncertain {
+            evidence.lifecycle = SecretLifecycle::CleanupPending;
+            evidence.cleanup = SecretCleanup::Pending;
+            return;
+        }
+        let cleaned = self.secret_runtime().map_or_else(
+            || {
+                if std::fs::symlink_metadata(self.record.secret_path()).is_ok() {
+                    std::fs::remove_dir_all(self.record.secret_path()).is_ok()
+                } else {
+                    true
+                }
+            },
+            |secrets| secrets.cleanup().is_ok(),
+        );
+        if cleaned {
+            evidence.lifecycle = SecretLifecycle::Destroyed;
+            evidence.cleanup = SecretCleanup::Completed;
+        } else {
+            evidence.lifecycle = SecretLifecycle::CleanupFailed;
+            evidence.cleanup = SecretCleanup::Failed;
+        }
     }
 
     async fn snapshot(&self) -> JobSnapshot {
@@ -464,6 +594,191 @@ impl WorkerRuntime {
                 }
             }
         }
+    }
+
+    async fn provision_secrets(&self, lease: SecretLeaseEnvelope) -> Result<(), ProtocolError> {
+        let expected = self.record.manifest.start.secrets.as_ref().ok_or_else(|| {
+            crate::protocol::secret_policy_error(SecretPolicyError::SecretPolicyUnavailable)
+        })?;
+        lease
+            .validate_resolved(unix_millis())
+            .map_err(crate::protocol::secret_policy_error)?;
+        if &lease.evidence != expected || self.state.lock().await.state != JobState::WorkerReady {
+            return Err(crate::protocol::secret_policy_error(
+                SecretPolicyError::SecretPolicyChanged,
+            ));
+        }
+        let sender = self.secret_sender.lock().await.take().ok_or_else(|| {
+            crate::protocol::secret_policy_error(SecretPolicyError::SecretReauthRequired)
+        })?;
+        sender.send(lease).map_err(|mut lease| {
+            lease.destroy();
+            crate::protocol::secret_policy_error(SecretPolicyError::SecretReauthRequired)
+        })
+    }
+
+    async fn take_secret_lease(&self) -> Result<Option<SecretLeaseEnvelope>, ProtocolError> {
+        let Some(expected) = self.record.manifest.start.secrets.as_ref() else {
+            return Ok(None);
+        };
+        let receiver = self.secret_receiver.lock().await.take().ok_or_else(|| {
+            crate::protocol::secret_policy_error(SecretPolicyError::SecretReauthRequired)
+        })?;
+        let remaining = expected.expires_at_ms.saturating_sub(unix_millis());
+        if remaining == 0 {
+            return Err(crate::protocol::secret_policy_error(
+                SecretPolicyError::SecretLeaseExpired,
+            ));
+        }
+        let lease = timeout(Duration::from_millis(remaining), receiver)
+            .await
+            .map_err(|_| {
+                crate::protocol::secret_policy_error(SecretPolicyError::SecretLeaseExpired)
+            })?
+            .map_err(|_| {
+                crate::protocol::secret_policy_error(SecretPolicyError::SecretReauthRequired)
+            })?;
+        Ok(Some(lease))
+    }
+
+    async fn prepare_secrets(&self) -> Result<(), ProtocolError> {
+        let Some(mut lease) = self.take_secret_lease().await? else {
+            return Ok(());
+        };
+        #[cfg(windows)]
+        {
+            lease.destroy();
+            return Err(crate::protocol::secret_policy_error(
+                SecretPolicyError::SecretPolicyUnavailable,
+            ));
+        }
+        #[cfg(unix)]
+        {
+            lease
+                .validate_resolved(unix_millis())
+                .map_err(crate::protocol::secret_policy_error)?;
+            let directory = self.record.secret_path();
+            if std::fs::symlink_metadata(&directory).is_ok()
+                || std::fs::create_dir(&directory).is_err()
+                || crate::platform::state_security::secure_private_directory(&directory).is_err()
+            {
+                return Err(crate::protocol::secret_policy_error(
+                    SecretPolicyError::SecretInjectionFailed,
+                ));
+            }
+            let result = (|| -> Result<SecretRuntime, ProtocolError> {
+                let canonical = std::fs::canonicalize(&directory).map_err(|_| {
+                    crate::protocol::secret_policy_error(SecretPolicyError::SecretInjectionFailed)
+                })?;
+                if canonical != directory {
+                    return Err(crate::protocol::secret_policy_error(
+                        SecretPolicyError::SecretInjectionFailed,
+                    ));
+                }
+                let workspace = self
+                    .record
+                    .manifest
+                    .start
+                    .policy
+                    .as_ref()
+                    .map(|policy| Path::new(&policy.workspace_root))
+                    .ok_or_else(|| {
+                        crate::protocol::secret_policy_error(
+                            SecretPolicyError::SecretPolicyUnavailable,
+                        )
+                    })?;
+                if canonical.starts_with(workspace) || workspace.starts_with(&canonical) {
+                    return Err(crate::protocol::secret_policy_error(
+                        SecretPolicyError::SecretInjectionFailed,
+                    ));
+                }
+                let values = std::mem::take(&mut lease.values);
+                let mut files = Vec::with_capacity(values.len());
+                let mut environment = Vec::with_capacity(values.len());
+                for (target, value) in lease.evidence.targets.iter().zip(&values) {
+                    let path = directory.join(Uuid::new_v4().simple().to_string());
+                    let mut file = crate::platform::state_security::open_new_private_file(&path)
+                        .map_err(|_| {
+                            crate::protocol::secret_policy_error(
+                                SecretPolicyError::SecretInjectionFailed,
+                            )
+                        })?;
+                    file.write_all(value).map_err(|_| {
+                        crate::protocol::secret_policy_error(
+                            SecretPolicyError::SecretInjectionFailed,
+                        )
+                    })?;
+                    file.sync_all().map_err(|_| {
+                        crate::protocol::secret_policy_error(
+                            SecretPolicyError::SecretInjectionFailed,
+                        )
+                    })?;
+                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400))
+                        .map_err(|_| {
+                            crate::protocol::secret_policy_error(
+                                SecretPolicyError::SecretInjectionFailed,
+                            )
+                        })?;
+                    file.sync_all().map_err(|_| {
+                        crate::protocol::secret_policy_error(
+                            SecretPolicyError::SecretInjectionFailed,
+                        )
+                    })?;
+                    let text = path
+                        .to_str()
+                        .ok_or_else(|| {
+                            crate::protocol::secret_policy_error(
+                                SecretPolicyError::SecretInjectionFailed,
+                            )
+                        })?
+                        .to_owned();
+                    files.push(path);
+                    environment.push((target.environment_variable.clone(), text));
+                }
+                crate::durable::sync_directory(&directory);
+                Ok(SecretRuntime {
+                    directory: directory.clone(),
+                    files,
+                    environment,
+                    values: StdMutex::new(values),
+                    cleaned: AtomicBool::new(false),
+                })
+            })();
+            let secrets = match result {
+                Ok(secrets) => secrets,
+                Err(error) => {
+                    let _ = std::fs::remove_dir_all(&directory);
+                    crate::durable::sync_directory(
+                        directory.parent().unwrap_or_else(|| Path::new("/")),
+                    );
+                    return Err(error);
+                }
+            };
+            self.secrets.set(secrets).map_err(|_| {
+                crate::protocol::secret_policy_error(SecretPolicyError::SecretReauthRequired)
+            })?;
+            self.publish_secret_injected().await
+        }
+    }
+
+    async fn publish_secret_injected(&self) -> Result<(), ProtocolError> {
+        let mut guard = self.state.lock().await;
+        let mut next = guard.clone();
+        let evidence = next
+            .secrets
+            .as_mut()
+            .ok_or_else(execution_security::corrupt)?;
+        evidence.lifecycle = SecretLifecycle::Injected;
+        evidence.cleanup = SecretCleanup::Pending;
+        evidence
+            .validate()
+            .map_err(|_| execution_security::corrupt())?;
+        *guard = self.record.transition(&guard, next)?;
+        Ok(())
+    }
+
+    fn secret_runtime(&self) -> Option<&SecretRuntime> {
+        self.secrets.get()
     }
 
     async fn take_termination_receiver(
@@ -792,6 +1107,22 @@ async fn handle_worker_connection(
                     },
                     Err(error) => WorkerResponse::failure(request_id, "INVALID_REQUEST", error),
                 },
+                "worker/secrets/provision" => {
+                    match parse_params::<SecretLeaseEnvelope>(request.params) {
+                        Ok(params) => worker_operation_response(
+                            request_id,
+                            runtime
+                                .provision_secrets(params)
+                                .await
+                                .map(|()| serde_json::json!({})),
+                        )?,
+                        Err(_) => WorkerResponse::failure(
+                            request_id,
+                            SecretPolicyError::SecretEvidenceCorrupt.code(),
+                            SecretPolicyError::SecretEvidenceCorrupt.to_string(),
+                        ),
+                    }
+                }
                 "worker/output/sync" => match parse_params::<EmptyParams>(request.params) {
                     Ok(_) => match runtime.sync_output().await {
                         Ok(snapshot) => WorkerResponse::success(
@@ -917,6 +1248,7 @@ fn worker_hello(
 
 #[cfg(unix)]
 async fn execute_job(runtime: Arc<WorkerRuntime>) -> Result<(), ProtocolError> {
+    runtime.prepare_secrets().await?;
     match runtime.record.manifest.start.io_mode {
         IoMode::Pipe => execute_pipe_job(runtime).await,
         IoMode::Pty => execute_pty_job(runtime).await,
@@ -925,6 +1257,11 @@ async fn execute_job(runtime: Arc<WorkerRuntime>) -> Result<(), ProtocolError> {
 
 #[cfg(windows)]
 async fn execute_job(runtime: Arc<WorkerRuntime>) -> Result<(), ProtocolError> {
+    if runtime.record.manifest.start.secrets.is_some() {
+        return Err(crate::protocol::secret_policy_error(
+            SecretPolicyError::SecretPolicyUnavailable,
+        ));
+    }
     match runtime.record.manifest.start.io_mode {
         IoMode::Pipe => execute_windows_pipe_job(runtime).await,
         IoMode::Pty => execute_windows_pty_job(runtime).await,
@@ -974,6 +1311,8 @@ async fn execute_windows_pipe_job(runtime: Arc<WorkerRuntime>) -> Result<(), Pro
             stdout_runtime.record.manifest.start.output_limit_bytes,
             &stdout_runtime.stdout_total,
             &stdout_runtime.stdout_retained,
+            None,
+            None,
         )
         .await
         {
@@ -989,6 +1328,8 @@ async fn execute_windows_pipe_job(runtime: Arc<WorkerRuntime>) -> Result<(), Pro
             stderr_runtime.record.manifest.start.output_limit_bytes,
             &stderr_runtime.stderr_total,
             &stderr_runtime.stderr_retained,
+            None,
+            None,
         )
         .await
         {
@@ -1685,6 +2026,18 @@ fn prepare_unix_launch(
         )
     })?;
     let mut environment = params.environment.clone();
+    let secret_files = runtime
+        .secret_runtime()
+        .map_or(&[][..], |secrets| secrets.files.as_slice());
+    if let Some(secrets) = runtime.secret_runtime() {
+        for (name, value) in &secrets.environment {
+            if environment.insert(name.clone(), value.clone()).is_some() {
+                return Err(crate::protocol::secret_policy_error(
+                    SecretPolicyError::SecretPolicyChanged,
+                ));
+            }
+        }
+    }
     let protected = policy.filesystem != FilesystemPolicy::Unrestricted
         || policy.network != crate::execution_policy::NetworkPolicy::Inherit;
     if !protected {
@@ -1718,10 +2071,11 @@ fn prepare_unix_launch(
                 crate::execution_policy::ExecutionPolicyError::ExecutionPolicyUnavailable,
             ));
         }
-        let invocation = crate::macos_seatbelt::build_invocation(
+        let invocation = crate::macos_seatbelt::build_invocation_with_secret_files(
             policy,
             Path::new(&policy.workspace_root),
             scratch.as_deref(),
+            secret_files,
         )
         .map_err(execution_security::policy_error)?;
         let mut sandbox_bootstrap = vec![
@@ -1782,7 +2136,7 @@ fn prepare_unix_launch(
             .iter()
             .map(std::ffi::OsString::from)
             .collect::<Vec<_>>();
-        let invocation = crate::linux_bubblewrap::build_invocation(
+        let invocation = crate::linux_bubblewrap::build_invocation_with_secret_files(
             sandbox_runtime,
             crate::linux_bubblewrap::BubblewrapLaunch {
                 binary_path: bootstrap,
@@ -1793,6 +2147,7 @@ fn prepare_unix_launch(
                 confirmation_digest: &digest,
                 argv: &user_argv,
             },
+            secret_files,
         )
         .map_err(execution_security::policy_error)?;
         return Ok(UnixLaunchPreparation {
@@ -2322,10 +2677,7 @@ async fn execute_pty_job(runtime: Arc<WorkerRuntime>) -> Result<(), ProtocolErro
         }
         JobTrigger::OutputFailed(message) => {
             runtime.publish_terminating().await?;
-            failure = Some(JobFailure {
-                code: "PTY_IO_FAILED".to_owned(),
-                message,
-            });
+            failure = Some(output_failure(message, "PTY_IO_FAILED"));
             let terminated = terminate_child(
                 &mut child,
                 pid,
@@ -2369,6 +2721,11 @@ async fn capture_pty_output(
     runtime: &WorkerRuntime,
 ) -> io::Result<()> {
     let mut buffer = vec![0u8; OUTPUT_BUFFER_BYTES];
+    let mut redactor = runtime
+        .secret_runtime()
+        .map(SecretRuntime::redactor)
+        .transpose()
+        .map_err(protocol_io_error)?;
     loop {
         let count = match source.read(&mut buffer).await {
             Ok(count) => count,
@@ -2376,6 +2733,22 @@ async fn capture_pty_output(
             Err(error) => return Err(error),
         };
         if count == 0 {
+            if let Some(redactor) = redactor.as_mut() {
+                let final_bytes = redactor.finish().map_err(secret_redaction_io_error)?;
+                if !final_bytes.is_empty() {
+                    runtime
+                        .require_pty()
+                        .map_err(protocol_io_error)?
+                        .output
+                        .lock()
+                        .await
+                        .append(&final_bytes)
+                        .map_err(protocol_io_error)?;
+                }
+                runtime
+                    .secret_pty_redactions
+                    .store(redactor.replacement_count(), Ordering::Release);
+            }
             runtime
                 .require_pty()
                 .map_err(protocol_io_error)?
@@ -2386,13 +2759,19 @@ async fn capture_pty_output(
                 .map_err(protocol_io_error)?;
             return Ok(());
         }
+        let redacted = match redactor.as_mut() {
+            Some(redactor) => redactor
+                .push(&buffer[..count])
+                .map_err(secret_redaction_io_error)?,
+            None => buffer[..count].to_vec(),
+        };
         runtime
             .require_pty()
             .map_err(protocol_io_error)?
             .output
             .lock()
             .await
-            .append(&buffer[..count])
+            .append(&redacted)
             .map_err(protocol_io_error)?;
     }
 }
@@ -2429,6 +2808,13 @@ async fn write_pty_commands(
 
 fn protocol_io_error(error: ProtocolError) -> io::Error {
     io::Error::other(format!("{}: {}", error.code, error.message))
+}
+
+fn unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
 }
 
 #[cfg(unix)]
@@ -2545,12 +2931,25 @@ async fn execute_pipe_job(runtime: Arc<WorkerRuntime>) -> Result<(), ProtocolErr
     let stdout_runtime = Arc::clone(&runtime);
     let stdout_failure_sender = output_failure_sender.clone();
     let stdout_task = tokio::spawn(async move {
+        let redactor = stdout_runtime
+            .secret_runtime()
+            .map(SecretRuntime::redactor)
+            .transpose();
+        let redactor = match redactor {
+            Ok(redactor) => redactor,
+            Err(error) => {
+                let _ = stdout_failure_sender.send(error.message).await;
+                return;
+            }
+        };
         if let Err(error) = capture_output(
             stdout,
             &stdout_runtime.record.stdout_path(),
             stdout_runtime.record.manifest.start.output_limit_bytes,
             &stdout_runtime.stdout_total,
             &stdout_runtime.stdout_retained,
+            redactor,
+            Some(&stdout_runtime.secret_stdout_redactions),
         )
         .await
         {
@@ -2559,12 +2958,25 @@ async fn execute_pipe_job(runtime: Arc<WorkerRuntime>) -> Result<(), ProtocolErr
     });
     let stderr_runtime = Arc::clone(&runtime);
     let stderr_task = tokio::spawn(async move {
+        let redactor = stderr_runtime
+            .secret_runtime()
+            .map(SecretRuntime::redactor)
+            .transpose();
+        let redactor = match redactor {
+            Ok(redactor) => redactor,
+            Err(error) => {
+                let _ = output_failure_sender.send(error.message).await;
+                return;
+            }
+        };
         if let Err(error) = capture_output(
             stderr,
             &stderr_runtime.record.stderr_path(),
             stderr_runtime.record.manifest.start.output_limit_bytes,
             &stderr_runtime.stderr_total,
             &stderr_runtime.stderr_retained,
+            redactor,
+            Some(&stderr_runtime.secret_stderr_redactions),
         )
         .await
         {
@@ -2658,10 +3070,7 @@ async fn execute_pipe_job(runtime: Arc<WorkerRuntime>) -> Result<(), ProtocolErr
         }
         JobTrigger::OutputFailed(message) => {
             runtime.publish_terminating().await?;
-            failure = Some(JobFailure {
-                code: "OUTPUT_CAPTURE_FAILED".to_owned(),
-                message,
-            });
+            failure = Some(output_failure(message, "OUTPUT_CAPTURE_FAILED"));
             let terminated = terminate_child(
                 &mut child,
                 pid,
@@ -2714,6 +3123,8 @@ async fn capture_output<R>(
     limit: u64,
     total: &AtomicU64,
     retained: &AtomicU64,
+    mut redactor: Option<StreamingSecretRedactor>,
+    redaction_count: Option<&AtomicU64>,
 ) -> io::Result<()>
 where
     R: AsyncRead + Unpin,
@@ -2723,16 +3134,61 @@ where
     loop {
         let count = source.read(&mut buffer).await?;
         if count == 0 {
+            if let Some(redactor) = redactor.as_mut() {
+                let final_bytes = redactor.finish().map_err(secret_redaction_io_error)?;
+                persist_output_bytes(&mut destination, &final_bytes, limit, total, retained)
+                    .await?;
+                if let Some(counter) = redaction_count {
+                    counter.store(redactor.replacement_count(), Ordering::Release);
+                }
+            }
             destination.sync_all().await?;
             return Ok(());
         }
-        total.fetch_add(count as u64, Ordering::AcqRel);
-        let already_retained = retained.load(Ordering::Acquire);
-        let writable = count.min(limit.saturating_sub(already_retained) as usize);
-        if writable > 0 {
-            destination.write_all(&buffer[..writable]).await?;
-            destination.flush().await?;
-            retained.fetch_add(writable as u64, Ordering::AcqRel);
+        let redacted = match redactor.as_mut() {
+            Some(redactor) => redactor
+                .push(&buffer[..count])
+                .map_err(secret_redaction_io_error)?,
+            None => buffer[..count].to_vec(),
+        };
+        persist_output_bytes(&mut destination, &redacted, limit, total, retained).await?;
+    }
+}
+
+async fn persist_output_bytes(
+    destination: &mut tokio::fs::File,
+    bytes: &[u8],
+    limit: u64,
+    total: &AtomicU64,
+    retained: &AtomicU64,
+) -> io::Result<()> {
+    total.fetch_add(bytes.len() as u64, Ordering::AcqRel);
+    let already_retained = retained.load(Ordering::Acquire);
+    let writable = bytes
+        .len()
+        .min(limit.saturating_sub(already_retained) as usize);
+    if writable > 0 {
+        destination.write_all(&bytes[..writable]).await?;
+        destination.flush().await?;
+        retained.fetch_add(writable as u64, Ordering::AcqRel);
+    }
+    Ok(())
+}
+
+fn secret_redaction_io_error(_error: SecretPolicyError) -> io::Error {
+    io::Error::other("SECRET_REDACTION_FAILED: Command output redaction failed.")
+}
+
+fn output_failure(message: String, default_code: &str) -> JobFailure {
+    if message.starts_with(SecretPolicyError::SecretRedactionFailed.code()) {
+        JobFailure {
+            code: SecretPolicyError::SecretRedactionFailed.code().to_owned(),
+            message: SecretPolicyError::SecretRedactionFailed.to_string(),
+        }
+    } else {
+        JobFailure {
+            code: default_code.to_owned(),
+            message,
         }
     }
 }

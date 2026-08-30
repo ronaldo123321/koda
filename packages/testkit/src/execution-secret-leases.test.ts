@@ -19,6 +19,7 @@ import {
 import { ScriptedModelProvider } from "@koda/providers";
 import {
   HostEnvironmentSecretResolver,
+  NativeExecutorError,
   SecretLeaseManager,
   SecretPolicyError,
   WorkspaceCommandRunner,
@@ -207,6 +208,31 @@ describe("Phase 4C3B secret leases", () => {
     );
   });
 
+  it("transfers an approved lease once and destroys the owned native buffers", async () => {
+    const manager = createManager(
+      new HostEnvironmentSecretResolver({ [SOURCE_NAME]: SECRET_VALUE }),
+    );
+    const binding = commandBinding();
+    const lease = await manager.prepare("exec_command", ["api-token"], binding);
+    if (lease === undefined) throw new Error("Expected a secret lease.");
+
+    const native = lease.consumeForNative(binding);
+    expect(native.evidence).toMatchObject({
+      lease_id: LEASE_ID,
+      aliases: ["api-token"],
+      lifecycle: "resolved",
+      cleanup: "not_started",
+    });
+    expect(native.values[0]?.toString("utf8")).toBe(SECRET_VALUE);
+    native.destroy();
+    expect(native.values[0]).toEqual(
+      Buffer.alloc(Buffer.byteLength(SECRET_VALUE)),
+    );
+    expect(() => lease.consumeForNative(binding)).toThrowError(
+      expect.objectContaining({ code: "SECRET_REAUTH_REQUIRED" }),
+    );
+  });
+
   it("rejects unknown or tool-unauthorized aliases without naming host variables", async () => {
     const manager = createManager(
       new HostEnvironmentSecretResolver({ [SOURCE_NAME]: SECRET_VALUE }),
@@ -266,8 +292,8 @@ describe("Phase 4C3B secret leases", () => {
   });
 });
 
-describe("Phase 4C3B command approval", () => {
-  it("applies the same fresh-approval and runtime-rejection contract to exec_terminal", async () => {
+describe("Phase 4C3B/C3C command approval", () => {
+  it("forwards the approved one-shot lease to exec_terminal without grant reuse", async () => {
     let terminalStarted = false;
     const security = commandBinding().security;
     const runner = {
@@ -283,9 +309,15 @@ describe("Phase 4C3B command approval", () => {
         summary: "Start an interactive background process.",
         preview: 'argv: ["terminal-tool"]',
         security,
-        execute: async () => {
-          terminalStarted = true;
-          throw new Error("The native terminal must not start in C3B.");
+        execute: async (
+          _signal: AbortSignal,
+          lease: import("@koda/runtime-node").SecretLease | undefined,
+          binding: SecretCommandBinding | undefined,
+        ) => {
+          expect(lease).toBeDefined();
+          expect(binding?.toolName).toBe("exec_terminal");
+          lease?.destroy();
+          throw new SecretPolicyError("SECRET_POLICY_UNAVAILABLE");
         },
       }),
     } as unknown as WorkspaceCommandRunner;
@@ -344,7 +376,15 @@ describe("Phase 4C3B command approval", () => {
       hello: async () => ({
         execution_security: macosSeatbeltExecutionCapabilities(),
       }),
-    } as NativeExecutorClient;
+      start: async (input: { secretLease?: { destroy(): void } }) => {
+        expect(input.secretLease).toBeDefined();
+        input.secretLease?.destroy();
+        throw new NativeExecutorError(
+          "SECRET_POLICY_UNAVAILABLE",
+          "The selected backend cannot enforce the requested secret policy.",
+        );
+      },
+    } as unknown as NativeExecutorClient;
     const runner = await WorkspaceCommandRunner.open(root, {
       executionPolicy: policy,
       nativeExecutor,

@@ -32,12 +32,15 @@ use crate::protocol::{
     AttachmentRenewParams, InputLeaseResult, InputWriteParams, InputWriteResult, IoMode,
     JobFailure, JobSnapshot, JobState, JobSummary, ListJobsParams, ListJobsResult,
     MAX_PTY_INPUT_BYTES, OutputReadResult, OutputStream, ProtocolError, ReadOutputParams,
-    StartParams, TerminalResizeParams, TerminalResizeResult, TerminateParams, TerminationAttempt,
+    StartRequest, TerminalResizeParams, TerminalResizeResult, TerminateParams, TerminationAttempt,
     TerminationReason, TerminationSnapshot, validate_attachment_credentials,
     validate_attachment_read, validate_identifier, validate_lease, validate_output_read,
     validate_start, validate_terminal_size,
 };
 use crate::pty_output::PtyOutputStore;
+use crate::secret_policy::{
+    SecretCleanup, SecretLeaseEnvelope, SecretLifecycle, SecretPolicyError,
+};
 
 const MAX_SCANNED_JOBS: usize = 10_000;
 const MAX_LIST_JOBS: u32 = 100;
@@ -127,8 +130,8 @@ impl Supervisor {
     ) -> Result<Value, ProtocolError> {
         match method {
             "job/start" => {
-                let params = crate::protocol::parse_start_params(params)?;
-                encode(self.start(request_id, params).await?)
+                let request = crate::protocol::parse_start_params(params)?;
+                encode(self.start(request_id, request).await?)
             }
             "job/get" => {
                 let params: crate::protocol::JobParams = crate::protocol::parse_params(params)?;
@@ -184,9 +187,24 @@ impl Supervisor {
     pub async fn start(
         self: &Arc<Self>,
         request_id: String,
-        params: StartParams,
+        mut request: StartRequest,
     ) -> Result<JobSnapshot, ProtocolError> {
+        let params = request.start;
         validate_start(&params)?;
+        if let Some(lease) = request.secret_lease.as_ref() {
+            lease
+                .validate_resolved(unix_millis())
+                .map_err(crate::protocol::secret_policy_error)?;
+            if self.execution_capabilities.backend
+                != crate::execution_policy::ExecutionBackend::NativePosix
+                || !matches!(self.execution_capabilities.schema_version, 2 | 3)
+                || params.secrets.as_ref() != Some(&lease.evidence)
+            {
+                return Err(crate::protocol::secret_policy_error(
+                    SecretPolicyError::SecretPolicyUnavailable,
+                ));
+            }
+        }
         let request_bytes = serde_json::to_vec(&params).map_err(internal_json_error)?;
         let request_digest = crate::durable::sha256_hex(&request_bytes);
 
@@ -221,7 +239,43 @@ impl Supervisor {
 
         fault_point("after_accepted");
         self.spawn_worker(&record)?;
+        if let Some(lease) = request.secret_lease.take() {
+            self.provision_worker_secrets(&record, lease).await?;
+        }
         self.wait_for_start(&record).await
+    }
+
+    async fn provision_worker_secrets(
+        &self,
+        record: &JobRecord,
+        mut lease: SecretLeaseEnvelope,
+    ) -> Result<(), ProtocolError> {
+        let mut connection = None;
+        for _ in 0..START_WAIT_ATTEMPTS {
+            match WorkerConnection::connect(record).await {
+                Ok(candidate) => {
+                    connection = Some(candidate);
+                    break;
+                }
+                Err(error) if error.code == "WORKER_UNAVAILABLE" => {
+                    sleep(Duration::from_millis(20)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        let Some(mut connection) = connection else {
+            return Err(crate::protocol::secret_policy_error(
+                SecretPolicyError::SecretReauthRequired,
+            ));
+        };
+        let value = serde_json::to_value(&lease).map_err(|_| {
+            crate::protocol::secret_policy_error(SecretPolicyError::SecretInjectionFailed)
+        })?;
+        let result = connection.call("worker/secrets/provision", value).await;
+        lease.destroy();
+        result.map(|_| ()).map_err(|_| {
+            crate::protocol::secret_policy_error(SecretPolicyError::SecretReauthRequired)
+        })
     }
 
     pub async fn get(self: &Arc<Self>, job_id: &str) -> Result<JobSnapshot, ProtocolError> {
@@ -678,6 +732,18 @@ impl Supervisor {
         }
         remove_stale_worker_socket(record)?;
         if matches!(current.state, JobState::Accepted | JobState::WorkerReady) {
+            if record.manifest.start.secrets.is_some() {
+                let mut next = current.clone();
+                next.state = JobState::StartFailed;
+                next.failure = Some(JobFailure {
+                    code: SecretPolicyError::SecretReauthRequired.code().into(),
+                    message: SecretPolicyError::SecretReauthRequired.to_string(),
+                });
+                finalize_orphan_secret_evidence(record, &mut next, true);
+                return Ok(record
+                    .transition(&current, next)?
+                    .snapshot(&record.manifest.start));
+            }
             if record.manifest.format_version == 1 {
                 let mut next = current.clone();
                 next.state = JobState::StartFailed;
@@ -697,20 +763,23 @@ impl Supervisor {
         }
 
         let mut attempts = Vec::new();
+        let mut tree_dead = false;
         if let (Some(pid), Some(identity)) = (
             current.command_pid,
             current.command_start_identity.as_deref(),
         ) {
             if process_identity_matches(pid, identity) {
-                attempts = crate::worker::cleanup_verified_process_group(
+                let cleanup = crate::worker::cleanup_verified_process_group(
                     pid,
                     identity,
                     record.manifest.start.termination_grace_ms,
                     record.manifest.start.termination_confirmation_ms,
                 )
-                .await
-                .attempts;
+                .await;
+                tree_dead = cleanup.outcome != "uncertain";
+                attempts = cleanup.attempts;
             } else {
+                tree_dead = true;
                 attempts.push(TerminationAttempt {
                     attempt: "identity_check".to_owned(),
                     mechanism: "process_start_identity_mismatch".to_owned(),
@@ -740,9 +809,31 @@ impl Supervisor {
             code: "WORKER_LOST_AFTER_COMMAND_BOUNDARY".to_owned(),
             message: "The Worker disappeared after command start; the owned command tree was reconciled without claiming a verified exit status.".to_owned(),
         });
+        finalize_orphan_secret_evidence(record, &mut next, tree_dead);
         let state = record.transition(&current, next)?;
         drop(lock);
         Ok(state.snapshot(&record.manifest.start))
+    }
+}
+
+fn finalize_orphan_secret_evidence(
+    record: &JobRecord,
+    state: &mut crate::durable::StoredJobState,
+    safe_to_remove: bool,
+) {
+    let Some(evidence) = state.secrets.as_mut() else {
+        return;
+    };
+    let cleaned = safe_to_remove
+        && (std::fs::symlink_metadata(record.secret_path()).is_err()
+            || std::fs::remove_dir_all(record.secret_path()).is_ok());
+    if cleaned {
+        crate::durable::sync_directory(&record.directory);
+        evidence.lifecycle = SecretLifecycle::Destroyed;
+        evidence.cleanup = SecretCleanup::Completed;
+    } else {
+        evidence.lifecycle = SecretLifecycle::CleanupPending;
+        evidence.cleanup = SecretCleanup::Pending;
     }
 }
 
@@ -1142,6 +1233,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
+    use crate::protocol::StartParams;
 
     #[test]
     fn retention_deletes_only_expired_verified_terminal_jobs() {
@@ -1219,6 +1311,7 @@ mod tests {
                         )
                         .unwrap(),
                     ),
+                    secrets: None,
                 },
             )
             .expect("job")

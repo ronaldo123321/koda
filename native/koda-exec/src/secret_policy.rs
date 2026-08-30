@@ -236,6 +236,79 @@ pub struct SecretExecutionEvidence {
     pub cleanup: SecretCleanup,
 }
 
+/// Value-bearing lease transported only across the authenticated start and
+/// Supervisor/Worker control exchanges. This type must never be embedded in a
+/// durable record or diagnostic payload.
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SecretLeaseEnvelope {
+    pub evidence: SecretExecutionEvidence,
+    pub values: Vec<Vec<u8>>,
+}
+
+impl std::fmt::Debug for SecretLeaseEnvelope {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SecretLeaseEnvelope")
+            .field("evidence", &self.evidence)
+            .field("value_count", &self.values.len())
+            .finish()
+    }
+}
+
+impl SecretLeaseEnvelope {
+    pub fn validate_resolved(&self, now_ms: u64) -> Result<(), SecretPolicyError> {
+        self.evidence.validate()?;
+        if self.evidence.lifecycle != SecretLifecycle::Resolved
+            || self.evidence.cleanup != SecretCleanup::NotStarted
+            || self.evidence.redactions
+                != (SecretRedactionCounts {
+                    stdout: 0,
+                    stderr: 0,
+                    pty: 0,
+                })
+            || self.values.len() != self.evidence.aliases.len()
+        {
+            return Err(SecretPolicyError::SecretEvidenceCorrupt);
+        }
+        if self.evidence.expires_at_ms <= now_ms {
+            return Err(SecretPolicyError::SecretLeaseExpired);
+        }
+        let mut total = 0usize;
+        for (index, value) in self.values.iter().enumerate() {
+            total = total
+                .checked_add(value.len())
+                .ok_or(SecretPolicyError::SecretValueInvalid)?;
+            if !(EXECUTION_SECRET_VALUE_MIN_BYTES..=EXECUTION_SECRET_VALUE_MAX_BYTES)
+                .contains(&value.len())
+                || total > EXECUTION_SECRET_VALUES_MAX_BYTES
+                || self.values[..index]
+                    .iter()
+                    .any(|previous| previous == value)
+            {
+                return Err(SecretPolicyError::SecretValueInvalid);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn public_evidence(&self) -> SecretExecutionEvidence {
+        self.evidence.clone()
+    }
+
+    pub fn destroy(&mut self) {
+        for value in &mut self.values {
+            value.fill(0);
+        }
+    }
+}
+
+impl Drop for SecretLeaseEnvelope {
+    fn drop(&mut self) {
+        self.destroy();
+    }
+}
+
 impl SecretExecutionEvidence {
     pub fn parse(value: Value) -> Result<Self, SecretPolicyError> {
         let evidence: Self =

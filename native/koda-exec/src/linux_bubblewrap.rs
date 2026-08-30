@@ -142,6 +142,14 @@ pub fn build_invocation(
     runtime: &LinuxBubblewrapRuntimeDescriptor,
     launch: BubblewrapLaunch<'_>,
 ) -> Result<BubblewrapInvocation, ExecutionPolicyError> {
+    build_invocation_with_secret_files(runtime, launch, &[])
+}
+
+pub fn build_invocation_with_secret_files(
+    runtime: &LinuxBubblewrapRuntimeDescriptor,
+    launch: BubblewrapLaunch<'_>,
+    secret_files: &[PathBuf],
+) -> Result<BubblewrapInvocation, ExecutionPolicyError> {
     let BubblewrapLaunch {
         binary_path,
         policy,
@@ -186,6 +194,19 @@ pub fn build_invocation(
         (_, None) => None,
         (_, Some(_)) => return Err(ExecutionPolicyError::InvalidExecutionPolicy),
     };
+    if secret_files.len() > crate::secret_policy::EXECUTION_SECRET_MAX_SELECTION {
+        return Err(ExecutionPolicyError::InvalidExecutionPolicy);
+    }
+    let secret_files = secret_files
+        .iter()
+        .map(|path| validate_private_secret_file(path))
+        .collect::<Result<Vec<_>, _>>()?;
+    if secret_files
+        .iter()
+        .any(|secret| secret.starts_with(&workspace) || workspace.starts_with(secret))
+    {
+        return Err(ExecutionPolicyError::InvalidExecutionPolicy);
+    }
 
     let mut arguments = vec![
         OsString::from("--die-with-parent"),
@@ -222,6 +243,13 @@ pub fn build_invocation(
             scratch.as_os_str().to_owned(),
         ]);
     }
+    for secret in &secret_files {
+        arguments.extend([
+            OsString::from("--ro-bind"),
+            secret.as_os_str().to_owned(),
+            secret.as_os_str().to_owned(),
+        ]);
+    }
     if policy.network == NetworkPolicy::Deny {
         arguments.push(OsString::from("--unshare-net"));
     }
@@ -250,6 +278,30 @@ pub fn build_invocation(
         executable,
         arguments,
     })
+}
+
+#[cfg(unix)]
+fn validate_private_secret_file(path: &Path) -> Result<PathBuf, ExecutionPolicyError> {
+    use std::os::unix::fs::MetadataExt;
+
+    let invalid = || ExecutionPolicyError::InvalidExecutionPolicy;
+    if !path.is_absolute() {
+        return Err(invalid());
+    }
+    let metadata = fs::symlink_metadata(path).map_err(|_| invalid())?;
+    let expected_uid = unsafe { libc::geteuid() };
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.uid() != expected_uid
+        || metadata.mode() & 0o777 != 0o400
+    {
+        return Err(invalid());
+    }
+    let canonical = fs::canonicalize(path).map_err(|_| invalid())?;
+    if canonical != path {
+        return Err(invalid());
+    }
+    Ok(canonical)
 }
 
 pub fn launch_confirmation_digest(
@@ -2068,6 +2120,68 @@ mod tests {
         assert!(!values.iter().any(|value| value.contains("-try")
             || value == "--new-session"
             || value == "--unshare-pid"));
+    }
+
+    #[test]
+    fn builder_adds_only_exact_mode_0400_secret_file_binds() {
+        let workspace = TestDirectory::new("secret-workspace");
+        let secret_root = TestDirectory::new("secret-root");
+        let secret = secret_root
+            .0
+            .join(uuid::Uuid::new_v4().simple().to_string());
+        fs::write(&secret, b"secret-value").unwrap();
+        fs::set_permissions(&secret, fs::Permissions::from_mode(0o400)).unwrap();
+        let launch_policy = policy(
+            &workspace.0,
+            FilesystemPolicy::ReadOnly,
+            NetworkPolicy::Deny,
+        );
+        let launch_argv = [OsString::from("/usr/bin/true")];
+        let invocation = build_invocation_with_secret_files(
+            &descriptor(),
+            BubblewrapLaunch {
+                binary_path: Path::new("/usr/bin/koda-exec"),
+                policy: &launch_policy,
+                workspace_root: &workspace.0,
+                cwd: &workspace.0,
+                scratch_root: None,
+                confirmation_digest: &[9; 32],
+                argv: &launch_argv,
+            },
+            std::slice::from_ref(&secret),
+        )
+        .unwrap();
+        let values = invocation
+            .arguments()
+            .iter()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(values.windows(3).any(|slice| {
+            slice
+                == [
+                    "--ro-bind",
+                    secret.to_str().unwrap(),
+                    secret.to_str().unwrap(),
+                ]
+        }));
+
+        fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(
+            build_invocation_with_secret_files(
+                &descriptor(),
+                BubblewrapLaunch {
+                    binary_path: Path::new("/usr/bin/koda-exec"),
+                    policy: &launch_policy,
+                    workspace_root: &workspace.0,
+                    cwd: &workspace.0,
+                    scratch_root: None,
+                    confirmation_digest: &[9; 32],
+                    argv: &launch_argv,
+                },
+                &[secret],
+            )
+            .is_err()
+        );
     }
 
     #[test]

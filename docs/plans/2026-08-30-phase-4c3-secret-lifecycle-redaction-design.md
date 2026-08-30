@@ -1,6 +1,6 @@
 # Phase 4C3 Secret Lifecycle and Output Redaction
 
-- Status: In progress — Phase 4C3A/C3B complete; Phase 4C3C/C3D pending
+- Status: In progress — Phase 4C3A/C3B/C3C complete; Phase 4C3D pending
 - Date: 2026-08-30
 - Depends on: Phase 4C1 execution-policy admission, Phase 4C2A macOS
   Seatbelt, and Phase 4C2B Linux Bubblewrap
@@ -345,6 +345,8 @@ process side effects. The commit passed `verify`, `linux-native`,
 
 ### Phase 4C3C: native injection and lifecycle
 
+Status: Complete
+
 - Extend the authenticated Supervisor/Worker start exchange without adding
   values to durable formats.
 - Create and clean private secret files for protected macOS and Linux Pipe/PTY
@@ -352,6 +354,26 @@ process side effects. The commit passed `verify`, `linux-native`,
 - Extend Seatbelt and Bubblewrap builders with exact read-only secret paths.
 - Redact before Pipe/PTY persistence and live attachment.
 - Add crash, retry, timeout, cancellation, and cleanup-pending reconciliation.
+
+Implementation uses native protocol v5 and durable format v5. The outer start
+request carries a bounded value-bearing lease separately from the durable
+`StartParams`; only value-free declaration/lease/target/expiry evidence enters
+the request digest and records. Secret starts disable client request replay.
+After authenticated Worker hello, the Supervisor provisions the lease once and
+the Worker blocks until it arrives or expires. The Worker creates an
+executor-state directory outside the workspace with mode `0700`, writes opaque
+mode-`0400` files, extends Seatbelt/Bubblewrap with exact read-only paths,
+injects only declared `*_FILE` names, and then follows the existing confirmed
+sandbox release gate.
+
+Separate longest-match streaming redactors run for stdout, stderr, and PTY
+before output limits, files, segments, or live attachment reads. Durable/public
+state retains only aliases, targets, lease identity, lifecycle, aggregate
+replacement counts, and cleanup status. Normal exit, timeout, cancellation,
+and verified prelaunch failure clean files; uncertain termination retains
+`cleanup_pending`, and a lost pre-release Worker becomes
+`SECRET_REAUTH_REQUIRED` instead of replaying the lease. TypeScript and Windows
+secret execution remain fixed unsupported paths for C3D acceptance.
 
 ### Phase 4C3D: clients and platform acceptance
 

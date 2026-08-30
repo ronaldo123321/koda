@@ -1,6 +1,6 @@
 # Koda Phase 4 Hardening Roadmap
 
-- Status: In progress — Phase 4B, Phase 4C1, Phase 4C2A/C2B, and Phase 4C3A/C3B complete
+- Status: In progress — Phase 4B, Phase 4C1, Phase 4C2A/C2B, and Phase 4C3A-C3C complete
 - Date: 2026-08-28
 - Depends on: completed Phase 3A through Phase 3I baseline
 
@@ -81,9 +81,9 @@ The completed Windows terminal contract and acceptance evidence are in [Phase 4B
 
 ### Phase 4C: sandbox, network, and secret policy
 
-Status: In progress — Phase 4C1, Phase 4C2A/C2B, and Phase 4C3A/C3B are
-complete; native secret injection/redaction, resource, provider/MCP/plugin,
-finer network, and Windows sandbox slices remain
+Status: In progress — Phase 4C1, Phase 4C2A/C2B, and Phase 4C3A-C3C are
+complete; C3D client/platform closure, resource, provider/MCP/plugin, finer
+network, and Windows sandbox slices remain
 
 - Add explicit filesystem, process, environment, and network capabilities.
 - Implement available OS isolation mechanisms and expose their effective strength rather than a portable boolean claim.
@@ -174,15 +174,15 @@ It introduces trusted host-environment declarations, single-use in-memory
 leases, per-job read-only secret files, fresh per-command approval, and exact
 byte-stream redaction before native Pipe/PTY persistence. The first supported
 runtime is deliberately narrow: verified macOS Seatbelt or Linux Bubblewrap,
-protected `read-only`/`workspace-write`, and denied network. C3A/C3B are
+protected `read-only`/`workspace-write`, and denied network. C3A-C3C are
 implemented: strict TypeScript/Rust declarations, public evidence and error
 codes, bounded value-free catalog normalization/digests, exact-byte streaming
 redactors, shared binary fixtures, frozen trusted application catalogs,
 host-environment resolution into single-use leases, configured alias requests,
-fresh approval, expiry, disposal, and grant rejection. C3B rejects every
-secret-bearing execution before user code starts. C3C adds native injection,
-cleanup, and pre-persistence Pipe/PTY redaction; C3D adds client projection and
-same-commit platform acceptance.
+fresh approval, expiry, disposal, grant rejection, authenticated non-replayed
+native transfer, private mode-`0700`/`0400` files, exact sandbox paths,
+pre-persistence Pipe/PTY redaction, and conservative cleanup reconciliation.
+C3D adds client projection and same-commit platform acceptance.
 
 Phase 4C3A implementation commit `0846f8c` passed `verify`, `linux-native`,
 `macos-native`, and `windows-native` in
@@ -192,15 +192,16 @@ does not by itself enable secret resolution, leases, injection, or runtime
 output redaction. Phase 4C3B implementation commit `7273895` passed `verify`,
 `linux-native`, `macos-native`, and `windows-native` in
 [GitHub Actions run 33318090937](https://github.com/ronaldo123321/koda/actions/runs/33318090937).
-This adds trusted preparation and approval, but still does not enable native
-secret injection or runtime output redaction.
+This adds trusted preparation and approval. C3C now enables the narrow native
+runtime described above; it does not close Phase 4C3 without C3D.
 
 Phase 4C3 does not claim containment from a process that is intentionally given
 a secret. Encoded/transformed output, writes into the workspace, inherited
 network, Keychain/Vault backends, Provider/MCP/plugin credentials, TypeScript
 execution, and Windows injection remain explicitly deferred.
 
-Until Phase 4C3 closes, secret injection and redaction remain unshipped.
+Until Phase 4C3D closes, safe evidence is not yet projected consistently by
+every client and the same-commit platform acceptance matrix remains unclaimed.
 Resource quotas, finer-grained network policy, provider/MCP/plugin sandboxing,
 shell syntax, Landlock fallback, bundled Bubblewrap distribution, and all
 Windows sandbox controls remain later Phase 4C/4E work rather than implicit

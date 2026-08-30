@@ -166,6 +166,12 @@ interface ResolvedSecretValue {
   value: Buffer;
 }
 
+export interface NativeSecretLeaseInput {
+  readonly evidence: SecretExecutionEvidence;
+  readonly values: readonly Buffer[];
+  destroy(): void;
+}
+
 export class SecretLease {
   readonly #leaseId: string;
   readonly #declarationDigest: string;
@@ -271,7 +277,38 @@ export class SecretLease {
     ].join("\n");
   }
 
-  /** C3B intentionally consumes and rejects every secret-bearing launch. */
+  public consumeForNative(
+    binding: SecretCommandBinding,
+  ): NativeSecretLeaseInput {
+    this.#assertUsable(binding);
+    this.#consumed = true;
+    const lease = this;
+    let destroyed = false;
+    return {
+      evidence: {
+        schema_version: 1,
+        declaration_digest: this.#declarationDigest,
+        lease_id: this.#leaseId,
+        aliases: [...this.#aliases],
+        targets: this.#targets.map(({ alias, environmentVariable }) => ({
+          alias,
+          environment_variable: environmentVariable,
+        })),
+        lifecycle: "resolved",
+        expires_at_ms: this.#expiresAtMs,
+        redactions: { stdout: 0, stderr: 0, pty: 0 },
+        cleanup: "not_started",
+      },
+      values: this.#values.map(({ value }) => value),
+      destroy(): void {
+        if (destroyed) return;
+        destroyed = true;
+        lease.destroy();
+      },
+    };
+  }
+
+  /** Compatibility fail-closed helper retained for callers built against C3B. */
   public rejectUnavailable(binding: SecretCommandBinding): never {
     this.#assertUsable(binding);
     this.#consumed = true;

@@ -12,7 +12,7 @@ use crate::execution_policy::{
 
 pub const SANDBOX_EXEC_PATH: &str = "/usr/bin/sandbox-exec";
 pub const MAX_PROFILE_BYTES: usize = 32 * 1024;
-pub const MAX_PARAMETER_COUNT: usize = 2;
+pub const MAX_PARAMETER_COUNT: usize = 18;
 pub const MAX_PARAMETER_PATH_BYTES: usize = 4096;
 const BASE_POLICY: &str = include_str!("macos_seatbelt_base.sbpl");
 const WORKSPACE_PARAMETER: &str = "WORKSPACE_ROOT";
@@ -67,6 +67,15 @@ pub fn build_invocation(
     workspace_root: &Path,
     scratch_root: Option<&Path>,
 ) -> Result<SeatbeltInvocation, ExecutionPolicyError> {
+    build_invocation_with_secret_files(policy, workspace_root, scratch_root, &[])
+}
+
+pub fn build_invocation_with_secret_files(
+    policy: &ExecutionPolicy,
+    workspace_root: &Path,
+    scratch_root: Option<&Path>,
+    secret_files: &[PathBuf],
+) -> Result<SeatbeltInvocation, ExecutionPolicyError> {
     policy.validate()?;
     if policy.process_isolation != ProcessIsolationPolicy::Inherit
         || policy.environment != EnvironmentPolicy::Explicit
@@ -95,7 +104,21 @@ pub fn build_invocation(
         _ => return Err(ExecutionPolicyError::InvalidExecutionPolicy),
     };
 
-    let mut profile = String::with_capacity(BASE_POLICY.len() + 512);
+    if secret_files.len() > crate::secret_policy::EXECUTION_SECRET_MAX_SELECTION {
+        return Err(ExecutionPolicyError::InvalidExecutionPolicy);
+    }
+    let secrets = secret_files
+        .iter()
+        .map(|path| validate_private_secret_file(path))
+        .collect::<Result<Vec<_>, _>>()?;
+    if secrets
+        .iter()
+        .any(|secret| secret.starts_with(&workspace) || workspace.starts_with(secret))
+    {
+        return Err(ExecutionPolicyError::InvalidExecutionPolicy);
+    }
+
+    let mut profile = String::with_capacity(BASE_POLICY.len() + 1024);
     profile.push_str(BASE_POLICY);
     profile.push_str(
         "\n; Reference the validated workspace parameter without granting writes.\n\
@@ -115,6 +138,11 @@ pub fn build_invocation(
     if policy.network == NetworkPolicy::Inherit {
         profile.push_str("; Network access was explicitly inherited.\n(allow network*)\n");
     }
+    for index in 0..secrets.len() {
+        profile.push_str(&format!(
+            "; Exact read-only secret file grant.\n(allow file-read* (literal (param \"SECRET_FILE_{index}\")))\n"
+        ));
+    }
     if profile.len() > MAX_PROFILE_BYTES {
         return Err(ExecutionPolicyError::InvalidExecutionPolicy);
     }
@@ -122,6 +150,9 @@ pub fn build_invocation(
     let mut parameters = vec![(WORKSPACE_PARAMETER.to_owned(), workspace)];
     if let Some(scratch) = scratch {
         parameters.push((SCRATCH_PARAMETER.to_owned(), scratch));
+    }
+    for (index, secret) in secrets.into_iter().enumerate() {
+        parameters.push((format!("SECRET_FILE_{index}"), secret));
     }
     if parameters.len() > MAX_PARAMETER_COUNT {
         return Err(ExecutionPolicyError::InvalidExecutionPolicy);
@@ -131,6 +162,33 @@ pub fn build_invocation(
         profile,
         parameters,
     })
+}
+
+#[cfg(unix)]
+fn validate_private_secret_file(path: &Path) -> Result<PathBuf, ExecutionPolicyError> {
+    use std::os::unix::fs::MetadataExt;
+
+    validate_parameter_path(path)?;
+    let invalid = || ExecutionPolicyError::InvalidExecutionPolicy;
+    let metadata = fs::symlink_metadata(path).map_err(|_| invalid())?;
+    let expected_uid = unsafe { libc::geteuid() };
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.uid() != expected_uid
+        || metadata.mode() & 0o777 != 0o400
+    {
+        return Err(invalid());
+    }
+    let canonical = fs::canonicalize(path).map_err(|_| invalid())?;
+    if canonical != path {
+        return Err(invalid());
+    }
+    Ok(canonical)
+}
+
+#[cfg(not(unix))]
+fn validate_private_secret_file(_path: &Path) -> Result<PathBuf, ExecutionPolicyError> {
+    Err(ExecutionPolicyError::ExecutionPolicyUnavailable)
 }
 
 pub fn requires_seatbelt(policy: &ExecutionPolicy) -> bool {
@@ -812,6 +870,50 @@ mod tests {
         assert!(!invocation.profile().contains("(allow file-write* (subpath"));
         assert!(!invocation.profile().contains("(allow network*)"));
         assert_eq!(invocation.parameters().len(), 1);
+    }
+
+    #[test]
+    fn secret_files_are_exact_read_only_parameters_and_require_mode_0400() {
+        let workspace = TestDirectory::new("secret-workspace");
+        let secret_root = TestDirectory::new("secret-root");
+        let secret = secret_root
+            .0
+            .join(uuid::Uuid::new_v4().simple().to_string());
+        fs::write(&secret, b"secret-value").unwrap();
+        fs::set_permissions(&secret, fs::Permissions::from_mode(0o400)).unwrap();
+        let invocation = build_invocation_with_secret_files(
+            &policy(
+                &workspace.0,
+                FilesystemPolicy::ReadOnly,
+                NetworkPolicy::Deny,
+            ),
+            &workspace.0,
+            None,
+            std::slice::from_ref(&secret),
+        )
+        .unwrap();
+        assert!(invocation.profile().contains("SECRET_FILE_0"));
+        assert!(!invocation.profile().contains(secret.to_str().unwrap()));
+        assert!(
+            invocation
+                .parameters()
+                .contains(&("SECRET_FILE_0".into(), secret.clone()))
+        );
+
+        fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(
+            build_invocation_with_secret_files(
+                &policy(
+                    &workspace.0,
+                    FilesystemPolicy::ReadOnly,
+                    NetworkPolicy::Deny,
+                ),
+                &workspace.0,
+                None,
+                &[secret],
+            )
+            .is_err()
+        );
     }
 
     #[test]

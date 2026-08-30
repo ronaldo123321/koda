@@ -249,6 +249,7 @@ mod tests {
             lifecycle: JobLifecycle::Foreground,
             pty: None,
             policy: Some(policy),
+            secrets: None,
         };
         let admission = admit_with_capabilities(&start, &capabilities).unwrap();
         assert!(launch_setup_with_capabilities(&start, &admission, &capabilities, false).is_err());

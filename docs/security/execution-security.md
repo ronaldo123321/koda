@@ -82,11 +82,11 @@ resize, detach, Supervisor restart, reattach, and completion.
 The current profiles do not provide workspace or host read privacy: protected
 commands can read ordinary host files visible through the read-only root. They
 do not provide a PID namespace, cgroup resource quotas, domain/address/port
-network allowlists, secret injection or output redaction, or isolation for
-providers, MCP servers, and plugins. `process_isolation = required` remains
-unsupported.
+network allowlists or isolation for providers, MCP servers, and plugins.
+Secret redaction is exact-byte only and does not cover transformed, encoded,
+or workspace-copied values. `process_isolation = required` remains unsupported.
 
-Phase 4C3A/C3B define value-free secret declarations/evidence, matching
+Phase 4C3A/C3B/C3C define value-free secret declarations/evidence, matching
 TypeScript/Rust exact-byte streaming-redaction primitives, frozen trusted
 `KodaApplication` catalogs, host-environment resolution into bounded
 single-use in-memory leases, and secret-aware fresh approval for
@@ -97,12 +97,23 @@ Prepared leases are destroyed on rejection, policy denial, cancellation,
 error, expiry, or execution completion, and reusable command grants are never
 matched for a non-empty secret set.
 
-C3B still rejects every secret-bearing backend with
-`SECRET_POLICY_UNAVAILABLE` before user code starts. It does not inject a
-secret, create a secret file, activate runtime redaction, or publish secret
-lifecycle evidence. Therefore it does not widen this runtime guarantee; native
-injection/cleanup/redaction in C3C and client/platform acceptance in C3D remain
-required. C3A is verified by all four jobs in
+C3C enables only verified macOS Seatbelt and Linux Bubblewrap native Pipe/PTY
+jobs using `read_only` or `workspace_write` with denied network. The bounded
+authenticated start exchange excludes values from argv, inherited Supervisor
+environment, idempotency material, manifests, state, diagnostics, and public
+evidence. The Worker creates an executor-state directory outside the workspace
+with mode `0700`, writes one opaque mode-`0400` file per declared target,
+injects only its path through `*_FILE`, and releases user code only after the
+existing sandbox confirmation and durable launch evidence succeed. Exact bytes
+are redacted before Pipe truncation/persistence and before PTY segment/live
+attachment publication. Verified process-tree completion removes the files;
+uncertain termination retains `cleanup_pending` evidence rather than removing
+files a live descendant may still use. Lost pre-release leases require fresh
+resolution and approval and are never replayed.
+
+C3D is still required to project this safe evidence consistently through CLI,
+TUI, and app-server responses and to close the platform matrix from one commit.
+C3A is verified by all four jobs in
 [GitHub Actions run 33315958454](https://github.com/ronaldo123321/koda/actions/runs/33315958454),
 and C3B implementation commit `7273895` is verified by all four jobs in
 [GitHub Actions run 33318090937](https://github.com/ronaldo123321/koda/actions/runs/33318090937).

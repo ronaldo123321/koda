@@ -1,10 +1,11 @@
 use std::collections::BTreeMap;
 
 use crate::execution_policy::{ExecutionPolicy, ExecutionSecuritySnapshot};
+use crate::secret_policy::{SecretExecutionEvidence, SecretLeaseEnvelope, SecretPolicyError};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 pub const MAX_FRAME_BYTES: usize = 1_048_576;
 pub const MAX_ARGUMENTS: usize = 64;
 pub const MAX_ARGUMENT_BYTES: usize = 4_096;
@@ -122,6 +123,16 @@ pub struct StartParams {
     // Optional only for reading v1 durable records. Current starts require it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy: Option<ExecutionPolicy>,
+    /// Public, value-free secret contract. Raw values are accepted only by
+    /// `StartRequest::secret_lease` and are never serialized with this record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secrets: Option<SecretExecutionEvidence>,
+}
+
+#[derive(Debug)]
+pub struct StartRequest {
+    pub start: StartParams,
+    pub secret_lease: Option<SecretLeaseEnvelope>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -352,6 +363,8 @@ pub struct JobSnapshot {
     pub termination: Option<TerminationSnapshot>,
     pub failure: Option<JobFailure>,
     pub security: ExecutionSecuritySnapshot,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secrets: Option<SecretExecutionEvidence>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -448,14 +461,34 @@ where
     })
 }
 
-pub fn parse_start_params(value: Value) -> Result<StartParams, ProtocolError> {
-    let policy = ExecutionPolicy::parse(value.get("policy").cloned().unwrap_or(Value::Null))
+pub fn parse_start_params(mut value: Value) -> Result<StartRequest, ProtocolError> {
+    let object = value.as_object_mut().ok_or_else(|| {
+        ProtocolError::new("INVALID_REQUEST", "Execution start parameters are invalid.")
+    })?;
+    let secret_value = object.remove("secret_lease");
+    let policy = ExecutionPolicy::parse(object.get("policy").cloned().unwrap_or(Value::Null))
         .map_err(crate::execution_security::policy_error)?;
     let mut params: StartParams = serde_json::from_value(value).map_err(|_| {
         ProtocolError::new("INVALID_REQUEST", "Execution start parameters are invalid.")
     })?;
     params.policy = Some(policy);
-    Ok(params)
+    let secret_lease = secret_value
+        .map(|secret| {
+            serde_json::from_value::<SecretLeaseEnvelope>(secret).map_err(|_| {
+                ProtocolError::new(
+                    SecretPolicyError::SecretEvidenceCorrupt.code(),
+                    SecretPolicyError::SecretEvidenceCorrupt.to_string(),
+                )
+            })
+        })
+        .transpose()?;
+    params.secrets = secret_lease
+        .as_ref()
+        .map(SecretLeaseEnvelope::public_evidence);
+    Ok(StartRequest {
+        start: params,
+        secret_lease,
+    })
 }
 
 pub fn validate_request(request: &Request) -> Result<(), ProtocolError> {
@@ -500,7 +533,7 @@ pub fn validate_hello(params: &HelloParams) -> Result<(), ProtocolError> {
     if !params.supported_versions.contains(&PROTOCOL_VERSION) {
         return Err(ProtocolError::new(
             "INCOMPATIBLE_PROTOCOL",
-            "The client does not support executor protocol version 4.",
+            "The client does not support executor protocol version 5.",
         ));
     }
     Ok(())
@@ -623,7 +656,47 @@ pub fn validate_start(params: &StartParams) -> Result<(), ProtocolError> {
         }
         (IoMode::Pty, Some(pty)) => validate_pty_config(pty)?,
     }
+    if let Some(secrets) = &params.secrets {
+        secrets.validate().map_err(secret_policy_error)?;
+        if secrets.lifecycle != crate::secret_policy::SecretLifecycle::Resolved
+            || secrets.cleanup != crate::secret_policy::SecretCleanup::NotStarted
+            || secrets.redactions
+                != (crate::secret_policy::SecretRedactionCounts {
+                    stdout: 0,
+                    stderr: 0,
+                    pty: 0,
+                })
+        {
+            return Err(secret_policy_error(
+                SecretPolicyError::SecretEvidenceCorrupt,
+            ));
+        }
+        let policy = params
+            .policy
+            .as_ref()
+            .ok_or_else(|| secret_policy_error(SecretPolicyError::SecretPolicyUnavailable))?;
+        if policy.network != crate::execution_policy::NetworkPolicy::Deny
+            || !matches!(
+                policy.filesystem,
+                crate::execution_policy::FilesystemPolicy::ReadOnly
+                    | crate::execution_policy::FilesystemPolicy::WorkspaceWrite
+            )
+            || secrets.targets.iter().any(|target| {
+                params
+                    .environment
+                    .contains_key(&target.environment_variable)
+            })
+        {
+            return Err(secret_policy_error(
+                SecretPolicyError::SecretPolicyUnavailable,
+            ));
+        }
+    }
     Ok(())
+}
+
+pub fn secret_policy_error(error: SecretPolicyError) -> ProtocolError {
+    ProtocolError::new(error.code(), error.to_string())
 }
 
 pub fn validate_pty_config(params: &PtyStartConfig) -> Result<(), ProtocolError> {
@@ -737,6 +810,7 @@ mod tests {
             lifecycle: JobLifecycle::Foreground,
             pty: None,
             policy: None,
+            secrets: None,
         };
 
         assert_eq!(
@@ -789,6 +863,7 @@ mod tests {
                 output_limit_bytes: DEFAULT_PTY_OUTPUT_LIMIT_BYTES,
             }),
             policy: None,
+            secrets: None,
         };
 
         validate_start(&params).expect("valid pty start");
@@ -804,9 +879,9 @@ mod tests {
     }
 
     #[test]
-    fn protocol_v4_rejects_v3_requests_and_clients_without_fallback() {
+    fn protocol_v5_rejects_v4_requests_and_clients_without_fallback() {
         let request = Request {
-            protocol_version: 3,
+            protocol_version: 4,
             request_id: "r1".into(),
             method: "system/hello".into(),
             params: serde_json::json!({}),
@@ -818,7 +893,7 @@ mod tests {
         let hello = HelloParams {
             client_name: "legacy-client".into(),
             client_version: "1.0.0".into(),
-            supported_versions: vec![3],
+            supported_versions: vec![4],
         };
         assert_eq!(
             validate_hello(&hello).unwrap_err().code,

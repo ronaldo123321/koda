@@ -212,11 +212,13 @@ export function registerExecCommandTool(
           ? {}
           : { dispose: () => secretLease.destroy() }),
         execute: async (): Promise<JsonValue> => {
-          if (secretLease !== undefined) {
-            secretLease.rejectUnavailable(secretBinding);
-          }
           return {
-            ...(await command.execute(context.signal, context.report)),
+            ...(await command.execute(
+              context.signal,
+              context.report,
+              secretLease,
+              secretBinding,
+            )),
           };
         },
       };

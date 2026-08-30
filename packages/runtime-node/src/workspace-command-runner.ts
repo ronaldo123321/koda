@@ -41,6 +41,12 @@ import {
   resolveExecutionPolicy,
   type ExecutionPolicyErrorCode,
 } from "./execution-policy.js";
+import {
+  SecretPolicyError,
+  type NativeSecretLeaseInput,
+  type SecretCommandBinding,
+  type SecretLease,
+} from "./secret-policy.js";
 
 export type CommandErrorCode =
   | "INVALID_COMMAND"
@@ -108,6 +114,8 @@ export interface PreparedWorkspaceCommand {
   execute(
     signal: AbortSignal,
     report?: (event: ToolOperationalEvent) => Promise<void>,
+    secretLease?: SecretLease,
+    secretBinding?: SecretCommandBinding,
   ): Promise<ExecCommandResult>;
 }
 
@@ -121,7 +129,11 @@ export interface PreparedWorkspaceTerminal {
   summary: string;
   preview: string;
   security: ExecutionSecuritySnapshot;
-  execute(signal: AbortSignal): Promise<InteractiveTerminalStartResult>;
+  execute(
+    signal: AbortSignal,
+    secretLease?: SecretLease,
+    secretBinding?: SecretCommandBinding,
+  ): Promise<InteractiveTerminalStartResult>;
 }
 
 export interface WorkspaceCommandRunnerOptions {
@@ -315,7 +327,7 @@ export class WorkspaceCommandRunner {
         executionPolicyPreview(security),
       ].join("\n"),
       security,
-      execute: async (signal, report) => {
+      execute: async (signal, report, secretLease, secretBinding) => {
         if (executed) {
           throw new CommandError(
             "INVALID_COMMAND",
@@ -326,6 +338,11 @@ export class WorkspaceCommandRunner {
         signal.throwIfAborted();
         await this.revalidateWorkingDirectory(requestedCwd, cwd);
         await this.revalidateExecutionSecurity(security);
+        const nativeSecretLease = consumeNativeSecretLease(
+          secretLease,
+          secretBinding,
+          this.nativeExecutor !== undefined,
+        );
         const executionOptions: RunForegroundCommandOptions = {
           argv,
           cwd: cwd.absolutePath,
@@ -342,6 +359,9 @@ export class WorkspaceCommandRunner {
           policy: this.executionPolicy,
           capabilities: this.executionCapabilities,
           ...(report === undefined ? {} : { report }),
+          ...(nativeSecretLease === undefined
+            ? {}
+            : { secretLease: nativeSecretLease }),
         };
         return this.nativeExecutor === undefined
           ? runForegroundCommand(executionOptions)
@@ -404,7 +424,7 @@ export class WorkspaceCommandRunner {
         executionPolicyPreview(security),
       ].join("\n"),
       security,
-      execute: async (signal) => {
+      execute: async (signal, secretLease, secretBinding) => {
         if (executed) {
           throw new CommandError(
             "INVALID_COMMAND",
@@ -415,6 +435,11 @@ export class WorkspaceCommandRunner {
         signal.throwIfAborted();
         await this.revalidateWorkingDirectory(requestedCwd, cwd);
         await this.revalidateExecutionSecurity(security);
+        const nativeSecretLease = consumeNativeSecretLease(
+          secretLease,
+          secretBinding,
+          true,
+        );
         return service.startTerminal({
           argv,
           cwd: cwd.absolutePath,
@@ -429,6 +454,9 @@ export class WorkspaceCommandRunner {
           lifecycle: options.lifecycle,
           displayName,
           policy: this.executionPolicy,
+          ...(nativeSecretLease === undefined
+            ? {}
+            : { secretLease: nativeSecretLease }),
         });
       },
     };
@@ -586,6 +614,7 @@ interface RunForegroundCommandOptions {
   policy: ExecutionPolicy;
   capabilities: ExecutionCapabilities;
   report?: (event: ToolOperationalEvent) => Promise<void>;
+  secretLease?: NativeSecretLeaseInput;
 }
 
 const MAX_NATIVE_ARTIFACT_OUTPUT_BYTES = 67_108_864;
@@ -610,6 +639,9 @@ async function runNativeForegroundCommand(
       terminationGraceMs: options.terminationGraceMs,
       terminationConfirmationMs: options.terminationConfirmationMs,
       policy: options.policy,
+      ...(options.secretLease === undefined
+        ? {}
+        : { secretLease: options.secretLease }),
     });
   } catch (error) {
     throw mapNativeExecutorError(error, options.argv[0] ?? "command");
@@ -667,6 +699,8 @@ async function runNativeForegroundCommand(
   }
   await reportStarted(snapshot);
 
+  const secretFailure = secretFailureFromSnapshot(snapshot);
+  if (secretFailure !== undefined) throw secretFailure;
   if (snapshot.state === "start_failed") {
     throw commandStartFailure(snapshot, options.argv[0] ?? "command");
   }
@@ -733,6 +767,19 @@ async function runNativeForegroundCommand(
         }),
     security: snapshot.security,
   };
+}
+
+function secretFailureFromSnapshot(
+  snapshot: NativeJobSnapshot,
+): SecretPolicyError | undefined {
+  const code = snapshot.failure?.code;
+  if (code === undefined) return undefined;
+  if (code.startsWith("SECRET_") || code === "INVALID_SECRET_DECLARATION") {
+    return new SecretPolicyError(
+      code as ConstructorParameters<typeof SecretPolicyError>[0],
+    );
+  }
+  return undefined;
 }
 
 async function terminateAndObserve(
@@ -889,6 +936,14 @@ function mapNativeExecutorError(
   if (!(error instanceof NativeExecutorError)) {
     return error instanceof Error ? error : new Error(String(error));
   }
+  if (
+    error.code.startsWith("SECRET_") ||
+    error.code === "INVALID_SECRET_DECLARATION"
+  ) {
+    return new SecretPolicyError(
+      error.code as ConstructorParameters<typeof SecretPolicyError>[0],
+    );
+  }
   if (error.code === "COMMAND_NOT_FOUND") {
     return new CommandError(
       "COMMAND_NOT_FOUND",
@@ -923,6 +978,23 @@ function mapNativeExecutorError(
     error.message,
     { cause: error },
   );
+}
+
+function consumeNativeSecretLease(
+  lease: SecretLease | undefined,
+  binding: SecretCommandBinding | undefined,
+  nativeAvailable: boolean,
+): NativeSecretLeaseInput | undefined {
+  if (lease === undefined) return undefined;
+  if (
+    binding === undefined ||
+    !nativeAvailable ||
+    process.platform === "win32"
+  ) {
+    lease.destroy();
+    throw new SecretPolicyError("SECRET_POLICY_UNAVAILABLE");
+  }
+  return lease.consumeForNative(binding);
 }
 
 async function runForegroundCommand(

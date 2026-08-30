@@ -87,7 +87,7 @@ describe("Phase 4C2 native admission and evidence", () => {
         else process.env.KODA_REQUIRE_MACOS_SEATBELT = previous;
       }
       await expect(client!.hello()).resolves.toMatchObject({
-        protocol_version: 4,
+        protocol_version: 5,
         platform: "macos",
         execution_security: {
           schema_version: 2,
@@ -117,7 +117,7 @@ describe("Phase 4C2 native admission and evidence", () => {
       }
       const hello = await client!.hello();
       expect(hello).toMatchObject({
-        protocol_version: 4,
+        protocol_version: 5,
         platform: "linux",
         execution_security: {
           schema_version: 3,
@@ -216,7 +216,7 @@ describe("Phase 4C2 native admission and evidence", () => {
     const fixture = await setup();
     const client = await open(fixture);
     const hello = await client.hello();
-    expect(hello.protocol_version).toBe(4);
+    expect(hello.protocol_version).toBe(5);
     const expectedSchema =
       process.platform === "darwin"
         ? 2
@@ -244,12 +244,12 @@ describe("Phase 4C2 native admission and evidence", () => {
     const currentManifest = await onlyManifest(fixture.root);
     expect(
       JSON.parse(await readFile(currentManifest.path, "utf8")).format_version,
-    ).toBe(4);
+    ).toBe(5);
     expect(
       JSON.parse(
         await readFile(join(currentManifest.directory, "state.json"), "utf8"),
       ).format_version,
-    ).toBe(4);
+    ).toBe(5);
     expect(terminal).toMatchObject({
       state: "exited",
       exit_code: 0,
@@ -916,7 +916,7 @@ describe("Phase 4C2 native admission and evidence", () => {
       { ...input.policy!, secret: "fixture-sensitive-marker" },
     ]) {
       const value = policy === undefined ? params : { ...params, policy };
-      const response = await rpc(client.socketPath, 4, "job/start", value);
+      const response = await rpc(client.socketPath, 5, "job/start", value);
       expect(response).toMatchObject({
         ok: false,
         error: { code: "INVALID_EXECUTION_POLICY" },
@@ -988,7 +988,7 @@ describe("Phase 4C2 native admission and evidence", () => {
 // Optional cross-version acceptance uses the real pinned v1 binary, not a fake
 // Worker. Build commit 3aa84ee and set KODA_LEGACY_EXECUTOR_BINARY to run it.
 describe.skipIf(legacyBinary === undefined || process.platform === "win32")(
-  "native v1 -> v4 live compatibility",
+  "native v1 -> v5 live compatibility",
   () => {
     it("refuses a live v1 Supervisor without replacing it", async () => {
       const fixture = await setup();

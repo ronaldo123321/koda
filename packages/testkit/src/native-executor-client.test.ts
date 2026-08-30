@@ -9,6 +9,7 @@ import {
   registerExecTerminalTool,
   resolveExecutionPolicy,
   type NativeJobSnapshot,
+  type NativeSecretLeaseInput,
 } from "@koda/runtime-node";
 import { randomUUID } from "node:crypto";
 import { access, mkdtemp, realpath, rm } from "node:fs/promises";
@@ -41,7 +42,7 @@ describeNative("NativeExecutorClient", () => {
 
   it("negotiates explicit POSIX capabilities", async () => {
     await expect(client.hello()).resolves.toMatchObject({
-      protocol_version: 4,
+      protocol_version: 5,
       platform: process.platform === "darwin" ? "macos" : "linux",
       capabilities: {
         process_group: true,
@@ -51,6 +52,136 @@ describeNative("NativeExecutorClient", () => {
         durable_restart_recovery: true,
       },
     });
+  });
+
+  it("injects file secrets once, redacts Pipe output before persistence, and cleans up", async () => {
+    const hello = await client.hello();
+    if (![2, 3].includes(hello.execution_security.schema_version)) return;
+    const workspace = await mkdtemp(join(root, "secret-workspace-"));
+    const value = Buffer.from("c3c-native-secret-value", "utf8");
+    const started = await client.start({
+      argv: [
+        process.execPath,
+        "-e",
+        "const fs=require('node:fs');const v=fs.readFileSync(process.env.APP_TOKEN_FILE);process.stdout.write(v);process.stderr.write(v)",
+      ],
+      cwd: workspace,
+      policy: await protectedPolicyFor(workspace),
+      environment: { PATH: process.env.PATH },
+      timeoutMs: 3_000,
+      outputLimitBytes: 65_536,
+      terminationGraceMs: 25,
+      terminationConfirmationMs: 1_000,
+      secretLease: nativeSecretLease(value),
+    });
+    expect(value).toEqual(Buffer.alloc(value.byteLength));
+    const terminal = await waitTerminal(client, started.job_id);
+    const [stdout, stderr] = await Promise.all([
+      client.readOutput(terminal.job_id, "stdout", 0),
+      client.readOutput(terminal.job_id, "stderr", 0),
+    ]);
+
+    expect(terminal.failure).toBeNull();
+    expect(terminal).toMatchObject({ state: "exited", exit_code: 0 });
+    expect(stdout.data.toString("utf8")).toBe("[REDACTED]");
+    expect(stderr.data.toString("utf8")).toBe("[REDACTED]");
+    expect(terminal.secrets).toMatchObject({
+      lifecycle: "destroyed",
+      cleanup: "completed",
+      redactions: { stdout: 1, stderr: 1, pty: 0 },
+    });
+    expect(JSON.stringify(terminal)).not.toContain("c3c-native-secret-value");
+  });
+
+  it("redacts PTY output before segments and live attachment reads", async () => {
+    const hello = await client.hello();
+    if (![2, 3].includes(hello.execution_security.schema_version)) return;
+    const workspace = await mkdtemp(join(root, "secret-pty-workspace-"));
+    const value = Buffer.from("c3c-pty-secret-value", "utf8");
+    const started = await client.startPty({
+      argv: [
+        process.execPath,
+        "-e",
+        "const fs=require('node:fs');process.stdout.write(fs.readFileSync(process.env.APP_TOKEN_FILE))",
+      ],
+      cwd: workspace,
+      policy: await protectedPolicyFor(workspace),
+      environment: { PATH: process.env.PATH },
+      timeoutMs: 3_000,
+      outputLimitBytes: 65_536,
+      terminationGraceMs: 25,
+      terminationConfirmationMs: 1_000,
+      rows: 24,
+      cols: 80,
+      secretLease: nativeSecretLease(value),
+    });
+    const attachment = await client.openAttachment(started.job_id);
+    const terminal = await waitTerminal(client, started.job_id);
+    const output = await readPtyToCompletion(attachment);
+
+    expect(terminal.failure).toBeNull();
+    expect(terminal).toMatchObject({ state: "exited", exit_code: 0 });
+    expect(output).toBe("[REDACTED]");
+    expect(terminal.secrets).toMatchObject({
+      lifecycle: "destroyed",
+      cleanup: "completed",
+      redactions: { stdout: 0, stderr: 0, pty: 1 },
+    });
+  });
+
+  it("keeps secret files through execution and removes them after cancellation", async () => {
+    const hello = await client.hello();
+    if (![2, 3].includes(hello.execution_security.schema_version)) return;
+    const workspace = await mkdtemp(join(root, "secret-cancel-workspace-"));
+    const value = Buffer.from("c3c-cancel-secret-value", "utf8");
+    const started = await client.start({
+      argv: [process.execPath, "-e", "setInterval(()=>{},1000)"],
+      cwd: workspace,
+      policy: await protectedPolicyFor(workspace),
+      environment: { PATH: process.env.PATH },
+      timeoutMs: 10_000,
+      outputLimitBytes: 65_536,
+      terminationGraceMs: 25,
+      terminationConfirmationMs: 1_000,
+      secretLease: nativeSecretLease(value),
+    });
+    await client.terminate(started.job_id, "cancellation");
+    const terminal = await waitTerminal(client, started.job_id);
+
+    expect(terminal).toMatchObject({
+      state: "exited",
+      secrets: {
+        lifecycle: "destroyed",
+        cleanup: "completed",
+      },
+    });
+  });
+
+  it("rejects an expired native lease with a fixed value-free error", async () => {
+    const hello = await client.hello();
+    if (![2, 3].includes(hello.execution_security.schema_version)) return;
+    const workspace = await mkdtemp(join(root, "secret-expired-workspace-"));
+    const value = Buffer.from("c3c-expired-secret-value", "utf8");
+    const lease = nativeSecretLease(value);
+    lease.evidence.expires_at_ms = Date.now() - 1;
+
+    await expect(
+      client.start({
+        argv: [process.execPath, "-e", "process.exit(0)"],
+        cwd: workspace,
+        policy: await protectedPolicyFor(workspace),
+        environment: { PATH: process.env.PATH },
+        timeoutMs: 3_000,
+        outputLimitBytes: 65_536,
+        terminationGraceMs: 25,
+        terminationConfirmationMs: 1_000,
+        secretLease: lease,
+      }),
+    ).rejects.toMatchObject({
+      code: "SECRET_LEASE_EXPIRED",
+      message: "The secret lease expired before execution.",
+    });
+    expect(value).toEqual(Buffer.alloc(value.byteLength));
   });
 
   it("runs a real PTY with configured dimensions and fenced input", async () => {
@@ -802,6 +933,36 @@ describeNative("NativeExecutorClient", () => {
 
 async function policyFor(root: string) {
   return resolveExecutionPolicy({ workspaceRoot: await realpath(root) });
+}
+
+async function protectedPolicyFor(root: string) {
+  return resolveExecutionPolicy({
+    workspaceRoot: await realpath(root),
+    environmentProfile: "read-only",
+  });
+}
+
+function nativeSecretLease(value: Buffer): NativeSecretLeaseInput {
+  let destroyed = false;
+  return {
+    evidence: {
+      schema_version: 1,
+      declaration_digest: "a".repeat(64),
+      lease_id: "0123456789abcdef0123456789abcdef",
+      aliases: ["api-token"],
+      targets: [{ alias: "api-token", environment_variable: "APP_TOKEN_FILE" }],
+      lifecycle: "resolved",
+      expires_at_ms: Date.now() + 60_000,
+      redactions: { stdout: 0, stderr: 0, pty: 0 },
+      cleanup: "not_started",
+    },
+    values: [value],
+    destroy(): void {
+      if (destroyed) return;
+      destroyed = true;
+      value.fill(0);
+    },
+  };
 }
 
 async function waitTerminal(

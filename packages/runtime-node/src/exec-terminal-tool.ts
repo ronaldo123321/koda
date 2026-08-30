@@ -196,10 +196,13 @@ export function registerExecTerminalTool(
           ? {}
           : { dispose: () => secretLease.destroy() }),
         execute: async (): Promise<JsonValue> => {
-          if (secretLease !== undefined) {
-            secretLease.rejectUnavailable(secretBinding);
-          }
-          return { ...(await command.execute(context.signal)) };
+          return {
+            ...(await command.execute(
+              context.signal,
+              secretLease,
+              secretBinding,
+            )),
+          };
         },
       };
     },

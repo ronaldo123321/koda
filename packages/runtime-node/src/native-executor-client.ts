@@ -8,6 +8,7 @@ import { isAbsolute, join, resolve } from "node:path";
 import { z } from "zod";
 import {
   executionCapabilitiesSchema,
+  secretExecutionEvidenceSchema,
   type ExecutionPolicy,
   type ExecutionSecuritySnapshot,
 } from "@koda/protocol";
@@ -16,8 +17,9 @@ import {
   normalizeExecutionPolicy,
   validateExecutionSecuritySnapshot,
 } from "./execution-policy.js";
+import type { NativeSecretLeaseInput } from "./secret-policy.js";
 
-const PROTOCOL_VERSION = 4;
+const PROTOCOL_VERSION = 5;
 const MAX_FRAME_BYTES = 1_048_576;
 const DEFAULT_STARTUP_TIMEOUT_MS = 5_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
@@ -53,6 +55,18 @@ export type NativeExecutorErrorCode =
   | "CURSOR_INVALID"
   | "PTY_OUTPUT_FAILED"
   | "PTY_OUTPUT_CORRUPT"
+  | "INVALID_SECRET_DECLARATION"
+  | "SECRET_ALIAS_NOT_CONFIGURED"
+  | "SECRET_VALUE_UNAVAILABLE"
+  | "SECRET_VALUE_INVALID"
+  | "SECRET_LEASE_EXPIRED"
+  | "SECRET_POLICY_UNAVAILABLE"
+  | "SECRET_POLICY_CHANGED"
+  | "SECRET_REAUTH_REQUIRED"
+  | "SECRET_INJECTION_FAILED"
+  | "SECRET_REDACTION_FAILED"
+  | "SECRET_CLEANUP_FAILED"
+  | "SECRET_EVIDENCE_CORRUPT"
   | "INTERNAL_ERROR";
 
 export class NativeExecutorError extends Error {
@@ -87,6 +101,7 @@ export interface NativeExecutorStartInput {
   requestId?: string;
   /** Frozen policy selected by the trusted application before approval. */
   policy: ExecutionPolicy;
+  secretLease?: NativeSecretLeaseInput;
 }
 
 export interface NativeExecutorPtyStartInput extends NativeExecutorStartInput {
@@ -150,6 +165,7 @@ export interface NativeJobSnapshot {
   termination: NativeTerminationSnapshot | null;
   failure: { code: string; message: string } | null;
   security: ExecutionSecuritySnapshot;
+  secrets?: import("@koda/protocol").SecretExecutionEvidence | undefined;
 }
 
 export interface NativeOutputReadResult {
@@ -308,6 +324,7 @@ const jobSnapshotSchema = z
       })
       .strict()
       .nullable(),
+    secrets: secretExecutionEvidenceSchema.optional(),
   })
   .strict()
   .superRefine((snapshot, context) => {
@@ -649,8 +666,19 @@ export class NativeExecutorClient {
       ...(input.displayName === undefined
         ? {}
         : { display_name: input.displayName }),
+      ...(input.secretLease === undefined
+        ? {}
+        : { secret_lease: secretLeaseParams(input.secretLease) }),
     };
-    return this.startRequest(params, requestId);
+    try {
+      return await this.startRequest(
+        params,
+        requestId,
+        input.secretLease === undefined,
+      );
+    } finally {
+      input.secretLease?.destroy();
+    }
   }
 
   public async startPty(
@@ -679,13 +707,25 @@ export class NativeExecutorClient {
         term: input.term ?? "xterm-256color",
         output_limit_bytes: input.outputLimitBytes,
       },
+      ...(input.secretLease === undefined
+        ? {}
+        : { secret_lease: secretLeaseParams(input.secretLease) }),
     };
-    return this.startRequest(params, requestId);
+    try {
+      return await this.startRequest(
+        params,
+        requestId,
+        input.secretLease === undefined,
+      );
+    } finally {
+      input.secretLease?.destroy();
+    }
   }
 
   private async startRequest(
     params: { policy: ExecutionPolicy },
     requestId: string,
+    allowRetry = true,
   ): Promise<NativeJobSnapshot> {
     try {
       return this.validateStartedJob(
@@ -699,6 +739,13 @@ export class NativeExecutorClient {
     } catch (error) {
       if (!isUnavailable(error)) {
         throw error;
+      }
+      if (!allowRetry) {
+        throw new NativeExecutorError(
+          "SECRET_REAUTH_REQUIRED",
+          "The secret start exchange was interrupted; resolve and approve it again.",
+          { cause: error },
+        );
       }
       return this.validateStartedJob(
         parseProtocolValue(
@@ -1316,7 +1363,7 @@ function parseResponse(value: unknown): ExecutorResponse {
   if (parsed.data.protocol_version !== PROTOCOL_VERSION) {
     throw new NativeExecutorError(
       "INCOMPATIBLE_PROTOCOL",
-      "Executor protocol v4 is required. Finish or stop the older Supervisor explicitly before upgrading; no fallback was attempted.",
+      "Executor protocol v5 is required. Finish or stop the older Supervisor explicitly before upgrading; no fallback was attempted.",
     );
   }
   return parsed.data;
@@ -1374,11 +1421,30 @@ function normalizeRemoteCode(
     case "CURSOR_INVALID":
     case "PTY_OUTPUT_FAILED":
     case "PTY_OUTPUT_CORRUPT":
+    case "INVALID_SECRET_DECLARATION":
+    case "SECRET_ALIAS_NOT_CONFIGURED":
+    case "SECRET_VALUE_UNAVAILABLE":
+    case "SECRET_VALUE_INVALID":
+    case "SECRET_LEASE_EXPIRED":
+    case "SECRET_POLICY_UNAVAILABLE":
+    case "SECRET_POLICY_CHANGED":
+    case "SECRET_REAUTH_REQUIRED":
+    case "SECRET_INJECTION_FAILED":
+    case "SECRET_REDACTION_FAILED":
+    case "SECRET_CLEANUP_FAILED":
+    case "SECRET_EVIDENCE_CORRUPT":
     case "INTERNAL_ERROR":
       return code;
     default:
       return "NATIVE_EXECUTOR_PROTOCOL_ERROR";
   }
+}
+
+function secretLeaseParams(lease: NativeSecretLeaseInput): object {
+  return {
+    evidence: lease.evidence,
+    values: lease.values.map((value) => [...value]),
+  };
 }
 
 function decodeCanonicalBase64(value: string): Buffer {

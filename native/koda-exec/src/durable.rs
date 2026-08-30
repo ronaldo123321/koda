@@ -15,8 +15,9 @@ use crate::platform::{self, state_security};
 use crate::protocol::{
     IoMode, JobFailure, JobSnapshot, JobState, ProtocolError, StartParams, TerminationSnapshot,
 };
+use crate::secret_policy::SecretExecutionEvidence;
 
-pub const STORE_FORMAT_VERSION: u32 = 4;
+pub const STORE_FORMAT_VERSION: u32 = 5;
 const MAX_MANIFEST_BYTES: u64 = 262_144;
 const MAX_STATE_BYTES: u64 = 65_536;
 const MAX_STATE_HEAD_BYTES: u64 = 4_096;
@@ -64,6 +65,8 @@ pub struct StoredJobState {
     pub failure: Option<JobFailure>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub security: Option<ExecutionSecuritySnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secrets: Option<SecretExecutionEvidence>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -185,6 +188,7 @@ impl JobStore {
 
         let mut initial = StoredJobState::initial(&manifest.job_id);
         initial.security = Some(security);
+        initial.secrets = manifest.start.secrets.clone();
         initial.state_digest = state_digest(&initial)?;
         write_new_json(&directory.join("state.json"), &initial, MAX_STATE_BYTES)?;
         write_new_json(
@@ -281,6 +285,14 @@ impl JobStore {
         } else if std::fs::symlink_metadata(directory.join("scratch")).is_ok() {
             return Err(corrupt("Unexpected sandbox scratch directory is present."));
         }
+        let secret_path = directory.join("secrets");
+        if manifest.start.secrets.is_some() {
+            if std::fs::symlink_metadata(&secret_path).is_ok() {
+                validate_secret_directory(&secret_path)?;
+            }
+        } else if std::fs::symlink_metadata(&secret_path).is_ok() {
+            return Err(corrupt("Unexpected secret directory is present."));
+        }
         validate_private_file(&directory.join("state.head"), None)?;
         let record = JobRecord {
             directory: directory.to_owned(),
@@ -369,6 +381,10 @@ impl JobRecord {
 
     pub fn scratch_path(&self) -> PathBuf {
         self.directory.join("scratch")
+    }
+
+    pub fn secret_path(&self) -> PathBuf {
+        self.directory.join("secrets")
     }
 
     pub fn lock_path(&self) -> PathBuf {
@@ -530,6 +546,7 @@ impl StoredJobState {
             termination: None,
             failure: None,
             security: None,
+            secrets: None,
         }
     }
 
@@ -556,6 +573,7 @@ impl StoredJobState {
                 .security
                 .clone()
                 .unwrap_or_else(execution_security::legacy_unknown),
+            secrets: self.secrets.clone(),
         }
     }
 }
@@ -640,6 +658,58 @@ fn validate_security_binding(
     manifest: &JobManifest,
     state: &StoredJobState,
 ) -> Result<(), ProtocolError> {
+    if manifest.format_version < 5 {
+        if manifest.start.secrets.is_some() || state.secrets.is_some() {
+            return Err(execution_security::corrupt());
+        }
+    } else {
+        match (&manifest.start.secrets, &state.secrets) {
+            (None, None) => {}
+            (Some(original), Some(current)) => {
+                current
+                    .validate()
+                    .map_err(|_| execution_security::corrupt())?;
+                if original.declaration_digest != current.declaration_digest
+                    || original.lease_id != current.lease_id
+                    || original.aliases != current.aliases
+                    || original.targets != current.targets
+                    || original.expires_at_ms != current.expires_at_ms
+                {
+                    return Err(execution_security::corrupt());
+                }
+                let lifecycle_valid = match state.state {
+                    JobState::Accepted | JobState::WorkerReady => matches!(
+                        current.lifecycle,
+                        crate::secret_policy::SecretLifecycle::Resolved
+                            | crate::secret_policy::SecretLifecycle::Injected
+                    ),
+                    JobState::CommandStarting
+                    | JobState::Starting
+                    | JobState::Running
+                    | JobState::Terminating => {
+                        current.lifecycle == crate::secret_policy::SecretLifecycle::Injected
+                    }
+                    JobState::Exited | JobState::StartFailed => matches!(
+                        current.lifecycle,
+                        crate::secret_policy::SecretLifecycle::Expired
+                            | crate::secret_policy::SecretLifecycle::Destroyed
+                            | crate::secret_policy::SecretLifecycle::CleanupFailed
+                    ),
+                    JobState::TerminationUncertain => matches!(
+                        current.lifecycle,
+                        crate::secret_policy::SecretLifecycle::Destroyed
+                            | crate::secret_policy::SecretLifecycle::CleanupPending
+                            | crate::secret_policy::SecretLifecycle::CleanupFailed
+                    ),
+                    JobState::Quarantined => true,
+                };
+                if !lifecycle_valid {
+                    return Err(execution_security::corrupt());
+                }
+            }
+            _ => return Err(execution_security::corrupt()),
+        }
+    }
     if manifest.format_version == 1 {
         return if state.security.is_none() {
             Ok(())
@@ -704,6 +774,9 @@ fn validate_manifest(manifest: &JobManifest) -> Result<(), ProtocolError> {
     crate::protocol::validate_identifier(&manifest.job_id, "job_id")?;
     crate::protocol::validate_identifier(&manifest.request_id, "request_id")?;
     crate::protocol::validate_start(&manifest.start)?;
+    if manifest.format_version < 5 && manifest.start.secrets.is_some() {
+        return Err(execution_security::corrupt());
+    }
     match manifest.format_version {
         1 if manifest.start.policy.is_none() && manifest.security.is_none() => {}
         2..=STORE_FORMAT_VERSION => {
@@ -719,6 +792,7 @@ fn validate_manifest(manifest: &JobManifest) -> Result<(), ProtocolError> {
                 2 => policy.schema_version == 1,
                 3 => matches!(policy.schema_version, 1..=2),
                 4 => matches!(policy.schema_version, 1..=3),
+                5 => matches!(policy.schema_version, 1..=3),
                 _ => false,
             };
             if !schema_allowed {
@@ -781,7 +855,59 @@ fn validate_state(state: &StoredJobState, job_id: &str) -> Result<(), ProtocolEr
     {
         return Err(corrupt("Retained output bytes exceed total output bytes."));
     }
+    if let Some(secrets) = &state.secrets {
+        secrets
+            .validate()
+            .map_err(|_| corrupt("Secret execution evidence is invalid."))?;
+    }
     Ok(())
+}
+
+fn validate_secret_directory(path: &Path) -> Result<(), ProtocolError> {
+    #[cfg(not(unix))]
+    return Err(corrupt(
+        "Secret directories are unsupported on this platform.",
+    ));
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
+
+    #[cfg(unix)]
+    {
+        validate_private_directory(path)?;
+        let entries = std::fs::read_dir(path)
+            .map_err(state_io_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(state_io_error)?;
+        if entries.len() > crate::secret_policy::EXECUTION_SECRET_MAX_SELECTION {
+            return Err(corrupt("Secret directory exceeds its file limit."));
+        }
+        for entry in entries {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                return Err(corrupt("Secret file identity is invalid."));
+            };
+            if name.len() != 32
+                || !name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                return Err(corrupt("Secret file identity is invalid."));
+            }
+            let metadata = std::fs::symlink_metadata(entry.path()).map_err(state_io_error)?;
+            let expected_uid = unsafe { libc::geteuid() };
+            if metadata.file_type().is_symlink()
+                || !metadata.is_file()
+                || metadata.uid() != expected_uid
+                || metadata.mode() & 0o777 != 0o400
+                || !(crate::secret_policy::EXECUTION_SECRET_VALUE_MIN_BYTES as u64
+                    ..=crate::secret_policy::EXECUTION_SECRET_VALUE_MAX_BYTES as u64)
+                    .contains(&metadata.len())
+            {
+                return Err(corrupt("Secret file structure is invalid."));
+            }
+        }
+        Ok(())
+    }
 }
 
 fn validate_state_head(head: &StateHead, job_id: &str) -> Result<(), ProtocolError> {
@@ -1050,6 +1176,7 @@ mod tests {
             policy: Some(
                 crate::execution_policy::resolve_execution_policy(&cwd, None, None).unwrap(),
             ),
+            secrets: None,
         }
     }
 
@@ -1338,7 +1465,7 @@ mod tests {
             let path = record.directory.join(name);
             let mut value: serde_json::Value =
                 read_private_json(&path, MAX_MANIFEST_BYTES).unwrap();
-            value["format_version"] = serde_json::json!(5);
+            value["format_version"] = serde_json::json!(6);
             value["future_field"] = serde_json::json!({"preserve":true});
             write_atomic_json(&path, &value, MAX_MANIFEST_BYTES).unwrap();
             let before = std::fs::read(&path).unwrap();
