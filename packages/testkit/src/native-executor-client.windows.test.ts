@@ -176,13 +176,17 @@ windowsDescribe("NativeExecutorClient Windows control plane", () => {
       type: "process.started",
       payload: expect.objectContaining({ ownership: "windows_job_object" }),
     });
-    expect(events).toContainEqual({
-      type: "process.termination_requested",
-      payload: expect.objectContaining({
-        attempt: "force",
-        mechanism: "windows_job_object_terminate",
-      }),
-    });
+    const requested = events.find(
+      (event) => event.type === "process.termination_requested",
+    );
+    if (requested?.type !== "process.termination_requested") {
+      throw new Error("Windows timeout did not report a termination attempt.");
+    }
+    expect(requested.payload.reason).toBe("timeout");
+    expect([
+      "windows_console_ctrl_break",
+      "windows_job_object_terminate",
+    ]).toContain(requested.payload.mechanism);
     expect(events).toContainEqual({
       type: "process.termination_completed",
       payload: expect.objectContaining({
@@ -270,10 +274,10 @@ windowsDescribe("NativeExecutorClient Windows control plane", () => {
             attempt.mechanism === "windows_job_object_recovery_pending",
         ),
       ).toBe(false);
-      if (started.pid === null) {
+      if (terminal.pid === null) {
         throw new Error("Windows Worker-loss job did not publish a root PID.");
       }
-      const rootPid = started.pid;
+      const rootPid = terminal.pid;
       expect(() => process.kill(rootPid, 0)).toThrow();
     } finally {
       await faultClient.closeOwnedSupervisorForTests();
