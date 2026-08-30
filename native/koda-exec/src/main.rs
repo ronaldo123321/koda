@@ -7,6 +7,7 @@ mod execution_security;
 mod executor_runtime;
 mod framing;
 mod internal_protocol;
+mod macos_seatbelt;
 mod platform;
 mod protocol;
 mod pty_output;
@@ -52,6 +53,20 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             token_handle,
         } => run_worker(job_dir, token_handle).await,
         Arguments::CommandBootstrap { gate_fd, argv } => run_command_bootstrap(gate_fd, argv),
+        Arguments::SandboxBootstrap {
+            confirmation_fd,
+            argv,
+        } => {
+            macos_seatbelt::run_sandbox_bootstrap(confirmation_fd, argv)?;
+            Ok(())
+        }
+        Arguments::SeatbeltProbe {
+            allowed_path,
+            denied_path,
+        } => {
+            macos_seatbelt::run_probe_contract(&allowed_path, &denied_path)?;
+            Ok(())
+        }
     }
 }
 
@@ -129,6 +144,14 @@ enum Arguments {
         gate_fd: i32,
         argv: Vec<String>,
     },
+    SandboxBootstrap {
+        confirmation_fd: i32,
+        argv: Vec<String>,
+    },
+    SeatbeltProbe {
+        allowed_path: PathBuf,
+        denied_path: PathBuf,
+    },
 }
 
 fn parse_arguments(
@@ -184,6 +207,38 @@ fn parse_arguments(
                 return Err("command bootstrap argv is required".into());
             }
             Ok(Arguments::CommandBootstrap { gate_fd, argv })
+        }
+        Some("sandbox-bootstrap") => {
+            if arguments.next().as_deref() != Some("--confirm-fd") {
+                return Err("sandbox bootstrap requires --confirm-fd".into());
+            }
+            let confirmation_fd = arguments
+                .next()
+                .ok_or("--confirm-fd is required")?
+                .parse::<i32>()?;
+            if confirmation_fd < 3 || arguments.next().as_deref() != Some("--") {
+                return Err("sandbox bootstrap descriptor or separator is invalid".into());
+            }
+            let argv = arguments.collect::<Vec<_>>();
+            if argv.is_empty() {
+                return Err("sandbox bootstrap argv is required".into());
+            }
+            Ok(Arguments::SandboxBootstrap {
+                confirmation_fd,
+                argv,
+            })
+        }
+        Some("seatbelt-probe") => {
+            let values = parse_named_arguments(arguments)?;
+            let allowed_path = required_path(&values, "--allowed")?;
+            let denied_path = required_path(&values, "--denied")?;
+            if !allowed_path.is_absolute() || !denied_path.is_absolute() {
+                return Err("seatbelt probe paths must be absolute".into());
+            }
+            Ok(Arguments::SeatbeltProbe {
+                allowed_path,
+                denied_path,
+            })
         }
         _ => Err(
             "usage: koda-exec serve --endpoint ENDPOINT --state-dir PATH | koda-exec endpoint --state-dir PATH | koda-exec worker --job-dir PATH --token-fd FD"
@@ -299,7 +354,7 @@ async fn handle_connection(
                                 "protocol_version": PROTOCOL_VERSION,
                                 "supervisor_version": env!("CARGO_PKG_VERSION"),
                                 "platform": std::env::consts::OS,
-                                "execution_security": execution_security::native_capabilities(),
+                                "execution_security": runtime.execution_capabilities(),
                                 "capabilities": {
                                     "process_group": capabilities().process_group,
                                     "job_object": capabilities().job_object,
@@ -417,6 +472,46 @@ mod tests {
                 .map(str::to_owned),
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn internal_seatbelt_commands_require_fixed_descriptors_and_absolute_paths() {
+        let bootstrap = parse_arguments(
+            [
+                "sandbox-bootstrap",
+                "--confirm-fd",
+                "3",
+                "--",
+                "/usr/bin/true",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        );
+        assert!(matches!(bootstrap, Ok(Arguments::SandboxBootstrap { .. })));
+        let invalid_descriptor = parse_arguments(
+            [
+                "sandbox-bootstrap",
+                "--confirm-fd",
+                "2",
+                "--",
+                "/usr/bin/true",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        );
+        assert!(invalid_descriptor.is_err());
+        let relative_probe = parse_arguments(
+            [
+                "seatbelt-probe",
+                "--allowed",
+                "relative",
+                "--denied",
+                TEST_JOB_DIRECTORY,
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        );
+        assert!(relative_probe.is_err());
     }
 
     #[cfg(windows)]

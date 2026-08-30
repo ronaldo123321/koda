@@ -64,7 +64,36 @@ afterEach(async () => {
 });
 
 describe("Phase 4C1B native admission and evidence", () => {
-  it("reports native protocol v3 with C1 security until C2A2 and retains it through restart and idempotency", async () => {
+  it.runIf(process.platform === "darwin")(
+    "verifies the real macOS Seatbelt self-test while keeping public capability at C1",
+    async () => {
+      const fixture = await setup();
+      const previous = process.env.KODA_REQUIRE_MACOS_SEATBELT;
+      let client: NativeExecutorClient;
+      try {
+        process.env.KODA_REQUIRE_MACOS_SEATBELT = "1";
+        client = await open(fixture);
+      } finally {
+        if (previous === undefined)
+          delete process.env.KODA_REQUIRE_MACOS_SEATBELT;
+        else process.env.KODA_REQUIRE_MACOS_SEATBELT = previous;
+      }
+      await expect(client!.hello()).resolves.toMatchObject({
+        protocol_version: 3,
+        platform: "macos",
+        execution_security: {
+          schema_version: 1,
+          backend: "native_posix",
+          filesystem: {
+            supported: ["unrestricted"],
+            mechanism: "none",
+          },
+        },
+      });
+    },
+  );
+
+  it("reports native protocol v3 with C1 security until C2A3 and retains it through restart and idempotency", async () => {
     const fixture = await setup();
     const client = await open(fixture);
     const hello = await client.hello();

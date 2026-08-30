@@ -1,6 +1,6 @@
 # Koda Phase 4 Hardening Roadmap
 
-- Status: In progress — Phase 4B and Phase 4C1 complete; Phase 4C2A macOS Seatbelt approved
+- Status: In progress — Phase 4B, Phase 4C1, and Phase 4C2A1/A2 complete; macOS C2A3 next
 - Date: 2026-08-28
 - Depends on: completed Phase 3A through Phase 3I baseline
 
@@ -81,7 +81,7 @@ The completed Windows terminal contract and acceptance evidence are in [Phase 4B
 
 ### Phase 4C: sandbox, network, and secret policy
 
-Status: In progress — Phase 4C1 and 4C2A1 complete; macOS C2A2 next
+Status: In progress — Phase 4C1 and 4C2A1/A2 complete; macOS C2A3 next
 
 - Add explicit filesystem, process, environment, and network capabilities.
 - Implement available OS isolation mechanisms and expose their effective strength rather than a portable boolean claim.
@@ -126,10 +126,13 @@ sandbox acceptance is not a Phase 4C2A completion condition.
 C2A1 is complete: strict macOS capability/snapshot v2 contracts and shared
 TS/Rust golden evidence are in place, the native executor protocol and durable
 store are version 3, and durable v1/v2 history remains readable without
-implicit upgrade. Runtime advertisement intentionally remains on the C1
-unconfined capability until C2A2 adds the bounded Seatbelt builder, launch
-bootstrap, and verified availability probe; C2A3 will then wire confirmed
-enforcement into Pipe and PTY launch.
+implicit upgrade. C2A2 is also complete: Koda now owns a bounded fixed SBPL
+builder, `-D`-only canonical path parameters, a pipe/PID sandbox-bootstrap
+confirmation protocol, and a startup probe that verifies real allowed and
+denied operations through the exact system `sandbox-exec`. The verified result
+is retained but runtime advertisement intentionally remains on C1 unconfined
+capability. C2A3 is the next slice: wire that confirmation into protected Pipe
+and PTY launch before publishing running state or applied evidence.
 
 Deferred Windows sandbox work remains explicit: restricted-token and privilege
 policy, filesystem workspace/scratch rules, network denial, launch confirmation,

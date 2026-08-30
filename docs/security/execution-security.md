@@ -9,6 +9,13 @@ Koda separates execution admission, process supervision, and operating-system
 isolation. A successful command does not imply that a filesystem or network
 sandbox was present. Current clients state `OS sandbox: none` explicitly.
 
+Phase 4C2A2 has completed the macOS Seatbelt builder, trusted bootstrap
+confirmation frame, and real startup capability self-test. That infrastructure
+is deliberately not advertised as protection yet: C2A3 must route actual Pipe
+and PTY user commands through it and move running/applied evidence publication
+behind the confirmation. The C1 tables and guarantees below therefore remain
+the current public contract without inference or downgrade.
+
 ## Supported profiles
 
 | Profile           | Filesystem request | Network request | C1 result                |
@@ -93,9 +100,10 @@ command implicitly.
 
 The Linux full-suite job runs application, TypeScript fallback, native Pipe and
 PTY, negative-launch, restart, and real v1→v2 compatibility tests. The macOS
-native job runs the POSIX native and real legacy matrices. The Windows native
-job runs Job Object/ConPTY tests plus the shared policy-negative and retained
-evidence suite.
+native job additionally requires the real Seatbelt startup probe while still
+checking that public capability remains C1, then runs the POSIX native and real
+legacy matrices. The Windows native job runs Job Object/ConPTY tests plus the
+shared policy-negative and retained evidence suite.
 
 The legacy executable is built from pinned commit `3aa84ee`, whose public
 executor protocol is version 1. The fixture is created outside the working

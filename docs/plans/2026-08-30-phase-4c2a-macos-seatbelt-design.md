@@ -1,6 +1,6 @@
 # Koda Phase 4C2A macOS Seatbelt Design
 
-- Status: In progress — C2A1 complete; C2A2 next
+- Status: In progress — C2A1 and C2A2 complete; C2A3 next
 - Date: 2026-08-30
 - Depends on: completed Phase 4C1 execution policy and isolation reporting
 - Platform order: macOS first, Linux second, Windows sandboxing last
@@ -288,8 +288,9 @@ successful exit code.
 
 C2A1 deliberately does not advertise the v2 capability from the native
 executor. Both Rust and TypeScript launch-evidence builders reject v2 until a
-trusted C2A2/C2A3 Seatbelt launch confirmation exists. The current macOS hello
-therefore continues to report C1 unconfined capabilities honestly.
+trusted C2A3 Seatbelt launch confirmation is connected to the real command
+boundary. The current macOS hello therefore continues to report C1 unconfined
+capabilities honestly.
 
 Local C2A1 verification on macOS passed `pnpm typecheck`,
 `pnpm format:check`, 42 Rust tests, and 622 TypeScript/integration tests (20
@@ -300,11 +301,33 @@ has already loaded the preceding `state.json` revision.
 
 ### C2A2: Seatbelt builder and capability probe
 
-- Add the fixed SBPL assets and bounded parameterized builder.
-- Add the sandbox bootstrap command and confirmation framing.
+- Add the fixed SBPL assets and bounded parameterized builder. **Completed.**
+  The profile is closed by default, has a 32 KiB limit, accepts at most two
+  canonical 4 KiB path parameters, and passes paths only through `-D`; user
+  path text and argv are never reconstructed into SBPL or a shell string.
+- Add the sandbox bootstrap command and confirmation framing. **Completed.**
+  The bootstrap accepts only a non-standard inherited pipe, emits the fixed
+  20-byte `KODA-SEATBELT-V1` plus big-endian PID frame, closes the channel, and
+  then `exec`s the prepared argv.
 - Add the startup capability probe and no-capability fallback for protected
-  admission.
+  admission. **Completed.** Each Supervisor probes the exact root-owned
+  `/usr/bin/sandbox-exec` once, retains the result, and requires a sandboxed
+  Koda bootstrap to prove allowed file reading plus denied file writing and TCP
+  listening. `KODA_REQUIRE_MACOS_SEATBELT=1` provides a fail-closed native/CI
+  acceptance gate. Public hello capability intentionally remains C1 until
+  C2A3 connects confirmation to protected Pipe and PTY launch.
 - Test path injection, profile bounds, missing executable, and probe failure.
+  **Completed.** Pure Rust negative tests cover malformed confirmation,
+  standard descriptors, oversized/relative paths, unsafe or nonempty scratch,
+  policy mismatches, fixed executable selection, argv preservation, and
+  missing probe binaries. A macOS integration test starts a real Supervisor
+  with the required-probe gate and verifies that C1 is still advertised.
+
+Local C2A2 verification on macOS passed 52 Rust tests, Clippy with warnings as
+errors, TypeScript typechecking and formatting, the real Seatbelt startup
+self-test, and the full 623-test TypeScript/integration suite (20
+platform-conditional skips). Remote macOS, Linux, and Windows regression jobs
+remain the same-commit release gate.
 
 ### C2A3: Pipe and PTY enforcement
 
