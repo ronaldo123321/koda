@@ -12,6 +12,7 @@ use std::ptr::{null, null_mut};
 use std::slice;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -67,6 +68,8 @@ use windows_sys::Win32::System::Threading::{
 };
 
 const PIPE_PREFIX: &str = r"\\.\pipe\koda-exec-";
+const REPLACE_FILE_ATTEMPTS: u32 = 20;
+const MAX_REPLACE_RETRY_DELAY_MS: u64 = 16;
 
 pub enum LocalStream {
     Server(NamedPipeServer),
@@ -575,19 +578,45 @@ pub fn sync_directory(_path: &Path) {}
 pub fn replace_file(source: &Path, target: &Path) -> io::Result<()> {
     let source = wide(source.as_os_str());
     let target = wide(target.as_os_str());
-    // SAFETY: both paths are null-terminated and remain live for the call.
-    if unsafe {
-        MoveFileExW(
-            source.as_ptr(),
-            target.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    } == 0
-    {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
+    let mut attempt = 0_u32;
+    loop {
+        // SAFETY: both paths are null-terminated and remain live for the call.
+        if unsafe {
+            MoveFileExW(
+                source.as_ptr(),
+                target.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        } != 0
+        {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        attempt += 1;
+        if attempt == REPLACE_FILE_ATTEMPTS || !is_transient_replace_error(&error) {
+            return Err(error);
+        }
+        // State readers validate ACL metadata before opening the file. Windows
+        // may briefly deny a concurrent replacement while that metadata handle
+        // is live, even though every Koda handle permits delete sharing. Keep
+        // the atomic replace and retry only the documented transient classes;
+        // permanent authorization failures still fail closed above.
+        let delay_ms = 1_u64
+            .checked_shl((attempt - 1).min(4))
+            .unwrap_or(MAX_REPLACE_RETRY_DELAY_MS)
+            .min(MAX_REPLACE_RETRY_DELAY_MS);
+        std::thread::sleep(Duration::from_millis(delay_ms));
     }
+}
+
+fn is_transient_replace_error(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::PermissionDenied
+        || matches!(
+            error.raw_os_error(),
+            Some(code)
+                if code == ERROR_SHARING_VIOLATION as i32
+                    || code == ERROR_LOCK_VIOLATION as i32
+        )
 }
 
 pub fn create_bootstrap_channel() -> io::Result<(BootstrapRead, BootstrapWrite)> {
@@ -1787,6 +1816,48 @@ mod tests {
     use tokio::io::AsyncWriteExt;
     use tokio::net::windows::named_pipe::ClientOptions;
     use windows_sys::Win32::Foundation::GetHandleInformation;
+
+    #[test]
+    fn atomic_replace_retries_only_transient_windows_conflicts() {
+        assert!(is_transient_replace_error(&io::Error::from_raw_os_error(5)));
+        assert!(is_transient_replace_error(&io::Error::from_raw_os_error(
+            ERROR_SHARING_VIOLATION as i32,
+        )));
+        assert!(is_transient_replace_error(&io::Error::from_raw_os_error(
+            ERROR_LOCK_VIOLATION as i32,
+        )));
+        assert!(!is_transient_replace_error(&io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid replacement",
+        )));
+    }
+
+    #[test]
+    fn atomic_replace_waits_for_a_transient_exclusive_reader() {
+        let root = std::env::temp_dir().join(format!(
+            "koda-atomic-replace-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&root).expect("replacement root");
+        let source = root.join("source");
+        let target = root.join("target");
+        std::fs::write(&source, b"next").expect("replacement source");
+        std::fs::write(&target, b"previous").expect("replacement target");
+        let exclusive_reader = OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&target)
+            .expect("exclusive target reader");
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(40));
+            drop(exclusive_reader);
+        });
+
+        replace_file(&source, &target).expect("replacement after reader release");
+        release.join().expect("reader release");
+        assert_eq!(std::fs::read(&target).expect("replacement bytes"), b"next");
+        std::fs::remove_dir_all(root).expect("replacement cleanup");
+    }
 
     #[test]
     fn endpoint_is_sid_and_state_bound_without_disclosure() {
