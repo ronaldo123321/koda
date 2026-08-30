@@ -327,17 +327,17 @@ windowsDescribe("NativeExecutorClient Windows control plane", () => {
         "-e",
         [
           `require("node:fs").writeFileSync(${JSON.stringify(startupMarker)},"started");`,
-          'const readline=require("node:readline");',
           "const dimensions=()=>`${process.stdout.columns}x${process.stdout.rows}`;",
           "process.stdout.write('\\u001b[31mUTF8:你好\\u001b[0m\\n');",
           "process.stdout.write(`READY:${process.stdin.isTTY}:${process.stdout.isTTY}:${dimensions()}:${process.env.TERM}\\n`);",
-          "const lines=readline.createInterface({input:process.stdin,terminal:false});",
-          "let inputCount=0;",
-          "lines.on('line',(line)=>{",
+          "process.stdin.setRawMode(true);process.stdin.resume();",
+          "let pending='';let inputCount=0;",
+          "const accept=(line)=>{",
           "if(line==='size'){process.stdout.write(`SIZE:${dimensions()}\\n`);return;}",
           "if(line==='exit'){process.stdout.write('EXIT\\n');process.exit(0);return;}",
           "process.stdout.write(`ECHO:${++inputCount}:${line}\\n`);",
-          "});",
+          "};",
+          "process.stdin.on('data',(chunk)=>{pending+=chunk.toString('utf8');for(;;){const end=pending.indexOf(';');if(end<0)return;const line=pending.slice(0,end);pending=pending.slice(end+1);accept(line);}});",
           "setInterval(()=>{},1000);",
         ].join(""),
       ],
@@ -380,18 +380,18 @@ windowsDescribe("NativeExecutorClient Windows control plane", () => {
     expect(ready).toContain("\u001b[");
 
     await writer.resize(30, 100);
-    await writer.write("size\n");
+    await writer.write("size;");
     expect(await waitForPtyText(writer, "SIZE:100x30")).toContain(
       "SIZE:100x30",
     );
 
     await writer.close();
     await reader.acquireInput();
-    await reader.write("reattached\n");
+    await reader.write("reattached;");
     expect(await waitForPtyText(reader, "ECHO:1:reattached")).toContain(
       "ECHO:1:reattached",
     );
-    await reader.write("exit\n");
+    await reader.write("exit;");
     const terminal = await waitTerminal(client, started.job_id);
     expect(terminal).toMatchObject({
       state: "exited",
@@ -405,6 +405,7 @@ windowsDescribe("NativeExecutorClient Windows control plane", () => {
   }, 30_000);
 
   test("waits for ConPTY descendants and drains their final output", async () => {
+    const descendantMarker = join(root, `conpty-descendant-${randomUUID()}`);
     const started = await client.startPty({
       argv: [
         process.execPath,
@@ -412,7 +413,9 @@ windowsDescribe("NativeExecutorClient Windows control plane", () => {
         [
           'const {spawn}=require("node:child_process");',
           "process.stdout.write('root-out;');",
-          "const child=spawn(process.execPath,['-e',\"setTimeout(()=>process.stdout.write('child-final'),250)\"],{detached:true,stdio:'inherit',windowsHide:true});",
+          `const child=spawn(process.execPath,['-e',${JSON.stringify(
+            `setTimeout(()=>require("node:fs").writeFileSync(${JSON.stringify(descendantMarker)},"child-final"),250)`,
+          )}],{detached:true,stdio:'ignore',windowsHide:true});`,
           "child.unref();",
           "setTimeout(()=>process.exit(0),100);",
         ].join(""),
@@ -428,10 +431,11 @@ windowsDescribe("NativeExecutorClient Windows control plane", () => {
       lifecycle: "background",
     });
     const attachment = await client.openAttachment(started.job_id);
-    const output = await waitForPtyText(attachment, "child-final");
     const terminal = await waitTerminal(client, started.job_id);
+    const output = await waitForPtyText(attachment, "root-out;");
 
-    expect(output).toContain("root-out;child-final");
+    await expect(access(descendantMarker)).resolves.toBeUndefined();
+    expect(output).toContain("root-out;");
     expect(terminal).toMatchObject({
       state: "exited",
       io_mode: "pty",
@@ -522,14 +526,17 @@ windowsDescribe("NativeExecutorClient Windows control plane", () => {
         process.execPath,
         "-e",
         [
-          'const readline=require("node:readline");',
           "const dimensions=()=>`${process.stdout.columns}x${process.stdout.rows}`;",
           "process.stdout.write('RESTART-READY\\n');",
-          "readline.createInterface({input:process.stdin,terminal:false}).on('line',(line)=>{",
+          "process.stdin.setRawMode(true);process.stdin.resume();",
+          "let pending='';",
+          "const accept=(line)=>{",
           "if(line==='size'){process.stdout.write(`RESTART-SIZE:${dimensions()}\\n`);return;}",
           "if(line==='exit'){process.stdout.write('RESTART-EXIT\\n');process.exit(0);return;}",
           "process.stdout.write(`RESTART-ECHO:${line}\\n`);",
-          "});setInterval(()=>{},1000);",
+          "};",
+          "process.stdin.on('data',(chunk)=>{pending+=chunk.toString('utf8');for(;;){const end=pending.indexOf(';');if(end<0)return;const line=pending.slice(0,end);pending=pending.slice(end+1);accept(line);}});",
+          "setInterval(()=>{},1000);",
         ].join(""),
       ],
       cwd: restartRoot,
@@ -555,9 +562,9 @@ windowsDescribe("NativeExecutorClient Windows control plane", () => {
       });
       const duplicate = await restartClient.startPty(input);
       const renewed = await original.renewInput();
-      await original.write("after-restart\n");
+      await original.write("after-restart;");
       await original.resize(31, 101);
-      await original.write("size\n");
+      await original.write("size;");
       const continued = await waitForPtyText(original, "RESTART-SIZE:101x31");
 
       expect(duplicate.job_id).toBe(started.job_id);
@@ -566,7 +573,7 @@ windowsDescribe("NativeExecutorClient Windows control plane", () => {
       await original.close();
       const replacement = await restartClient.openAttachment(started.job_id);
       await replacement.acquireInput();
-      await replacement.write("exit\n");
+      await replacement.write("exit;");
       const terminal = await waitTerminal(restartClient, started.job_id);
       const output = await waitForPtyText(replacement, "RESTART-EXIT");
 
