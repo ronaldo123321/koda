@@ -423,7 +423,18 @@ async function inputFor(
   return {
     argv: [process.execPath, "-e", code],
     cwd: await realpath(cwd),
-    environment: { PATH: process.env.PATH, FIXTURE_ENV: "FIXTURE_ENV_VALUE" },
+    environment: {
+      PATH: process.env.PATH,
+      ...(process.platform === "win32"
+        ? {
+            ComSpec: process.env.ComSpec,
+            SystemRoot: process.env.SystemRoot,
+            TEMP: process.env.TEMP,
+            TMP: process.env.TMP,
+          }
+        : {}),
+      FIXTURE_ENV: "FIXTURE_ENV_VALUE",
+    },
     timeoutMs: 15000,
     outputLimitBytes: 65536,
     terminationGraceMs: 25,
