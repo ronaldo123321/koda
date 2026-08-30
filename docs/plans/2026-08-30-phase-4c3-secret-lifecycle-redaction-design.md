@@ -1,6 +1,6 @@
 # Phase 4C3 Secret Lifecycle and Output Redaction
 
-- Status: In progress — Phase 4C3A complete; Phase 4C3B through C3D pending
+- Status: In progress — Phase 4C3A/C3B complete; Phase 4C3C/C3D pending
 - Date: 2026-08-30
 - Depends on: Phase 4C1 execution-policy admission, Phase 4C2A macOS
   Seatbelt, and Phase 4C2B Linux Bubblewrap
@@ -314,11 +314,34 @@ Implementation commit `0846f8c` passed `verify`, `linux-native`,
 
 ### Phase 4C3B: trusted configuration and approval
 
+Status: Complete
+
 - Freeze declarations at `KodaApplication` construction.
 - Add the host-environment resolver and single-use in-memory leases.
 - Let command tools request configured aliases only.
 - Add secret-aware preparation, approval copy, expiry, and grant rejection.
 - Reject every runtime backend until C3C is available.
+
+Implementation commit `7273895` freezes a normalized trusted catalog at
+application construction, adds `HostEnvironmentSecretResolver`, monotonic
+single-use leases with owned-buffer destruction, target-collision and bounded
+value checks, and binding across command, workspace, policy/capability
+evidence, declaration digest, target map, and lease identifier. Both command
+tools expose only configured aliases in their model schema, require a fresh
+approval even when a host policy would otherwise allow execution, omit grant
+candidates for secret-bearing calls, and show value-free protected-profile,
+denied-network, alias, target, expiry, and exact-redaction requirements.
+
+Prepared tools now have an idempotent disposal lifecycle, so lease buffers are
+covered after rejection, policy denial, cancellation, error, or execution.
+All C3B backends intentionally return `SECRET_POLICY_UNAVAILABLE` after fresh
+approval and before calling the prepared Pipe/PTY command. Tests prove expiry,
+single use, changed bindings, missing/malformed/duplicate values, unknown and
+tool-unauthorized aliases, target collisions, non-serialization, grant
+non-reuse, zero value/source leakage in approval and events, and absence of
+process side effects. The commit passed `verify`, `linux-native`,
+`macos-native`, and `windows-native` in
+[GitHub Actions run 33318090937](https://github.com/ronaldo123321/koda/actions/runs/33318090937).
 
 ### Phase 4C3C: native injection and lifecycle
 
