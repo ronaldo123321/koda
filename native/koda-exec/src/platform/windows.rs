@@ -922,6 +922,13 @@ impl SuspendedManagedPtyProcess {
         let mut command_line = windows_command_line(&command_arguments);
         let mut startup = STARTUPINFOEXW::default();
         startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
+        // A console-subsystem host may itself have redirected standard handles
+        // (for example under CI). Explicitly clear them so the child cannot keep
+        // using the host redirection instead of the attached pseudoconsole.
+        startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+        startup.StartupInfo.hStdInput = null_mut();
+        startup.StartupInfo.hStdOutput = null_mut();
+        startup.StartupInfo.hStdError = null_mut();
         startup.lpAttributeList = attributes.as_raw().cast();
         let mut process = PROCESS_INFORMATION::default();
         // SAFETY: all pointers refer to live values. The process is born suspended,
