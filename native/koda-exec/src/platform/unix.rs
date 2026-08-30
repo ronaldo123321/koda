@@ -630,12 +630,15 @@ pub fn exit_signal_name(status: &std::process::ExitStatus) -> Option<String> {
 pub fn open_terminal(rows: u16, cols: u16) -> io::Result<(OwnedFd, OwnedFd)> {
     let mut master = -1;
     let mut slave = -1;
-    let mut size = libc::winsize {
+    let size = libc::winsize {
         ws_row: rows,
         ws_col: cols,
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
+    // libc exposes a mutable winsize pointer on Apple platforms even though
+    // openpty only reads the supplied initial dimensions.
+    let size_pointer = std::ptr::from_ref(&size).cast_mut();
     // SAFETY: openpty initializes both descriptors on success and only reads the supplied
     // window-size value during this call.
     if unsafe {
@@ -644,7 +647,7 @@ pub fn open_terminal(rows: u16, cols: u16) -> io::Result<(OwnedFd, OwnedFd)> {
             &mut slave,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
-            &mut size,
+            size_pointer,
         )
     } != 0
     {

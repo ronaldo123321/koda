@@ -19,8 +19,6 @@ use tokio::time::{sleep, timeout};
 
 use crate::attachment::AttachmentRegistry;
 use crate::durable::{JobLock, JobRecord, JobStore, StoredJobState, sha256_hex};
-#[cfg(target_os = "linux")]
-use crate::execution_policy::ExecutionSecurityStage;
 #[cfg(unix)]
 use crate::execution_policy::FilesystemPolicy;
 use crate::execution_policy::{
@@ -1591,7 +1589,7 @@ enum UnixSandboxKind {
     LinuxBubblewrap {
         digest: [u8; 32],
         network_denied: bool,
-        runtime: crate::execution_policy::LinuxBubblewrapRuntimeDescriptor,
+        runtime: Box<crate::execution_policy::LinuxBubblewrapRuntimeDescriptor>,
     },
 }
 
@@ -1805,7 +1803,7 @@ fn prepare_unix_launch(
                 kind: UnixSandboxKind::LinuxBubblewrap {
                     digest,
                     network_denied: policy.network == crate::execution_policy::NetworkPolicy::Deny,
-                    runtime: sandbox_runtime.clone(),
+                    runtime: Box::new(sandbox_runtime.clone()),
                 },
             }),
         });
@@ -1956,7 +1954,7 @@ async fn activate_unix_launch(
                 pid,
                 *network_denied,
                 *digest,
-                sandbox_runtime.clone(),
+                (**sandbox_runtime).clone(),
             )
             .await
         }
