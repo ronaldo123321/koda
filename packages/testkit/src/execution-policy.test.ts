@@ -20,6 +20,7 @@ import {
   executionPolicyDigest,
   executionPolicyPreview,
   ExecutionPolicyError,
+  macosSeatbeltExecutionCapabilities,
   normalizeExecutionPolicy,
   resolveExecutionPolicy,
   validateExecutionSecuritySnapshot,
@@ -45,6 +46,16 @@ interface Fixtures {
   snapshot_cases: { name: string; input: unknown; valid: boolean }[];
 }
 
+interface MacosFixtures {
+  capability: {
+    capabilities: ExecutionCapabilities;
+    canonical: string;
+    sha256: string;
+  };
+  policy: ExecutionPolicy;
+  snapshot_cases: { name: string; input: unknown; valid: boolean }[];
+}
+
 const fixtures: Fixtures = JSON.parse(
   readFileSync(
     new URL("../fixtures/execution-policy-v1.json", import.meta.url),
@@ -53,6 +64,13 @@ const fixtures: Fixtures = JSON.parse(
 );
 const base = fixtures.policy_cases[0]!.policy;
 const caps = c1ExecutionCapabilities("native_posix");
+const macosFixtures: MacosFixtures = JSON.parse(
+  readFileSync(
+    new URL("../fixtures/execution-policy-v2.json", import.meta.url),
+    "utf8",
+  ),
+);
+const macosCaps = macosSeatbeltExecutionCapabilities();
 
 describe("Phase 4C1A execution policy contract", () => {
   it.each(fixtures.policy_cases)(
@@ -401,6 +419,125 @@ describe("Phase 4C1A execution policy contract", () => {
     expect(Object.isFrozen(snapshot)).toBe(true);
     if (snapshot.kind === "policy")
       expect(Object.isFrozen(snapshot.policy)).toBe(true);
+  });
+});
+
+describe("Phase 4C2A1 macOS Seatbelt contract", () => {
+  it("matches cross-language v2 capability bytes and SHA-256", () => {
+    expect(macosCaps).toEqual(macosFixtures.capability.capabilities);
+    expect(canonicalExecutionCapabilities(reverseKeys(macosCaps))).toBe(
+      macosFixtures.capability.canonical,
+    );
+    expect(executionCapabilitiesDigest(macosCaps)).toBe(
+      macosFixtures.capability.sha256,
+    );
+    expect(executionCapabilitiesSchema.parse(macosCaps)).toEqual(macosCaps);
+  });
+
+  it("supports the macOS filesystem/network matrix but not process isolation", () => {
+    for (const filesystem of [
+      "unrestricted",
+      "read_only",
+      "workspace_write",
+    ] as const) {
+      for (const network of ["inherit", "deny"] as const) {
+        const policy = {
+          ...macosFixtures.policy,
+          filesystem,
+          network,
+        };
+        expect(evaluateExecutionPolicy(policy, macosCaps)).toEqual({
+          allowed: true,
+          unmet: [],
+        });
+        const admission = createExecutionAdmissionSnapshot(policy, macosCaps);
+        expect(admission).toMatchObject({
+          schema_version: 2,
+          platform: "macos",
+          stage: "admission",
+          filesystem: {
+            status:
+              filesystem === "unrestricted" ? "not_requested" : "not_applied",
+          },
+          network: {
+            status: network === "inherit" ? "not_requested" : "not_applied",
+          },
+        });
+        expect(JSON.stringify(admission)).not.toContain('"applied"');
+        expectCode(
+          () => createExecutionLaunchSetupSnapshot(policy, macosCaps),
+          "EXECUTION_POLICY_UNAVAILABLE",
+        );
+      }
+    }
+    const unsupported = {
+      ...macosFixtures.policy,
+      process_isolation: "required" as const,
+    };
+    expect(evaluateExecutionPolicy(unsupported, macosCaps)).toEqual({
+      allowed: false,
+      unmet: [{ dimension: "process_isolation", reason: "not_implemented" }],
+    });
+    expectCode(
+      () => createExecutionAdmissionSnapshot(unsupported, macosCaps),
+      "EXECUTION_POLICY_UNAVAILABLE",
+    );
+  });
+
+  it.each(macosFixtures.snapshot_cases)(
+    "validates shared macOS retained evidence: $name",
+    ({ input, valid }) => {
+      if (valid)
+        expect(validateExecutionSecuritySnapshot(input)).toEqual(input);
+      else
+        expectCode(
+          () => validateExecutionSecuritySnapshot(input),
+          "EXECUTION_SECURITY_CORRUPT",
+        );
+    },
+  );
+
+  it("generates shared admission but reserves launch evidence for native confirmation", () => {
+    expect(
+      createExecutionAdmissionSnapshot(macosFixtures.policy, macosCaps),
+    ).toEqual(macosFixtures.snapshot_cases[0]!.input);
+    expect(
+      validateExecutionSecuritySnapshot(macosFixtures.snapshot_cases[1]!.input),
+    ).toEqual(macosFixtures.snapshot_cases[1]!.input);
+    expectCode(
+      () => createExecutionLaunchSetupSnapshot(macosFixtures.policy, macosCaps),
+      "EXECUTION_POLICY_UNAVAILABLE",
+    );
+  });
+
+  it("rejects platform, mechanism, order, future-version, and v1 evidence confusion", () => {
+    const invalidCapabilities = [
+      { ...macosCaps, schema_version: 3 },
+      { ...macosCaps, platform: "linux" },
+      {
+        ...macosCaps,
+        filesystem: { ...macosCaps.filesystem, mechanism: "none" },
+      },
+      {
+        ...macosCaps,
+        network: { ...macosCaps.network, supported: ["deny", "inherit"] },
+      },
+      { ...macosCaps, secret: "fixture-secret-marker" },
+    ];
+    for (const input of invalidCapabilities)
+      expect(executionCapabilitiesSchema.safeParse(input).success).toBe(false);
+
+    const v1 = createExecutionAdmissionSnapshot(base, caps);
+    expect(
+      executionSecuritySnapshotSchema.safeParse({
+        ...v1,
+        filesystem: {
+          status: "applied",
+          mechanism: "macos_seatbelt",
+          layer: "os",
+        },
+      }).success,
+    ).toBe(false);
   });
 });
 

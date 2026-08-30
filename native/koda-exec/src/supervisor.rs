@@ -861,7 +861,7 @@ async fn worker_snapshot(
     }
     let snapshot: JobSnapshot = serde_json::from_value(result)
         .map_err(|_| ProtocolError::new("WORKER_PROTOCOL_ERROR", "Worker snapshot is invalid."))?;
-    if record.manifest.format_version == 2 {
+    if record.manifest.format_version >= 2 {
         execution_security::validate_retained(&record.manifest.start, &snapshot.security)?;
         if record.read_state()?.security.as_ref() != Some(&snapshot.security)
             && record.manifest.security.as_ref() != Some(&snapshot.security)

@@ -9,6 +9,14 @@ fn fixtures() -> Value {
     .unwrap()
 }
 
+fn macos_fixtures() -> Value {
+    serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../packages/testkit/fixtures/execution-policy-v2.json"
+    )))
+    .unwrap()
+}
+
 fn base() -> ExecutionPolicy {
     resolve_execution_policy("/workspace", None, None).unwrap()
 }
@@ -46,6 +54,115 @@ fn capability_golden_bytes_and_digests() {
         digests.insert(caps.digest().unwrap());
     }
     assert_eq!(digests.len(), 4);
+}
+
+#[test]
+fn macos_capability_golden_bytes_digest_and_matrix() {
+    let fixture = macos_fixtures();
+    let expected = ExecutionCapabilities::parse(fixture["capability"]["capabilities"].clone())
+        .expect("valid macOS capabilities");
+    let caps = macos_seatbelt_execution_capabilities();
+    assert_eq!(caps, expected);
+    assert_eq!(
+        caps.canonical_json().unwrap(),
+        fixture["capability"]["canonical"].as_str().unwrap()
+    );
+    assert_eq!(
+        caps.digest().unwrap(),
+        fixture["capability"]["sha256"].as_str().unwrap()
+    );
+
+    let policy = ExecutionPolicy::parse(fixture["policy"].clone()).unwrap();
+    for filesystem in [
+        FilesystemPolicy::Unrestricted,
+        FilesystemPolicy::ReadOnly,
+        FilesystemPolicy::WorkspaceWrite,
+    ] {
+        for network in [NetworkPolicy::Inherit, NetworkPolicy::Deny] {
+            let candidate = ExecutionPolicy {
+                filesystem,
+                network,
+                ..policy.clone()
+            };
+            assert!(
+                evaluate_execution_policy(&candidate, &caps)
+                    .unwrap()
+                    .allowed
+            );
+            let admission = create_execution_admission_snapshot(&candidate, &caps).unwrap();
+            let encoded = serde_json::to_string(&admission).unwrap();
+            assert!(!encoded.contains(r#"\"applied\""#));
+            admission.validate().unwrap();
+        }
+    }
+
+    let unsupported = ExecutionPolicy {
+        process_isolation: ProcessIsolationPolicy::Required,
+        ..policy
+    };
+    assert_eq!(
+        evaluate_execution_policy(&unsupported, &caps).unwrap(),
+        ExecutionPolicyEvaluation {
+            allowed: false,
+            unmet: vec![UnmetRequirement {
+                dimension: ExecutionPolicyDimension::ProcessIsolation,
+                reason: UnmetReason::NotImplemented,
+            }],
+        }
+    );
+    assert_eq!(
+        create_execution_admission_snapshot(&unsupported, &caps).unwrap_err(),
+        ExecutionPolicyError::ExecutionPolicyUnavailable
+    );
+}
+
+#[test]
+fn shared_macos_snapshot_cases_match_typescript_validation() {
+    for case in macos_fixtures()["snapshot_cases"].as_array().unwrap() {
+        let parsed = ExecutionSecuritySnapshot::parse(case["input"].clone());
+        if case["valid"].as_bool().unwrap() {
+            assert_eq!(
+                serde_json::to_value(parsed.unwrap()).unwrap(),
+                case["input"],
+                "{}",
+                case["name"]
+            );
+        } else {
+            assert_eq!(
+                parsed.expect_err(case["name"].as_str().unwrap()),
+                ExecutionPolicyError::ExecutionSecurityCorrupt
+            );
+        }
+    }
+}
+
+#[test]
+fn macos_contract_rejects_future_platform_mechanism_and_order_changes() {
+    let base = macos_fixtures()["capability"]["capabilities"].clone();
+    let mutations = [
+        ("schema_version", json!(3)),
+        ("platform", json!("linux")),
+        (
+            "filesystem",
+            json!({
+                "supported":["unrestricted","read_only","workspace_write"],
+                "mechanism":"none"
+            }),
+        ),
+        (
+            "network",
+            json!({"supported":["deny","inherit"],"mechanism":"macos_seatbelt"}),
+        ),
+        ("secret", json!("fixture-secret-marker")),
+    ];
+    for (field, value) in mutations {
+        let mut input = base.clone();
+        input[field] = value;
+        assert_eq!(
+            ExecutionCapabilities::parse(input).unwrap_err(),
+            ExecutionPolicyError::InvalidExecutionPolicy
+        );
+    }
 }
 
 #[test]

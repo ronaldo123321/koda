@@ -17,7 +17,7 @@ import {
   validateExecutionSecuritySnapshot,
 } from "./execution-policy.js";
 
-const PROTOCOL_VERSION = 2;
+const PROTOCOL_VERSION = 3;
 const MAX_FRAME_BYTES = 1_048_576;
 const DEFAULT_STARTUP_TIMEOUT_MS = 5_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
@@ -1304,7 +1304,7 @@ function parseResponse(value: unknown): ExecutorResponse {
   if (parsed.data.protocol_version !== PROTOCOL_VERSION) {
     throw new NativeExecutorError(
       "INCOMPATIBLE_PROTOCOL",
-      "Executor protocol v2 is required. Finish or stop the older Supervisor explicitly before upgrading; no fallback was attempted.",
+      "Executor protocol v3 is required. Finish or stop the older Supervisor explicitly before upgrading; no fallback was attempted.",
     );
   }
   return parsed.data;

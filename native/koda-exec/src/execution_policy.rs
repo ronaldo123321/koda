@@ -232,9 +232,16 @@ pub enum ExecutionBackend {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum ExecutionPlatform {
+    Macos,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum EnforcementMechanism {
     None,
     ExplicitEnvironment,
+    MacosSeatbelt,
     PosixProcessGroup,
     WindowsJobObject,
     WindowsTaskkillTree,
@@ -275,6 +282,8 @@ pub struct SupervisionCapability {
 #[serde(deny_unknown_fields)]
 pub struct ExecutionCapabilities {
     pub schema_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<ExecutionPlatform>,
     pub backend: ExecutionBackend,
     pub filesystem: IsolationCapability<FilesystemPolicy>,
     pub network: IsolationCapability<NetworkPolicy>,
@@ -305,6 +314,7 @@ pub fn execution_supervision(backend: ExecutionBackend) -> SupervisionCapability
 pub fn c1_execution_capabilities(backend: ExecutionBackend) -> ExecutionCapabilities {
     ExecutionCapabilities {
         schema_version: 1,
+        platform: None,
         backend,
         filesystem: IsolationCapability {
             supported: vec![FilesystemPolicy::Unrestricted],
@@ -327,6 +337,42 @@ pub fn c1_execution_capabilities(backend: ExecutionBackend) -> ExecutionCapabili
     }
 }
 
+/// Pure Phase 4C2A contract. Runtime advertisement remains gated by the
+/// native macOS capability probe introduced in C2A2.
+pub fn macos_seatbelt_execution_capabilities() -> ExecutionCapabilities {
+    ExecutionCapabilities {
+        schema_version: 2,
+        platform: Some(ExecutionPlatform::Macos),
+        backend: ExecutionBackend::NativePosix,
+        filesystem: IsolationCapability {
+            supported: vec![
+                FilesystemPolicy::Unrestricted,
+                FilesystemPolicy::ReadOnly,
+                FilesystemPolicy::WorkspaceWrite,
+            ],
+            mechanism: EnforcementMechanism::MacosSeatbelt,
+        },
+        network: IsolationCapability {
+            supported: vec![NetworkPolicy::Inherit, NetworkPolicy::Deny],
+            mechanism: EnforcementMechanism::MacosSeatbelt,
+        },
+        process_isolation: IsolationCapability {
+            supported: vec![ProcessIsolationPolicy::Inherit],
+            mechanism: EnforcementMechanism::None,
+        },
+        environment: EnvironmentCapability {
+            supported: vec![EnvironmentPolicy::Explicit],
+            mechanism: EnforcementMechanism::ExplicitEnvironment,
+            layer: EnforcementLayer::Application,
+        },
+        supervision: SupervisionCapability {
+            mechanism: EnforcementMechanism::PosixProcessGroup,
+            layer: EnforcementLayer::Os,
+            durable: true,
+        },
+    }
+}
+
 impl ExecutionCapabilities {
     pub fn parse(value: Value) -> Result<Self, ExecutionPolicyError> {
         let caps: Self = serde_json::from_value(value)
@@ -336,7 +382,12 @@ impl ExecutionCapabilities {
     }
 
     pub fn validate(&self) -> Result<(), ExecutionPolicyError> {
-        if self != &c1_execution_capabilities(self.backend) {
+        let valid = match self.schema_version {
+            1 => self == &c1_execution_capabilities(self.backend),
+            2 => self == &macos_seatbelt_execution_capabilities(),
+            _ => false,
+        };
+        if !valid {
             return Err(ExecutionPolicyError::InvalidExecutionPolicy);
         }
         Ok(())
@@ -446,6 +497,8 @@ pub enum ExecutionSecurityStage {
 #[serde(deny_unknown_fields)]
 pub struct PolicySecuritySnapshot {
     pub schema_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<ExecutionPlatform>,
     pub stage: ExecutionSecurityStage,
     pub policy: ExecutionPolicy,
     pub policy_digest: String,
@@ -484,12 +537,23 @@ impl ExecutionSecuritySnapshot {
             Self::LegacyUnknown { .. } => return Err(corrupt),
             Self::Policy(snapshot) => snapshot,
         };
-        if snapshot.schema_version != 1
-            || snapshot.policy.digest().map_err(|_| corrupt)? != snapshot.policy_digest
-            // This is the fixed v1 contract, not a probe of the current host.
-            || c1_execution_capabilities(snapshot.backend).digest().map_err(|_| corrupt)? != snapshot.capabilities_digest
-        {
+        if snapshot.policy.digest().map_err(|_| corrupt)? != snapshot.policy_digest {
             return Err(corrupt);
+        }
+        let expected_capabilities = match snapshot.schema_version {
+            1 if snapshot.platform.is_none() => c1_execution_capabilities(snapshot.backend),
+            2 if snapshot.platform == Some(ExecutionPlatform::Macos)
+                && snapshot.backend == ExecutionBackend::NativePosix =>
+            {
+                macos_seatbelt_execution_capabilities()
+            }
+            _ => return Err(corrupt),
+        };
+        if expected_capabilities.digest().map_err(|_| corrupt)? != snapshot.capabilities_digest {
+            return Err(corrupt);
+        }
+        if snapshot.schema_version == 2 {
+            return validate_macos_snapshot(snapshot);
         }
         for (evidence, requested) in [
             (
@@ -547,6 +611,71 @@ impl ExecutionSecuritySnapshot {
     }
 }
 
+fn validate_macos_snapshot(snapshot: &PolicySecuritySnapshot) -> Result<(), ExecutionPolicyError> {
+    let corrupt = ExecutionPolicyError::ExecutionSecurityCorrupt;
+    for (evidence, requested) in [
+        (
+            &snapshot.filesystem,
+            snapshot.policy.filesystem != FilesystemPolicy::Unrestricted,
+        ),
+        (
+            &snapshot.network,
+            snapshot.policy.network != NetworkPolicy::Inherit,
+        ),
+    ] {
+        let valid = if !requested {
+            matches!(evidence, ExecutionEnforcementEvidence::NotRequested {})
+        } else {
+            match evidence {
+                ExecutionEnforcementEvidence::Unknown {} => true,
+                ExecutionEnforcementEvidence::NotApplied {} => {
+                    snapshot.stage == ExecutionSecurityStage::Admission
+                }
+                ExecutionEnforcementEvidence::Applied { mechanism, layer } => {
+                    snapshot.stage == ExecutionSecurityStage::LaunchSetup
+                        && *mechanism == EnforcementMechanism::MacosSeatbelt
+                        && *layer == EnforcementLayer::Os
+                }
+                ExecutionEnforcementEvidence::NotRequested {} => false,
+            }
+        };
+        if !valid {
+            return Err(corrupt);
+        }
+    }
+    if !matches!(
+        snapshot.process_isolation,
+        ExecutionEnforcementEvidence::NotRequested {}
+    ) {
+        return Err(corrupt);
+    }
+    for (evidence, expected_mechanism, expected_layer) in [
+        (
+            &snapshot.environment,
+            EnforcementMechanism::ExplicitEnvironment,
+            EnforcementLayer::Application,
+        ),
+        (
+            &snapshot.supervision,
+            EnforcementMechanism::PosixProcessGroup,
+            EnforcementLayer::Os,
+        ),
+    ] {
+        match evidence {
+            ExecutionEnforcementEvidence::NotRequested {} => return Err(corrupt),
+            ExecutionEnforcementEvidence::Applied { mechanism, layer }
+                if snapshot.stage != ExecutionSecurityStage::LaunchSetup
+                    || *mechanism != expected_mechanism
+                    || *layer != expected_layer =>
+            {
+                return Err(corrupt);
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// Admission is not launch evidence: no applied claims are generated here.
 pub fn create_execution_admission_snapshot(
     policy: &ExecutionPolicy,
@@ -556,14 +685,23 @@ pub fn create_execution_admission_snapshot(
         return Err(ExecutionPolicyError::ExecutionPolicyUnavailable);
     }
     let snapshot = ExecutionSecuritySnapshot::Policy(Box::new(PolicySecuritySnapshot {
-        schema_version: 1,
+        schema_version: caps.schema_version,
+        platform: caps.platform,
         stage: ExecutionSecurityStage::Admission,
         policy: policy.clone(),
         policy_digest: policy.digest()?,
         capabilities_digest: caps.digest()?,
         backend: caps.backend,
-        filesystem: ExecutionEnforcementEvidence::NotRequested {},
-        network: ExecutionEnforcementEvidence::NotRequested {},
+        filesystem: if policy.filesystem == FilesystemPolicy::Unrestricted {
+            ExecutionEnforcementEvidence::NotRequested {}
+        } else {
+            ExecutionEnforcementEvidence::NotApplied {}
+        },
+        network: if policy.network == NetworkPolicy::Inherit {
+            ExecutionEnforcementEvidence::NotRequested {}
+        } else {
+            ExecutionEnforcementEvidence::NotApplied {}
+        },
         process_isolation: ExecutionEnforcementEvidence::NotRequested {},
         environment: ExecutionEnforcementEvidence::NotApplied {},
         supervision: ExecutionEnforcementEvidence::NotApplied {},

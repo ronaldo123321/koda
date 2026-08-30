@@ -86,6 +86,7 @@ export const executionBackendSchema = z.enum([
   "typescript_posix",
   "typescript_windows",
 ]);
+export const executionPlatformSchema = z.literal("macos");
 export const executionPolicyDimensionSchema = z.enum([
   "filesystem",
   "network",
@@ -117,10 +118,8 @@ export function executionSupervision(backend: ExecutionBackend) {
   };
 }
 
-/** C1 has no implemented OS-isolation mechanism. Adding one requires an
- * explicit contract change, not inferring support from the host platform.
- */
-export const executionCapabilitiesSchema = z
+/** Immutable Phase 4C1 capability contract. */
+const executionCapabilitiesV1Schema = z
   .object({
     schema_version: z.literal(1),
     backend: executionBackendSchema,
@@ -167,6 +166,58 @@ export const executionCapabilitiesSchema = z
     );
   }, "Inconsistent backend supervision capability.");
 
+/** Phase 4C2A contract shape. The runtime must not advertise this capability
+ * until the macOS Seatbelt probe and launch enforcement are implemented.
+ */
+const executionCapabilitiesV2Schema = z
+  .object({
+    schema_version: z.literal(2),
+    platform: executionPlatformSchema,
+    backend: z.literal("native_posix"),
+    filesystem: z
+      .object({
+        supported: z.tuple([
+          z.literal("unrestricted"),
+          z.literal("read_only"),
+          z.literal("workspace_write"),
+        ]),
+        mechanism: z.literal("macos_seatbelt"),
+      })
+      .strict(),
+    network: z
+      .object({
+        supported: z.tuple([z.literal("inherit"), z.literal("deny")]),
+        mechanism: z.literal("macos_seatbelt"),
+      })
+      .strict(),
+    process_isolation: z
+      .object({
+        supported: z.tuple([z.literal("inherit")]),
+        mechanism: z.literal("none"),
+      })
+      .strict(),
+    environment: z
+      .object({
+        supported: z.tuple([z.literal("explicit")]),
+        mechanism: z.literal("explicit_environment"),
+        layer: z.literal("application"),
+      })
+      .strict(),
+    supervision: z
+      .object({
+        mechanism: z.literal("posix_process_group"),
+        layer: z.literal("os"),
+        durable: z.literal(true),
+      })
+      .strict(),
+  })
+  .strict();
+
+export const executionCapabilitiesSchema = z.discriminatedUnion(
+  "schema_version",
+  [executionCapabilitiesV1Schema, executionCapabilitiesV2Schema],
+);
+
 export const executionEnforcementEvidenceSchema = z.discriminatedUnion(
   "status",
   [
@@ -178,6 +229,7 @@ export const executionEnforcementEvidenceSchema = z.discriminatedUnion(
         status: z.literal("applied"),
         mechanism: z.enum([
           "explicit_environment",
+          "macos_seatbelt",
           "posix_process_group",
           "windows_job_object",
           "windows_taskkill_tree",
@@ -188,7 +240,7 @@ export const executionEnforcementEvidenceSchema = z.discriminatedUnion(
   ],
 );
 
-const policySecuritySnapshotSchema = z
+const policySecuritySnapshotV1Schema = z
   .object({
     schema_version: z.literal(1),
     kind: z.literal("policy"),
@@ -243,9 +295,74 @@ const policySecuritySnapshotSchema = z
     }
   });
 
+const policySecuritySnapshotV2Schema = z
+  .object({
+    schema_version: z.literal(2),
+    kind: z.literal("policy"),
+    platform: executionPlatformSchema,
+    stage: z.enum(["admission", "launch_setup"]),
+    policy: executionPolicySchema,
+    policy_digest: digestSchema,
+    capabilities_digest: digestSchema,
+    backend: z.literal("native_posix"),
+    filesystem: executionEnforcementEvidenceSchema,
+    network: executionEnforcementEvidenceSchema,
+    process_isolation: executionEnforcementEvidenceSchema,
+    environment: executionEnforcementEvidenceSchema,
+    supervision: executionEnforcementEvidenceSchema,
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const reject = () =>
+      context.addIssue({
+        code: "custom",
+        message: "Inconsistent execution security evidence.",
+      });
+    for (const dimension of ["filesystem", "network"] as const) {
+      const requested =
+        value.policy[dimension] !==
+        (dimension === "filesystem" ? "unrestricted" : "inherit");
+      const evidence = value[dimension];
+      if (!requested) {
+        if (evidence.status !== "not_requested") reject();
+        continue;
+      }
+      if (evidence.status === "unknown") continue;
+      if (value.stage === "admission") {
+        if (evidence.status !== "not_applied") reject();
+      } else if (
+        evidence.status !== "applied" ||
+        evidence.mechanism !== "macos_seatbelt" ||
+        evidence.layer !== "os"
+      ) {
+        reject();
+      }
+    }
+    if (value.process_isolation.status !== "not_requested") reject();
+    for (const dimension of ["environment", "supervision"] as const) {
+      const evidence = value[dimension];
+      if (evidence.status === "not_requested") {
+        reject();
+        continue;
+      }
+      if (evidence.status !== "applied") continue;
+      const expected =
+        dimension === "environment"
+          ? { mechanism: "explicit_environment", layer: "application" }
+          : { mechanism: "posix_process_group", layer: "os" };
+      if (
+        value.stage !== "launch_setup" ||
+        evidence.mechanism !== expected.mechanism ||
+        evidence.layer !== expected.layer
+      )
+        reject();
+    }
+  });
+
 export const executionSecuritySnapshotSchema = z
   .union([
-    policySecuritySnapshotSchema,
+    policySecuritySnapshotV1Schema,
+    policySecuritySnapshotV2Schema,
     z
       .object({
         schema_version: z.literal(1),
@@ -262,6 +379,7 @@ export type ExecutionPolicy = z.infer<typeof executionPolicySchema>;
 export type ExecutionPolicyConfig = z.infer<typeof executionPolicyConfigSchema>;
 export type ExecutionProfile = z.infer<typeof executionProfileSchema>;
 export type ExecutionBackend = z.infer<typeof executionBackendSchema>;
+export type ExecutionPlatform = z.infer<typeof executionPlatformSchema>;
 export type ExecutionPolicyDimension = z.infer<
   typeof executionPolicyDimensionSchema
 >;

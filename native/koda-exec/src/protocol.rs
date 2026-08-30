@@ -4,7 +4,7 @@ use crate::execution_policy::{ExecutionPolicy, ExecutionSecuritySnapshot};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 pub const MAX_FRAME_BYTES: usize = 1_048_576;
 pub const MAX_ARGUMENTS: usize = 64;
 pub const MAX_ARGUMENT_BYTES: usize = 4_096;

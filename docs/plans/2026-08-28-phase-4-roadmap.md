@@ -81,7 +81,7 @@ The completed Windows terminal contract and acceptance evidence are in [Phase 4B
 
 ### Phase 4C: sandbox, network, and secret policy
 
-Status: In progress — Phase 4C1 complete; concrete isolation, secrets, grants, and quotas remain
+Status: In progress — Phase 4C1 and 4C2A1 complete; macOS C2A2 next
 
 - Add explicit filesystem, process, environment, and network capabilities.
 - Implement available OS isolation mechanisms and expose their effective strength rather than a portable boolean claim.
@@ -122,6 +122,14 @@ contract; Linux follows on the same contract. Windows sandbox enforcement is
 deferred until both are complete. Existing Windows CI remains a regression gate
 for the shipped Job Object, ConPTY, protocol, and durable runtime, but Windows
 sandbox acceptance is not a Phase 4C2A completion condition.
+
+C2A1 is complete: strict macOS capability/snapshot v2 contracts and shared
+TS/Rust golden evidence are in place, the native executor protocol and durable
+store are version 3, and durable v1/v2 history remains readable without
+implicit upgrade. Runtime advertisement intentionally remains on the C1
+unconfined capability until C2A2 adds the bounded Seatbelt builder, launch
+bootstrap, and verified availability probe; C2A3 will then wire confirmed
+enforcement into Pipe and PTY launch.
 
 Deferred Windows sandbox work remains explicit: restricted-token and privilege
 policy, filesystem workspace/scratch rules, network denial, launch confirmation,

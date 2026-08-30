@@ -128,6 +128,13 @@ pub fn launch_setup(
     let ExecutionSecuritySnapshot::Policy(security) = &mut snapshot else {
         return Err(corrupt());
     };
+    // C2A1 defines v2 evidence, but only C2A2 may construct launch evidence
+    // after the native Seatbelt wrapper has actually been installed.
+    if security.schema_version != 1 {
+        return Err(policy_error(
+            ExecutionPolicyError::ExecutionPolicyUnavailable,
+        ));
+    }
     security.stage = ExecutionSecurityStage::LaunchSetup;
     security.environment = ExecutionEnforcementEvidence::Applied {
         mechanism: EnforcementMechanism::ExplicitEnvironment,

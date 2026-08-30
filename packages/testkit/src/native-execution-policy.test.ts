@@ -64,11 +64,11 @@ afterEach(async () => {
 });
 
 describe("Phase 4C1B native admission and evidence", () => {
-  it("reports native v2 security separately and retains it through restart and idempotency", async () => {
+  it("reports native protocol v3 with C1 security until C2A2 and retains it through restart and idempotency", async () => {
     const fixture = await setup();
     const client = await open(fixture);
     const hello = await client.hello();
-    expect(hello.protocol_version).toBe(2);
+    expect(hello.protocol_version).toBe(3);
     expect(hello.execution_security.filesystem).toEqual({
       supported: ["unrestricted"],
       mechanism: "none",
@@ -159,7 +159,7 @@ describe("Phase 4C1B native admission and evidence", () => {
       { ...input.policy!, secret: "fixture-sensitive-marker" },
     ]) {
       const value = policy === undefined ? params : { ...params, policy };
-      const response = await rpc(client.socketPath, 2, "job/start", value);
+      const response = await rpc(client.socketPath, 3, "job/start", value);
       expect(response).toMatchObject({
         ok: false,
         error: { code: "INVALID_EXECUTION_POLICY" },
@@ -231,7 +231,7 @@ describe("Phase 4C1B native admission and evidence", () => {
 // Optional cross-version acceptance uses the real pinned v1 binary, not a fake
 // Worker. Build commit 3aa84ee and set KODA_LEGACY_EXECUTOR_BINARY to run it.
 describe.skipIf(legacyBinary === undefined || process.platform === "win32")(
-  "native v1 -> v2 live compatibility",
+  "native v1 -> v3 live compatibility",
   () => {
     it("refuses a live v1 Supervisor without replacing it", async () => {
       const fixture = await setup();

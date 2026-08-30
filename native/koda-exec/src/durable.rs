@@ -14,7 +14,7 @@ use crate::protocol::{
     IoMode, JobFailure, JobSnapshot, JobState, ProtocolError, StartParams, TerminationSnapshot,
 };
 
-pub const STORE_FORMAT_VERSION: u32 = 2;
+pub const STORE_FORMAT_VERSION: u32 = 3;
 const MAX_MANIFEST_BYTES: u64 = 262_144;
 const MAX_STATE_BYTES: u64 = 65_536;
 const MAX_STATE_HEAD_BYTES: u64 = 4_096;
@@ -542,7 +542,7 @@ fn read_versioned_value(
         .get("format_version")
         .and_then(serde_json::Value::as_u64)
         .ok_or_else(|| corrupt("Job record format version is invalid."))?;
-    if version != 1 && version != u64::from(STORE_FORMAT_VERSION) {
+    if !(1..=u64::from(STORE_FORMAT_VERSION)).contains(&version) {
         return Err(ProtocolError::new(
             "INCOMPATIBLE_STATE_VERSION",
             "Job store contains an unsupported format; leave it untouched and use a compatible executor.",
@@ -552,7 +552,7 @@ fn read_versioned_value(
 }
 
 fn record_decode_error(version: u32) -> ProtocolError {
-    if version == STORE_FORMAT_VERSION {
+    if version >= 2 {
         execution_security::corrupt()
     } else {
         corrupt("Legacy job record is malformed.")
@@ -605,6 +605,8 @@ fn validate_security_binding(
         return Err(execution_security::corrupt());
     };
     if original.policy != retained.policy
+        || original.schema_version != retained.schema_version
+        || original.platform != retained.platform
         || original.backend != retained.backend
         || original.policy_digest != retained.policy_digest
         || original.capabilities_digest != retained.capabilities_digest
@@ -638,7 +640,7 @@ fn validate_security_binding(
 }
 
 fn validate_manifest(manifest: &JobManifest) -> Result<(), ProtocolError> {
-    if !matches!(manifest.format_version, 1 | STORE_FORMAT_VERSION) {
+    if !matches!(manifest.format_version, 1..=STORE_FORMAT_VERSION) {
         return Err(corrupt("Job manifest format version is unsupported."));
     }
     crate::protocol::validate_identifier(&manifest.job_id, "job_id")?;
@@ -646,7 +648,7 @@ fn validate_manifest(manifest: &JobManifest) -> Result<(), ProtocolError> {
     crate::protocol::validate_start(&manifest.start)?;
     match manifest.format_version {
         1 if manifest.start.policy.is_none() && manifest.security.is_none() => {}
-        STORE_FORMAT_VERSION => {
+        2..=STORE_FORMAT_VERSION => {
             let security = manifest
                 .security
                 .as_ref()
@@ -655,9 +657,17 @@ fn validate_manifest(manifest: &JobManifest) -> Result<(), ProtocolError> {
             let ExecutionSecuritySnapshot::Policy(policy) = security else {
                 return Err(execution_security::corrupt());
             };
+            if manifest.format_version == 2 && policy.schema_version != 1 {
+                return Err(execution_security::corrupt());
+            }
+            let capabilities = match policy.schema_version {
+                1 => crate::execution_policy::c1_execution_capabilities(policy.backend),
+                2 => crate::execution_policy::macos_seatbelt_execution_capabilities(),
+                _ => return Err(execution_security::corrupt()),
+            };
             let expected = crate::execution_policy::create_execution_admission_snapshot(
                 &policy.policy,
-                &crate::execution_policy::c1_execution_capabilities(policy.backend),
+                &capabilities,
             )
             .map_err(|_| execution_security::corrupt())?;
             if &expected != security {
@@ -677,7 +687,7 @@ fn validate_manifest(manifest: &JobManifest) -> Result<(), ProtocolError> {
 }
 
 fn validate_state(state: &StoredJobState, job_id: &str) -> Result<(), ProtocolError> {
-    if !matches!(state.format_version, 1 | STORE_FORMAT_VERSION)
+    if !matches!(state.format_version, 1..=STORE_FORMAT_VERSION)
         || state.job_id != job_id
         || state.revision < 1
         || state.state_digest != state_digest(state)?
@@ -704,7 +714,7 @@ fn validate_state(state: &StoredJobState, job_id: &str) -> Result<(), ProtocolEr
 }
 
 fn validate_state_head(head: &StateHead, job_id: &str) -> Result<(), ProtocolError> {
-    if !matches!(head.format_version, 1 | STORE_FORMAT_VERSION)
+    if !matches!(head.format_version, 1..=STORE_FORMAT_VERSION)
         || head.job_id != job_id
         || head.revision < 1
         || !is_sha256(&head.state_digest)
@@ -1002,6 +1012,32 @@ mod tests {
         }
     }
 
+    fn v2_copy(record: &JobRecord) -> JobRecord {
+        let mut manifest = record.manifest.clone();
+        manifest.format_version = 2;
+        manifest.manifest_digest = manifest_digest(&manifest).unwrap();
+        let mut state = record.read_state().unwrap();
+        state.format_version = 2;
+        state.state_digest = state_digest(&state).unwrap();
+        write_atomic_json(
+            &record.directory.join("manifest.json"),
+            &manifest,
+            MAX_MANIFEST_BYTES,
+        )
+        .unwrap();
+        write_atomic_json(&record.state_path(), &state, MAX_STATE_BYTES).unwrap();
+        write_atomic_json(
+            &record.state_head_path(),
+            &StateHead::from_state(&state),
+            MAX_STATE_HEAD_BYTES,
+        )
+        .unwrap();
+        JobRecord {
+            directory: record.directory.clone(),
+            manifest,
+        }
+    }
+
     #[test]
     fn legacy_hashes_remain_stable_and_reads_do_not_upgrade_records() {
         let root = std::env::temp_dir().join(format!("koda-legacy-{}", Uuid::new_v4().simple()));
@@ -1040,6 +1076,71 @@ mod tests {
     }
 
     #[test]
+    fn v2_records_remain_readable_and_transitions_do_not_upgrade_them() {
+        let root = std::env::temp_dir().join(format!("koda-v2-{}", Uuid::new_v4().simple()));
+        let store = JobStore::open(&root).unwrap();
+        let (record, _) = store.create_job("v2", start()).unwrap();
+        assert_eq!(record.manifest.format_version, STORE_FORMAT_VERSION);
+        let previous = v2_copy(&record);
+        let paths = [
+            previous.directory.join("manifest.json"),
+            previous.state_path(),
+            previous.state_head_path(),
+        ];
+        let before: Vec<_> = paths
+            .iter()
+            .map(|path| std::fs::read(path).unwrap())
+            .collect();
+        let loaded = store.load_job(&previous.directory).unwrap();
+        let state = loaded.read_state().unwrap();
+        let ExecutionSecuritySnapshot::Policy(security) =
+            state.snapshot(&loaded.manifest.start).security
+        else {
+            panic!("v2 record must retain policy evidence")
+        };
+        assert_eq!(security.schema_version, 1);
+        for (path, bytes) in paths.iter().zip(before) {
+            assert_eq!(std::fs::read(path).unwrap(), bytes);
+        }
+        let mut next = state.clone();
+        next.state = JobState::StartFailed;
+        let next = loaded.transition(&state, next).unwrap();
+        assert_eq!(next.format_version, 2);
+        assert_eq!(
+            store
+                .load_job(&previous.directory)
+                .unwrap()
+                .manifest
+                .format_version,
+            2
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn v2_format_rejects_v2_security_evidence() {
+        let root =
+            std::env::temp_dir().join(format!("koda-v2-evidence-{}", Uuid::new_v4().simple()));
+        let store = JobStore::open(&root).unwrap();
+        let (record, _) = store.create_job("v2-evidence", start()).unwrap();
+        let mut manifest = record.manifest.clone();
+        manifest.format_version = 2;
+        manifest.security = Some(
+            crate::execution_policy::create_execution_admission_snapshot(
+                manifest.start.policy.as_ref().unwrap(),
+                &crate::execution_policy::macos_seatbelt_execution_capabilities(),
+            )
+            .unwrap(),
+        );
+        manifest.manifest_digest = manifest_digest(&manifest).unwrap();
+        assert_eq!(
+            validate_manifest(&manifest).unwrap_err().code,
+            "EXECUTION_SECURITY_CORRUPT"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn unknown_future_formats_are_left_in_place_before_any_quarantine() {
         for name in ["manifest.json", "state.json", "state.head"] {
             let root =
@@ -1049,7 +1150,7 @@ mod tests {
             let path = record.directory.join(name);
             let mut value: serde_json::Value =
                 read_private_json(&path, MAX_MANIFEST_BYTES).unwrap();
-            value["format_version"] = serde_json::json!(3);
+            value["format_version"] = serde_json::json!(4);
             value["future_field"] = serde_json::json!({"preserve":true});
             write_atomic_json(&path, &value, MAX_MANIFEST_BYTES).unwrap();
             let before = std::fs::read(&path).unwrap();

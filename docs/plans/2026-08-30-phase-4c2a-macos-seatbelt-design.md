@@ -1,6 +1,6 @@
 # Koda Phase 4C2A macOS Seatbelt Design
 
-- Status: Approved — implementation pending
+- Status: In progress — C2A1 complete; C2A2 next
 - Date: 2026-08-30
 - Depends on: completed Phase 4C1 execution policy and isolation reporting
 - Platform order: macOS first, Linux second, Windows sandboxing last
@@ -274,10 +274,27 @@ successful exit code.
 ### C2A1: contract and compatibility
 
 - Add strict capability/snapshot version unions and `macos_seatbelt`.
+  **Completed.** Version 2 is explicitly bound to `platform = macos` and
+  `backend = native_posix`; version 1 remains byte-for-byte immutable.
 - Add protocol v3 and durable v3 parsing without changing policy v1.
-- Preserve v1/v2 observation and evidence semantics.
+  **Completed.** Durable v1 and v2 remain readable and are never upgraded by
+  observation or transition.
+- Preserve v1/v2 observation and evidence semantics. **Completed.** Durable v2
+  accepts only snapshot v1, while durable v3 can retain snapshot v1 or v2.
 - Update cross-language canonical bytes, digests, negative fixtures, and
-  approval-grant binding tests.
+  approval-grant binding tests. **Completed for the contract boundary.** The
+  shared TS/Rust fixture fixes the v2 capability digest at
+  `c4b6f5225312147181875e833dcf7fc01387b9786a1622ed1957748d39d9e9b7`.
+
+C2A1 deliberately does not advertise the v2 capability from the native
+executor. Both Rust and TypeScript launch-evidence builders reject v2 until a
+trusted C2A2/C2A3 Seatbelt launch confirmation exists. The current macOS hello
+therefore continues to report C1 unconfined capabilities honestly.
+
+Local C2A1 verification on macOS passed `pnpm typecheck`,
+`pnpm format:check`, 41 Rust tests, and 622 TypeScript/integration tests (20
+platform-conditional skips), including real PTY, background, reconnect, and
+Supervisor-restart coverage.
 
 ### C2A2: Seatbelt builder and capability probe
 

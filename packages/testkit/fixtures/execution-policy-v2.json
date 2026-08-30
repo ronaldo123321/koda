@@ -1,0 +1,179 @@
+{
+  "capability": {
+    "capabilities": {
+      "schema_version": 2,
+      "platform": "macos",
+      "backend": "native_posix",
+      "filesystem": {
+        "supported": ["unrestricted", "read_only", "workspace_write"],
+        "mechanism": "macos_seatbelt"
+      },
+      "network": {
+        "supported": ["inherit", "deny"],
+        "mechanism": "macos_seatbelt"
+      },
+      "process_isolation": {
+        "supported": ["inherit"],
+        "mechanism": "none"
+      },
+      "environment": {
+        "supported": ["explicit"],
+        "mechanism": "explicit_environment",
+        "layer": "application"
+      },
+      "supervision": {
+        "mechanism": "posix_process_group",
+        "layer": "os",
+        "durable": true
+      }
+    },
+    "canonical": "{\"schema_version\":2,\"platform\":\"macos\",\"backend\":\"native_posix\",\"filesystem\":{\"supported\":[\"unrestricted\",\"read_only\",\"workspace_write\"],\"mechanism\":\"macos_seatbelt\"},\"network\":{\"supported\":[\"inherit\",\"deny\"],\"mechanism\":\"macos_seatbelt\"},\"process_isolation\":{\"supported\":[\"inherit\"],\"mechanism\":\"none\"},\"environment\":{\"supported\":[\"explicit\"],\"mechanism\":\"explicit_environment\",\"layer\":\"application\"},\"supervision\":{\"mechanism\":\"posix_process_group\",\"layer\":\"os\",\"durable\":true}}",
+    "sha256": "c4b6f5225312147181875e833dcf7fc01387b9786a1622ed1957748d39d9e9b7"
+  },
+  "policy": {
+    "schema_version": 1,
+    "workspace_root": "/workspace",
+    "filesystem": "workspace_write",
+    "network": "deny",
+    "process_isolation": "inherit",
+    "environment": "explicit"
+  },
+  "snapshot_cases": [
+    {
+      "name": "macos-admission-requested-not-applied",
+      "valid": true,
+      "input": {
+        "schema_version": 2,
+        "kind": "policy",
+        "platform": "macos",
+        "stage": "admission",
+        "policy": {
+          "schema_version": 1,
+          "workspace_root": "/workspace",
+          "filesystem": "workspace_write",
+          "network": "deny",
+          "process_isolation": "inherit",
+          "environment": "explicit"
+        },
+        "policy_digest": "6f59726471aacb8e3a19253a74a186db1dbd914eca2951ff2c515e8e884a6c4a",
+        "capabilities_digest": "c4b6f5225312147181875e833dcf7fc01387b9786a1622ed1957748d39d9e9b7",
+        "backend": "native_posix",
+        "filesystem": { "status": "not_applied" },
+        "network": { "status": "not_applied" },
+        "process_isolation": { "status": "not_requested" },
+        "environment": { "status": "not_applied" },
+        "supervision": { "status": "not_applied" }
+      }
+    },
+    {
+      "name": "macos-launch-setup-applied",
+      "valid": true,
+      "input": {
+        "schema_version": 2,
+        "kind": "policy",
+        "platform": "macos",
+        "stage": "launch_setup",
+        "policy": {
+          "schema_version": 1,
+          "workspace_root": "/workspace",
+          "filesystem": "workspace_write",
+          "network": "deny",
+          "process_isolation": "inherit",
+          "environment": "explicit"
+        },
+        "policy_digest": "6f59726471aacb8e3a19253a74a186db1dbd914eca2951ff2c515e8e884a6c4a",
+        "capabilities_digest": "c4b6f5225312147181875e833dcf7fc01387b9786a1622ed1957748d39d9e9b7",
+        "backend": "native_posix",
+        "filesystem": {
+          "status": "applied",
+          "mechanism": "macos_seatbelt",
+          "layer": "os"
+        },
+        "network": {
+          "status": "applied",
+          "mechanism": "macos_seatbelt",
+          "layer": "os"
+        },
+        "process_isolation": { "status": "not_requested" },
+        "environment": {
+          "status": "applied",
+          "mechanism": "explicit_environment",
+          "layer": "application"
+        },
+        "supervision": {
+          "status": "applied",
+          "mechanism": "posix_process_group",
+          "layer": "os"
+        }
+      }
+    },
+    {
+      "name": "macos-admission-must-not-claim-applied",
+      "valid": false,
+      "input": {
+        "schema_version": 2,
+        "kind": "policy",
+        "platform": "macos",
+        "stage": "admission",
+        "policy": {
+          "schema_version": 1,
+          "workspace_root": "/workspace",
+          "filesystem": "workspace_write",
+          "network": "deny",
+          "process_isolation": "inherit",
+          "environment": "explicit"
+        },
+        "policy_digest": "6f59726471aacb8e3a19253a74a186db1dbd914eca2951ff2c515e8e884a6c4a",
+        "capabilities_digest": "c4b6f5225312147181875e833dcf7fc01387b9786a1622ed1957748d39d9e9b7",
+        "backend": "native_posix",
+        "filesystem": {
+          "status": "applied",
+          "mechanism": "macos_seatbelt",
+          "layer": "os"
+        },
+        "network": { "status": "not_applied" },
+        "process_isolation": { "status": "not_requested" },
+        "environment": { "status": "not_applied" },
+        "supervision": { "status": "not_applied" }
+      }
+    },
+    {
+      "name": "macos-launch-must-prove-requested-dimensions",
+      "valid": false,
+      "input": {
+        "schema_version": 2,
+        "kind": "policy",
+        "platform": "macos",
+        "stage": "launch_setup",
+        "policy": {
+          "schema_version": 1,
+          "workspace_root": "/workspace",
+          "filesystem": "workspace_write",
+          "network": "deny",
+          "process_isolation": "inherit",
+          "environment": "explicit"
+        },
+        "policy_digest": "6f59726471aacb8e3a19253a74a186db1dbd914eca2951ff2c515e8e884a6c4a",
+        "capabilities_digest": "c4b6f5225312147181875e833dcf7fc01387b9786a1622ed1957748d39d9e9b7",
+        "backend": "native_posix",
+        "filesystem": { "status": "not_applied" },
+        "network": {
+          "status": "applied",
+          "mechanism": "macos_seatbelt",
+          "layer": "os"
+        },
+        "process_isolation": { "status": "not_requested" },
+        "environment": {
+          "status": "applied",
+          "mechanism": "explicit_environment",
+          "layer": "application"
+        },
+        "supervision": {
+          "status": "applied",
+          "mechanism": "posix_process_group",
+          "layer": "os"
+        }
+      }
+    }
+  ]
+}

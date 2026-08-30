@@ -151,6 +151,45 @@ export function c1ExecutionCapabilities(
   );
 }
 
+/** Pure Phase 4C2A contract. Runtime advertisement remains gated by the
+ * native macOS capability probe introduced in C2A2.
+ */
+export function macosSeatbeltExecutionCapabilities(): ExecutionCapabilities {
+  return freezeRecord(
+    parse(
+      executionCapabilitiesSchema,
+      {
+        schema_version: 2,
+        platform: "macos",
+        backend: "native_posix",
+        filesystem: {
+          supported: ["unrestricted", "read_only", "workspace_write"],
+          mechanism: "macos_seatbelt",
+        },
+        network: {
+          supported: ["inherit", "deny"],
+          mechanism: "macos_seatbelt",
+        },
+        process_isolation: {
+          supported: ["inherit"],
+          mechanism: "none",
+        },
+        environment: {
+          supported: ["explicit"],
+          mechanism: "explicit_environment",
+          layer: "application",
+        },
+        supervision: {
+          mechanism: "posix_process_group",
+          layer: "os",
+          durable: true,
+        },
+      },
+      "INVALID_EXECUTION_POLICY",
+    ),
+  );
+}
+
 export function canonicalExecutionCapabilities(value: unknown): string {
   const caps = parse(
     executionCapabilitiesSchema,
@@ -159,6 +198,7 @@ export function canonicalExecutionCapabilities(value: unknown): string {
   );
   return JSON.stringify({
     schema_version: caps.schema_version,
+    ...(caps.schema_version === 2 ? { platform: caps.platform } : {}),
     backend: caps.backend,
     filesystem: {
       supported: caps.filesystem.supported,
@@ -233,15 +273,22 @@ export function createExecutionAdmissionSnapshot(
   if (!evaluateExecutionPolicy(policy, caps).allowed)
     throw new ExecutionPolicyError("EXECUTION_POLICY_UNAVAILABLE");
   return validateExecutionSecuritySnapshot({
-    schema_version: 1,
+    schema_version: caps.schema_version,
     kind: "policy",
+    ...(caps.schema_version === 2 ? { platform: caps.platform } : {}),
     stage: "admission",
     policy,
     policy_digest: executionPolicyDigest(policy),
     capabilities_digest: executionCapabilitiesDigest(caps),
     backend: caps.backend,
-    filesystem: { status: "not_requested" },
-    network: { status: "not_requested" },
+    filesystem:
+      policy.filesystem === "unrestricted"
+        ? { status: "not_requested" }
+        : { status: "not_applied" },
+    network:
+      policy.network === "inherit"
+        ? { status: "not_requested" }
+        : { status: "not_applied" },
     process_isolation: { status: "not_requested" },
     environment: { status: "not_applied" },
     supervision: { status: "not_applied" },
@@ -262,6 +309,10 @@ export function createExecutionLaunchSetupSnapshot(
     "INVALID_EXECUTION_POLICY",
   );
   if (!evaluateExecutionPolicy(policy, caps).allowed)
+    throw new ExecutionPolicyError("EXECUTION_POLICY_UNAVAILABLE");
+  // C2A1 defines the v2 evidence shape, but only the trusted native launch
+  // path may construct it after C2A2/C2A3 confirm Seatbelt installation.
+  if (caps.schema_version !== 1)
     throw new ExecutionPolicyError("EXECUTION_POLICY_UNAVAILABLE");
   return validateExecutionSecuritySnapshot({
     schema_version: 1,
@@ -293,6 +344,12 @@ export function executionPolicyPreview(snapshotInput: unknown): string {
     return "Execution security: legacy evidence unknown";
   }
   const supervision = executionSupervision(snapshot.backend);
+  const sandbox =
+    snapshot.schema_version === 2
+      ? snapshot.stage === "launch_setup"
+        ? "OS sandbox: macOS Seatbelt"
+        : "expected OS sandbox: macOS Seatbelt"
+      : "OS sandbox: none";
   return [
     "Execution security:",
     `backend: ${snapshot.backend}`,
@@ -301,7 +358,7 @@ export function executionPolicyPreview(snapshotInput: unknown): string {
     `process isolation: ${snapshot.policy.process_isolation}`,
     "environment: explicit application filtering",
     `expected process supervision: ${supervision.mechanism} (${supervision.layer})`,
-    "OS sandbox: none",
+    sandbox,
   ].join("\n");
 }
 
@@ -317,10 +374,13 @@ export function validateExecutionSecuritySnapshot(
     "EXECUTION_SECURITY_CORRUPT",
   );
   if (snapshot.kind === "policy") {
+    const capabilities =
+      snapshot.schema_version === 1
+        ? c1ExecutionCapabilities(snapshot.backend)
+        : macosSeatbeltExecutionCapabilities();
     if (
       snapshot.policy_digest !== executionPolicyDigest(snapshot.policy) ||
-      snapshot.capabilities_digest !==
-        executionCapabilitiesDigest(c1ExecutionCapabilities(snapshot.backend))
+      snapshot.capabilities_digest !== executionCapabilitiesDigest(capabilities)
     ) {
       throw new ExecutionPolicyError("EXECUTION_SECURITY_CORRUPT");
     }
