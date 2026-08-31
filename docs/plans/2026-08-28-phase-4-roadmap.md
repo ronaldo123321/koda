@@ -1,6 +1,7 @@
 # Koda Phase 4 Hardening Roadmap
 
-- Status: In progress — Phase 4B, Phase 4C1, Phase 4C2A/C2B, and Phase 4C3 complete
+- Status: In progress — Phase 4B, Phase 4C1, Phase 4C2A/C2B, Phase 4C3,
+  and Phase 4C4A1 complete
 - Date: 2026-08-28
 - Depends on: completed Phase 3A through Phase 3I baseline
 
@@ -81,9 +82,9 @@ The completed Windows terminal contract and acceptance evidence are in [Phase 4B
 
 ### Phase 4C: sandbox, network, and secret policy
 
-Status: In progress — Phase 4C1, Phase 4C2A/C2B, and Phase 4C3 are complete;
-resource, provider/MCP/plugin, finer
-network, and Windows sandbox slices remain
+Status: In progress — Phase 4C1, Phase 4C2A/C2B, Phase 4C3, and Phase 4C4A1
+are complete; resource runtime/durability/projection, provider/MCP/plugin,
+finer network, and Windows sandbox slices remain
 
 - Add explicit filesystem, process, environment, and network capabilities.
 - Implement available OS isolation mechanisms and expose their effective strength rather than a portable boolean claim.
@@ -226,6 +227,16 @@ C4A is split into standalone contracts, trusted native admission/durability,
 and projection/acceptance. macOS enforcement follows in Phase 4C4B, Linux
 follows in Phase 4C4C, and Windows resource enforcement remains explicitly
 deferred.
+
+C4A1 implementation commit `ca5c5a9` adds the standalone TypeScript/Rust
+policy-v2 and security/capability-v4 contracts, canonical digests, shared golden
+fixtures, immutable unsupported-resource wrappers over the existing isolation
+contracts, and fail-closed resource evaluation. It intentionally leaves the
+application resolver, native protocol, durable format, and app-server on their
+current versions. The commit passed `verify`, `linux-native`, `macos-native`,
+and `windows-native` in
+[GitHub Actions run 33357380456](https://github.com/ronaldo123321/koda/actions/runs/33357380456).
+C4A2 and C4A3 remain required before Phase 4C4A closes.
 
 Deferred Windows sandbox work remains explicit: restricted-token and privilege
 policy, filesystem workspace/scratch rules, network denial, launch confirmation,

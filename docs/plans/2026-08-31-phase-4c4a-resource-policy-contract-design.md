@@ -1,6 +1,7 @@
 # Phase 4C4A Resource Policy Contract and Evidence
 
-- Status: Approved — implementation pending
+- Status: In progress — C4A1 standalone contracts complete; C4A2 trusted
+  admission/durability and C4A3 client projection/acceptance remain
 - Date: 2026-08-31
 - Depends on: Phase 4C1 execution-policy admission, Phase 4C2 native sandbox
   enforcement, and Phase 4C3 secret lifecycle and client projection
@@ -16,11 +17,11 @@ backend, exit signal, or process ownership.
 
 The first contract covers five explicitly scoped limits:
 
-- `processCpuTimeMs`: CPU time consumed by one process;
-- `processAddressSpaceBytes`: virtual address space of one process;
-- `jobProcessCount`: simultaneously live processes in the owned job tree;
-- `processOpenFiles`: open file descriptors or handles in one process; and
-- `processFileSizeBytes`: maximum size of one file written by one process.
+- `process_cpu_time_ms`: CPU time consumed by one process;
+- `process_address_space_bytes`: virtual address space of one process;
+- `job_process_count`: simultaneously live processes in the owned job tree;
+- `process_open_files`: open file descriptors or handles in one process; and
+- `process_file_size_bytes`: maximum size of one file written by one process.
 
 The names deliberately expose scope. Koda does not describe a per-process
 `rlimit` as a job-tree memory or CPU guarantee. Wall-clock `timeoutMs` and
@@ -156,6 +157,24 @@ than being dropped from a result or process summary.
 
 No sequence item enables an operating-system resource backend. Phase 4C4A is
 complete only when all three items pass together.
+
+### C4A1 closure
+
+C4A1 is complete. TypeScript and Rust now share strict policy-v2 resource
+limits, schema-v4 capability/snapshot contracts, fixed canonical field order,
+SHA-256 digests, unsupported-resource capability wrappers over generic,
+macOS Seatbelt, and Linux Bubblewrap isolation contracts, and fail-closed
+`RESOURCE_LIMIT_UNAVAILABLE` evaluation. Empty resource objects normalize to
+the same bytes as omission, while policy v1 rejects any resource field.
+
+The runtime application resolver deliberately remains on policy v1 and native
+protocol/durable/app-server versions remain v5/v5/v16. Therefore C4A1 changes
+no command execution behavior and advertises no resource backend. Those wiring
+changes belong to C4A2 and C4A3.
+
+Implementation commit `ca5c5a9` passed `verify`, `linux-native`,
+`macos-native`, and `windows-native` in
+[GitHub Actions run 33357380456](https://github.com/ronaldo123321/koda/actions/runs/33357380456).
 
 ## Acceptance
 

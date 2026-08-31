@@ -1,8 +1,8 @@
 # Koda Execution Security Guarantees
 
-- Scope: Phase 4C1, Phase 4C2A, Phase 4C2B, and Phase 4C3A-C3D
-- Status: Complete — C3D and Phase 4C3 passed same-commit four-platform
-  acceptance
+- Scope: Phase 4C1, Phase 4C2A, Phase 4C2B, Phase 4C3A-C3D, and Phase 4C4A1
+- Status: Current through C4A1 — sandbox and secret guarantees are complete;
+  resource enforcement is not enabled
 - Last updated: 2026-08-31
 
 Koda separates execution admission, process supervision, and operating-system
@@ -76,6 +76,23 @@ without making an otherwise read-only filesystem writable. Pipe and PTY use the
 same policy builder, confirmation, evidence, and release path. Protected
 background PTYs retain applied evidence across attach, input acquisition,
 resize, detach, Supervisor restart, reattach, and completion.
+
+## Resource contract status
+
+Phase 4C4A1 defines standalone TypeScript/Rust policy-v2 resource limits and
+schema-v4 capability/security evidence for per-process CPU time, per-process
+address space, job-tree process count, per-process open files, and per-process
+file size. Every current v4 capability wrapper reports every resource limit as
+`unsupported`. A standalone resource request fails with
+`RESOURCE_LIMIT_UNAVAILABLE`; no capability can fabricate applied evidence.
+
+C4A1 does not connect these contracts to trusted application configuration,
+the native protocol, the durable job store, or clients. The running application
+continues to resolve policy v1 and native execution continues to use the
+existing v1-v3 isolation evidence. Consequently C4A1 is not a resource-quota
+claim. macOS/Linux enforcement, retained applied evidence, and client
+projection remain C4A2/C4A3 and later Phase 4C4 work. Windows enforcement is
+still deferred.
 
 ## What is not guaranteed
 
@@ -225,8 +242,14 @@ closing Phase 4C3.
 Implementation commit `abd6d3c` passed all four jobs in
 [GitHub Actions run 33312729690](https://github.com/ronaldo123321/koda/actions/runs/33312729690).
 That same-commit result closes Phase 4C2B. It does not complete the deferred
-secret, resource, provider/MCP/plugin, finer network, bundled Bubblewrap,
+resource enforcement, provider/MCP/plugin, finer network, bundled Bubblewrap,
 Landlock, PID-namespace, or Windows sandbox work listed above.
+
+Phase 4C4A1 implementation commit `ca5c5a9` passed all four jobs in
+[GitHub Actions run 33357380456](https://github.com/ronaldo123321/koda/actions/runs/33357380456).
+This closes only the standalone resource contract. It does not enable resource
+configuration, native enforcement, durable applied evidence, or client
+projection.
 
 The legacy executable is built from pinned commit `3aa84ee` outside the working
 tree:
