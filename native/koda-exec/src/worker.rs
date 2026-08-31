@@ -432,7 +432,7 @@ impl WorkerRuntime {
         resources_confirmed: bool,
     ) -> Result<(), ProtocolError> {
         #[cfg(windows)]
-        let _ = macos_seatbelt_confirmed;
+        let _ = (macos_seatbelt_confirmed, resources_confirmed);
         let mut guard = self.state.lock().await;
         let mut next = guard.clone();
         #[cfg(unix)]

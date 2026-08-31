@@ -78,7 +78,9 @@ pub mod bootstrap {
 
 #[cfg(windows)]
 pub mod bootstrap {
-    pub use super::windows::{BootstrapHandle, read_inherited_secret, spawn_worker_process};
+    pub use super::windows::{
+        BootstrapHandle, BootstrapRead, read_inherited_secret, spawn_worker_process,
+    };
 }
 
 #[cfg(unix)]
