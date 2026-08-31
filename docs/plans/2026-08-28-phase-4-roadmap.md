@@ -251,6 +251,15 @@ closing Phase 4C4A. No operating-system resource backend is claimed; macOS and
 Linux enforcement remain Phase 4C4B/C4C, and Windows enforcement remains
 deferred.
 
+The approved next slice is
+[Phase 4C4B macOS resource enforcement](2026-08-31-phase-4c4b-macos-resource-enforcement-design.md).
+It enables only exact per-process `RLIMIT_CPU`, `RLIMIT_NOFILE`, and
+`RLIMIT_FSIZE` hard limits, with gated bootstrap confirmation and retained
+applied evidence. macOS address-space and job-tree process limits remain
+unsupported because the available Darwin interfaces do not match those public
+scopes. Native protocol and durable format advance to v7 so historical v6
+unsupported-resource evidence remains readable without reinterpretation.
+
 Deferred Windows sandbox work remains explicit: restricted-token and privilege
 policy, filesystem workspace/scratch rules, network denial, launch confirmation,
 Job Object and ConPTY integration, durable evidence, reparse-point and Named
