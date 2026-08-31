@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "product": "koda",
+  "version": "0.1.0",
+  "platform": "darwin",
+  "arch": "arm64",
+  "node": {
+    "version": "22.18.0",
+    "path": "node/bin/node"
+  },
+  "entrypoints": {
+    "dispatcher": "app/dispatcher.mjs",
+    "cli": "app/cli.mjs",
+    "tui": "app/tui.mjs",
+    "app_server": "app/app-server.mjs",
+    "doctor": "app/doctor.mjs"
+  },
+  "native_executor": {
+    "path": "native/koda-exec"
+  },
+  "protocols": {
+    "app_server": 18,
+    "native_executor": 8
+  },
+  "integrity_sha256": "b94e86c44690eade36d7315cfe2285c7c93b2fb716253c500f316f73ebb8ccc6"
+}

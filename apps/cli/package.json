@@ -10,7 +10,8 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
-    }
+    },
+    "./main": "./dist/main.js"
   },
   "files": [
     "dist"
@@ -23,6 +24,7 @@
   "dependencies": {
     "@koda/app": "workspace:*",
     "@koda/agent-core": "workspace:*",
+    "@koda/distribution": "workspace:*",
     "@koda/protocol": "workspace:*",
     "@koda/providers": "workspace:*",
     "@koda/runtime-node": "workspace:*",

@@ -104,6 +104,7 @@ import {
   type JsonValue,
   type TurnId,
 } from "@koda/protocol";
+import { KODA_VERSION } from "@koda/distribution";
 import {
   InteractiveProcessError,
   NativeExecutorError,
@@ -144,7 +145,7 @@ export class KodaAppServer {
   public constructor(options: KodaAppServerOptions) {
     this.application = options.application;
     this.writer = options.writer;
-    this.serverVersion = options.serverVersion ?? "0.1.0";
+    this.serverVersion = options.serverVersion ?? KODA_VERSION;
     this.diagnostic = options.diagnostic ?? (() => undefined);
     this.fatal = options.fatal ?? (() => undefined);
     this.planAcceptances = new PendingPlanAcceptanceRegistry(

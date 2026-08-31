@@ -1,5 +1,7 @@
 import { Command, Option } from "commander";
 
+import { KODA_VERSION } from "@koda/distribution";
+
 import { runTui, type RunTuiOptions, type TuiRuntime } from "./run.js";
 
 export interface TuiProgramRuntime extends TuiRuntime {
@@ -16,7 +18,7 @@ export function createTuiProgram(runtime: TuiProgramRuntime): Command {
   program
     .name("koda-chat")
     .description("Interactive Koda coding-agent chat")
-    .version("0.1.0")
+    .version(KODA_VERSION)
     .option("-C, --cwd <directory>", "workspace directory")
     .option("-m, --model <model>", "model ID for the selected provider")
     .addOption(

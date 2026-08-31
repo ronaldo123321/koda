@@ -39,6 +39,12 @@ arm64/Intel artifacts, signing/notarization, and Homebrew delivery. Remaining
 Linux resource and new Windows security work is deferred, not removed; existing
 cross-platform CI remains a regression gate.
 
+MR1A1 is complete: Koda now has one version authority, strict versioned runtime
+and integrity manifests, structural source/release discovery, fail-closed
+critical-file verification, a unified `koda`/`koda-chat` dispatcher, and the
+offline `koda doctor --bundle-only` core. MR1A2 will assemble these contracts
+into the first repository-independent macOS arm64 bundle.
+
 Phase 4C3A/C3B/C3C/C3D are complete with strict value-free secret
 declarations/evidence, stable cross-language digests and limits, matching
 TypeScript/Rust exact-byte streaming redactors, frozen trusted application

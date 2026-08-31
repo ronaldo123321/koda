@@ -28,6 +28,10 @@ until the macOS preview is in user hands. Phase 4D remote operation, the rest of
 Phase 4E/4F, and Phase 5 remain later work. Existing Linux and Windows behavior
 continues to run as a shared regression gate.
 
+Delivery status: MR1A1 (release runtime contract, unified command dispatcher,
+strict installed-runtime resolution, integrity doctor, and deterministic
+fixtures) is complete. MR1A2 standalone bundle assembly is the next slice.
+
 ## Guiding policies
 
 1. Never claim an outcome that cannot be proven from durable evidence and current operating-system state.

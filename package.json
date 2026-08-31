@@ -10,7 +10,8 @@
   "scripts": {
     "build": "pnpm build:native && pnpm -r --if-present build",
     "build:native": "cargo build --workspace",
-    "chat": "node apps/tui/dist/main.js",
+    "chat": "node apps/distribution/dist/main.js",
+    "koda": "node apps/distribution/dist/main.js",
     "eval:scenarios": "pnpm build && vitest run packages/testkit/scenarios/scenario-suite.test.ts",
     "format": "cargo fmt --all && prettier --write .",
     "format:check": "cargo fmt --all -- --check && prettier --check .",

@@ -11,6 +11,7 @@ export * from "./extensions.js";
 export * from "./ids.js";
 export * from "./items.js";
 export * from "./json.js";
+export * from "./native-executor.js";
 export * from "./plans.js";
 export * from "./plugins.js";
 export * from "./providers.js";

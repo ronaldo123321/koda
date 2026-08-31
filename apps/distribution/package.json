@@ -1,10 +1,11 @@
 {
-  "name": "@koda/app-server",
+  "name": "@koda/distribution-app",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "bin": {
-    "koda-app-server": "./dist/main.js"
+    "koda": "./dist/main.js",
+    "koda-chat": "./dist/main.js"
   },
   "exports": {
     ".": {
@@ -22,12 +23,11 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@koda/agent-core": "workspace:*",
-    "@koda/app": "workspace:*",
+    "@koda/app-server": "workspace:*",
+    "@koda/cli": "workspace:*",
     "@koda/distribution": "workspace:*",
     "@koda/protocol": "workspace:*",
-    "@koda/runtime-node": "workspace:*",
-    "zod": "^4.1.5"
+    "@koda/tui": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^22.18.0"

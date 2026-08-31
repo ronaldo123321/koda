@@ -10,7 +10,8 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
-    }
+    },
+    "./main": "./dist/main.js"
   },
   "files": [
     "dist"
@@ -22,6 +23,7 @@
   },
   "dependencies": {
     "@koda/app-server-client-node": "workspace:*",
+    "@koda/distribution": "workspace:*",
     "@koda/protocol": "workspace:*",
     "commander": "^15.0.0",
     "ink": "7.1.1",

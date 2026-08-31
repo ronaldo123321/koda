@@ -1,6 +1,6 @@
 # Koda Mac Release 1A Design
 
-- Status: Approved — implementation pending
+- Status: In progress — MR1A1 complete; MR1A2 is next
 - Date: 2026-08-31
 - Target: macOS CLI/TUI developer preview
 - Depends on: completed Phase 3, Phase 4A, Phase 4B, Phase 4C2A, Phase 4C3,
@@ -123,10 +123,15 @@ tests. The two modes share the same protocol and application behavior.
 
 ## Build and assembly
 
-An internal `@koda/distribution` workspace package owns the installed bootstrap,
-manifest schemas, doctor command, and release assembly contract. It depends on
-the CLI, TUI, and app-server packages so a production `pnpm deploy` operation
-can create one portable dependency tree after the normal workspace build.
+The distribution implementation is split at a deliberate dependency boundary.
+The low-level `@koda/distribution` workspace package owns versions, manifest
+schemas, installed-runtime discovery, integrity checks, bounded errors, and the
+doctor report contract. It depends only on the public protocol package. The
+`@koda/distribution-app` package owns the installed bootstrap and unified
+dispatcher, and depends on `@koda/distribution`, CLI, TUI, and app-server. This
+keeps runtime components free to consume release resolution without creating a
+dependency cycle, while still allowing a production `pnpm deploy` operation to
+create one portable dependency tree after the normal workspace build.
 
 The assembly pipeline:
 
@@ -272,6 +277,8 @@ manual release gate performs one real Provider turn without recording the key.
 
 ### MR1A1 — release runtime contract
 
+Status: Complete.
+
 - authoritative Koda release version;
 - manifest/inventory schemas and canonicalization;
 - development/release installation resolver;
@@ -280,7 +287,20 @@ manual release gate performs one real Provider turn without recording the key.
 - `koda doctor --bundle-only` core;
 - deterministic tests and fixtures.
 
+Implementation notes:
+
+- `@koda/distribution` owns the strict low-level runtime contract and
+  `@koda/distribution-app` owns the cycle-free unified executable;
+- normal release discovery verifies manifest/inventory compatibility and every
+  critical file, rejects symlink traversal, and ignores executor overrides;
+- `koda doctor --bundle-only` performs the complete immutable payload scan;
+- the canonical v1 fixture and distribution suite cover source/release mode,
+  corruption, missing metadata, platform/architecture/protocol mismatch,
+  bounded public errors, routing, and launch plans.
+
 ### MR1A2 — local standalone bundle
+
+Status: Next.
 
 - `@koda/distribution` portable production deploy;
 - pinned verified Node acquisition;
@@ -291,6 +311,8 @@ manual release gate performs one real Provider turn without recording the key.
 
 ### MR1A3 — dual-architecture CI and Homebrew contract
 
+Status: Pending.
+
 - native arm64 and Intel build jobs;
 - unsigned artifact retention;
 - clean-install and corruption-negative tests;
@@ -298,6 +320,8 @@ manual release gate performs one real Provider turn without recording the key.
 - same-commit bundle metadata comparison.
 
 ### MR1A4 — signed public preview
+
+Status: Pending.
 
 - protected Developer ID and notarization credentials;
 - nested Mach-O signing and signature audit;

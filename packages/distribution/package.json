@@ -1,32 +1,23 @@
 {
-  "name": "@koda/app-server",
+  "name": "@koda/distribution",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "bin": {
-    "koda-app-server": "./dist/main.js"
-  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
-    },
-    "./main": "./dist/main.js"
+    }
   },
   "files": [
     "dist"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "start": "node dist/main.js",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@koda/agent-core": "workspace:*",
-    "@koda/app": "workspace:*",
-    "@koda/distribution": "workspace:*",
     "@koda/protocol": "workspace:*",
-    "@koda/runtime-node": "workspace:*",
     "zod": "^4.1.5"
   },
   "devDependencies": {

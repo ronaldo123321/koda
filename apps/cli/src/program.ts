@@ -1,5 +1,7 @@
 import { Command, Option } from "commander";
 
+import { KODA_VERSION } from "@koda/distribution";
+
 import { runArtifactGarbageCollectionCommand } from "./artifact-command.js";
 import type { TextWriter } from "./console-event-sink.js";
 import {
@@ -43,7 +45,7 @@ export function createProgram(runtime: ProgramRuntime): Command {
   program
     .name("koda")
     .description("A local-first coding agent")
-    .version("0.1.0");
+    .version(KODA_VERSION);
 
   program
     .command("run")

@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "files": [
+    {
+      "path": "app/main.mjs",
+      "bytes": 3,
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "path": "node/bin/node",
+      "bytes": 4,
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  ]
+}

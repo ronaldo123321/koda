@@ -8,6 +8,7 @@ import { isAbsolute, join, resolve } from "node:path";
 import { z } from "zod";
 import {
   executionCapabilitiesSchema,
+  NATIVE_EXECUTOR_PROTOCOL_VERSION,
   secretExecutionEvidenceSchema,
   type ExecutionPolicy,
   type ExecutionSecuritySnapshot,
@@ -19,7 +20,7 @@ import {
 } from "./execution-policy.js";
 import type { NativeSecretLeaseInput } from "./secret-policy.js";
 
-const PROTOCOL_VERSION = 8;
+const PROTOCOL_VERSION = NATIVE_EXECUTOR_PROTOCOL_VERSION;
 const MAX_FRAME_BYTES = 1_048_576;
 const DEFAULT_STARTUP_TIMEOUT_MS = 5_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;

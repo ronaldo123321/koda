@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 
 import { NodeAppServerClient } from "@koda/app-server-client-node";
 import type { AppServerClientApi } from "@koda/app-server-client-node";
+import { KODA_VERSION } from "@koda/distribution";
 import {
   modelProviderIdSchema,
   runtimeSettingsModelSchema,
@@ -61,7 +62,7 @@ export async function runTui(
             cwd: runtime.processDirectory,
             environment: runtime.environment,
             clientName: "koda-chat",
-            clientVersion: "0.1.0",
+            clientVersion: KODA_VERSION,
           })
         : await runtime.connectAppServer();
     const settings = await loadRuntimeSettings(client, workspace);

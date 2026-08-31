@@ -29,6 +29,9 @@ importers:
       '@koda/app':
         specifier: workspace:*
         version: link:../../packages/app
+      '@koda/distribution':
+        specifier: workspace:*
+        version: link:../../packages/distribution
       '@koda/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
@@ -51,6 +54,9 @@ importers:
       '@koda/app':
         specifier: workspace:*
         version: link:../../packages/app
+      '@koda/distribution':
+        specifier: workspace:*
+        version: link:../../packages/distribution
       '@koda/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
@@ -68,11 +74,36 @@ importers:
         specifier: ^22.18.0
         version: 22.20.1
 
+  apps/distribution:
+    dependencies:
+      '@koda/app-server':
+        specifier: workspace:*
+        version: link:../app-server
+      '@koda/cli':
+        specifier: workspace:*
+        version: link:../cli
+      '@koda/distribution':
+        specifier: workspace:*
+        version: link:../../packages/distribution
+      '@koda/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
+      '@koda/tui':
+        specifier: workspace:*
+        version: link:../tui
+    devDependencies:
+      '@types/node':
+        specifier: ^22.18.0
+        version: 22.20.1
+
   apps/tui:
     dependencies:
       '@koda/app-server-client-node':
         specifier: workspace:*
         version: link:../../packages/app-server-client-node
+      '@koda/distribution':
+        specifier: workspace:*
+        version: link:../../packages/distribution
       '@koda/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
@@ -132,6 +163,19 @@ importers:
       '@koda/app-server':
         specifier: workspace:*
         version: link:../../apps/app-server
+      '@koda/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      zod:
+        specifier: ^4.1.5
+        version: 4.4.3
+    devDependencies:
+      '@types/node':
+        specifier: ^22.18.0
+        version: 22.20.1
+
+  packages/distribution:
+    dependencies:
       '@koda/protocol':
         specifier: workspace:*
         version: link:../protocol
@@ -251,6 +295,12 @@ importers:
       '@koda/cli':
         specifier: workspace:*
         version: link:../../apps/cli
+      '@koda/distribution':
+        specifier: workspace:*
+        version: link:../distribution
+      '@koda/distribution-app':
+        specifier: workspace:*
+        version: link:../../apps/distribution
       '@koda/mcp-client-node':
         specifier: workspace:*
         version: link:../mcp-client-node
