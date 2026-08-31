@@ -122,6 +122,7 @@ const initialization = initializeResultSchema.parse({
     plugins: true,
     workspaceMutationRecovery: true,
     interactiveProcesses: true,
+    secretEvidence: true,
   },
   providers: [
     {
@@ -334,6 +335,7 @@ const client: AppServerClientApi = {
     return {
       status: "ok" as const,
       processSessionId,
+      process: processSummary(),
       inputState: "owned" as const,
       cursor,
       nextCursor: processCursor,

@@ -36,6 +36,7 @@ import {
 } from "./context.js";
 import { toolCatalogChangedPayloadSchema } from "./tool-catalogs.js";
 import { executionSecuritySnapshotSchema } from "./execution-policy.js";
+import { secretExecutionEvidenceSchema } from "./execution-secrets.js";
 
 const metadataShape = {
   schemaVersion: z.literal(1),
@@ -177,6 +178,8 @@ export const agentEventSchema = z.discriminatedUnion("type", [
       ownership: processOwnershipSchema,
       // Historical JSONL records predate execution-security evidence.
       security: executionSecuritySnapshotSchema.optional(),
+      // Historical records and non-secret executions omit this field.
+      secrets: secretExecutionEvidenceSchema.optional(),
     }),
   }),
   z.object({
@@ -188,6 +191,7 @@ export const agentEventSchema = z.discriminatedUnion("type", [
       pid: z.number().int().positive(),
       exitCode: z.number().int().nullable(),
       signal: z.string().min(1).nullable(),
+      secrets: secretExecutionEvidenceSchema.optional(),
     }),
   }),
   z.object({

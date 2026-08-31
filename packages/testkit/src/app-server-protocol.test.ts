@@ -57,10 +57,11 @@ import {
   linuxProtectedLaunchSecurity,
   macosProtectedLaunchSecurity,
 } from "./execution-security-fixtures.js";
+import { destroyedSecretEvidence } from "./execution-secret-fixtures.js";
 
 describe("app-server protocol", () => {
   it("accepts strict versioned requests and safe JSON-RPC IDs", () => {
-    expect(APP_SERVER_PROTOCOL_VERSION).toBe(15);
+    expect(APP_SERVER_PROTOCOL_VERSION).toBe(16);
     expect(
       jsonRpcRequestSchema.parse({
         jsonrpc: "2.0",
@@ -126,6 +127,7 @@ describe("app-server protocol", () => {
           plugins: true,
           workspaceMutationRecovery: true,
           interactiveProcesses: false,
+          secretEvidence: true,
         },
         providers: [
           {
@@ -148,6 +150,7 @@ describe("app-server protocol", () => {
       plugins: true,
       workspaceMutationRecovery: true,
       interactiveProcesses: false,
+      secretEvidence: true,
     });
 
     expect(
@@ -442,6 +445,7 @@ describe("app-server protocol", () => {
         updatedAtMs: 2,
         pid: 42,
         security,
+        secrets: destroyedSecretEvidence(),
       },
       inputState: "owned",
       rows: 24,
@@ -453,6 +457,7 @@ describe("app-server protocol", () => {
     });
     expect(attached).not.toHaveProperty("capabilityToken");
     expect(attached.process.security).toEqual(security);
+    expect(attached.process.secrets).toEqual(destroyedSecretEvidence());
     expect(
       processAttachResultSchema.parse({
         ...attached,
@@ -479,6 +484,7 @@ describe("app-server protocol", () => {
           updatedAtMs: 2,
           pid: 42,
           security,
+          secrets: destroyedSecretEvidence(),
         },
         inputState: "owned",
         rows: 24,
@@ -493,6 +499,18 @@ describe("app-server protocol", () => {
       processReadResultSchema.parse({
         status: "ok",
         processSessionId,
+        process: {
+          jobId: "job-1",
+          displayName: "Dev server",
+          cwd: "/workspace",
+          state: "exited",
+          lifecycle: "background",
+          createdAtMs: 1,
+          updatedAtMs: 3,
+          pid: 42,
+          security,
+          secrets: destroyedSecretEvidence(),
+        },
         inputState: "read_only",
         cursor: 5,
         nextCursor: 8,
@@ -501,7 +519,27 @@ describe("app-server protocol", () => {
         complete: true,
         dataBase64: Buffer.from("abc").toString("base64"),
       }),
-    ).toMatchObject({ inputState: "read_only" });
+    ).toMatchObject({
+      inputState: "read_only",
+      process: { secrets: destroyedSecretEvidence() },
+    });
+    expect(() =>
+      processReadResultSchema.parse({
+        status: "ok",
+        processSessionId,
+        process: {
+          ...attached.process,
+          secrets: { ...destroyedSecretEvidence(), unexpected: true },
+        },
+        inputState: "read_only",
+        cursor: 5,
+        nextCursor: 8,
+        earliestCursor: 5,
+        latestCursor: 8,
+        complete: true,
+        dataBase64: "",
+      }),
+    ).toThrow();
     expect(() =>
       processInputParamsSchema.parse({
         processSessionId,

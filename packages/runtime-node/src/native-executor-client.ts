@@ -191,6 +191,7 @@ export interface NativeJobSummary {
   updated_at_ms: number;
   pid: number | null;
   security: ExecutionSecuritySnapshot;
+  secrets?: import("@koda/protocol").SecretExecutionEvidence | undefined;
 }
 
 export interface NativeJobListResult {
@@ -366,6 +367,7 @@ const jobSummarySchema = z
     created_at_ms: safeInteger,
     updated_at_ms: safeInteger,
     pid: positiveSafeInteger.nullable(),
+    secrets: secretExecutionEvidenceSchema.optional(),
   })
   .strict();
 

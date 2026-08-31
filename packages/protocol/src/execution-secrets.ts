@@ -239,6 +239,20 @@ function isStrictlySorted(values: readonly string[]): boolean {
   );
 }
 
+export function secretExecutionSummary(input: unknown): string {
+  const evidence = secretExecutionEvidenceSchema.parse(input);
+  const visibleAliases = evidence.aliases.slice(0, 3);
+  const remainingAliases = evidence.aliases.length - visibleAliases.length;
+  const aliases = `${visibleAliases.join(", ")}${
+    remainingAliases === 0 ? "" : ` +${remainingAliases}`
+  }`;
+  const redactions =
+    BigInt(evidence.redactions.stdout) +
+    BigInt(evidence.redactions.stderr) +
+    BigInt(evidence.redactions.pty);
+  return `secrets ${aliases} · ${evidence.lifecycle} · cleanup ${evidence.cleanup} · redacted ${redactions.toString()}`;
+}
+
 export type SecretAlias = z.infer<typeof secretAliasSchema>;
 export type SecretTool = z.infer<typeof secretToolSchema>;
 export type SecretDeclaration = z.infer<typeof secretDeclarationSchema>;

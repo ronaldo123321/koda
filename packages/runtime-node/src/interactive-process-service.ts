@@ -14,6 +14,7 @@ import {
   type ProcessResizeResult,
   type ProcessTerminateResult,
   type ExecutionSecuritySnapshot,
+  type SecretExecutionEvidence,
 } from "@koda/protocol";
 
 import {
@@ -70,6 +71,7 @@ export interface InteractiveTerminalStartResult {
   lifecycle: "foreground" | "background";
   pid: number | null;
   security: ExecutionSecuritySnapshot;
+  secrets?: SecretExecutionEvidence;
 }
 
 interface InteractiveProcessNativeClient {
@@ -177,6 +179,7 @@ export class InteractiveProcessService {
       lifecycle: input.lifecycle ?? "foreground",
       pid: snapshot.pid,
       security: snapshot.security,
+      ...(snapshot.secrets === undefined ? {} : { secrets: snapshot.secrets }),
     };
   }
 
@@ -284,10 +287,13 @@ export class InteractiveProcessService {
   ): Promise<ProcessReadResult> {
     const session = this.requireSession(processSessionId);
     const result = await session.attachment.read(maxBytes);
+    const snapshot = await this.nativeClient.get(session.job.jobId);
+    session.job = refreshProcessSummary(session.job, snapshot);
     if (result.status === "cursor_expired") {
       return {
         status: result.status,
         processSessionId,
+        process: session.job,
         inputState: session.inputState,
         cursor: result.cursor,
         earliestCursor: result.earliest_cursor,
@@ -298,6 +304,7 @@ export class InteractiveProcessService {
     return {
       status: result.status,
       processSessionId,
+      process: session.job,
       inputState: session.inputState,
       cursor: result.cursor,
       nextCursor: result.next_cursor,
@@ -376,13 +383,7 @@ export class InteractiveProcessService {
       "cancellation",
     );
     return {
-      process: {
-        ...existing,
-        state: snapshot.state,
-        updatedAtMs: Date.now(),
-        pid: snapshot.pid,
-        security: snapshot.security,
-      },
+      process: refreshProcessSummary(existing, snapshot),
     };
   }
 
@@ -495,6 +496,25 @@ function toProcessSummary(job: NativeJobSummary): InteractiveProcessSummary {
     updatedAtMs: job.updated_at_ms,
     pid: job.pid,
     security: job.security,
+    ...(job.secrets === undefined ? {} : { secrets: job.secrets }),
+  };
+}
+
+function refreshProcessSummary(
+  existing: InteractiveProcessSummary,
+  snapshot: NativeJobSnapshot,
+): InteractiveProcessSummary {
+  return {
+    jobId: existing.jobId,
+    displayName: existing.displayName,
+    cwd: existing.cwd,
+    state: snapshot.state,
+    lifecycle: existing.lifecycle,
+    createdAtMs: existing.createdAtMs,
+    updatedAtMs: Date.now(),
+    pid: snapshot.pid,
+    security: snapshot.security,
+    ...(snapshot.secrets === undefined ? {} : { secrets: snapshot.secrets }),
   };
 }
 

@@ -276,6 +276,7 @@ describe("NodeAppServerClient", () => {
         plugins: true,
         workspaceMutationRecovery: true,
         interactiveProcesses: false,
+        secretEvidence: true,
       },
       providers: [
         { id: "openai", configured: true },
@@ -607,6 +608,7 @@ function fixtureServerScript(options: {
       plugins: true,
       workspaceMutationRecovery: true,
       interactiveProcesses: false,
+      secretEvidence: true,
     },
     providers: [
       {

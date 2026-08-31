@@ -42,6 +42,7 @@ import {
   linuxProtectedLaunchSecurity,
   macosProtectedLaunchSecurity,
 } from "./execution-security-fixtures.js";
+import { destroyedSecretEvidence } from "./execution-secret-fixtures.js";
 
 import { DeterministicItemIdFactory } from "./deterministic.js";
 
@@ -243,6 +244,19 @@ describe("Phase 1A CLI", () => {
         pid: 42,
         ownership: "posix_process_group",
         security: macosProtectedLaunchSecurity(),
+        secrets: destroyedSecretEvidence(),
+      },
+    });
+    await sink.append({
+      ...metadata,
+      type: "process.exited",
+      payload: {
+        callId: toolCallIdSchema.parse("console-call"),
+        name: "exec_terminal",
+        pid: 42,
+        exitCode: 0,
+        signal: null,
+        secrets: destroyedSecretEvidence(),
       },
     });
     await sink.append({
@@ -283,6 +297,11 @@ describe("Phase 1A CLI", () => {
     expect(stderr.value).toContain("[koda] artifact sha256:");
     expect(stderr.value).toContain("OS sandbox: macOS Seatbelt");
     expect(stderr.value).toContain("OS sandbox: Linux Bubblewrap + seccomp");
+    expect(stderr.value).toContain(
+      "secrets api-token · destroyed · cleanup completed · redacted 1",
+    );
+    expect(stderr.value).not.toContain("0123456789abcdef");
+    expect(stderr.value).not.toContain("APP_TOKEN_FILE");
     expect(stderr.value).toContain("120 input (80 cached, 10 cache write)");
     expect(stderr.value).toContain("1/1 requests reported");
   });

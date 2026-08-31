@@ -379,6 +379,8 @@ pub struct JobSummary {
     pub updated_at_ms: u64,
     pub pid: Option<u32>,
     pub security: ExecutionSecuritySnapshot,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secrets: Option<SecretExecutionEvidence>,
 }
 
 #[derive(Clone, Debug, Serialize)]

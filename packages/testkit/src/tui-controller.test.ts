@@ -76,6 +76,7 @@ import {
 import { describe, expect, it, vi } from "vitest";
 
 import { macosProtectedLaunchSecurity } from "./execution-security-fixtures.js";
+import { destroyedSecretEvidence } from "./execution-secret-fixtures.js";
 
 describe("TuiController", () => {
   it("lists, attaches, projects, writes, reacquires, and detaches terminal sessions", async () => {
@@ -111,6 +112,7 @@ describe("TuiController", () => {
     const readProcess = vi.spyOn(client, "readProcess").mockResolvedValue({
       status: "ok",
       processSessionId: "00000000-0000-4000-8000-000000000001",
+      process: { ...process, state: "exited", updatedAtMs: 3 },
       inputState: "read_only",
       cursor: 0,
       nextCursor: 18,
@@ -734,6 +736,7 @@ describe("TuiController", () => {
           pid: 42,
           ownership: "posix_process_group",
           security: macosProtectedLaunchSecurity(),
+          secrets: destroyedSecretEvidence(),
         },
       }),
     ];
@@ -777,11 +780,14 @@ describe("TuiController", () => {
     expect(controller.getSnapshot().activityNavigation?.rows).toEqual([
       "#11 tool.started · read_file · call activity-call",
       "#12 tool.execution_started · read_file · read · call activity-call",
-      "#13 process.started · exec_terminal · pid 42 · posix_process_group · OS sandbox: macOS Seatbelt · native_posix · call activity-call",
+      "#13 process.started · exec_terminal · pid 42 · posix_process_group · OS sandbox: macOS Seatbelt · native_posix · secrets api-token · destroyed · cleanup completed · redacted 1 · call activity-call",
     ]);
     expect(
       controller.getSnapshot().activityNavigation?.rows.join("\n"),
     ).not.toContain("not duplicated");
+    expect(
+      controller.getSnapshot().activityNavigation?.rows.join("\n"),
+    ).not.toContain("0123456789abcdef");
 
     await controller.navigateActivity("page_up");
     expect(client.threadEventRequests.at(-1)).toEqual({
@@ -2353,6 +2359,7 @@ class FakeAppServerClient implements AppServerClientApi {
         plugins: true,
         workspaceMutationRecovery: true,
         interactiveProcesses: false,
+        secretEvidence: true,
       },
       providers: [
         provider("openai", "OpenAI", "OPENAI_API_KEY", "gpt-5.6-terra"),

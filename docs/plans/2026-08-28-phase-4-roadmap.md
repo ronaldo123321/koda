@@ -1,6 +1,6 @@
 # Koda Phase 4 Hardening Roadmap
 
-- Status: In progress — Phase 4B, Phase 4C1, Phase 4C2A/C2B, and Phase 4C3A-C3C complete
+- Status: In progress — Phase 4B, Phase 4C1, Phase 4C2A/C2B, and Phase 4C3A-C3C complete; C3D implementation awaiting same-commit CI closure
 - Date: 2026-08-28
 - Depends on: completed Phase 3A through Phase 3I baseline
 
@@ -82,7 +82,8 @@ The completed Windows terminal contract and acceptance evidence are in [Phase 4B
 ### Phase 4C: sandbox, network, and secret policy
 
 Status: In progress — Phase 4C1, Phase 4C2A/C2B, and Phase 4C3A-C3C are
-complete; C3D client/platform closure, resource, provider/MCP/plugin, finer
+complete; C3D client projection is implemented and awaits its closure matrix;
+resource, provider/MCP/plugin, finer
 network, and Windows sandbox slices remain
 
 - Add explicit filesystem, process, environment, and network capabilities.
@@ -182,7 +183,10 @@ host-environment resolution into single-use leases, configured alias requests,
 fresh approval, expiry, disposal, grant rejection, authenticated non-replayed
 native transfer, private mode-`0700`/`0400` files, exact sandbox paths,
 pre-persistence Pipe/PTY redaction, and conservative cleanup reconciliation.
-C3D adds client projection and same-commit platform acceptance.
+C3D now adds app-server v16 `secretEvidence`, strict result/event/process
+projection, bounded CLI/TUI summaries, refreshed PTY read state, real
+macOS/Linux Pipe and PTY acceptance, and fixed Windows pre-execution rejection.
+The slice closes only after the implementation commit passes all four CI jobs.
 
 Phase 4C3A implementation commit `0846f8c` passed `verify`, `linux-native`,
 `macos-native`, and `windows-native` in
@@ -204,8 +208,9 @@ a secret. Encoded/transformed output, writes into the workspace, inherited
 network, Keychain/Vault backends, Provider/MCP/plugin credentials, TypeScript
 execution, and Windows injection remain explicitly deferred.
 
-Until Phase 4C3D closes, safe evidence is not yet projected consistently by
-every client and the same-commit platform acceptance matrix remains unclaimed.
+Safe evidence is now projected consistently by every client, but Phase 4C3D
+and Phase 4C3 remain open until the same implementation commit passes the
+four-job platform acceptance matrix.
 Resource quotas, finer-grained network policy, provider/MCP/plugin sandboxing,
 shell syntax, Landlock fallback, bundled Bubblewrap distribution, and all
 Windows sandbox controls remain later Phase 4C/4E work rather than implicit

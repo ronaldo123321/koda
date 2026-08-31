@@ -442,6 +442,7 @@ impl Supervisor {
                         .security
                         .clone()
                         .unwrap_or_else(execution_security::legacy_unknown),
+                    secrets: state.secrets.clone(),
                 })
             })
             .collect::<Result<Vec<_>, ProtocolError>>()?;

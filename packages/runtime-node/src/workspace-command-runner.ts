@@ -10,6 +10,7 @@ import type {
   ExecutionCapabilities,
   ExecutionPolicy,
   ExecutionSecuritySnapshot,
+  SecretExecutionEvidence,
 } from "@koda/protocol";
 
 import {
@@ -101,6 +102,7 @@ export interface ExecCommandResult {
   duration_ms: number;
   termination?: ProcessTerminationReport;
   security: ExecutionSecuritySnapshot;
+  secrets?: SecretExecutionEvidence;
 }
 
 export interface PreparedWorkspaceCommand {
@@ -660,6 +662,9 @@ async function runNativeForegroundCommand(
               ? "windows_job_object"
               : "posix_process_group",
           security: current.security,
+          ...(current.secrets === undefined
+            ? {}
+            : { secrets: current.secrets }),
         },
       });
       reportedPid = current.pid;
@@ -700,7 +705,12 @@ async function runNativeForegroundCommand(
   await reportStarted(snapshot);
 
   const secretFailure = secretFailureFromSnapshot(snapshot);
-  if (secretFailure !== undefined) throw secretFailure;
+  if (secretFailure !== undefined) {
+    if (snapshot.pid !== null && reportedPid !== undefined) {
+      await reportNativeCompletion(options.report, snapshot, snapshot.pid);
+    }
+    throw secretFailure;
+  }
   if (snapshot.state === "start_failed") {
     throw commandStartFailure(snapshot, options.argv[0] ?? "command");
   }
@@ -766,6 +776,7 @@ async function runNativeForegroundCommand(
           },
         }),
     security: snapshot.security,
+    ...(snapshot.secrets === undefined ? {} : { secrets: snapshot.secrets }),
   };
 }
 
@@ -829,6 +840,9 @@ async function reportNativeCompletion(
         pid,
         exitCode: snapshot.exit_code,
         signal: snapshot.signal,
+        ...(snapshot.secrets === undefined
+          ? {}
+          : { secrets: snapshot.secrets }),
       },
     });
   }

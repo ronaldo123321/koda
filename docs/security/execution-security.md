@@ -1,9 +1,9 @@
 # Koda Execution Security Guarantees
 
-- Scope: Phase 4C1, Phase 4C2A, and Phase 4C2B
-- Status: Complete — Linux Bubblewrap enforcement and same-commit four-platform
-  acceptance delivered
-- Last updated: 2026-08-30
+- Scope: Phase 4C1, Phase 4C2A, Phase 4C2B, and Phase 4C3A-C3D
+- Status: C3D implementation complete — same-commit four-platform acceptance
+  pending
+- Last updated: 2026-08-31
 
 Koda separates execution admission, process supervision, and operating-system
 isolation. A successful command does not imply that a filesystem or network
@@ -111,8 +111,13 @@ uncertain termination retains `cleanup_pending` evidence rather than removing
 files a live descendant may still use. Lost pre-release leases require fresh
 resolution and approval and are never replayed.
 
-C3D is still required to project this safe evidence consistently through CLI,
-TUI, and app-server responses and to close the platform matrix from one commit.
+C3D projects the same strict optional evidence through foreground results,
+`process.started`/`process.exited`, native PTY summaries, and app-server v16
+list/attach/read/terminate responses. CLI and TUI share a bounded formatter
+that shows at most three aliases, lifecycle, cleanup, and total exact-byte
+redactions; it omits lease IDs, digests, expiry, and target names. Historical
+and non-secret records omit the field rather than inventing success. C3D still
+requires the same implementation commit to close the four-job platform matrix.
 C3A is verified by all four jobs in
 [GitHub Actions run 33315958454](https://github.com/ronaldo123321/koda/actions/runs/33315958454),
 and C3B implementation commit `7273895` is verified by all four jobs in
@@ -148,7 +153,7 @@ durable launch evidence retains that evidence and cleans the verified process
 group or reports conservative `termination_uncertain`.
 
 Command results, `process.started` events, native job state, PTY summaries,
-app-server v15 responses, CLI diagnostics, and TUI activity/process views all
+app-server v16 responses, CLI diagnostics, and TUI activity/process views all
 retain or derive their label from the same snapshot. Linux applied evidence is
 reported as `OS sandbox: Linux Bubblewrap + seccomp`; it is never inferred from
 the platform name, requested profile, or exit code.

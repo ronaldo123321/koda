@@ -127,6 +127,10 @@ describeNative("NativeExecutorClient", () => {
       cleanup: "completed",
       redactions: { stdout: 0, stderr: 0, pty: 1 },
     });
+    const listed = await client.list({ limit: 100 });
+    expect(
+      listed.jobs.find(({ job_id }) => job_id === terminal.job_id)?.secrets,
+    ).toEqual(terminal.secrets);
   });
 
   it("keeps secret files through execution and removes them after cancellation", async () => {

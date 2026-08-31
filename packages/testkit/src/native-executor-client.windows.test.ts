@@ -1,5 +1,6 @@
 import { type ToolOperationalEvent } from "@koda/agent-core";
 import {
+  type NativeSecretLeaseInput,
   WorkspaceCommandRunner,
   resolveExecutionPolicy,
 } from "@koda/runtime-node";
@@ -60,6 +61,30 @@ windowsDescribe("NativeExecutorClient Windows control plane", () => {
       reattach: true,
       durable_restart_recovery: true,
     });
+  });
+
+  test("rejects secret injection before Windows user code starts", async () => {
+    const marker = join(root, "windows-secret-must-not-run");
+    const value = Buffer.from("windows-secret-rejection-value", "utf8");
+    await expect(
+      client.start({
+        argv: [
+          process.execPath,
+          "-e",
+          `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "bad")`,
+        ],
+        cwd: root,
+        policy: await policyFor(root),
+        environment: windowsEnvironment,
+        timeoutMs: 3_000,
+        outputLimitBytes: 4_096,
+        terminationGraceMs: 25,
+        terminationConfirmationMs: 2_000,
+        secretLease: windowsSecretLease(value),
+      }),
+    ).rejects.toMatchObject({ code: "SECRET_POLICY_UNAVAILABLE" });
+    expect(value).toEqual(Buffer.alloc(value.byteLength));
+    await expect(access(marker)).rejects.toThrow();
   });
 
   test("runs a background Pipe tree until descendants exit and drains both streams", async () => {
@@ -744,6 +769,29 @@ windowsDescribe("NativeExecutorClient Windows control plane", () => {
 
 async function policyFor(root: string) {
   return resolveExecutionPolicy({ workspaceRoot: await realpath(root) });
+}
+
+function windowsSecretLease(value: Buffer): NativeSecretLeaseInput {
+  let destroyed = false;
+  return {
+    evidence: {
+      schema_version: 1,
+      declaration_digest: "a".repeat(64),
+      lease_id: "0123456789abcdef0123456789abcdef",
+      aliases: ["api-token"],
+      targets: [{ alias: "api-token", environment_variable: "APP_TOKEN_FILE" }],
+      lifecycle: "resolved",
+      expires_at_ms: Date.now() + 60_000,
+      redactions: { stdout: 0, stderr: 0, pty: 0 },
+      cleanup: "not_started",
+    },
+    values: [value],
+    destroy(): void {
+      if (destroyed) return;
+      destroyed = true;
+      value.fill(0);
+    },
+  };
 }
 
 async function waitTerminal(

@@ -13,6 +13,7 @@ import {
   EXECUTION_SECRET_VALUES_MAX_BYTES,
   secretCatalogSchema,
   secretExecutionEvidenceSchema,
+  secretExecutionSummary,
   secretPolicyErrorCodeSchema,
 } from "@koda/protocol";
 import {
@@ -188,6 +189,40 @@ describe("Phase 4C3A secret contract", () => {
       expect(error.code).toBe(code);
       expect(error.message).not.toContain("fixture-secret-marker");
     }
+  });
+
+  it("formats strict evidence into one bounded value-free client summary", () => {
+    const valid = fixtures.evidence_cases.find(({ valid }) => valid)?.input;
+    if (valid === undefined || typeof valid !== "object" || valid === null) {
+      throw new Error("Missing valid evidence fixture.");
+    }
+    const evidence = {
+      ...valid,
+      aliases: ["api-token", "build-key", "deploy-key", "signing-key"],
+      targets: [
+        { alias: "api-token", environment_variable: "API_TOKEN_FILE" },
+        { alias: "build-key", environment_variable: "BUILD_KEY_FILE" },
+        { alias: "deploy-key", environment_variable: "DEPLOY_KEY_FILE" },
+        { alias: "signing-key", environment_variable: "SIGNING_KEY_FILE" },
+      ],
+      lifecycle: "destroyed",
+      cleanup: "completed",
+      redactions: { stdout: 2, stderr: 3, pty: 5 },
+    };
+
+    const summary = secretExecutionSummary(evidence);
+    expect(summary).toBe(
+      "secrets api-token, build-key, deploy-key +1 · destroyed · cleanup completed · redacted 10",
+    );
+    expect(Buffer.byteLength(summary, "utf8")).toBeLessThanOrEqual(512);
+    expect(summary).not.toContain(String(Reflect.get(valid, "lease_id")));
+    expect(summary).not.toContain(
+      String(Reflect.get(valid, "declaration_digest")),
+    );
+    expect(summary).not.toContain("API_TOKEN_FILE");
+    expect(() =>
+      secretExecutionSummary({ ...evidence, extra: true }),
+    ).toThrow();
   });
 
   it("matches the cross-language resource limits", () => {

@@ -113,6 +113,17 @@ describe("WorkspaceCommandRunner", () => {
     const canonicalRoot = await realpath(root);
     const capabilities = linuxProtectedExecutionCapabilities();
     const launchSecurity = linuxProtectedLaunchSecurity(canonicalRoot);
+    const secrets = {
+      schema_version: 1 as const,
+      declaration_digest: "a".repeat(64),
+      lease_id: "0123456789abcdef0123456789abcdef",
+      aliases: ["api-token"],
+      targets: [{ alias: "api-token", environment_variable: "APP_TOKEN_FILE" }],
+      lifecycle: "destroyed" as const,
+      expires_at_ms: Date.now() + 60_000,
+      redactions: { stdout: 1, stderr: 0, pty: 0 },
+      cleanup: "completed" as const,
+    };
     const terminal: NativeJobSnapshot = {
       job_id: "linux-protected-job",
       state: "exited",
@@ -132,6 +143,7 @@ describe("WorkspaceCommandRunner", () => {
       termination: null,
       failure: null,
       security: launchSecurity,
+      secrets,
     };
     const nativeExecutor = {
       hello: async () => ({ execution_security: capabilities }),
@@ -170,12 +182,93 @@ describe("WorkspaceCommandRunner", () => {
       },
     );
     expect(result.security).toEqual(launchSecurity);
+    expect(result.secrets).toEqual(secrets);
     expect(events).toContainEqual({
       type: "process.started",
       payload: {
         pid: 4242,
         ownership: "posix_process_group",
         security: launchSecurity,
+        secrets,
+      },
+    });
+    expect(events).toContainEqual({
+      type: "process.exited",
+      payload: {
+        pid: 4242,
+        exitCode: 0,
+        signal: null,
+        secrets,
+      },
+    });
+  });
+
+  it("reports final secret evidence before surfacing a post-start secret failure", async () => {
+    const root = await createWorkspace();
+    const canonicalRoot = await realpath(root);
+    const launchSecurity = linuxProtectedLaunchSecurity(canonicalRoot);
+    const secrets = {
+      schema_version: 1 as const,
+      declaration_digest: "a".repeat(64),
+      lease_id: "0123456789abcdef0123456789abcdef",
+      aliases: ["api-token"],
+      targets: [{ alias: "api-token", environment_variable: "APP_TOKEN_FILE" }],
+      lifecycle: "cleanup_failed" as const,
+      expires_at_ms: Date.now() + 60_000,
+      redactions: { stdout: 0, stderr: 0, pty: 0 },
+      cleanup: "failed" as const,
+    };
+    const nativeExecutor = {
+      hello: async () => ({
+        execution_security: linuxProtectedExecutionCapabilities(),
+      }),
+      start: async (): Promise<NativeJobSnapshot> => ({
+        job_id: "secret-cleanup-failed",
+        state: "exited",
+        io_mode: "pipe",
+        lifecycle: "foreground",
+        pid: 4243,
+        exit_code: 0,
+        signal: null,
+        timed_out: false,
+        duration_ms: 1,
+        stdout_bytes: 0,
+        stderr_bytes: 0,
+        stdout_retained_bytes: 0,
+        stderr_retained_bytes: 0,
+        stdout_truncated: false,
+        stderr_truncated: false,
+        termination: null,
+        failure: {
+          code: "SECRET_CLEANUP_FAILED",
+          message: "Secret cleanup failed.",
+        },
+        security: launchSecurity,
+        secrets,
+      }),
+    } as unknown as NativeExecutorClient;
+    const runner = await WorkspaceCommandRunner.open(root, {
+      nativeExecutor,
+      executionPolicy: resolveExecutionPolicy({
+        workspaceRoot: canonicalRoot,
+        environmentProfile: "workspace-write",
+      }),
+    });
+    const command = await runner.prepare({ argv: [process.execPath] });
+    const events: ToolOperationalEvent[] = [];
+
+    await expect(
+      command.execute(new AbortController().signal, async (event) => {
+        events.push(event);
+      }),
+    ).rejects.toMatchObject({ code: "SECRET_CLEANUP_FAILED" });
+    expect(events.at(-1)).toEqual({
+      type: "process.exited",
+      payload: {
+        pid: 4243,
+        exitCode: 0,
+        signal: null,
+        secrets,
       },
     });
   });

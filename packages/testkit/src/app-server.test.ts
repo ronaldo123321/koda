@@ -34,7 +34,11 @@ import {
   ArtifactStore,
   InteractiveProcessService,
   JsonlEventStore,
+  type NativeExecutorClient,
+  type NativeJobSnapshot,
+  type NativeSecretLeaseInput,
   ReadOnlyWorkspace,
+  resolveExecutionPolicy,
 } from "@koda/runtime-node";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -109,6 +113,7 @@ describe("KodaAppServer", () => {
         plugins: true,
         workspaceMutationRecovery: true,
         interactiveProcesses: false,
+        secretEvidence: true,
       },
       providers: [
         { id: "openai", defaultModel: "gpt-5.6-terra", configured: true },
@@ -336,6 +341,142 @@ describe("KodaAppServer", () => {
       await service.nativeExecutor.closeOwnedSupervisorForTests();
     }
   });
+
+  it.runIf(process.platform !== "win32")(
+    "projects redacted PTY secret evidence through list, attach, read, and terminate",
+    async () => {
+      const fixture = await createFixture();
+      const service = await InteractiveProcessService.open({
+        binaryPath: resolve("target/debug/koda-exec"),
+        stateDirectory: join(fixture.kodaHome, "executor"),
+        socketPath: join(fixture.root, "exec.sock"),
+        leaseRenewalMs: 100,
+      });
+      const writer = new MemoryProtocolWriter();
+      const application = new KodaApplication({
+        environment: {
+          OPENAI_API_KEY: "offline-test-key",
+          KODA_HOME: fixture.kodaHome,
+        },
+        processDirectory: fixture.root,
+        dependencies: dependencies(
+          new ScriptedModelProvider([]),
+          "server-secret-projection",
+        ),
+        interactiveProcessService: service,
+      });
+      const server = new KodaAppServer({
+        application,
+        writer,
+        serverVersion: "test",
+        interactiveProcessService: service,
+      });
+      const sentinel = "c3d-app-server-secret-value";
+      const secretValue = Buffer.from(sentinel, "utf8");
+      try {
+        await initialize(server, 1);
+        const workspace = await realpath(fixture.workspaceRoot);
+        const started = await service.startTerminal({
+          argv: [
+            process.execPath,
+            "-e",
+            "const fs=require('node:fs');process.stdout.write(fs.readFileSync(process.env.APP_TOKEN_FILE))",
+          ],
+          cwd: workspace,
+          environment: { PATH: process.env.PATH },
+          timeoutMs: 3_000,
+          outputLimitBytes: 65_536,
+          terminationGraceMs: 25,
+          terminationConfirmationMs: 1_000,
+          rows: 24,
+          cols: 80,
+          lifecycle: "background",
+          displayName: "Secret projection",
+          policy: resolveExecutionPolicy({
+            workspaceRoot: workspace,
+            environmentProfile: "read-only",
+          }),
+          secretLease: appServerSecretLease(secretValue),
+        });
+        expect(secretValue).toEqual(Buffer.alloc(secretValue.byteLength));
+        const terminal = await waitNativeTerminal(
+          service.nativeExecutor,
+          started.job_id,
+        );
+        expect(terminal.secrets).toMatchObject({
+          lifecycle: "destroyed",
+          cleanup: "completed",
+          redactions: { pty: 1 },
+        });
+
+        await request(server, 2, "process/list", { workspace });
+        const listed = responseResult(writer, 2);
+        if (!isObject(listed) || !Array.isArray(listed.processes)) {
+          throw new Error("Secret process list response is invalid.");
+        }
+        const summary = listed.processes.find(
+          (value) => isObject(value) && value.jobId === started.job_id,
+        );
+        expect(summary).toMatchObject({ secrets: terminal.secrets });
+
+        await request(server, 3, "process/attach", {
+          workspace,
+          jobId: started.job_id,
+          rows: 24,
+          cols: 80,
+        });
+        const attached = responseResult(writer, 3);
+        if (
+          !isObject(attached) ||
+          typeof attached.processSessionId !== "string"
+        ) {
+          throw new Error("Secret process attachment response is invalid.");
+        }
+        expect(attached).toMatchObject({
+          process: { secrets: terminal.secrets },
+        });
+
+        await request(server, 4, "process/read", {
+          processSessionId: attached.processSessionId,
+        });
+        const read = responseResult(writer, 4);
+        expect(read).toMatchObject({
+          status: "ok",
+          process: { secrets: terminal.secrets },
+        });
+        if (!isObject(read) || typeof read.dataBase64 !== "string") {
+          throw new Error("Secret process read response is invalid.");
+        }
+        const output = Buffer.from(read.dataBase64, "base64").toString("utf8");
+        expect(output).toContain("REDACTED");
+
+        await request(server, 5, "process/terminate", {
+          workspace,
+          jobId: started.job_id,
+        });
+        const terminated = responseResult(writer, 5);
+        expect(terminated).toMatchObject({
+          process: { secrets: terminal.secrets },
+        });
+        const serialized = JSON.stringify({
+          listed,
+          attached,
+          read,
+          terminated,
+        });
+        expect(serialized).not.toContain(sentinel);
+        expect(serialized).not.toMatch(/secret[_-](?:file|path)|\.secret/u);
+
+        await request(server, 6, "process/detach", {
+          processSessionId: attached.processSessionId,
+        });
+        await request(server, 7, "shutdown", {});
+      } finally {
+        await service.close();
+        await service.nativeExecutor.closeOwnedSupervisorForTests();
+      }
+    },
+  );
 
   it("serves thread-authorized artifact lists and UTF-8 ranges", async () => {
     const fixture = await createFixture();
@@ -1621,6 +1762,48 @@ function isObject(
   value: JsonValue | undefined,
 ): value is { [key: string]: JsonValue } {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function appServerSecretLease(value: Buffer): NativeSecretLeaseInput {
+  let destroyed = false;
+  return {
+    evidence: {
+      schema_version: 1,
+      declaration_digest: "a".repeat(64),
+      lease_id: "0123456789abcdef0123456789abcdef",
+      aliases: ["api-token"],
+      targets: [{ alias: "api-token", environment_variable: "APP_TOKEN_FILE" }],
+      lifecycle: "resolved",
+      expires_at_ms: Date.now() + 60_000,
+      redactions: { stdout: 0, stderr: 0, pty: 0 },
+      cleanup: "not_started",
+    },
+    values: [value],
+    destroy(): void {
+      if (destroyed) return;
+      destroyed = true;
+      value.fill(0);
+    },
+  };
+}
+
+async function waitNativeTerminal(
+  client: NativeExecutorClient,
+  jobId: string,
+): Promise<NativeJobSnapshot> {
+  for (let attempt = 0; attempt < 300; attempt += 1) {
+    const snapshot = await client.get(jobId);
+    if (
+      snapshot.state === "exited" ||
+      snapshot.state === "start_failed" ||
+      snapshot.state === "termination_uncertain" ||
+      snapshot.state === "quarantined"
+    ) {
+      return snapshot;
+    }
+    await new Promise<void>((resolvePromise) => setTimeout(resolvePromise, 10));
+  }
+  throw new Error(`Native job '${jobId}' did not reach a terminal state.`);
 }
 
 async function waitForAbort(signal: AbortSignal): Promise<void> {
