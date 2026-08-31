@@ -1,7 +1,7 @@
 # Koda Phase 4 Hardening Roadmap
 
 - Status: In progress — Phase 4B, Phase 4C1, Phase 4C2A/C2B, Phase 4C3,
-  and Phase 4C4A1/C4A2 complete
+  and Phase 4C4A complete
 - Date: 2026-08-28
 - Depends on: completed Phase 3A through Phase 3I baseline
 
@@ -82,9 +82,9 @@ The completed Windows terminal contract and acceptance evidence are in [Phase 4B
 
 ### Phase 4C: sandbox, network, and secret policy
 
-Status: In progress — Phase 4C1, Phase 4C2A/C2B, Phase 4C3, and Phase 4C4A1/C4A2
-are complete; resource client projection/acceptance, provider/MCP/plugin, finer
-network, and Windows sandbox slices remain
+Status: In progress — Phase 4C1, Phase 4C2A/C2B, Phase 4C3, and Phase 4C4A
+are complete; operating-system resource enforcement, provider/MCP/plugin,
+finer network, and Windows sandbox slices remain
 
 - Add explicit filesystem, process, environment, and network capabilities.
 - Implement available OS isolation mechanisms and expose their effective strength rather than a portable boolean claim.
@@ -242,8 +242,14 @@ schema-v4 Supervisor/Worker revalidation, and durable format v6. Formats v1-v5
 remain readable without upgrade, and every unsupported resource request is
 rejected before job creation. The commit passed the four-platform matrix in
 [GitHub Actions run 33365855082](https://github.com/ronaldo123321/koda/actions/runs/33365855082).
-C4A3 remains required before Phase 4C4A closes; no resource enforcement backend
-or client projection is claimed by C4A2.
+C4A3 implementation commit `32874c9` adds app-server v17 with
+`resourceEvidence`, strict foreground/event/process projection, historical
+absence compatibility, and one bounded CLI/TUI formatter. It passed the four
+platform jobs in
+[GitHub Actions run 33368506996](https://github.com/ronaldo123321/koda/actions/runs/33368506996),
+closing Phase 4C4A. No operating-system resource backend is claimed; macOS and
+Linux enforcement remain Phase 4C4B/C4C, and Windows enforcement remains
+deferred.
 
 Deferred Windows sandbox work remains explicit: restricted-token and privilege
 policy, filesystem workspace/scratch rules, network denial, launch confirmation,

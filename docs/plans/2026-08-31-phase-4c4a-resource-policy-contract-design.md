@@ -1,7 +1,7 @@
 # Phase 4C4A Resource Policy Contract and Evidence
 
-- Status: In progress — C4A1 standalone contracts and C4A2 trusted
-  admission/durability complete; C4A3 client projection/acceptance remains
+- Status: Complete — C4A1 contracts, C4A2 trusted admission/durability, and
+  C4A3 client projection/platform acceptance are implemented and verified
 - Date: 2026-08-31
 - Depends on: Phase 4C1 execution-policy admission, Phase 4C2 native sandbox
   enforcement, and Phase 4C3 secret lifecycle and client projection
@@ -206,6 +206,35 @@ C4A3.
 Implementation commit `9395da3` passed `verify`, `linux-native`,
 `macos-native`, and `windows-native` in
 [GitHub Actions run 33365855082](https://github.com/ronaldo123321/koda/actions/runs/33365855082).
+
+### C4A3 closure
+
+C4A3 is complete. The app-server advances from v16 to v17 and advertises
+`resourceEvidence: true`; v16 initialization is rejected without a parallel
+handler. Foreground command results, terminal start results,
+`process.started`/`process.exited` events, and interactive process summaries
+returned by list, attach, read, and terminate now carry the same optional
+strict `ExecutionResourceEvidence` copied from retained schema-v4 security.
+
+Present process-summary/start evidence must equal the nested retained resource
+evidence after canonical key normalization. Conflicting, malformed, oversized,
+or unknown fields fail closed. Historical events may omit the public field,
+including C4A2 events whose nested security already used schema v4. Runtime
+projection never upgrades that absence to `not_requested` or reconstructs
+evidence from the current host.
+
+The protocol package now owns one deterministic bounded formatter. CLI process
+diagnostics, TUI activity rows, process lists, and attached-session headers use
+it for present evidence. The formatter shows requested names and bounded values
+plus `unavailable`, `unknown`, or `applied`, and shows the current empty request
+as `resources not requested`; it never expands capability objects or digests.
+The TUI labels missing evidence as historical only in process views where the
+distinction is relevant.
+
+Implementation commit `32874c9` passed `verify`, `linux-native`,
+`macos-native`, and `windows-native` in
+[GitHub Actions run 33368506996](https://github.com/ronaldo123321/koda/actions/runs/33368506996).
+This closes Phase 4C4A without enabling an operating-system resource backend.
 
 ## Acceptance
 

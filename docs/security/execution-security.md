@@ -1,7 +1,7 @@
 # Koda Execution Security Guarantees
 
-- Scope: Phase 4C1, Phase 4C2A, Phase 4C2B, Phase 4C3A-C3D, and Phase 4C4A1-C4A2
-- Status: Current through C4A2 — sandbox and secret guarantees are complete;
+- Scope: Phase 4C1, Phase 4C2A, Phase 4C2B, Phase 4C3A-C3D, and Phase 4C4A
+- Status: Current through C4A3 — sandbox and secret guarantees are complete;
   resource requests fail closed before spawn and enforcement is not enabled
 - Last updated: 2026-08-31
 
@@ -96,8 +96,15 @@ evidence. Any request for one of the five limits fails with
 not run and no `applied` evidence exists.
 
 Consequently C4A2 is still not a resource-quota claim. App-server/CLI/TUI
-projection and the same-commit C4A acceptance matrix remain C4A3; macOS/Linux
-enforcement remains Phase 4C4B/C4C. Windows enforcement is still deferred.
+projection and the same-commit C4A acceptance matrix are delivered by C4A3;
+macOS/Linux enforcement remains Phase 4C4B/C4C. Windows enforcement is still
+deferred.
+
+C4A3 advances app-server to v17 with `resourceEvidence: true` and projects the
+same optional strict evidence through command/terminal results, process events,
+and process list/attach/read/terminate summaries. Present public evidence must
+match retained schema-v4 security; historical absence remains absent. CLI and
+TUI use one bounded formatter and never expand capability objects or digests.
 
 ## What is not guaranteed
 
@@ -261,6 +268,12 @@ Phase 4C4A2 implementation commit `9395da3` passed all four jobs in
 This closes trusted admission and durability only. It enables resource-aware
 configuration and deterministic pre-spawn rejection, not resource enforcement
 or client projection.
+
+Phase 4C4A3 implementation commit `32874c9` passed all four jobs in
+[GitHub Actions run 33368506996](https://github.com/ronaldo123321/koda/actions/runs/33368506996).
+This closes client projection and Phase 4C4A. It still does not enable an OS
+resource backend: every non-empty resource request continues to fail before
+job creation.
 
 The legacy executable is built from pinned commit `3aa84ee` outside the working
 tree:
