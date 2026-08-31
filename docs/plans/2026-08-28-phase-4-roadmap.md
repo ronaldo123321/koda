@@ -273,6 +273,13 @@ The Phase 4C4B implementation was finalized at commit `490d316` and passed
 `verify`, `linux-native`, `macos-native`, and `windows-native` in
 [GitHub Actions run 33377612504](https://github.com/ronaldo123321/koda/actions/runs/33377612504).
 
+The approved next resource slice is
+[Phase 4C4C Linux resource enforcement](2026-08-31-phase-4c4c-linux-resource-enforcement-design.md).
+It evolves the current contract to `job_task_count`, adds exact Linux rlimits,
+and advertises cgroup v2 `pids.max` only when Koda owns a verified delegated
+subtree and can prevent same-UID command code from modifying it. Historical
+`job_process_count` records remain readable without reinterpretation.
+
 Deferred Windows sandbox work remains explicit: restricted-token and privilege
 policy, filesystem workspace/scratch rules, network denial, launch confirmation,
 Job Object and ConPTY integration, durable evidence, reparse-point and Named
