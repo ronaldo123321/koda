@@ -1,7 +1,7 @@
 # Koda Phase 4 Hardening Roadmap
 
-- Status: In progress — Phase 4B, Phase 4C1, Phase 4C2A/C2B, Phase 4C3,
-  and Phase 4C4A complete
+- Status: In progress — macOS CLI/TUI product delivery is the current priority;
+  Linux/Windows feature expansion is deferred without removing existing gates
 - Date: 2026-08-28
 - Depends on: completed Phase 3A through Phase 3I baseline
 
@@ -12,6 +12,21 @@ Koda now has a transport-neutral agent loop, durable thread events, bounded arti
 The current multi-file transaction retains rollback bytes only in process memory. A process kill or power loss can therefore leave a prepared change set partially applied with no executable recovery material. Process ownership also ends at the Node control process, remote transports have no authentication or reconnect contract, plugins have no trusted distribution path, and current execution guardrails are not an operating-system sandbox.
 
 Phase 4 hardens these boundaries before Koda adds child-agent execution in Phase 5.
+
+## Delivery-order amendment: macOS first
+
+The approved current delivery target is
+[Mac Release 1A](2026-08-31-macos-cli-release-design.md): a self-contained,
+signed, notarized macOS CLI/TUI developer preview distributed through GitHub
+Releases and Homebrew. This preserves the existing application, app-server,
+native executor, protocol, durable state, and security architecture.
+
+The roadmap is reordered rather than replaced. Mac Release 1A pulls forward
+the macOS packaging/signing portion of Phase 4E and the macOS acceptance portion
+of Phase 4F. Linux C4C2-C4C4 and new Windows sandbox/resource/secret work pause
+until the macOS preview is in user hands. Phase 4D remote operation, the rest of
+Phase 4E/4F, and Phase 5 remain later work. Existing Linux and Windows behavior
+continues to run as a shared regression gate.
 
 ## Guiding policies
 
@@ -82,9 +97,9 @@ The completed Windows terminal contract and acceptance evidence are in [Phase 4B
 
 ### Phase 4C: sandbox, network, and secret policy
 
-Status: In progress — Phase 4C1, Phase 4C2A/C2B, Phase 4C3, and Phase 4C4A/C4B
-are complete; Linux/Windows resource enforcement, provider/MCP/plugin, finer
-network, and Windows sandbox slices remain
+Status: Paused after C4C1 contract evolution — Phase 4C1, Phase 4C2A/C2B,
+Phase 4C3, Phase 4C4A/C4B, and Phase 4C4C1 are complete; remaining Linux and
+Windows feature slices resume after Mac Release 1A
 
 - Add explicit filesystem, process, environment, and network capabilities.
 - Implement available OS isolation mechanisms and expose their effective strength rather than a portable boolean claim.
@@ -283,6 +298,10 @@ v2 `pids.max` only when Koda owns a verified delegated subtree and can prevent
 same-UID command code from modifying it. C4C4 remains the acceptance and
 closure slice.
 
+Mac Release 1A does not claim that C4C2-C4C4 are complete. It reuses the
+already-complete macOS Seatbelt, secret, resource, PTY, and recovery paths while
+keeping all current Linux/Windows compatibility tests active.
+
 Deferred Windows sandbox work remains explicit: restricted-token and privilege
 policy, filesystem workspace/scratch rules, network denial, launch confirmation,
 Job Object and ConPTY integration, durable evidence, reparse-point and Named
@@ -297,6 +316,10 @@ of these items is considered complete when macOS or Linux closes.
 - Separate tenant identity, workspace authorization, and thread authorization.
 
 ### Phase 4E: extension and release supply chain
+
+The signed macOS CLI/TUI release subset is pulled forward as Mac Release 1A.
+Plugin registry trust, cross-platform signed releases, and full update lifecycle
+remain in Phase 4E after the macOS preview.
 
 - Add plugin discovery, enable/disable, install, update, provenance, signature verification, and bounded lifecycle supervision.
 - Define registry trust roots and safe rollback of failed updates.

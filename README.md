@@ -31,6 +31,14 @@ job observation, POSIX process groups, Windows Job Objects and ConPTY, bounded
 retained output, explicit native capability reporting, and end-to-end
 execution-policy evidence on top of those foundations:
 
+The current delivery priority is
+[Mac Release 1A](docs/plans/2026-08-31-macos-cli-release-design.md): a
+self-contained macOS CLI/TUI developer preview with an embedded Node runtime,
+the matching native executor, strict installed-runtime diagnostics, native
+arm64/Intel artifacts, signing/notarization, and Homebrew delivery. Remaining
+Linux resource and new Windows security work is deferred, not removed; existing
+cross-platform CI remains a regression gate.
+
 Phase 4C3A/C3B/C3C/C3D are complete with strict value-free secret
 declarations/evidence, stable cross-language digests and limits, matching
 TypeScript/Rust exact-byte streaming redactors, frozen trusted application
