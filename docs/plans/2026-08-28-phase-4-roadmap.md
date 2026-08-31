@@ -1,7 +1,7 @@
 # Koda Phase 4 Hardening Roadmap
 
 - Status: In progress — Phase 4B, Phase 4C1, Phase 4C2A/C2B, Phase 4C3,
-  and Phase 4C4A1 complete
+  and Phase 4C4A1/C4A2 complete
 - Date: 2026-08-28
 - Depends on: completed Phase 3A through Phase 3I baseline
 
@@ -82,9 +82,9 @@ The completed Windows terminal contract and acceptance evidence are in [Phase 4B
 
 ### Phase 4C: sandbox, network, and secret policy
 
-Status: In progress — Phase 4C1, Phase 4C2A/C2B, Phase 4C3, and Phase 4C4A1
-are complete; resource runtime/durability/projection, provider/MCP/plugin,
-finer network, and Windows sandbox slices remain
+Status: In progress — Phase 4C1, Phase 4C2A/C2B, Phase 4C3, and Phase 4C4A1/C4A2
+are complete; resource client projection/acceptance, provider/MCP/plugin, finer
+network, and Windows sandbox slices remain
 
 - Add explicit filesystem, process, environment, and network capabilities.
 - Implement available OS isolation mechanisms and expose their effective strength rather than a portable boolean claim.
@@ -236,7 +236,14 @@ application resolver, native protocol, durable format, and app-server on their
 current versions. The commit passed `verify`, `linux-native`, `macos-native`,
 and `windows-native` in
 [GitHub Actions run 33357380456](https://github.com/ronaldo123321/koda/actions/runs/33357380456).
-C4A2 and C4A3 remain required before Phase 4C4A closes.
+C4A2 implementation commit `9395da3` connects strict trusted resource
+configuration to policy v2, approval and grant identity, native protocol v6,
+schema-v4 Supervisor/Worker revalidation, and durable format v6. Formats v1-v5
+remain readable without upgrade, and every unsupported resource request is
+rejected before job creation. The commit passed the four-platform matrix in
+[GitHub Actions run 33365855082](https://github.com/ronaldo123321/koda/actions/runs/33365855082).
+C4A3 remains required before Phase 4C4A closes; no resource enforcement backend
+or client projection is claimed by C4A2.
 
 Deferred Windows sandbox work remains explicit: restricted-token and privilege
 policy, filesystem workspace/scratch rules, network denial, launch confirmation,

@@ -1,8 +1,8 @@
 # Koda Execution Security Guarantees
 
-- Scope: Phase 4C1, Phase 4C2A, Phase 4C2B, Phase 4C3A-C3D, and Phase 4C4A1
-- Status: Current through C4A1 — sandbox and secret guarantees are complete;
-  resource enforcement is not enabled
+- Scope: Phase 4C1, Phase 4C2A, Phase 4C2B, Phase 4C3A-C3D, and Phase 4C4A1-C4A2
+- Status: Current through C4A2 — sandbox and secret guarantees are complete;
+  resource requests fail closed before spawn and enforcement is not enabled
 - Last updated: 2026-08-31
 
 Koda separates execution admission, process supervision, and operating-system
@@ -34,19 +34,21 @@ workspace root is added only after trusted workspace opening.
 
 ### macOS
 
-The native Supervisor advertises schema-v2 protection only after a real startup
-self-test through the fixed system `/usr/bin/sandbox-exec` proves normal reads,
-denied writes, denied network access, and sandbox-internal confirmation. Pipe
-and PTY jobs share the same bounded SBPL builder and two-way launch gate.
+The native Supervisor advertises the current schema-v4 resource wrapper over
+macOS schema-v2 protection only after a real startup self-test through the fixed
+system `/usr/bin/sandbox-exec` proves normal reads, denied writes, denied
+network access, and sandbox-internal confirmation. Pipe and PTY jobs share the
+same bounded SBPL builder and two-way launch gate.
 
 ### Linux
 
-The native Supervisor advertises schema-v3 protection only after a real,
-multi-profile startup probe succeeds through the exact Bubblewrap executable
-recorded in its capability descriptor. Koda accepts only a trusted fixed system
-path or the explicit `KODA_BWRAP_PATH` administrator override. It records the
-canonical path, device, inode, size, nanosecond mtime, SHA-256, bounded version,
-and probe revision, and revalidates that identity before every protected launch.
+The native Supervisor advertises the current schema-v4 resource wrapper over
+Linux schema-v3 protection only after a real, multi-profile startup probe
+succeeds through the exact Bubblewrap executable recorded in its capability
+descriptor. Koda accepts only a trusted fixed system path or the explicit
+`KODA_BWRAP_PATH` administrator override. It records the canonical path,
+device, inode, size, nanosecond mtime, SHA-256, bounded version, and probe
+revision, and revalidates that identity before every protected launch.
 
 The Linux protected boundary consists of:
 
@@ -79,20 +81,23 @@ resize, detach, Supervisor restart, reattach, and completion.
 
 ## Resource contract status
 
-Phase 4C4A1 defines standalone TypeScript/Rust policy-v2 resource limits and
+Phase 4C4A1 defines TypeScript/Rust policy-v2 resource limits and
 schema-v4 capability/security evidence for per-process CPU time, per-process
 address space, job-tree process count, per-process open files, and per-process
 file size. Every current v4 capability wrapper reports every resource limit as
-`unsupported`. A standalone resource request fails with
-`RESOURCE_LIMIT_UNAVAILABLE`; no capability can fabricate applied evidence.
+`unsupported`; no capability can fabricate applied evidence.
 
-C4A1 does not connect these contracts to trusted application configuration,
-the native protocol, the durable job store, or clients. The running application
-continues to resolve policy v1 and native execution continues to use the
-existing v1-v3 isolation evidence. Consequently C4A1 is not a resource-quota
-claim. macOS/Linux enforcement, retained applied evidence, and client
-projection remain C4A2/C4A3 and later Phase 4C4 work. Windows enforcement is
-still deferred.
+C4A2 connects strict, frozen trusted configuration to policy v2, approval and
+exact-command grant binding, native protocol v6, schema-v4 Supervisor/Worker
+revalidation, and durable format v6. Formats v1-v5 remain readable without
+implicit upgrade. A command without limits retains explicit `not_requested`
+evidence. Any request for one of the five limits fails with
+`RESOURCE_LIMIT_UNAVAILABLE` before a native job is created, so user code does
+not run and no `applied` evidence exists.
+
+Consequently C4A2 is still not a resource-quota claim. App-server/CLI/TUI
+projection and the same-commit C4A acceptance matrix remain C4A3; macOS/Linux
+enforcement remains Phase 4C4B/C4C. Windows enforcement is still deferred.
 
 ## What is not guaranteed
 
@@ -250,6 +255,12 @@ Phase 4C4A1 implementation commit `ca5c5a9` passed all four jobs in
 This closes only the standalone resource contract. It does not enable resource
 configuration, native enforcement, durable applied evidence, or client
 projection.
+
+Phase 4C4A2 implementation commit `9395da3` passed all four jobs in
+[GitHub Actions run 33365855082](https://github.com/ronaldo123321/koda/actions/runs/33365855082).
+This closes trusted admission and durability only. It enables resource-aware
+configuration and deterministic pre-spawn rejection, not resource enforcement
+or client projection.
 
 The legacy executable is built from pinned commit `3aa84ee` outside the working
 tree:

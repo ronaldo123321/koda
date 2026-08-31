@@ -1,7 +1,7 @@
 # Phase 4C4A Resource Policy Contract and Evidence
 
-- Status: In progress — C4A1 standalone contracts complete; C4A2 trusted
-  admission/durability and C4A3 client projection/acceptance remain
+- Status: In progress — C4A1 standalone contracts and C4A2 trusted
+  admission/durability complete; C4A3 client projection/acceptance remains
 - Date: 2026-08-31
 - Depends on: Phase 4C1 execution-policy admission, Phase 4C2 native sandbox
   enforcement, and Phase 4C3 secret lifecycle and client projection
@@ -167,14 +167,45 @@ macOS Seatbelt, and Linux Bubblewrap isolation contracts, and fail-closed
 `RESOURCE_LIMIT_UNAVAILABLE` evaluation. Empty resource objects normalize to
 the same bytes as omission, while policy v1 rejects any resource field.
 
-The runtime application resolver deliberately remains on policy v1 and native
-protocol/durable/app-server versions remain v5/v5/v16. Therefore C4A1 changes
-no command execution behavior and advertises no resource backend. Those wiring
-changes belong to C4A2 and C4A3.
+At the C4A1 implementation commit, the runtime application resolver deliberately
+remained on policy v1 and native protocol/durable/app-server versions remained
+v5/v5/v16. Therefore that slice changed no command execution behavior and
+advertised no resource backend. The trusted admission and durability wiring is
+closed separately by C4A2 below.
 
 Implementation commit `ca5c5a9` passed `verify`, `linux-native`,
 `macos-native`, and `windows-native` in
 [GitHub Actions run 33357380456](https://github.com/ronaldo123321/koda/actions/runs/33357380456).
+
+### C4A2 closure
+
+C4A2 is complete. Trusted typed application configuration is parsed as a
+strict resource-aware shape, copied and deeply frozen at the resource boundary,
+and resolved to policy v2 even when no limit is requested. Preparation and
+approval now show the resource request, the complete policy digest participates
+in exact-command grant identity, and both the TypeScript fallback and native
+runtime expose schema-v4 capability wrappers over their existing isolation
+contracts.
+
+Native protocol v6 carries the current policy and capabilities. The Supervisor
+persists schema-v4 admission evidence before Worker handoff; the Worker
+reconstructs the authenticated generic, macOS Seatbelt, or Linux Bubblewrap
+capability, recalculates admission, and requires an exact match before spawn.
+Durable format v6 accepts only current schema-v4 evidence, while formats v1
+through v5 remain readable and retain their original format and historical
+evidence during transitions.
+
+All five resource names still report `unsupported`. Each well-formed request
+therefore returns `RESOURCE_LIMIT_UNAVAILABLE` before native job creation, and
+sentinel tests prove user code does not run. Commands without resource limits
+continue through Pipe, PTY, background, sandbox, secret, restart, and recovery
+paths with explicit `not_requested` evidence. C4A2 adds no OS resource backend
+and does not project resource evidence through app-server/CLI/TUI; that remains
+C4A3.
+
+Implementation commit `9395da3` passed `verify`, `linux-native`,
+`macos-native`, and `windows-native` in
+[GitHub Actions run 33365855082](https://github.com/ronaldo123321/koda/actions/runs/33365855082).
 
 ## Acceptance
 
