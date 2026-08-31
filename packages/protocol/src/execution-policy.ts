@@ -1,10 +1,11 @@
 import { z } from "zod";
 
-export const EXECUTION_POLICY_SCHEMA_VERSION = 1;
+export const EXECUTION_POLICY_SCHEMA_VERSION = 2;
 export const EXECUTION_WORKSPACE_MAX_BYTES = 4_096;
 export const EXECUTION_SECURITY_MAX_BYTES = 16_384;
 export const EXECUTION_SANDBOX_RUNTIME_PATH_MAX_BYTES = 4_096;
 export const EXECUTION_SANDBOX_RUNTIME_VERSION_MAX_BYTES = 256;
+export const EXECUTION_RESOURCE_LIMIT_MAX = Number.MAX_SAFE_INTEGER;
 
 const utf8Bytes = (text: string) => new TextEncoder().encode(text).byteLength;
 
@@ -60,21 +61,79 @@ function validParts(parts: string[]): boolean {
   return parts.every((part) => part !== "" && part !== "." && part !== "..");
 }
 
-export const executionPolicySchema = z
+const executionPolicyBaseShape = {
+  workspace_root: z
+    .string()
+    .refine(isExecutionWorkspacePath, "Invalid workspace root."),
+  filesystem: z.enum(["unrestricted", "read_only", "workspace_write"]),
+  network: z.enum(["inherit", "deny"]),
+  process_isolation: z.enum(["inherit", "required"]),
+  environment: z.literal("explicit"),
+} as const;
+
+const executionResourceLimitSchema = z
+  .number()
+  .int()
+  .safe()
+  .positive()
+  .max(EXECUTION_RESOURCE_LIMIT_MAX);
+
+export const executionResourceLimitNameSchema = z.enum([
+  "process_cpu_time_ms",
+  "process_address_space_bytes",
+  "job_process_count",
+  "process_open_files",
+  "process_file_size_bytes",
+]);
+
+function rejectUnknownResourceLimitNames(
+  value: Record<string, unknown>,
+  context: z.RefinementCtx,
+): void {
+  for (const name of Object.keys(value)) {
+    if (!executionResourceLimitNameSchema.safeParse(name).success) {
+      context.addIssue({
+        code: "custom",
+        message: "Unknown resource limit.",
+        path: [name],
+      });
+    }
+  }
+}
+
+export const executionResourceLimitsSchema = z
+  .record(z.string(), executionResourceLimitSchema)
+  .superRefine(rejectUnknownResourceLimitNames);
+
+export const executionPolicyV1Schema = z
   .object({
-    schema_version: z.literal(EXECUTION_POLICY_SCHEMA_VERSION),
-    workspace_root: z
-      .string()
-      .refine(isExecutionWorkspacePath, "Invalid workspace root."),
-    filesystem: z.enum(["unrestricted", "read_only", "workspace_write"]),
-    network: z.enum(["inherit", "deny"]),
-    process_isolation: z.enum(["inherit", "required"]),
-    environment: z.literal("explicit"),
+    schema_version: z.literal(1),
+    ...executionPolicyBaseShape,
   })
   .strict();
 
+const executionPolicyV2BaseShape = {
+  schema_version: z.literal(EXECUTION_POLICY_SCHEMA_VERSION),
+  ...executionPolicyBaseShape,
+} as const;
+
+export const executionPolicyV2Schema = z.union([
+  z.object(executionPolicyV2BaseShape).strict(),
+  z
+    .object({
+      ...executionPolicyV2BaseShape,
+      resources: executionResourceLimitsSchema,
+    })
+    .strict(),
+]);
+
+export const executionPolicySchema = z.union([
+  executionPolicyV1Schema,
+  executionPolicyV2Schema,
+]);
+
 // Workspace authority is deliberately absent from the configuration surface.
-export const executionPolicyConfigSchema = executionPolicySchema
+export const executionPolicyConfigSchema = executionPolicyV1Schema
   .omit({ schema_version: true, workspace_root: true })
   .strict();
 export const executionProfileSchema = z.enum([
@@ -94,6 +153,11 @@ export const executionPolicyDimensionSchema = z.enum([
   "network",
   "process_isolation",
   "environment",
+  "process_cpu_time_ms",
+  "process_address_space_bytes",
+  "job_process_count",
+  "process_open_files",
+  "process_file_size_bytes",
 ]);
 
 const supervisionMechanismSchema = z.enum([
@@ -103,6 +167,16 @@ const supervisionMechanismSchema = z.enum([
 ]);
 const enforcementLayerSchema = z.enum(["application", "os"]);
 const digestSchema = z.string().regex(/^[a-f0-9]{64}$/u);
+const resourceLimitBackendSchema = z.enum([
+  "posix_rlimit",
+  "linux_cgroup_v2",
+  "windows_job_object",
+]);
+const resourceLimitScopeSchema = z.enum(["process", "job_tree"]);
+const resourceLimitEnforcementSchema = z.enum([
+  "kernel_hard",
+  "kernel_accounted_hard",
+]);
 const canonicalU64DecimalSchema = z
   .string()
   .regex(/^(?:0|[1-9][0-9]{0,19})$/u)
@@ -314,14 +388,161 @@ const executionCapabilitiesV3Schema = z
   })
   .strict();
 
-export const executionCapabilitiesSchema = z.discriminatedUnion(
-  "schema_version",
+export const executionResourceLimitCapabilitySchema = z.discriminatedUnion(
+  "status",
   [
-    executionCapabilitiesV1Schema,
-    executionCapabilitiesV2Schema,
-    executionCapabilitiesV3Schema,
+    z.object({ status: z.literal("unsupported") }).strict(),
+    z
+      .object({
+        status: z.literal("supported"),
+        backend: resourceLimitBackendSchema,
+        scope: resourceLimitScopeSchema,
+        enforcement: resourceLimitEnforcementSchema,
+        granularity: executionResourceLimitSchema,
+      })
+      .strict(),
   ],
 );
+
+export const executionResourceCapabilitiesSchema = z
+  .object({
+    process_cpu_time_ms: executionResourceLimitCapabilitySchema,
+    process_address_space_bytes: executionResourceLimitCapabilitySchema,
+    job_process_count: executionResourceLimitCapabilitySchema,
+    process_open_files: executionResourceLimitCapabilitySchema,
+    process_file_size_bytes: executionResourceLimitCapabilitySchema,
+  })
+  .strict();
+
+const executionCapabilitiesV4CommonShape = {
+  schema_version: z.literal(4),
+  backend: executionBackendSchema,
+  filesystem: z
+    .object({
+      supported: z.union([
+        z.tuple([z.literal("unrestricted")]),
+        z.tuple([
+          z.literal("unrestricted"),
+          z.literal("read_only"),
+          z.literal("workspace_write"),
+        ]),
+      ]),
+      mechanism: z.enum([
+        "none",
+        "macos_seatbelt",
+        "linux_bubblewrap_mount_namespace",
+      ]),
+    })
+    .strict(),
+  network: z
+    .object({
+      supported: z.union([
+        z.tuple([z.literal("inherit")]),
+        z.tuple([z.literal("inherit"), z.literal("deny")]),
+      ]),
+      mechanism: z.enum([
+        "none",
+        "macos_seatbelt",
+        "linux_network_namespace_seccomp",
+      ]),
+    })
+    .strict(),
+  process_isolation: z
+    .object({
+      supported: z.tuple([z.literal("inherit")]),
+      mechanism: z.literal("none"),
+    })
+    .strict(),
+  environment: z
+    .object({
+      supported: z.tuple([z.literal("explicit")]),
+      mechanism: z.literal("explicit_environment"),
+      layer: z.literal("application"),
+    })
+    .strict(),
+  supervision: z
+    .object({
+      mechanism: supervisionMechanismSchema,
+      layer: enforcementLayerSchema,
+      durable: z.boolean(),
+    })
+    .strict(),
+  resource_limits: executionResourceCapabilitiesSchema,
+} as const;
+
+function refineExecutionCapabilitiesV4(
+  value: {
+    resource_limits: z.infer<typeof executionResourceCapabilitiesSchema>;
+  },
+  context: z.RefinementCtx,
+  legacySchema: z.ZodType,
+  legacyVersion: 1 | 2 | 3,
+): void {
+  const { resource_limits: _resourceLimits, ...withoutResources } = value;
+  const legacy = legacySchema.safeParse({
+    ...withoutResources,
+    schema_version: legacyVersion,
+  });
+  const unsupported = Object.values(value.resource_limits).every(
+    (entry) => entry.status === "unsupported",
+  );
+  if (!legacy.success || !unsupported) {
+    context.addIssue({
+      code: "custom",
+      message: "Inconsistent Phase 4C4A resource capability.",
+    });
+  }
+}
+
+const executionCapabilitiesV4Schema = z.union([
+  z
+    .object(executionCapabilitiesV4CommonShape)
+    .strict()
+    .superRefine((value, context) =>
+      refineExecutionCapabilitiesV4(
+        value,
+        context,
+        executionCapabilitiesV1Schema,
+        1,
+      ),
+    ),
+  z
+    .object({
+      ...executionCapabilitiesV4CommonShape,
+      platform: z.literal("macos"),
+    })
+    .strict()
+    .superRefine((value, context) =>
+      refineExecutionCapabilitiesV4(
+        value,
+        context,
+        executionCapabilitiesV2Schema,
+        2,
+      ),
+    ),
+  z
+    .object({
+      ...executionCapabilitiesV4CommonShape,
+      platform: z.literal("linux"),
+      sandbox_runtime: linuxBubblewrapRuntimeDescriptorSchema,
+    })
+    .strict()
+    .superRefine((value, context) =>
+      refineExecutionCapabilitiesV4(
+        value,
+        context,
+        executionCapabilitiesV3Schema,
+        3,
+      ),
+    ),
+]);
+
+export const executionCapabilitiesSchema = z.union([
+  executionCapabilitiesV1Schema,
+  executionCapabilitiesV2Schema,
+  executionCapabilitiesV3Schema,
+  executionCapabilitiesV4Schema,
+]);
 
 export const executionEnforcementEvidenceSchema = z.discriminatedUnion(
   "status",
@@ -352,7 +573,7 @@ const policySecuritySnapshotV1Schema = z
     schema_version: z.literal(1),
     kind: z.literal("policy"),
     stage: z.enum(["admission", "launch_setup"]),
-    policy: executionPolicySchema,
+    policy: executionPolicyV1Schema,
     policy_digest: digestSchema,
     capabilities_digest: digestSchema,
     backend: executionBackendSchema,
@@ -408,7 +629,7 @@ const policySecuritySnapshotV2Schema = z
     kind: z.literal("policy"),
     platform: executionPlatformSchema,
     stage: z.enum(["admission", "launch_setup"]),
-    policy: executionPolicySchema,
+    policy: executionPolicyV1Schema,
     policy_digest: digestSchema,
     capabilities_digest: digestSchema,
     backend: z.literal("native_posix"),
@@ -473,7 +694,7 @@ const policySecuritySnapshotV3Schema = z
     platform: z.literal("linux"),
     sandbox_runtime: linuxBubblewrapRuntimeDescriptorSchema,
     stage: z.enum(["admission", "launch_setup"]),
-    policy: executionPolicySchema,
+    policy: executionPolicyV1Schema,
     policy_digest: digestSchema,
     capabilities_digest: digestSchema,
     backend: z.literal("native_posix"),
@@ -535,11 +756,164 @@ const policySecuritySnapshotV3Schema = z
     }
   });
 
+const nonEmptyExecutionResourceLimitsSchema =
+  executionResourceLimitsSchema.refine(
+    (value) => Object.keys(value).length > 0,
+    "At least one resource limit is required.",
+  );
+
+export const executionResourceAppliedLimitSchema = z
+  .object({
+    limit: executionResourceLimitSchema,
+    backend: resourceLimitBackendSchema,
+    scope: resourceLimitScopeSchema,
+    enforcement: resourceLimitEnforcementSchema,
+    granularity: executionResourceLimitSchema,
+  })
+  .strict();
+
+export const executionResourceAppliedLimitsSchema = z
+  .record(z.string(), executionResourceAppliedLimitSchema)
+  .superRefine(rejectUnknownResourceLimitNames)
+  .refine(
+    (value) => Object.keys(value).length > 0,
+    "At least one applied resource limit is required.",
+  );
+
+export const executionResourceEvidenceSchema = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("not_requested") }).strict(),
+  z
+    .object({
+      status: z.literal("not_applied"),
+      requested: nonEmptyExecutionResourceLimitsSchema,
+      requested_digest: digestSchema,
+      available: executionResourceCapabilitiesSchema,
+      available_digest: digestSchema,
+    })
+    .strict(),
+  z
+    .object({
+      status: z.literal("unknown"),
+      requested: nonEmptyExecutionResourceLimitsSchema,
+      requested_digest: digestSchema,
+      available: executionResourceCapabilitiesSchema,
+      available_digest: digestSchema,
+    })
+    .strict(),
+  z
+    .object({
+      status: z.literal("applied"),
+      requested: nonEmptyExecutionResourceLimitsSchema,
+      requested_digest: digestSchema,
+      available: executionResourceCapabilitiesSchema,
+      available_digest: digestSchema,
+      applied: executionResourceAppliedLimitsSchema,
+      applied_digest: digestSchema,
+    })
+    .strict(),
+]);
+
+const policySecuritySnapshotV4CommonShape = {
+  schema_version: z.literal(4),
+  kind: z.literal("policy"),
+  stage: z.enum(["admission", "launch_setup"]),
+  policy: executionPolicyV2Schema,
+  policy_digest: digestSchema,
+  capabilities_digest: digestSchema,
+  backend: executionBackendSchema,
+  filesystem: executionEnforcementEvidenceSchema,
+  network: executionEnforcementEvidenceSchema,
+  process_isolation: executionEnforcementEvidenceSchema,
+  environment: executionEnforcementEvidenceSchema,
+  supervision: executionEnforcementEvidenceSchema,
+  resources: executionResourceEvidenceSchema,
+} as const;
+
+function refinePolicySecuritySnapshotV4(
+  value: {
+    policy: z.infer<typeof executionPolicyV2Schema>;
+    resources: z.infer<typeof executionResourceEvidenceSchema>;
+  } & Record<string, unknown>,
+  context: z.RefinementCtx,
+  legacySchema: z.ZodType,
+  legacyVersion: 1 | 2 | 3,
+): void {
+  const requested =
+    "resources" in value.policy &&
+    Object.keys(value.policy.resources).length > 0;
+  if (requested === (value.resources.status === "not_requested")) {
+    context.addIssue({
+      code: "custom",
+      message: "Inconsistent resource security evidence.",
+    });
+  }
+  const { resources: _resources, ...withoutResourceEvidence } = value;
+  const policyWithoutResources =
+    "resources" in value.policy
+      ? (({ resources: _policyResources, ...policy }) => policy)(value.policy)
+      : value.policy;
+  const legacy = legacySchema.safeParse({
+    ...withoutResourceEvidence,
+    schema_version: legacyVersion,
+    policy: { ...policyWithoutResources, schema_version: 1 },
+  });
+  if (!legacy.success) {
+    context.addIssue({
+      code: "custom",
+      message: "Inconsistent Phase 4C4A base security evidence.",
+    });
+  }
+}
+
+const policySecuritySnapshotV4Schema = z.union([
+  z
+    .object(policySecuritySnapshotV4CommonShape)
+    .strict()
+    .superRefine((value, context) =>
+      refinePolicySecuritySnapshotV4(
+        value,
+        context,
+        policySecuritySnapshotV1Schema,
+        1,
+      ),
+    ),
+  z
+    .object({
+      ...policySecuritySnapshotV4CommonShape,
+      platform: z.literal("macos"),
+    })
+    .strict()
+    .superRefine((value, context) =>
+      refinePolicySecuritySnapshotV4(
+        value,
+        context,
+        policySecuritySnapshotV2Schema,
+        2,
+      ),
+    ),
+  z
+    .object({
+      ...policySecuritySnapshotV4CommonShape,
+      platform: z.literal("linux"),
+      sandbox_runtime: linuxBubblewrapRuntimeDescriptorSchema,
+    })
+    .strict()
+    .superRefine((value, context) =>
+      refinePolicySecuritySnapshotV4(
+        value,
+        context,
+        policySecuritySnapshotV3Schema,
+        3,
+      ),
+    ),
+]);
+
 export const executionSecuritySnapshotSchema = z
   .union([
     policySecuritySnapshotV1Schema,
     policySecuritySnapshotV2Schema,
     policySecuritySnapshotV3Schema,
+    policySecuritySnapshotV4Schema,
     z
       .object({
         schema_version: z.literal(1),
@@ -553,7 +927,20 @@ export const executionSecuritySnapshotSchema = z
   );
 
 export type ExecutionPolicy = z.infer<typeof executionPolicySchema>;
+export type ExecutionPolicyV2 = z.infer<typeof executionPolicyV2Schema>;
 export type ExecutionPolicyConfig = z.infer<typeof executionPolicyConfigSchema>;
+export type ExecutionResourceLimits = z.infer<
+  typeof executionResourceLimitsSchema
+>;
+export type ExecutionResourceLimitName = z.infer<
+  typeof executionResourceLimitNameSchema
+>;
+export type ExecutionResourceCapabilities = z.infer<
+  typeof executionResourceCapabilitiesSchema
+>;
+export type ExecutionResourceEvidence = z.infer<
+  typeof executionResourceEvidenceSchema
+>;
 export type ExecutionProfile = z.infer<typeof executionProfileSchema>;
 export type ExecutionBackend = z.infer<typeof executionBackendSchema>;
 export type ExecutionPlatform = z.infer<typeof executionPlatformSchema>;
@@ -592,9 +979,15 @@ export function executionOsSandboxSummary(
     return "OS sandbox: none";
   }
   const expectedMechanisms =
-    security.schema_version === 2
+    security.schema_version === 2 ||
+    (security.schema_version === 4 &&
+      "platform" in security &&
+      security.platform === "macos")
       ? requestedEvidence.map(() => "macos_seatbelt" as const)
-      : security.schema_version === 3
+      : security.schema_version === 3 ||
+          (security.schema_version === 4 &&
+            "platform" in security &&
+            security.platform === "linux")
         ? [
             ...(security.policy.filesystem === "unrestricted"
               ? []
@@ -605,9 +998,15 @@ export function executionOsSandboxSummary(
           ]
         : [];
   const sandboxName =
-    security.schema_version === 2
+    security.schema_version === 2 ||
+    (security.schema_version === 4 &&
+      "platform" in security &&
+      security.platform === "macos")
       ? "macOS Seatbelt"
-      : security.schema_version === 3
+      : security.schema_version === 3 ||
+          (security.schema_version === 4 &&
+            "platform" in security &&
+            security.platform === "linux")
         ? "Linux Bubblewrap + seccomp"
         : undefined;
   if (sandboxName === undefined) return "OS sandbox: none";

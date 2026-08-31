@@ -1,9 +1,13 @@
 import { readFileSync } from "node:fs";
 import {
+  EXECUTION_RESOURCE_LIMIT_MAX,
   executionCapabilitiesSchema,
   linuxBubblewrapRuntimeDescriptorSchema,
   executionOsSandboxSummary,
   executionPolicySchema,
+  executionResourceCapabilitiesSchema,
+  executionResourceEvidenceSchema,
+  executionResourceLimitsSchema,
   executionSecuritySnapshotSchema,
   isExecutionWorkspacePath,
   type ExecutionBackend,
@@ -14,19 +18,25 @@ import {
 import {
   canonicalExecutionCapabilities,
   canonicalExecutionPolicy,
+  canonicalExecutionResourceCapabilities,
+  canonicalExecutionResourceLimits,
   c1ExecutionCapabilities,
   createExecutionAdmissionSnapshot,
   createExecutionLaunchSetupSnapshot,
   evaluateExecutionPolicy,
   executionCapabilitiesDigest,
   executionPolicyDigest,
+  executionResourceCapabilitiesDigest,
+  executionResourceLimitsDigest,
   executionPolicyPreview,
   ExecutionPolicyError,
   linuxBubblewrapExecutionCapabilities,
   macosSeatbeltExecutionCapabilities,
   normalizeExecutionPolicy,
+  resourceContractExecutionCapabilities,
   resolveExecutionPolicy,
   validateExecutionSecuritySnapshot,
+  unsupportedExecutionResourceCapabilities,
 } from "@koda/runtime-node";
 import { KodaApplication } from "@koda/app";
 import { describe, expect, it } from "vitest";
@@ -70,6 +80,20 @@ interface LinuxFixtures {
   snapshot_cases: { name: string; input: unknown; valid: boolean }[];
 }
 
+interface ResourceContractFixtures {
+  policy_cases: {
+    name: string;
+    input: unknown;
+    normalized: unknown;
+    canonical: string;
+    sha256: string;
+  }[];
+  resource_canonical: string;
+  resource_sha256: string;
+  capability_cases: { name: string; canonical: string; sha256: string }[];
+  snapshot_cases: { name: string; input: unknown; valid: boolean }[];
+}
+
 const fixtures: Fixtures = JSON.parse(
   readFileSync(
     new URL("../fixtures/execution-policy-v1.json", import.meta.url),
@@ -92,6 +116,12 @@ const linuxFixtures: LinuxFixtures = JSON.parse(
   ),
 );
 const linuxCaps = linuxBubblewrapExecutionCapabilities(linuxFixtures.runtime);
+const resourceFixtures: ResourceContractFixtures = JSON.parse(
+  readFileSync(
+    new URL("../fixtures/execution-policy-v4.json", import.meta.url),
+    "utf8",
+  ),
+);
 
 describe("Phase 4C1A execution policy contract", () => {
   it.each(fixtures.policy_cases)(
@@ -128,16 +158,17 @@ describe("Phase 4C1A execution policy contract", () => {
     },
   );
 
-  it.each(fixtures.invalid_policy_cases)(
-    "rejects malformed policy without echoing it: $name",
-    ({ input }) => {
-      expect(executionPolicySchema.safeParse(input).success).toBe(false);
-      expectCode(
-        () => normalizeExecutionPolicy(input),
-        "INVALID_EXECUTION_POLICY",
-      );
-    },
-  );
+  it.each(
+    fixtures.invalid_policy_cases.filter(
+      ({ name }) => name !== "future-version",
+    ),
+  )("rejects malformed policy without echoing it: $name", ({ input }) => {
+    expect(executionPolicySchema.safeParse(input).success).toBe(false);
+    expectCode(
+      () => normalizeExecutionPolicy(input),
+      "INVALID_EXECUTION_POLICY",
+    );
+  });
 
   it("rejects any omitted policy field rather than applying defaults", () => {
     for (const field of Object.keys(base)) {
@@ -732,6 +763,223 @@ describe("Phase 4C2B1 Linux Bubblewrap contract", () => {
     expectCode(
       () => validateExecutionSecuritySnapshot(missingRuntime),
       "EXECUTION_SECURITY_CORRUPT",
+    );
+  });
+});
+
+describe("Phase 4C4A1 resource policy contract", () => {
+  const legacyCapabilities = [caps, macosCaps, linuxCaps] as const;
+  const resourceCapabilities = legacyCapabilities.map((value) =>
+    resourceContractExecutionCapabilities(value),
+  );
+
+  it.each(resourceFixtures.policy_cases)(
+    "matches v2 policy bytes and SHA-256: $name",
+    ({ input, normalized, canonical, sha256 }) => {
+      expect(executionPolicySchema.parse(input)).toEqual(input);
+      expect(normalizeExecutionPolicy(reverseKeys(input))).toEqual(normalized);
+      expect(canonicalExecutionPolicy(reverseKeys(input))).toBe(canonical);
+      expect(executionPolicyDigest(input)).toBe(sha256);
+    },
+  );
+
+  it("normalizes an empty resource object and fingerprints fixed resource order", () => {
+    const resources = (
+      resourceFixtures.policy_cases.find(
+        ({ name }) => name === "all_resources",
+      )!.input as { resources: Record<string, number> }
+    ).resources;
+    expect(canonicalExecutionResourceLimits(reverseKeys(resources))).toBe(
+      resourceFixtures.resource_canonical,
+    );
+    expect(executionResourceLimitsDigest(resources)).toBe(
+      resourceFixtures.resource_sha256,
+    );
+    expect(resourceFixtures.policy_cases[0]!.sha256).toBe(
+      resourceFixtures.policy_cases[1]!.sha256,
+    );
+  });
+
+  it("strictly validates every resource name and numeric boundary", () => {
+    for (const name of [
+      "process_cpu_time_ms",
+      "process_address_space_bytes",
+      "job_process_count",
+      "process_open_files",
+      "process_file_size_bytes",
+    ]) {
+      expect(executionResourceLimitsSchema.parse({ [name]: 1 })).toEqual({
+        [name]: 1,
+      });
+      expect(
+        executionResourceLimitsSchema.parse({
+          [name]: EXECUTION_RESOURCE_LIMIT_MAX,
+        }),
+      ).toEqual({ [name]: EXECUTION_RESOURCE_LIMIT_MAX });
+      for (const invalid of [
+        0,
+        -1,
+        1.5,
+        EXECUTION_RESOURCE_LIMIT_MAX + 1,
+        Number.NaN,
+        Number.POSITIVE_INFINITY,
+      ]) {
+        expect(
+          executionResourceLimitsSchema.safeParse({ [name]: invalid }).success,
+        ).toBe(false);
+      }
+    }
+    expect(
+      executionResourceLimitsSchema.safeParse({
+        secret: "fixture-secret-marker",
+      }).success,
+    ).toBe(false);
+    expect(
+      executionPolicySchema.safeParse({
+        ...base,
+        resources: { process_cpu_time_ms: 1 },
+      }).success,
+    ).toBe(false);
+  });
+
+  it.each(resourceFixtures.capability_cases)(
+    "wraps immutable isolation capability with unsupported resources: $name",
+    ({ name, canonical, sha256 }) => {
+      const index = resourceFixtures.capability_cases.findIndex(
+        (candidate) => candidate.name === name,
+      );
+      const capability = resourceCapabilities[index]!;
+      if (capability.schema_version !== 4) {
+        throw new Error("Expected schema-v4 resource capabilities.");
+      }
+      expect(executionCapabilitiesSchema.parse(capability)).toEqual(capability);
+      expect(canonicalExecutionCapabilities(reverseKeys(capability))).toBe(
+        canonical,
+      );
+      expect(executionCapabilitiesDigest(capability)).toBe(sha256);
+      expect(
+        canonicalExecutionResourceCapabilities(capability.resource_limits),
+      ).toBe(
+        canonicalExecutionResourceCapabilities(
+          unsupportedExecutionResourceCapabilities(),
+        ),
+      );
+      expect(
+        executionResourceCapabilitiesDigest(capability.resource_limits),
+      ).toBe(
+        executionResourceCapabilitiesDigest(
+          unsupportedExecutionResourceCapabilities(),
+        ),
+      );
+    },
+  );
+
+  it("rejects fabricated v4 support and wrapping an already wrapped capability", () => {
+    const capability = resourceCapabilities[0]!;
+    if (capability.schema_version !== 4) {
+      throw new Error("Expected schema-v4 resource capabilities.");
+    }
+    const fabricated = {
+      ...capability,
+      resource_limits: {
+        ...capability.resource_limits,
+        process_cpu_time_ms: {
+          status: "supported",
+          backend: "posix_rlimit",
+          scope: "process",
+          enforcement: "kernel_hard",
+          granularity: 1_000,
+        },
+      },
+    };
+    expect(
+      executionResourceCapabilitiesSchema.safeParse(fabricated.resource_limits)
+        .success,
+    ).toBe(true);
+    expect(executionCapabilitiesSchema.safeParse(fabricated).success).toBe(
+      false,
+    );
+    expectCode(
+      () => resourceContractExecutionCapabilities(capability),
+      "INVALID_EXECUTION_POLICY",
+    );
+  });
+
+  it("reports each requested quota and fails closed with a resource error", () => {
+    const capability = resourceCapabilities[0]!;
+    for (const name of [
+      "process_cpu_time_ms",
+      "process_address_space_bytes",
+      "job_process_count",
+      "process_open_files",
+      "process_file_size_bytes",
+    ] as const) {
+      const policy = {
+        ...(resourceFixtures.policy_cases[0]!.normalized as Record<
+          string,
+          unknown
+        >),
+        resources: { [name]: 1 },
+      };
+      expect(evaluateExecutionPolicy(policy, capability)).toEqual({
+        allowed: false,
+        unmet: [{ dimension: name, reason: "not_implemented" }],
+      });
+      expectCode(
+        () => createExecutionAdmissionSnapshot(policy, capability),
+        "RESOURCE_LIMIT_UNAVAILABLE",
+      );
+    }
+  });
+
+  it.each(resourceFixtures.snapshot_cases)(
+    "validates shared v4 retained evidence: $name",
+    ({ input, valid }) => {
+      expect(valid).toBe(true);
+      expect(
+        executionResourceEvidenceSchema.parse({
+          status: "not_requested",
+        }),
+      ).toEqual({ status: "not_requested" });
+      expect(validateExecutionSecuritySnapshot(input)).toEqual(input);
+    },
+  );
+
+  it("rejects missing, fabricated, and digest-tampered resource evidence", () => {
+    const baseSnapshot = resourceFixtures.snapshot_cases[0]!.input as Record<
+      string,
+      unknown
+    >;
+    const missing = { ...baseSnapshot };
+    delete missing.resources;
+    expectCode(
+      () => validateExecutionSecuritySnapshot(missing),
+      "EXECUTION_SECURITY_CORRUPT",
+    );
+    expectCode(
+      () =>
+        validateExecutionSecuritySnapshot({
+          ...baseSnapshot,
+          capabilities_digest: "a".repeat(64),
+        }),
+      "EXECUTION_SECURITY_CORRUPT",
+    );
+    expectCode(
+      () =>
+        validateExecutionSecuritySnapshot({
+          ...baseSnapshot,
+          resources: {
+            status: "not_requested",
+            secret: "fixture-secret-marker",
+          },
+        }),
+      "EXECUTION_SECURITY_CORRUPT",
+    );
+  });
+
+  it("keeps the trusted resolver on v1 until C4A2 wiring", () => {
+    expect(resolveExecutionPolicy({ workspaceRoot: "/workspace" })).toEqual(
+      base,
     );
   });
 });

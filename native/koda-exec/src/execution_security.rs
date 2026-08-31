@@ -235,6 +235,7 @@ mod tests {
             network: NetworkPolicy::Deny,
             process_isolation: ProcessIsolationPolicy::Inherit,
             environment: EnvironmentPolicy::Explicit,
+            resources: None,
         };
         let start = StartParams {
             argv: vec!["/usr/bin/true".to_owned()],

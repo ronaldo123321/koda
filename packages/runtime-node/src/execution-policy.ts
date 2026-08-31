@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import {
   executionBackendSchema,
   executionCapabilitiesSchema,
+  executionResourceCapabilitiesSchema,
+  executionResourceLimitsSchema,
   linuxBubblewrapRuntimeDescriptorSchema,
   executionPolicyConfigSchema,
   executionPolicySchema,
@@ -14,6 +16,9 @@ import {
   type ExecutionPolicy,
   type ExecutionPolicyConfig,
   type ExecutionPolicyDimension,
+  type ExecutionResourceCapabilities,
+  type ExecutionResourceLimitName,
+  type ExecutionResourceLimits,
   type ExecutionSecuritySnapshot,
   type LinuxBubblewrapRuntimeDescriptor,
 } from "@koda/protocol";
@@ -22,6 +27,7 @@ import type { z } from "zod";
 export type ExecutionPolicyErrorCode =
   | "INVALID_EXECUTION_POLICY"
   | "EXECUTION_POLICY_UNAVAILABLE"
+  | "RESOURCE_LIMIT_UNAVAILABLE"
   | "EXECUTION_POLICY_CHANGED"
   | "INCOMPATIBLE_PROTOCOL"
   | "EXECUTION_SECURITY_CORRUPT";
@@ -30,6 +36,8 @@ const errorMessages: Record<ExecutionPolicyErrorCode, string> = {
   INVALID_EXECUTION_POLICY: "Execution policy configuration is invalid.",
   EXECUTION_POLICY_UNAVAILABLE:
     "The selected backend cannot enforce the requested execution policy.",
+  RESOURCE_LIMIT_UNAVAILABLE:
+    "The selected backend cannot enforce the requested resource limit.",
   EXECUTION_POLICY_CHANGED:
     "The prepared execution security contract has changed.",
   INCOMPATIBLE_PROTOCOL: "The executor protocol is incompatible.",
@@ -58,9 +66,20 @@ function parse<T>(
 export function normalizeExecutionPolicy(
   value: unknown,
 ): Readonly<ExecutionPolicy> {
-  return Object.freeze(
-    parse(executionPolicySchema, value, "INVALID_EXECUTION_POLICY"),
+  const policy = parse(
+    executionPolicySchema,
+    value,
+    "INVALID_EXECUTION_POLICY",
   );
+  if (
+    policy.schema_version === 2 &&
+    "resources" in policy &&
+    Object.keys(policy.resources).length === 0
+  ) {
+    const { resources: _resources, ...withoutResources } = policy;
+    return freezeRecord(withoutResources);
+  }
+  return freezeRecord(policy);
 }
 
 export interface ResolveExecutionPolicyOptions {
@@ -118,11 +137,56 @@ export function canonicalExecutionPolicy(value: unknown): string {
     network: policy.network,
     process_isolation: policy.process_isolation,
     environment: policy.environment,
+    ...(policy.schema_version === 2 && "resources" in policy
+      ? { resources: canonicalResourceLimitsObject(policy.resources) }
+      : {}),
   });
 }
 
 export function executionPolicyDigest(value: unknown): string {
   return sha256(canonicalExecutionPolicy(value));
+}
+
+export function canonicalExecutionResourceLimits(value: unknown): string {
+  const resources = parse(
+    executionResourceLimitsSchema,
+    value,
+    "INVALID_EXECUTION_POLICY",
+  );
+  return JSON.stringify(canonicalResourceLimitsObject(resources));
+}
+
+export function executionResourceLimitsDigest(value: unknown): string {
+  return sha256(canonicalExecutionResourceLimits(value));
+}
+
+export function unsupportedExecutionResourceCapabilities(): ExecutionResourceCapabilities {
+  return freezeRecord(
+    parse(
+      executionResourceCapabilitiesSchema,
+      Object.fromEntries(
+        RESOURCE_LIMIT_NAMES.map((name) => [name, { status: "unsupported" }]),
+      ),
+      "INVALID_EXECUTION_POLICY",
+    ),
+  );
+}
+
+export function canonicalExecutionResourceCapabilities(value: unknown): string {
+  const capabilities = parse(
+    executionResourceCapabilitiesSchema,
+    value,
+    "INVALID_EXECUTION_POLICY",
+  );
+  return JSON.stringify(
+    Object.fromEntries(
+      RESOURCE_LIMIT_NAMES.map((name) => [name, capabilities[name]]),
+    ),
+  );
+}
+
+export function executionResourceCapabilitiesDigest(value: unknown): string {
+  return sha256(canonicalExecutionResourceCapabilities(value));
 }
 
 export function c1ExecutionCapabilities(
@@ -241,6 +305,32 @@ export function linuxBubblewrapExecutionCapabilities(
   );
 }
 
+/** Phase 4C4A immutable wrapper. It preserves a verified v1-v3 isolation
+ * contract while explicitly reporting every resource limit as unsupported.
+ */
+export function resourceContractExecutionCapabilities(
+  legacyInput: unknown,
+): ExecutionCapabilities {
+  const legacy = parse(
+    executionCapabilitiesSchema,
+    legacyInput,
+    "INVALID_EXECUTION_POLICY",
+  );
+  if (legacy.schema_version === 4)
+    throw new ExecutionPolicyError("INVALID_EXECUTION_POLICY");
+  return freezeRecord(
+    parse(
+      executionCapabilitiesSchema,
+      {
+        ...legacy,
+        schema_version: 4,
+        resource_limits: unsupportedExecutionResourceCapabilities(),
+      },
+      "INVALID_EXECUTION_POLICY",
+    ),
+  );
+}
+
 export function canonicalExecutionCapabilities(value: unknown): string {
   const caps = parse(
     executionCapabilitiesSchema,
@@ -249,11 +339,14 @@ export function canonicalExecutionCapabilities(value: unknown): string {
   );
   return JSON.stringify({
     schema_version: caps.schema_version,
-    ...(caps.schema_version === 2 || caps.schema_version === 3
+    ...(caps.schema_version === 2 ||
+    caps.schema_version === 3 ||
+    (caps.schema_version === 4 && "platform" in caps)
       ? { platform: caps.platform }
       : {}),
     backend: caps.backend,
-    ...(caps.schema_version === 3
+    ...(caps.schema_version === 3 ||
+    (caps.schema_version === 4 && "sandbox_runtime" in caps)
       ? { sandbox_runtime: canonicalSandboxRuntime(caps.sandbox_runtime) }
       : {}),
     filesystem: {
@@ -278,6 +371,13 @@ export function canonicalExecutionCapabilities(value: unknown): string {
       layer: caps.supervision.layer,
       durable: caps.supervision.durable,
     },
+    ...(caps.schema_version === 4
+      ? {
+          resource_limits: JSON.parse(
+            canonicalExecutionResourceCapabilities(caps.resource_limits),
+          ) as ExecutionResourceCapabilities,
+        }
+      : {}),
   });
 }
 
@@ -312,6 +412,17 @@ export function evaluateExecutionPolicy(
     if (!supported.includes(policy[dimension]))
       unmet.push({ dimension, reason: "not_implemented" });
   }
+  if (policy.schema_version === 2) {
+    for (const name of RESOURCE_LIMIT_NAMES) {
+      if (!("resources" in policy) || policy.resources[name] === undefined)
+        continue;
+      const supported =
+        caps.schema_version === 4 &&
+        caps.resource_limits[name].status === "supported";
+      if (!supported)
+        unmet.push({ dimension: name, reason: "not_implemented" });
+    }
+  }
   return { allowed: unmet.length === 0, unmet };
 }
 
@@ -326,15 +437,27 @@ export function createExecutionAdmissionSnapshot(
     capabilitiesInput,
     "INVALID_EXECUTION_POLICY",
   );
-  if (!evaluateExecutionPolicy(policy, caps).allowed)
-    throw new ExecutionPolicyError("EXECUTION_POLICY_UNAVAILABLE");
+  const evaluation = evaluateExecutionPolicy(policy, caps);
+  if (!evaluation.allowed)
+    throw new ExecutionPolicyError(
+      evaluation.unmet.some(({ dimension }) =>
+        RESOURCE_LIMIT_NAMES.includes(dimension as ExecutionResourceLimitName),
+      )
+        ? "RESOURCE_LIMIT_UNAVAILABLE"
+        : "EXECUTION_POLICY_UNAVAILABLE",
+    );
+  if ((caps.schema_version === 4) !== (policy.schema_version === 2))
+    throw new ExecutionPolicyError("INVALID_EXECUTION_POLICY");
   return validateExecutionSecuritySnapshot({
     schema_version: caps.schema_version,
     kind: "policy",
-    ...(caps.schema_version === 2 || caps.schema_version === 3
+    ...(caps.schema_version === 2 ||
+    caps.schema_version === 3 ||
+    (caps.schema_version === 4 && "platform" in caps)
       ? { platform: caps.platform }
       : {}),
-    ...(caps.schema_version === 3
+    ...(caps.schema_version === 3 ||
+    (caps.schema_version === 4 && "sandbox_runtime" in caps)
       ? { sandbox_runtime: caps.sandbox_runtime }
       : {}),
     stage: "admission",
@@ -353,6 +476,9 @@ export function createExecutionAdmissionSnapshot(
     process_isolation: { status: "not_requested" },
     environment: { status: "not_applied" },
     supervision: { status: "not_applied" },
+    ...(caps.schema_version === 4
+      ? { resources: { status: "not_requested" } }
+      : {}),
   });
 }
 
@@ -369,8 +495,15 @@ export function createExecutionLaunchSetupSnapshot(
     capabilitiesInput,
     "INVALID_EXECUTION_POLICY",
   );
-  if (!evaluateExecutionPolicy(policy, caps).allowed)
-    throw new ExecutionPolicyError("EXECUTION_POLICY_UNAVAILABLE");
+  const evaluation = evaluateExecutionPolicy(policy, caps);
+  if (!evaluation.allowed)
+    throw new ExecutionPolicyError(
+      evaluation.unmet.some(({ dimension }) =>
+        RESOURCE_LIMIT_NAMES.includes(dimension as ExecutionResourceLimitName),
+      )
+        ? "RESOURCE_LIMIT_UNAVAILABLE"
+        : "EXECUTION_POLICY_UNAVAILABLE",
+    );
   // C2A1 defines the v2 evidence shape, but only the trusted native launch
   // path may construct it after C2A2/C2A3 confirm Seatbelt installation.
   if (caps.schema_version !== 1)
@@ -434,12 +567,35 @@ export function validateExecutionSecuritySnapshot(
         ? c1ExecutionCapabilities(snapshot.backend)
         : snapshot.schema_version === 2
           ? macosSeatbeltExecutionCapabilities()
-          : linuxBubblewrapExecutionCapabilities(snapshot.sandbox_runtime);
+          : snapshot.schema_version === 3
+            ? linuxBubblewrapExecutionCapabilities(snapshot.sandbox_runtime)
+            : resourceContractExecutionCapabilities(
+                !("platform" in snapshot)
+                  ? c1ExecutionCapabilities(snapshot.backend)
+                  : snapshot.platform === "macos"
+                    ? macosSeatbeltExecutionCapabilities()
+                    : linuxBubblewrapExecutionCapabilities(
+                        snapshot.sandbox_runtime,
+                      ),
+              );
     if (
       snapshot.policy_digest !== executionPolicyDigest(snapshot.policy) ||
       snapshot.capabilities_digest !== executionCapabilitiesDigest(capabilities)
     ) {
       throw new ExecutionPolicyError("EXECUTION_SECURITY_CORRUPT");
+    }
+    if (snapshot.schema_version === 4) {
+      const requested =
+        "resources" in snapshot.policy ? snapshot.policy.resources : undefined;
+      if (
+        (requested === undefined || Object.keys(requested).length === 0) &&
+        snapshot.resources.status !== "not_requested"
+      ) {
+        throw new ExecutionPolicyError("EXECUTION_SECURITY_CORRUPT");
+      }
+      if (requested !== undefined && Object.keys(requested).length > 0) {
+        throw new ExecutionPolicyError("EXECUTION_SECURITY_CORRUPT");
+      }
     }
   }
   return freezeRecord(snapshot);
@@ -464,6 +620,25 @@ function canonicalSandboxRuntime(
 
 function sha256(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+const RESOURCE_LIMIT_NAMES = [
+  "process_cpu_time_ms",
+  "process_address_space_bytes",
+  "job_process_count",
+  "process_open_files",
+  "process_file_size_bytes",
+] as const satisfies readonly ExecutionResourceLimitName[];
+
+function canonicalResourceLimitsObject(
+  resources: ExecutionResourceLimits | undefined,
+): ExecutionResourceLimits {
+  if (resources === undefined) return {};
+  return Object.fromEntries(
+    RESOURCE_LIMIT_NAMES.flatMap((name) =>
+      resources[name] === undefined ? [] : [[name, resources[name]]],
+    ),
+  ) as ExecutionResourceLimits;
 }
 
 function freezeRecord<T>(value: T): T {

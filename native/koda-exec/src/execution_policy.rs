@@ -9,12 +9,14 @@ pub const EXECUTION_WORKSPACE_MAX_BYTES: usize = 4096;
 pub const EXECUTION_SECURITY_MAX_BYTES: usize = 16384;
 pub const EXECUTION_SANDBOX_RUNTIME_PATH_MAX_BYTES: usize = 4096;
 pub const EXECUTION_SANDBOX_RUNTIME_VERSION_MAX_BYTES: usize = 256;
-const JAVASCRIPT_MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+pub const EXECUTION_RESOURCE_LIMIT_MAX: u64 = 9_007_199_254_740_991;
+const JAVASCRIPT_MAX_SAFE_INTEGER: u64 = EXECUTION_RESOURCE_LIMIT_MAX;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutionPolicyError {
     InvalidExecutionPolicy,
     ExecutionPolicyUnavailable,
+    ResourceLimitUnavailable,
     ExecutionPolicyChanged,
     IncompatibleProtocol,
     ExecutionSecurityCorrupt,
@@ -25,6 +27,7 @@ impl ExecutionPolicyError {
         match self {
             Self::InvalidExecutionPolicy => "INVALID_EXECUTION_POLICY",
             Self::ExecutionPolicyUnavailable => "EXECUTION_POLICY_UNAVAILABLE",
+            Self::ResourceLimitUnavailable => "RESOURCE_LIMIT_UNAVAILABLE",
             Self::ExecutionPolicyChanged => "EXECUTION_POLICY_CHANGED",
             Self::IncompatibleProtocol => "INCOMPATIBLE_PROTOCOL",
             Self::ExecutionSecurityCorrupt => "EXECUTION_SECURITY_CORRUPT",
@@ -38,6 +41,9 @@ impl std::fmt::Display for ExecutionPolicyError {
             Self::InvalidExecutionPolicy => "Execution policy configuration is invalid.",
             Self::ExecutionPolicyUnavailable => {
                 "The selected backend cannot enforce the requested execution policy."
+            }
+            Self::ResourceLimitUnavailable => {
+                "The selected backend cannot enforce the requested resource limit."
             }
             Self::ExecutionPolicyChanged => "The prepared execution security contract has changed.",
             Self::IncompatibleProtocol => "The executor protocol is incompatible.",
@@ -78,6 +84,65 @@ pub enum EnvironmentPolicy {
     Explicit,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionResourceLimits {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_cpu_time_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_address_space_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_process_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_open_files: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_file_size_bytes: Option<u64>,
+}
+
+impl ExecutionResourceLimits {
+    pub fn parse(value: Value) -> Result<Self, ExecutionPolicyError> {
+        let limits: Self = serde_json::from_value(value)
+            .map_err(|_| ExecutionPolicyError::InvalidExecutionPolicy)?;
+        limits.validate()?;
+        Ok(limits)
+    }
+
+    pub fn validate(&self) -> Result<(), ExecutionPolicyError> {
+        if self
+            .values()
+            .into_iter()
+            .flatten()
+            .any(|value| *value == 0 || *value > EXECUTION_RESOURCE_LIMIT_MAX)
+        {
+            return Err(ExecutionPolicyError::InvalidExecutionPolicy);
+        }
+        Ok(())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.values().into_iter().all(|value| value.is_none())
+    }
+
+    fn values(&self) -> [Option<&u64>; 5] {
+        [
+            self.process_cpu_time_ms.as_ref(),
+            self.process_address_space_bytes.as_ref(),
+            self.job_process_count.as_ref(),
+            self.process_open_files.as_ref(),
+            self.process_file_size_bytes.as_ref(),
+        ]
+    }
+
+    pub fn canonical_json(&self) -> Result<String, ExecutionPolicyError> {
+        self.validate()?;
+        serde_json::to_string(self).map_err(|_| ExecutionPolicyError::InvalidExecutionPolicy)
+    }
+
+    pub fn digest(&self) -> Result<String, ExecutionPolicyError> {
+        Ok(sha256(&self.canonical_json()?))
+    }
+}
+
 // Declaration order is the policy fingerprint's fixed JSON field order.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -88,6 +153,8 @@ pub struct ExecutionPolicy {
     pub network: NetworkPolicy,
     pub process_isolation: ProcessIsolationPolicy,
     pub environment: EnvironmentPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resources: Option<ExecutionResourceLimits>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,14 +168,29 @@ pub struct ExecutionPolicyConfig {
 
 impl ExecutionPolicy {
     pub fn parse(value: Value) -> Result<Self, ExecutionPolicyError> {
-        let policy: Self = serde_json::from_value(value)
+        let mut policy: Self = serde_json::from_value(value)
             .map_err(|_| ExecutionPolicyError::InvalidExecutionPolicy)?;
+        if policy
+            .resources
+            .as_ref()
+            .is_some_and(ExecutionResourceLimits::is_empty)
+        {
+            policy.resources = None;
+        }
         policy.validate()?;
         Ok(policy)
     }
 
     pub fn validate(&self) -> Result<(), ExecutionPolicyError> {
-        if self.schema_version != 1 || !is_execution_workspace_path(&self.workspace_root) {
+        let version_valid = match self.schema_version {
+            1 => self.resources.is_none(),
+            2 => self
+                .resources
+                .as_ref()
+                .is_none_or(|resources| resources.validate().is_ok()),
+            _ => false,
+        };
+        if !version_valid || !is_execution_workspace_path(&self.workspace_root) {
             return Err(ExecutionPolicyError::InvalidExecutionPolicy);
         }
         Ok(())
@@ -116,7 +198,15 @@ impl ExecutionPolicy {
 
     pub fn canonical_json(&self) -> Result<String, ExecutionPolicyError> {
         self.validate()?;
-        serde_json::to_string(self).map_err(|_| ExecutionPolicyError::InvalidExecutionPolicy)
+        let mut normalized = self.clone();
+        if normalized
+            .resources
+            .as_ref()
+            .is_some_and(ExecutionResourceLimits::is_empty)
+        {
+            normalized.resources = None;
+        }
+        serde_json::to_string(&normalized).map_err(|_| ExecutionPolicyError::InvalidExecutionPolicy)
     }
 
     pub fn digest(&self) -> Result<String, ExecutionPolicyError> {
@@ -219,6 +309,7 @@ pub fn resolve_execution_policy(
         network: config.network,
         process_isolation: config.process_isolation,
         environment: config.environment,
+        resources: None,
     };
     policy.validate()?;
     Ok(policy)
@@ -284,6 +375,106 @@ pub struct SupervisionCapability {
     pub durable: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceLimitBackend {
+    PosixRlimit,
+    LinuxCgroupV2,
+    WindowsJobObject,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceLimitScope {
+    Process,
+    JobTree,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceLimitEnforcement {
+    KernelHard,
+    KernelAccountedHard,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ResourceLimitCapability {
+    Unsupported {},
+    Supported {
+        backend: ResourceLimitBackend,
+        scope: ResourceLimitScope,
+        enforcement: ResourceLimitEnforcement,
+        granularity: u64,
+    },
+}
+
+impl ResourceLimitCapability {
+    fn validate(&self) -> Result<(), ExecutionPolicyError> {
+        if let Self::Supported { granularity, .. } = self
+            && (*granularity == 0 || *granularity > EXECUTION_RESOURCE_LIMIT_MAX)
+        {
+            return Err(ExecutionPolicyError::InvalidExecutionPolicy);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionResourceCapabilities {
+    pub process_cpu_time_ms: ResourceLimitCapability,
+    pub process_address_space_bytes: ResourceLimitCapability,
+    pub job_process_count: ResourceLimitCapability,
+    pub process_open_files: ResourceLimitCapability,
+    pub process_file_size_bytes: ResourceLimitCapability,
+}
+
+impl ExecutionResourceCapabilities {
+    pub fn unsupported() -> Self {
+        Self {
+            process_cpu_time_ms: ResourceLimitCapability::Unsupported {},
+            process_address_space_bytes: ResourceLimitCapability::Unsupported {},
+            job_process_count: ResourceLimitCapability::Unsupported {},
+            process_open_files: ResourceLimitCapability::Unsupported {},
+            process_file_size_bytes: ResourceLimitCapability::Unsupported {},
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), ExecutionPolicyError> {
+        for capability in self.values() {
+            capability.validate()?;
+        }
+        Ok(())
+    }
+
+    pub fn parse(value: Value) -> Result<Self, ExecutionPolicyError> {
+        let capabilities: Self = serde_json::from_value(value)
+            .map_err(|_| ExecutionPolicyError::InvalidExecutionPolicy)?;
+        capabilities.validate()?;
+        Ok(capabilities)
+    }
+
+    fn values(&self) -> [&ResourceLimitCapability; 5] {
+        [
+            &self.process_cpu_time_ms,
+            &self.process_address_space_bytes,
+            &self.job_process_count,
+            &self.process_open_files,
+            &self.process_file_size_bytes,
+        ]
+    }
+
+    pub fn canonical_json(&self) -> Result<String, ExecutionPolicyError> {
+        self.validate()?;
+        serde_json::to_string(self).map_err(|_| ExecutionPolicyError::InvalidExecutionPolicy)
+    }
+
+    pub fn digest(&self) -> Result<String, ExecutionPolicyError> {
+        Ok(sha256(&self.canonical_json()?))
+    }
+}
+
 // Declaration order is part of the cross-language capability digest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -346,6 +537,8 @@ pub struct ExecutionCapabilities {
     pub process_isolation: IsolationCapability<ProcessIsolationPolicy>,
     pub environment: EnvironmentCapability,
     pub supervision: SupervisionCapability,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_limits: Option<ExecutionResourceCapabilities>,
 }
 
 pub fn execution_supervision(backend: ExecutionBackend) -> SupervisionCapability {
@@ -391,6 +584,7 @@ pub fn c1_execution_capabilities(backend: ExecutionBackend) -> ExecutionCapabili
             layer: EnforcementLayer::Application,
         },
         supervision: execution_supervision(backend),
+        resource_limits: None,
     }
 }
 
@@ -428,6 +622,7 @@ pub fn macos_seatbelt_execution_capabilities() -> ExecutionCapabilities {
             layer: EnforcementLayer::Os,
             durable: true,
         },
+        resource_limits: None,
     }
 }
 
@@ -468,7 +663,22 @@ pub fn linux_bubblewrap_execution_capabilities(
             layer: EnforcementLayer::Os,
             durable: true,
         },
+        resource_limits: None,
     })
+}
+
+pub fn resource_contract_execution_capabilities(
+    legacy: &ExecutionCapabilities,
+) -> Result<ExecutionCapabilities, ExecutionPolicyError> {
+    legacy.validate()?;
+    if legacy.schema_version == 4 {
+        return Err(ExecutionPolicyError::InvalidExecutionPolicy);
+    }
+    let mut capabilities = legacy.clone();
+    capabilities.schema_version = 4;
+    capabilities.resource_limits = Some(ExecutionResourceCapabilities::unsupported());
+    capabilities.validate()?;
+    Ok(capabilities)
 }
 
 impl ExecutionCapabilities {
@@ -488,6 +698,22 @@ impl ExecutionCapabilities {
                 .as_ref()
                 .and_then(|runtime| linux_bubblewrap_execution_capabilities(runtime).ok())
                 .is_some_and(|expected| self == &expected),
+            4 => {
+                let legacy_version = match (self.platform, self.sandbox_runtime.as_ref()) {
+                    (None, None) => Some(1),
+                    (Some(ExecutionPlatform::Macos), None) => Some(2),
+                    (Some(ExecutionPlatform::Linux), Some(_)) => Some(3),
+                    _ => None,
+                };
+                legacy_version.is_some_and(|schema_version| {
+                    let mut legacy = self.clone();
+                    legacy.schema_version = schema_version;
+                    legacy.resource_limits = None;
+                    legacy.validate().is_ok()
+                        && self.resource_limits
+                            == Some(ExecutionResourceCapabilities::unsupported())
+                })
+            }
             _ => false,
         };
         if !valid {
@@ -513,6 +739,11 @@ pub enum ExecutionPolicyDimension {
     Network,
     ProcessIsolation,
     Environment,
+    ProcessCpuTimeMs,
+    ProcessAddressSpaceBytes,
+    JobProcessCount,
+    ProcessOpenFiles,
+    ProcessFileSizeBytes,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -569,6 +800,79 @@ pub fn evaluate_execution_policy(
             });
         }
     }
+    if policy.schema_version == 2 {
+        let resources = policy.resources.as_ref();
+        let capabilities = caps.resource_limits.as_ref();
+        for (dimension, requested, supported) in [
+            (
+                ExecutionPolicyDimension::ProcessCpuTimeMs,
+                resources
+                    .and_then(|value| value.process_cpu_time_ms)
+                    .is_some(),
+                capabilities.is_some_and(|value| {
+                    matches!(
+                        value.process_cpu_time_ms,
+                        ResourceLimitCapability::Supported { .. }
+                    )
+                }),
+            ),
+            (
+                ExecutionPolicyDimension::ProcessAddressSpaceBytes,
+                resources
+                    .and_then(|value| value.process_address_space_bytes)
+                    .is_some(),
+                capabilities.is_some_and(|value| {
+                    matches!(
+                        value.process_address_space_bytes,
+                        ResourceLimitCapability::Supported { .. }
+                    )
+                }),
+            ),
+            (
+                ExecutionPolicyDimension::JobProcessCount,
+                resources
+                    .and_then(|value| value.job_process_count)
+                    .is_some(),
+                capabilities.is_some_and(|value| {
+                    matches!(
+                        value.job_process_count,
+                        ResourceLimitCapability::Supported { .. }
+                    )
+                }),
+            ),
+            (
+                ExecutionPolicyDimension::ProcessOpenFiles,
+                resources
+                    .and_then(|value| value.process_open_files)
+                    .is_some(),
+                capabilities.is_some_and(|value| {
+                    matches!(
+                        value.process_open_files,
+                        ResourceLimitCapability::Supported { .. }
+                    )
+                }),
+            ),
+            (
+                ExecutionPolicyDimension::ProcessFileSizeBytes,
+                resources
+                    .and_then(|value| value.process_file_size_bytes)
+                    .is_some(),
+                capabilities.is_some_and(|value| {
+                    matches!(
+                        value.process_file_size_bytes,
+                        ResourceLimitCapability::Supported { .. }
+                    )
+                }),
+            ),
+        ] {
+            if requested && !supported {
+                unmet.push(UnmetRequirement {
+                    dimension,
+                    reason: UnmetReason::NotImplemented,
+                });
+            }
+        }
+    }
     Ok(ExecutionPolicyEvaluation {
         allowed: unmet.is_empty(),
         unmet,
@@ -587,6 +891,147 @@ pub enum ExecutionEnforcementEvidence {
         mechanism: EnforcementMechanism,
         layer: EnforcementLayer,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceAppliedLimit {
+    pub limit: u64,
+    pub backend: ResourceLimitBackend,
+    pub scope: ResourceLimitScope,
+    pub enforcement: ResourceLimitEnforcement,
+    pub granularity: u64,
+}
+
+impl ResourceAppliedLimit {
+    fn validate(&self) -> Result<(), ExecutionPolicyError> {
+        if self.limit == 0
+            || self.limit > EXECUTION_RESOURCE_LIMIT_MAX
+            || self.granularity == 0
+            || self.granularity > EXECUTION_RESOURCE_LIMIT_MAX
+        {
+            return Err(ExecutionPolicyError::InvalidExecutionPolicy);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionResourceAppliedLimits {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_cpu_time_ms: Option<ResourceAppliedLimit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_address_space_bytes: Option<ResourceAppliedLimit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_process_count: Option<ResourceAppliedLimit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_open_files: Option<ResourceAppliedLimit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_file_size_bytes: Option<ResourceAppliedLimit>,
+}
+
+impl ExecutionResourceAppliedLimits {
+    fn validate(&self) -> Result<(), ExecutionPolicyError> {
+        let values = [
+            self.process_cpu_time_ms.as_ref(),
+            self.process_address_space_bytes.as_ref(),
+            self.job_process_count.as_ref(),
+            self.process_open_files.as_ref(),
+            self.process_file_size_bytes.as_ref(),
+        ];
+        if values.iter().all(|value| value.is_none()) {
+            return Err(ExecutionPolicyError::InvalidExecutionPolicy);
+        }
+        for value in values.into_iter().flatten() {
+            value.validate()?;
+        }
+        Ok(())
+    }
+
+    fn canonical_json(&self) -> Result<String, ExecutionPolicyError> {
+        self.validate()?;
+        serde_json::to_string(self).map_err(|_| ExecutionPolicyError::InvalidExecutionPolicy)
+    }
+
+    fn digest(&self) -> Result<String, ExecutionPolicyError> {
+        Ok(sha256(&self.canonical_json()?))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExecutionResourceEvidence {
+    NotRequested {},
+    NotApplied {
+        requested: ExecutionResourceLimits,
+        requested_digest: String,
+        available: ExecutionResourceCapabilities,
+        available_digest: String,
+    },
+    Unknown {
+        requested: ExecutionResourceLimits,
+        requested_digest: String,
+        available: ExecutionResourceCapabilities,
+        available_digest: String,
+    },
+    Applied {
+        requested: ExecutionResourceLimits,
+        requested_digest: String,
+        available: ExecutionResourceCapabilities,
+        available_digest: String,
+        applied: ExecutionResourceAppliedLimits,
+        applied_digest: String,
+    },
+}
+
+impl ExecutionResourceEvidence {
+    fn validate(&self) -> Result<(), ExecutionPolicyError> {
+        let validate_layers = |requested: &ExecutionResourceLimits,
+                               requested_digest: &str,
+                               available: &ExecutionResourceCapabilities,
+                               available_digest: &str|
+         -> Result<(), ExecutionPolicyError> {
+            requested.validate()?;
+            available.validate()?;
+            if requested.is_empty()
+                || requested.digest()? != requested_digest
+                || available.digest()? != available_digest
+            {
+                return Err(ExecutionPolicyError::InvalidExecutionPolicy);
+            }
+            Ok(())
+        };
+        match self {
+            Self::NotRequested {} => Ok(()),
+            Self::NotApplied {
+                requested,
+                requested_digest,
+                available,
+                available_digest,
+            }
+            | Self::Unknown {
+                requested,
+                requested_digest,
+                available,
+                available_digest,
+            } => validate_layers(requested, requested_digest, available, available_digest),
+            Self::Applied {
+                requested,
+                requested_digest,
+                available,
+                available_digest,
+                applied,
+                applied_digest,
+            } => {
+                validate_layers(requested, requested_digest, available, available_digest)?;
+                if applied.digest()? != applied_digest.as_str() {
+                    return Err(ExecutionPolicyError::InvalidExecutionPolicy);
+                }
+                Ok(())
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -614,6 +1059,8 @@ pub struct PolicySecuritySnapshot {
     pub process_isolation: ExecutionEnforcementEvidence,
     pub environment: ExecutionEnforcementEvidence,
     pub supervision: ExecutionEnforcementEvidence,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resources: Option<ExecutionResourceEvidence>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -645,6 +1092,11 @@ impl ExecutionSecuritySnapshot {
         if snapshot.policy.digest().map_err(|_| corrupt)? != snapshot.policy_digest {
             return Err(corrupt);
         }
+        if (snapshot.schema_version <= 3 && snapshot.policy.schema_version != 1)
+            || (snapshot.schema_version == 4 && snapshot.policy.schema_version != 2)
+        {
+            return Err(corrupt);
+        }
         let expected_capabilities = match snapshot.schema_version {
             1 if snapshot.platform.is_none() && snapshot.sandbox_runtime.is_none() => {
                 c1_execution_capabilities(snapshot.backend)
@@ -663,15 +1115,51 @@ impl ExecutionSecuritySnapshot {
                 )
                 .map_err(|_| corrupt)?
             }
+            4 => {
+                let legacy = match (snapshot.platform, snapshot.sandbox_runtime.as_ref()) {
+                    (None, None) => c1_execution_capabilities(snapshot.backend),
+                    (Some(ExecutionPlatform::Macos), None)
+                        if snapshot.backend == ExecutionBackend::NativePosix =>
+                    {
+                        macos_seatbelt_execution_capabilities()
+                    }
+                    (Some(ExecutionPlatform::Linux), Some(runtime))
+                        if snapshot.backend == ExecutionBackend::NativePosix =>
+                    {
+                        linux_bubblewrap_execution_capabilities(runtime).map_err(|_| corrupt)?
+                    }
+                    _ => return Err(corrupt),
+                };
+                resource_contract_execution_capabilities(&legacy).map_err(|_| corrupt)?
+            }
             _ => return Err(corrupt),
         };
         if expected_capabilities.digest().map_err(|_| corrupt)? != snapshot.capabilities_digest {
             return Err(corrupt);
         }
-        if snapshot.schema_version == 2 {
+        if snapshot.schema_version <= 3 && snapshot.resources.is_some() {
+            return Err(corrupt);
+        }
+        if snapshot.schema_version == 4 {
+            let resources = snapshot.resources.as_ref().ok_or(corrupt)?;
+            resources.validate().map_err(|_| corrupt)?;
+            let requested = snapshot
+                .policy
+                .resources
+                .as_ref()
+                .is_some_and(|value| !value.is_empty());
+            if requested || !matches!(resources, ExecutionResourceEvidence::NotRequested {}) {
+                return Err(corrupt);
+            }
+        }
+        if snapshot.schema_version == 2
+            || (snapshot.schema_version == 4 && snapshot.platform == Some(ExecutionPlatform::Macos))
+        {
             return validate_macos_snapshot(snapshot);
         }
-        if snapshot.schema_version == 3 {
+        if snapshot.schema_version == 3
+            || (snapshot.schema_version == 4 && snapshot.platform == Some(ExecutionPlatform::Linux))
+        {
             return validate_linux_snapshot(snapshot);
         }
         for (evidence, requested) in [
@@ -867,8 +1355,26 @@ pub fn create_execution_admission_snapshot(
     policy: &ExecutionPolicy,
     caps: &ExecutionCapabilities,
 ) -> Result<ExecutionSecuritySnapshot, ExecutionPolicyError> {
-    if !evaluate_execution_policy(policy, caps)?.allowed {
-        return Err(ExecutionPolicyError::ExecutionPolicyUnavailable);
+    let evaluation = evaluate_execution_policy(policy, caps)?;
+    if !evaluation.allowed {
+        let resource_unmet = evaluation.unmet.iter().any(|requirement| {
+            matches!(
+                requirement.dimension,
+                ExecutionPolicyDimension::ProcessCpuTimeMs
+                    | ExecutionPolicyDimension::ProcessAddressSpaceBytes
+                    | ExecutionPolicyDimension::JobProcessCount
+                    | ExecutionPolicyDimension::ProcessOpenFiles
+                    | ExecutionPolicyDimension::ProcessFileSizeBytes
+            )
+        });
+        return Err(if resource_unmet {
+            ExecutionPolicyError::ResourceLimitUnavailable
+        } else {
+            ExecutionPolicyError::ExecutionPolicyUnavailable
+        });
+    }
+    if (caps.schema_version == 4) != (policy.schema_version == 2) {
+        return Err(ExecutionPolicyError::InvalidExecutionPolicy);
     }
     let snapshot = ExecutionSecuritySnapshot::Policy(Box::new(PolicySecuritySnapshot {
         schema_version: caps.schema_version,
@@ -892,6 +1398,11 @@ pub fn create_execution_admission_snapshot(
         process_isolation: ExecutionEnforcementEvidence::NotRequested {},
         environment: ExecutionEnforcementEvidence::NotApplied {},
         supervision: ExecutionEnforcementEvidence::NotApplied {},
+        resources: if caps.schema_version == 4 {
+            Some(ExecutionResourceEvidence::NotRequested {})
+        } else {
+            None
+        },
     }));
     snapshot.validate()?;
     Ok(snapshot)

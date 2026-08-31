@@ -464,6 +464,7 @@ fn run_probe(binary_path: &Path) -> Result<(), SeatbeltUnavailableReason> {
         network: NetworkPolicy::Deny,
         process_isolation: ProcessIsolationPolicy::Inherit,
         environment: EnvironmentPolicy::Explicit,
+        resources: None,
     };
     let invocation = build_invocation(&policy, &workspace, None)
         .map_err(|_| SeatbeltUnavailableReason::ProbeSetupFailed)?;
@@ -816,6 +817,7 @@ mod tests {
             network,
             process_isolation: ProcessIsolationPolicy::Inherit,
             environment: EnvironmentPolicy::Explicit,
+            resources: None,
         }
     }
 

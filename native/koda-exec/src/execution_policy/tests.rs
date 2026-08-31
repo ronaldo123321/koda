@@ -25,6 +25,14 @@ fn linux_fixtures() -> Value {
     .unwrap()
 }
 
+fn resource_fixtures() -> Value {
+    serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../packages/testkit/fixtures/execution-policy-v4.json"
+    )))
+    .unwrap()
+}
+
 fn base() -> ExecutionPolicy {
     resolve_execution_policy("/workspace", None, None).unwrap()
 }
@@ -216,6 +224,201 @@ fn shared_linux_snapshot_cases_match_typescript_validation() {
 }
 
 #[test]
+fn resource_policy_golden_bytes_digests_and_empty_normalization() {
+    let fixture = resource_fixtures();
+    for case in fixture["policy_cases"].as_array().unwrap() {
+        let policy = ExecutionPolicy::parse(case["input"].clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&policy).unwrap(),
+            case["normalized"],
+            "{}",
+            case["name"]
+        );
+        assert_eq!(
+            policy.canonical_json().unwrap(),
+            case["canonical"].as_str().unwrap(),
+            "{}",
+            case["name"]
+        );
+        assert_eq!(
+            policy.digest().unwrap(),
+            case["sha256"].as_str().unwrap(),
+            "{}",
+            case["name"]
+        );
+    }
+    let limits =
+        ExecutionResourceLimits::parse(fixture["policy_cases"][2]["input"]["resources"].clone())
+            .unwrap();
+    assert_eq!(
+        limits.canonical_json().unwrap(),
+        fixture["resource_canonical"].as_str().unwrap()
+    );
+    assert_eq!(
+        limits.digest().unwrap(),
+        fixture["resource_sha256"].as_str().unwrap()
+    );
+}
+
+#[test]
+fn resource_limits_are_strict_positive_and_javascript_safe() {
+    for name in [
+        "process_cpu_time_ms",
+        "process_address_space_bytes",
+        "job_process_count",
+        "process_open_files",
+        "process_file_size_bytes",
+    ] {
+        for valid in [1, EXECUTION_RESOURCE_LIMIT_MAX] {
+            ExecutionResourceLimits::parse(json!({ (name): valid })).unwrap();
+        }
+        for invalid in [0, EXECUTION_RESOURCE_LIMIT_MAX + 1] {
+            assert_eq!(
+                ExecutionResourceLimits::parse(json!({ (name): invalid })).unwrap_err(),
+                ExecutionPolicyError::InvalidExecutionPolicy
+            );
+        }
+    }
+    assert_eq!(
+        ExecutionResourceLimits::parse(json!({"secret":"fixture-secret-marker"})).unwrap_err(),
+        ExecutionPolicyError::InvalidExecutionPolicy
+    );
+    let mut v1 = serde_json::to_value(base()).unwrap();
+    v1["resources"] = json!({"process_cpu_time_ms": 1});
+    assert_eq!(
+        ExecutionPolicy::parse(v1).unwrap_err(),
+        ExecutionPolicyError::InvalidExecutionPolicy
+    );
+}
+
+#[test]
+fn resource_capability_wrappers_match_cross_language_golden_contract() {
+    let fixture = resource_fixtures();
+    let runtime =
+        LinuxBubblewrapRuntimeDescriptor::parse(linux_fixtures()["runtime"].clone()).unwrap();
+    let legacy = [
+        c1_execution_capabilities(ExecutionBackend::NativePosix),
+        macos_seatbelt_execution_capabilities(),
+        linux_bubblewrap_execution_capabilities(&runtime).unwrap(),
+    ];
+    for (case, legacy) in fixture["capability_cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(legacy)
+    {
+        let capability = resource_contract_execution_capabilities(&legacy).unwrap();
+        assert_eq!(capability.schema_version, 4);
+        assert_eq!(
+            capability.resource_limits,
+            Some(ExecutionResourceCapabilities::unsupported())
+        );
+        assert_eq!(
+            capability.canonical_json().unwrap(),
+            case["canonical"].as_str().unwrap(),
+            "{}",
+            case["name"]
+        );
+        assert_eq!(
+            capability.digest().unwrap(),
+            case["sha256"].as_str().unwrap(),
+            "{}",
+            case["name"]
+        );
+        assert_eq!(
+            resource_contract_execution_capabilities(&capability).unwrap_err(),
+            ExecutionPolicyError::InvalidExecutionPolicy
+        );
+    }
+}
+
+#[test]
+fn resource_requests_are_reported_and_rejected_before_admission() {
+    let fixture = resource_fixtures();
+    let base_policy = ExecutionPolicy::parse(fixture["policy_cases"][0]["input"].clone()).unwrap();
+    let caps = resource_contract_execution_capabilities(&c1_execution_capabilities(
+        ExecutionBackend::NativePosix,
+    ))
+    .unwrap();
+    for (dimension, resources) in [
+        (
+            ExecutionPolicyDimension::ProcessCpuTimeMs,
+            ExecutionResourceLimits {
+                process_cpu_time_ms: Some(1),
+                ..Default::default()
+            },
+        ),
+        (
+            ExecutionPolicyDimension::ProcessAddressSpaceBytes,
+            ExecutionResourceLimits {
+                process_address_space_bytes: Some(1),
+                ..Default::default()
+            },
+        ),
+        (
+            ExecutionPolicyDimension::JobProcessCount,
+            ExecutionResourceLimits {
+                job_process_count: Some(1),
+                ..Default::default()
+            },
+        ),
+        (
+            ExecutionPolicyDimension::ProcessOpenFiles,
+            ExecutionResourceLimits {
+                process_open_files: Some(1),
+                ..Default::default()
+            },
+        ),
+        (
+            ExecutionPolicyDimension::ProcessFileSizeBytes,
+            ExecutionResourceLimits {
+                process_file_size_bytes: Some(1),
+                ..Default::default()
+            },
+        ),
+    ] {
+        let policy = ExecutionPolicy {
+            resources: Some(resources),
+            ..base_policy.clone()
+        };
+        assert_eq!(
+            evaluate_execution_policy(&policy, &caps).unwrap(),
+            ExecutionPolicyEvaluation {
+                allowed: false,
+                unmet: vec![UnmetRequirement {
+                    dimension,
+                    reason: UnmetReason::NotImplemented,
+                }],
+            }
+        );
+        assert_eq!(
+            create_execution_admission_snapshot(&policy, &caps).unwrap_err(),
+            ExecutionPolicyError::ResourceLimitUnavailable
+        );
+    }
+}
+
+#[test]
+fn shared_v4_snapshots_preserve_resource_absence_without_inference() {
+    for case in resource_fixtures()["snapshot_cases"].as_array().unwrap() {
+        let parsed = ExecutionSecuritySnapshot::parse(case["input"].clone());
+        if case["valid"].as_bool().unwrap() {
+            assert_eq!(
+                serde_json::to_value(parsed.unwrap()).unwrap(),
+                case["input"],
+                "{}",
+                case["name"]
+            );
+        } else {
+            assert_eq!(
+                parsed.expect_err(case["name"].as_str().unwrap()),
+                ExecutionPolicyError::ExecutionSecurityCorrupt
+            );
+        }
+    }
+}
+
+#[test]
 fn linux_runtime_descriptor_is_strict_bounded_and_versioned() {
     let base = linux_fixtures()["runtime"].clone();
     for (field, value) in [
@@ -309,6 +512,9 @@ fn portable_path_cases_and_utf8_bounds() {
 #[test]
 fn invalid_and_missing_policy_fields_fail_safely() {
     for case in fixtures()["invalid_policy_cases"].as_array().unwrap() {
+        if case["name"] == "future-version" {
+            continue;
+        }
         let error = ExecutionPolicy::parse(case["input"].clone()).unwrap_err();
         assert_eq!(
             error,

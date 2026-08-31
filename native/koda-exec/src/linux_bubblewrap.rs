@@ -1194,6 +1194,7 @@ fn run_contract_probe(
         network: kind.network(),
         process_isolation: ProcessIsolationPolicy::Inherit,
         environment: EnvironmentPolicy::Explicit,
+        resources: None,
     };
     let digest = probe_digest(runtime, kind.name())?;
     let mut probe_argv = vec![
@@ -1258,6 +1259,7 @@ fn run_release_abort_probe(
         network: NetworkPolicy::Deny,
         process_isolation: ProcessIsolationPolicy::Inherit,
         environment: EnvironmentPolicy::Explicit,
+        resources: None,
     };
     let digest = probe_digest(runtime, "release-abort")?;
     let argv = vec![
@@ -1951,6 +1953,7 @@ mod tests {
             network,
             process_isolation: ProcessIsolationPolicy::Inherit,
             environment: EnvironmentPolicy::Explicit,
+            resources: None,
         }
     }
 
