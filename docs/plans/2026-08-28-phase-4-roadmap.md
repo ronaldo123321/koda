@@ -269,6 +269,10 @@ app-server process projection, and application/corruption/timeout gate
 failures with a never-executed sentinel. Linux resource enforcement remains
 Phase 4C4C; Windows resource enforcement remains deferred.
 
+The Phase 4C4B implementation was finalized at commit `490d316` and passed
+`verify`, `linux-native`, `macos-native`, and `windows-native` in
+[GitHub Actions run 33377612504](https://github.com/ronaldo123321/koda/actions/runs/33377612504).
+
 Deferred Windows sandbox work remains explicit: restricted-token and privilege
 policy, filesystem workspace/scratch rules, network denial, launch confirmation,
 Job Object and ConPTY integration, durable evidence, reparse-point and Named

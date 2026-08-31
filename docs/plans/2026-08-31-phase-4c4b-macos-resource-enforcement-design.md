@@ -1,6 +1,6 @@
 # Phase 4C4B macOS Resource Enforcement
 
-- Status: Implemented — local acceptance complete; same-commit CI pending
+- Status: Complete
 - Date: 2026-08-31
 - Depends on: completed Phase 4C4A resource policy, trusted admission,
   durability, and client projection
@@ -214,3 +214,12 @@ cover v1-v6 reads and v7 round trips. Real macOS integration tests cover CPU,
 file-size, descriptor exhaustion, Pipe, protected background PTY, attach/list/
 terminate retention, app-server projection, and all three injected bootstrap
 failure modes with a sentinel proving user code did not run.
+
+Implementation commit `00ab122` introduced the complete C4B contract and
+backend. Follow-up commits `b9c9366` and `490d316` reduced the shared launch
+surface to satisfy strict Clippy gates and repaired the Windows compatibility
+projection without enabling Windows resource enforcement. The finalized
+implementation tree passed `verify`, `linux-native`, `macos-native`, and
+`windows-native` in
+[GitHub Actions run 33377612504](https://github.com/ronaldo123321/koda/actions/runs/33377612504),
+closing Phase 4C4B.
