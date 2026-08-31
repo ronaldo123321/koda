@@ -147,6 +147,7 @@ fn validate_supported_request(resources: &ExecutionResourceLimits) -> io::Result
     if resources.is_empty()
         || resources.process_address_space_bytes.is_some()
         || resources.job_process_count.is_some()
+        || resources.job_task_count.is_some()
     {
         return Err(invalid_request("resource request is unsupported on macOS"));
     }
@@ -267,6 +268,7 @@ mod tests {
             process_cpu_time_ms: Some(1_000),
             process_address_space_bytes: None,
             job_process_count: None,
+            job_task_count: None,
             process_open_files: Some(64),
             process_file_size_bytes: None,
         };
@@ -290,6 +292,7 @@ mod tests {
             process_cpu_time_ms: None,
             process_address_space_bytes: Some(4_096),
             job_process_count: None,
+            job_task_count: None,
             process_open_files: None,
             process_file_size_bytes: None,
         };
@@ -298,6 +301,7 @@ mod tests {
             process_cpu_time_ms: Some(1_001),
             process_address_space_bytes: None,
             job_process_count: None,
+            job_task_count: None,
             process_open_files: None,
             process_file_size_bytes: None,
         };

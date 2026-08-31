@@ -318,7 +318,8 @@ pub fn launch_confirmation_digest(
     policy.validate()?;
     capabilities.validate()?;
     let contract_matches = (capabilities.schema_version == 3 && policy.schema_version == 1)
-        || (capabilities.schema_version == 4 && policy.schema_version == 2);
+        || (capabilities.schema_version == 4 && policy.schema_version == 2)
+        || (capabilities.schema_version == 5 && policy.schema_version == 3);
     if !contract_matches || capabilities.sandbox_runtime.as_ref() != Some(runtime) {
         return Err(ExecutionPolicyError::ExecutionPolicyUnavailable);
     }
@@ -2006,7 +2007,7 @@ mod tests {
             launch_confirmation_digest(&runtime, &read_only, &capabilities).unwrap()
         );
         let current_policy = ExecutionPolicy {
-            schema_version: 2,
+            schema_version: 3,
             ..read_only.clone()
         };
         let current_capabilities =

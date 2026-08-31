@@ -28,6 +28,14 @@ fn linux_fixtures() -> Value {
 fn resource_fixtures() -> Value {
     serde_json::from_str(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
+        "/../../packages/testkit/fixtures/execution-policy-v5.json"
+    )))
+    .unwrap()
+}
+
+fn legacy_resource_fixtures() -> Value {
+    serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
         "/../../packages/testkit/fixtures/execution-policy-v4.json"
     )))
     .unwrap()
@@ -273,7 +281,7 @@ fn resource_limits_are_strict_positive_and_javascript_safe() {
     for name in [
         "process_cpu_time_ms",
         "process_address_space_bytes",
-        "job_process_count",
+        "job_task_count",
         "process_open_files",
         "process_file_size_bytes",
     ] {
@@ -316,7 +324,7 @@ fn resource_capability_wrappers_match_cross_language_golden_contract() {
         .zip(legacy)
     {
         let capability = resource_contract_execution_capabilities(&legacy).unwrap();
-        assert_eq!(capability.schema_version, 4);
+        assert_eq!(capability.schema_version, 5);
         assert_eq!(
             capability.resource_limits,
             Some(ExecutionResourceCapabilities::unsupported())
@@ -338,6 +346,20 @@ fn resource_capability_wrappers_match_cross_language_golden_contract() {
             ExecutionPolicyError::InvalidExecutionPolicy
         );
     }
+
+    let macos_policy = ExecutionPolicy::parse(
+        fixture["snapshot_cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|case| case["name"] == "macos_admission")
+            .unwrap()["input"]["policy"]
+            .clone(),
+    )
+    .unwrap();
+    let wrapped =
+        resource_contract_execution_capabilities(&macos_seatbelt_execution_capabilities()).unwrap();
+    create_execution_admission_snapshot(&macos_policy, &wrapped).unwrap();
 }
 
 #[test]
@@ -364,9 +386,9 @@ fn resource_requests_are_reported_and_rejected_before_admission() {
             },
         ),
         (
-            ExecutionPolicyDimension::JobProcessCount,
+            ExecutionPolicyDimension::JobTaskCount,
             ExecutionResourceLimits {
-                job_process_count: Some(1),
+                job_task_count: Some(1),
                 ..Default::default()
             },
         ),
@@ -448,6 +470,7 @@ fn macos_rlimit_capability_admits_only_the_exact_supported_subset() {
         process_cpu_time_ms: Some(1_000),
         process_address_space_bytes: None,
         job_process_count: None,
+        job_task_count: None,
         process_open_files: Some(64),
         process_file_size_bytes: Some(4_096),
     });
@@ -489,7 +512,7 @@ fn macos_rlimit_capability_admits_only_the_exact_supported_subset() {
 }
 
 #[test]
-fn shared_v4_snapshots_preserve_resource_absence_without_inference() {
+fn shared_v5_snapshots_preserve_resource_absence_without_inference() {
     for case in resource_fixtures()["snapshot_cases"].as_array().unwrap() {
         let parsed = ExecutionSecuritySnapshot::parse(case["input"].clone());
         if case["valid"].as_bool().unwrap() {
@@ -506,6 +529,55 @@ fn shared_v4_snapshots_preserve_resource_absence_without_inference() {
             );
         }
     }
+}
+
+#[test]
+fn frozen_v2_v4_records_remain_readable_without_task_reinterpretation() {
+    let fixture = legacy_resource_fixtures();
+    for case in fixture["policy_cases"].as_array().unwrap() {
+        let policy = ExecutionPolicy::parse(case["input"].clone()).unwrap();
+        assert_eq!(policy.schema_version, 2);
+        assert!(
+            policy
+                .resources
+                .as_ref()
+                .is_none_or(|resources| resources.job_task_count.is_none())
+        );
+        assert_eq!(
+            policy.canonical_json().unwrap(),
+            case["canonical"].as_str().unwrap()
+        );
+        assert_eq!(policy.digest().unwrap(), case["sha256"].as_str().unwrap());
+    }
+    for case in fixture["snapshot_cases"].as_array().unwrap() {
+        let snapshot = ExecutionSecuritySnapshot::parse(case["input"].clone()).unwrap();
+        let ExecutionSecuritySnapshot::Policy(snapshot) = snapshot else {
+            panic!("expected policy snapshot")
+        };
+        assert_eq!(snapshot.schema_version, 4);
+        assert_eq!(snapshot.policy.schema_version, 2);
+    }
+
+    let mut legacy_as_current = fixture["policy_cases"][2]["input"].clone();
+    legacy_as_current["schema_version"] = json!(3);
+    assert_eq!(
+        ExecutionPolicy::parse(legacy_as_current).unwrap_err(),
+        ExecutionPolicyError::InvalidExecutionPolicy
+    );
+    let mut current_as_legacy = resource_fixtures()["policy_cases"][2]["input"].clone();
+    current_as_legacy["schema_version"] = json!(2);
+    assert_eq!(
+        ExecutionPolicy::parse(current_as_legacy).unwrap_err(),
+        ExecutionPolicyError::InvalidExecutionPolicy
+    );
+    assert_eq!(
+        ExecutionPolicyError::ResourceLimitIntegrityLost.code(),
+        "RESOURCE_LIMIT_INTEGRITY_LOST"
+    );
+    assert_eq!(
+        ExecutionPolicyError::ResourceLimitIntegrityLost.to_string(),
+        "The operating system resource limit contract lost integrity."
+    );
 }
 
 #[test]
@@ -655,7 +727,7 @@ fn invalid_and_missing_policy_fields_fail_safely() {
 #[test]
 fn profile_resolution_and_config_priority() {
     let unconfined = resolve_execution_policy("/workspace", None, Some("unconfined")).unwrap();
-    assert_eq!(unconfined.schema_version, 2);
+    assert_eq!(unconfined.schema_version, 3);
     assert_eq!(unconfined.filesystem, FilesystemPolicy::Unrestricted);
     assert_eq!(unconfined.network, NetworkPolicy::Inherit);
     assert!(unconfined.resources.is_none());

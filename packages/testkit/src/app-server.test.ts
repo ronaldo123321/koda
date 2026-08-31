@@ -76,7 +76,7 @@ describe("KodaAppServer", () => {
     await server.handleLine("not-json");
     await request(server, 1, "thread/list", {});
     await request(server, 2, "initialize", {
-      protocolVersion: 16,
+      protocolVersion: 17,
       client: { name: "wrong-version" },
     });
     await initialize(server, 3);

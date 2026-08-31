@@ -5,6 +5,7 @@ import type {
 import {
   createExecutionAdmissionSnapshot,
   linuxBubblewrapExecutionCapabilities,
+  macosResourceExecutionCapabilities,
   macosSeatbeltExecutionCapabilities,
   normalizeExecutionPolicy,
   resourceContractExecutionCapabilities,
@@ -14,14 +15,14 @@ import {
 export function macosProtectedAdmissionSecurity(): ExecutionSecuritySnapshot {
   return createExecutionAdmissionSnapshot(
     normalizeExecutionPolicy({
-      schema_version: 2,
+      schema_version: 3,
       workspace_root: "/workspace",
       filesystem: "workspace_write",
       network: "deny",
       process_isolation: "inherit",
       environment: "explicit",
     }),
-    resourceContractExecutionCapabilities(macosSeatbeltExecutionCapabilities()),
+    macosResourceExecutionCapabilities(),
   );
 }
 
@@ -53,7 +54,7 @@ export function linuxProtectedAdmissionSecurity(
 ): ExecutionSecuritySnapshot {
   return createExecutionAdmissionSnapshot(
     normalizeExecutionPolicy({
-      schema_version: 2,
+      schema_version: 3,
       workspace_root: workspaceRoot,
       filesystem: "workspace_write",
       network: "deny",
@@ -68,8 +69,8 @@ export function linuxProtectedLaunchSecurity(
   workspaceRoot = "/workspace",
 ): ExecutionSecuritySnapshot {
   const admission = linuxProtectedAdmissionSecurity(workspaceRoot);
-  if (admission.kind !== "policy" || admission.schema_version !== 4) {
-    throw new Error("Expected Linux v4 admission evidence.");
+  if (admission.kind !== "policy" || admission.schema_version !== 5) {
+    throw new Error("Expected Linux v5 admission evidence.");
   }
   return validateExecutionSecuritySnapshot({
     ...admission,
@@ -99,8 +100,8 @@ export function linuxProtectedLaunchSecurity(
 
 export function macosProtectedLaunchSecurity(): ExecutionSecuritySnapshot {
   const admission = macosProtectedAdmissionSecurity();
-  if (admission.kind !== "policy" || admission.schema_version !== 4) {
-    throw new Error("Expected macOS v4 admission evidence.");
+  if (admission.kind !== "policy" || admission.schema_version !== 5) {
+    throw new Error("Expected macOS v5 admission evidence.");
   }
   return validateExecutionSecuritySnapshot({
     ...admission,

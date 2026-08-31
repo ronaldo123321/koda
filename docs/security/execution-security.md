@@ -1,7 +1,7 @@
 # Koda Execution Security Guarantees
 
-- Scope: Phase 4C1, Phase 4C2A, Phase 4C2B, Phase 4C3A-C3D, and Phase 4C4A-C4B
-- Status: Current through C4B — sandbox and secret guarantees are complete;
+- Scope: Phase 4C1, Phase 4C2A, Phase 4C2B, Phase 4C3A-C3D, and Phase 4C4A-C4C1
+- Status: Current through C4C1 — sandbox and secret guarantees are complete;
   exact macOS per-process CPU, open-file, and file-size hard limits are enabled
 - Last updated: 2026-08-31
 
@@ -34,7 +34,7 @@ workspace root is added only after trusted workspace opening.
 
 ### macOS
 
-The native Supervisor advertises the current schema-v4 macOS contract only
+The native Supervisor advertises the current schema-v5 macOS contract only
 after a real startup self-test through the fixed system
 `/usr/bin/sandbox-exec` proves normal reads, denied writes, denied network
 access, and sandbox-internal confirmation. Pipe and PTY jobs share the same
@@ -45,7 +45,7 @@ only then can either an unconfined command gate or the final Seatbelt gate open.
 
 ### Linux
 
-The native Supervisor advertises the current schema-v4 resource wrapper over
+The native Supervisor advertises the current schema-v5 resource wrapper over
 Linux schema-v3 protection only after a real, multi-profile startup probe
 succeeds through the exact Bubblewrap executable recorded in its capability
 descriptor. Koda accepts only a trusted fixed system path or the explicit
@@ -84,12 +84,14 @@ resize, detach, Supervisor restart, reattach, and completion.
 
 ## Resource contract status
 
-Phase 4C4A defines TypeScript/Rust policy-v2 resource limits and schema-v4
-capability/security evidence for per-process CPU time, per-process address
-space, job-tree process count, per-process open files, and per-process file
-size. It also binds trusted configuration, approval identity, native admission,
-durability, and app-server/CLI/TUI projection without fabricating applied
-evidence.
+Phase 4C4C1 advances the current TypeScript/Rust contract to policy v3 and
+capability/security v5. It defines per-process CPU time, per-process address
+space, job-tree task count, per-process open files, and per-process file size.
+Historical policy-v2/security-v4 `job_process_count` records remain readable
+through frozen schemas and digest order, but are never upgraded or interpreted
+as task limits. Trusted configuration, approval identity, native admission,
+durability, and app-server/CLI/TUI projection remain bound without fabricating
+applied evidence.
 
 C4B enables the exact macOS subset whose operating-system semantics match the
 public contract:
@@ -104,21 +106,22 @@ Soft and hard values are equal, read back exactly with `getrlimit`, inherited
 across `exec`, and never rounded. An inexact CPU request fails admission.
 `process_address_space_bytes` remains unsupported because Darwin's available
 limit does not provide the promised hard virtual-address-space semantics.
-`job_process_count` remains unsupported because `RLIMIT_NPROC` is user-wide,
+`job_task_count` remains unsupported because `RLIMIT_NPROC` is user-wide,
 not scoped to a Koda job tree.
 
-Native protocol and durable format are v7. Formats v1-v6 remain readable
-without implicit upgrade; v6 always reconstructs the frozen all-unsupported
-C4A capability digest. A command without limits retains explicit
+Native protocol and durable format are v8. Formats v1-v7 remain readable
+without implicit upgrade; v6/v7 reconstruct their frozen schema-v4 capability
+digests while v8 accepts only current schema-v5 evidence. A command without
+limits retains explicit
 `not_requested` evidence. Unsupported Linux, Windows, macOS address-space, and
 macOS job-count requests fail before job creation with
 `RESOURCE_LIMIT_UNAVAILABLE`. Application, read-back, malformed confirmation,
 and confirmation-timeout failures retain `not_applied`, terminate the still
 gated child, and report `RESOURCE_LIMIT_APPLY_FAILED`.
 
-App-server v17 projects the same strict evidence through command/terminal
+App-server v18 projects the same strict evidence through command/terminal
 results, process events, and process list/attach/read/terminate summaries.
-Present public evidence must match retained schema-v4 security; historical
+Present public evidence must match retained schema-v5 security; historical
 absence remains absent. CLI and TUI use one bounded formatter and never expand
 capability objects or digests.
 

@@ -1,6 +1,6 @@
 # Phase 4C4C Linux Resource Enforcement
 
-- Status: Approved — implementation pending
+- Status: C4C1 implemented and locally verified; C4C2-C4C4 pending
 - Date: 2026-08-31
 - Depends on: completed Phase 4C4A resource contracts and Phase 4C4B macOS
   resource enforcement
@@ -164,7 +164,7 @@ failure rather than continuing to claim enforcement.
 
 ## Implementation sequence
 
-1. **C4C1 — contract upgrade:** policy v3, capability/security v5, native
+1. **C4C1 — contract upgrade (completed):** policy v3, capability/security v5, native
    protocol and durable v8, app-server v18, `job_task_count`, frozen historical
    reconstruction, shared fixtures, and fail-closed platform matrices.
 2. **C4C2 — Linux rlimits:** exact `RLIMIT_CPU`, `RLIMIT_AS`, `RLIMIT_NOFILE`,

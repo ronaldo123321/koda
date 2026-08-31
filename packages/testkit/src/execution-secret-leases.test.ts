@@ -24,7 +24,7 @@ import {
   SecretPolicyError,
   WorkspaceCommandRunner,
   createExecutionAdmissionSnapshot,
-  macosSeatbeltExecutionCapabilities,
+  macosResourceExecutionCapabilities,
   resourceContractExecutionCapabilities,
   registerExecCommandTool,
   registerExecTerminalTool,
@@ -378,9 +378,7 @@ describe("Phase 4C3B/C3C command approval", () => {
     });
     const nativeExecutor = {
       hello: async () => ({
-        execution_security: resourceContractExecutionCapabilities(
-          macosSeatbeltExecutionCapabilities(),
-        ),
+        execution_security: macosResourceExecutionCapabilities(),
       }),
       start: async (input: { secretLease?: { destroy(): void } }) => {
         expect(input.secretLease).toBeDefined();
@@ -592,7 +590,7 @@ function commandBinding(): SecretCommandBinding {
   });
   const security: ExecutionSecuritySnapshot = createExecutionAdmissionSnapshot(
     policy,
-    resourceContractExecutionCapabilities(macosSeatbeltExecutionCapabilities()),
+    macosResourceExecutionCapabilities(),
   );
   return {
     toolName: "exec_command",

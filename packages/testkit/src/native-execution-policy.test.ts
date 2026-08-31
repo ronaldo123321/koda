@@ -73,7 +73,7 @@ afterEach(async () => {
 
 describe("Phase 4C2 native admission and evidence", () => {
   it.runIf(process.platform === "darwin")(
-    "advertises v4 only after the real macOS Seatbelt self-test succeeds",
+    "advertises v5 only after the real macOS Seatbelt self-test succeeds",
     async () => {
       const fixture = await setup();
       const previous = process.env.KODA_REQUIRE_MACOS_SEATBELT;
@@ -87,10 +87,10 @@ describe("Phase 4C2 native admission and evidence", () => {
         else process.env.KODA_REQUIRE_MACOS_SEATBELT = previous;
       }
       await expect(client!.hello()).resolves.toMatchObject({
-        protocol_version: 7,
+        protocol_version: 8,
         platform: "macos",
         execution_security: {
-          schema_version: 4,
+          schema_version: 5,
           backend: "native_posix",
           filesystem: {
             supported: ["unrestricted", "read_only", "workspace_write"],
@@ -102,7 +102,7 @@ describe("Phase 4C2 native admission and evidence", () => {
   );
 
   it.runIf(process.platform === "linux")(
-    "advertises v4 only after the real Linux Bubblewrap self-test succeeds",
+    "advertises v5 only after the real Linux Bubblewrap self-test succeeds",
     async () => {
       const fixture = await setup();
       const previous = process.env.KODA_REQUIRE_LINUX_BUBBLEWRAP;
@@ -117,10 +117,10 @@ describe("Phase 4C2 native admission and evidence", () => {
       }
       const hello = await client!.hello();
       expect(hello).toMatchObject({
-        protocol_version: 7,
+        protocol_version: 8,
         platform: "linux",
         execution_security: {
-          schema_version: 4,
+          schema_version: 5,
           platform: "linux",
           backend: "native_posix",
           sandbox_runtime: {
@@ -139,11 +139,11 @@ describe("Phase 4C2 native admission and evidence", () => {
         },
       });
       if (
-        hello.execution_security.schema_version !== 4 ||
+        hello.execution_security.schema_version !== 5 ||
         !("platform" in hello.execution_security) ||
         hello.execution_security.platform !== "linux"
       ) {
-        throw new Error("Expected Linux execution-security schema v3.");
+        throw new Error("Expected Linux execution-security schema v5.");
       }
       const runtime = hello.execution_security.sandbox_runtime;
       expect(runtime.canonical_path).toMatch(/^\/(?!\/)/u);
@@ -179,7 +179,7 @@ describe("Phase 4C2 native admission and evidence", () => {
         else process.env.KODA_REQUIRE_LINUX_BUBBLEWRAP = previousRequired;
       }
       expect((await client!.hello()).execution_security).toMatchObject({
-        schema_version: 4,
+        schema_version: 5,
         sandbox_runtime: { canonical_path: wrapper },
       });
 
@@ -207,7 +207,7 @@ describe("Phase 4C2 native admission and evidence", () => {
         terminal.state,
       );
       expect(terminal.security).toMatchObject({
-        schema_version: 4,
+        schema_version: 5,
         stage: "admission",
         filesystem: { status: "not_applied" },
         network: { status: "not_applied" },
@@ -220,8 +220,8 @@ describe("Phase 4C2 native admission and evidence", () => {
     const fixture = await setup();
     const client = await open(fixture);
     const hello = await client.hello();
-    expect(hello.protocol_version).toBe(7);
-    expect(hello.execution_security.schema_version).toBe(4);
+    expect(hello.protocol_version).toBe(8);
+    expect(hello.execution_security.schema_version).toBe(5);
     expect(hello.execution_security.filesystem).toEqual(
       process.platform === "darwin"
         ? {
@@ -242,12 +242,12 @@ describe("Phase 4C2 native admission and evidence", () => {
     const currentManifest = await onlyManifest(fixture.root);
     expect(
       JSON.parse(await readFile(currentManifest.path, "utf8")).format_version,
-    ).toBe(7);
+    ).toBe(8);
     expect(
       JSON.parse(
         await readFile(join(currentManifest.directory, "state.json"), "utf8"),
       ).format_version,
-    ).toBe(7);
+    ).toBe(8);
     expect(terminal).toMatchObject({
       state: "exited",
       exit_code: 0,
@@ -309,12 +309,12 @@ describe("Phase 4C2 native admission and evidence", () => {
           ? [
               "process_cpu_time_ms",
               "process_address_space_bytes",
-              "job_process_count",
+              "job_task_count",
             ]
           : [
               "process_cpu_time_ms",
               "process_address_space_bytes",
-              "job_process_count",
+              "job_task_count",
               "process_open_files",
               "process_file_size_bytes",
             ];
@@ -490,7 +490,7 @@ describe("Phase 4C2 native admission and evidence", () => {
       const external = join(fixture.root, `external-probe-${mode}`);
       const client = await open(fixture);
       const contract = await activeProtectedContract(client);
-      if (contract?.schemaVersion !== 4) return;
+      if (contract?.schemaVersion !== 5) return;
       const input = await inputFor(workspace, "process.exit(99)");
       input.argv = [
         binaryPath,
@@ -522,7 +522,7 @@ describe("Phase 4C2 native admission and evidence", () => {
           exit_code: 0,
           failure: null,
           security: {
-            schema_version: 4,
+            schema_version: 5,
             stage: "launch_setup",
             filesystem: { status: "applied" },
             network: { status: "applied" },
@@ -655,7 +655,7 @@ describe("Phase 4C2 native admission and evidence", () => {
         }
         const client = await open(fixture);
         const contract = await activeProtectedContract(client);
-        if (contract?.schemaVersion !== 4) return;
+        if (contract?.schemaVersion !== 5) return;
         const code = [
           "const fs=require('node:fs'),net=require('node:net'),dgram=require('node:dgram');",
           filesystem === "workspace_write"
@@ -688,7 +688,7 @@ describe("Phase 4C2 native admission and evidence", () => {
           exit_code: 0,
           failure: null,
           security: {
-            schema_version: 4,
+            schema_version: 5,
             stage: "launch_setup",
             filesystem: { status: "applied" },
             network: { status: "not_requested" },
@@ -848,7 +848,7 @@ describe("Phase 4C2 native admission and evidence", () => {
       const fixture = await setup();
       const client = await open(fixture, faultPoint);
       const contract = await activeProtectedContract(client);
-      if (contract?.schemaVersion !== 4) return;
+      if (contract?.schemaVersion !== 5) return;
       const workspace = join(fixture.root, "workspace");
       await mkdir(workspace);
       const marker = join(workspace, `linux-not-released-${faultPoint}`);
@@ -867,7 +867,7 @@ describe("Phase 4C2 native admission and evidence", () => {
         terminal.state,
       );
       expect(terminal.security).toMatchObject({
-        schema_version: 4,
+        schema_version: 5,
         stage: "admission",
         filesystem: { status: "not_applied" },
         network: { status: "not_applied" },
@@ -885,7 +885,7 @@ describe("Phase 4C2 native admission and evidence", () => {
       const fixture = await setup();
       const client = await open(fixture, faultPoint);
       const contract = await activeProtectedContract(client);
-      if (contract?.schemaVersion !== 4) return;
+      if (contract?.schemaVersion !== 5) return;
       const workspace = join(fixture.root, "workspace");
       await mkdir(workspace);
       const marker = join(workspace, `linux-cleaned-${faultPoint}`);
@@ -910,7 +910,7 @@ describe("Phase 4C2 native admission and evidence", () => {
       }
       expect(terminal.state).toBe("termination_uncertain");
       expect(terminal.security).toMatchObject({
-        schema_version: 4,
+        schema_version: 5,
         stage: "launch_setup",
         filesystem: {
           status: "applied",
@@ -934,11 +934,11 @@ describe("Phase 4C2 native admission and evidence", () => {
     for (const policy of [
       undefined,
       null,
-      { ...input.policy!, schema_version: 3 },
+      { ...input.policy!, schema_version: 4 },
       { ...input.policy!, secret: "fixture-sensitive-marker" },
     ]) {
       const value = policy === undefined ? params : { ...params, policy };
-      const response = await rpc(client.socketPath, 7, "job/start", value);
+      const response = await rpc(client.socketPath, 8, "job/start", value);
       expect(response).toMatchObject({
         ok: false,
         error: { code: "INVALID_EXECUTION_POLICY" },
@@ -1010,7 +1010,7 @@ describe("Phase 4C2 native admission and evidence", () => {
 // Optional cross-version acceptance uses the real pinned v1 binary, not a fake
 // Worker. Build commit 3aa84ee and set KODA_LEGACY_EXECUTOR_BINARY to run it.
 describe.skipIf(legacyBinary === undefined || process.platform === "win32")(
-  "native v1 -> v7 live compatibility",
+  "native v1 -> v8 live compatibility",
   () => {
     it("refuses a live v1 Supervisor without replacing it", async () => {
       const fixture = await setup();
@@ -1131,23 +1131,23 @@ describe.skipIf(legacyBinary === undefined || process.platform === "win32")(
 async function activeProtectedContract(client: NativeExecutorClient) {
   const security = (await client.hello()).execution_security;
   if (
-    security.schema_version === 4 &&
+    security.schema_version === 5 &&
     "platform" in security &&
     security.platform === "macos"
   ) {
     return {
-      schemaVersion: 4,
+      schemaVersion: 5,
       filesystemMechanism: "macos_seatbelt",
       networkMechanism: "macos_seatbelt",
     } as const;
   }
   if (
-    security.schema_version === 4 &&
+    security.schema_version === 5 &&
     "platform" in security &&
     security.platform === "linux"
   ) {
     return {
-      schemaVersion: 4,
+      schemaVersion: 5,
       filesystemMechanism: "linux_bubblewrap_mount_namespace",
       networkMechanism: "linux_network_namespace_seccomp",
     } as const;

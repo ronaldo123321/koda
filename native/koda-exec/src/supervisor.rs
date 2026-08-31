@@ -197,7 +197,7 @@ impl Supervisor {
                 .map_err(crate::protocol::secret_policy_error)?;
             if self.execution_capabilities.backend
                 != crate::execution_policy::ExecutionBackend::NativePosix
-                || self.execution_capabilities.schema_version != 4
+                || self.execution_capabilities.schema_version != 5
                 || self.execution_capabilities.platform.is_none()
                 || params.secrets.as_ref() != Some(&lease.evidence)
             {

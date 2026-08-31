@@ -171,7 +171,7 @@ describe("WorkspaceCommandRunner", () => {
       "expected OS sandbox: Linux Bubblewrap + seccomp",
     );
     expect(command.security).toMatchObject({
-      schema_version: 4,
+      schema_version: 5,
       platform: "linux",
       stage: "admission",
       sandbox_runtime: { mechanism: "linux_bubblewrap" },

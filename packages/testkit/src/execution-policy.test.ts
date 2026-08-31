@@ -10,7 +10,9 @@ import {
   executionResourceEvidenceEqual,
   executionResourceEvidenceFromSecurity,
   executionResourceEvidenceSchema,
+  executionResourceEvidenceV4Schema,
   executionResourceLimitsSchema,
+  executionResourceLimitsV2Schema,
   executionResourceSummary,
   executionSecuritySnapshotSchema,
   isExecutionWorkspacePath,
@@ -130,6 +132,12 @@ const linuxFixtures: LinuxFixtures = JSON.parse(
 const linuxCaps = linuxBubblewrapExecutionCapabilities(linuxFixtures.runtime);
 const resourceFixtures: ResourceContractFixtures = JSON.parse(
   readFileSync(
+    new URL("../fixtures/execution-policy-v5.json", import.meta.url),
+    "utf8",
+  ),
+);
+const legacyResourceFixtures: ResourceContractFixtures = JSON.parse(
+  readFileSync(
     new URL("../fixtures/execution-policy-v4.json", import.meta.url),
     "utf8",
   ),
@@ -228,7 +236,7 @@ describe("Phase 4C1A execution policy contract", () => {
   });
 
   it("resolves default, named profiles, and explicit configuration priority", () => {
-    const currentBase = { ...base, schema_version: 2 } as const;
+    const currentBase = { ...base, schema_version: 3 } as const;
     expect(resolveExecutionPolicy({ workspaceRoot: "/workspace" })).toEqual(
       currentBase,
     );
@@ -263,7 +271,7 @@ describe("Phase 4C1A execution policy contract", () => {
       environmentProfile: "invalid-ignored-by-explicit-option",
     });
     expect(resolved).toMatchObject(config);
-    expect(resolved.schema_version).toBe(2);
+    expect(resolved.schema_version).toBe(3);
     config.filesystem = "unrestricted";
     expect(resolved.filesystem).toBe("read_only");
     expect(Object.isFrozen(resolved)).toBe(true);
@@ -792,14 +800,14 @@ describe("Phase 4C2B1 Linux Bubblewrap contract", () => {
   });
 });
 
-describe("Phase 4C4A1 resource policy contract", () => {
+describe("Phase 4C4C1 resource policy contract", () => {
   const legacyCapabilities = [caps, macosCaps, linuxCaps] as const;
   const resourceCapabilities = legacyCapabilities.map((value) =>
     resourceContractExecutionCapabilities(value),
   );
 
   it.each(resourceFixtures.policy_cases)(
-    "matches v2 policy bytes and SHA-256: $name",
+    "matches v3 policy bytes and SHA-256: $name",
     ({ input, normalized, canonical, sha256 }) => {
       expect(executionPolicySchema.parse(input)).toEqual(input);
       expect(normalizeExecutionPolicy(reverseKeys(input))).toEqual(normalized);
@@ -829,7 +837,7 @@ describe("Phase 4C4A1 resource policy contract", () => {
     for (const name of [
       "process_cpu_time_ms",
       "process_address_space_bytes",
-      "job_process_count",
+      "job_task_count",
       "process_open_files",
       "process_file_size_bytes",
     ]) {
@@ -865,6 +873,64 @@ describe("Phase 4C4A1 resource policy contract", () => {
         resources: { process_cpu_time_ms: 1 },
       }).success,
     ).toBe(false);
+    expect(
+      executionResourceLimitsSchema.safeParse({ job_process_count: 1 }).success,
+    ).toBe(false);
+    expect(
+      executionResourceLimitsV2Schema.safeParse({ job_task_count: 1 }).success,
+    ).toBe(false);
+  });
+
+  it("reads frozen v2/v4 records without reinterpreting process counts as tasks", () => {
+    for (const policyCase of legacyResourceFixtures.policy_cases) {
+      expect(executionPolicySchema.parse(policyCase.input)).toEqual(
+        policyCase.input,
+      );
+      expect(canonicalExecutionPolicy(reverseKeys(policyCase.input))).toBe(
+        policyCase.canonical,
+      );
+      expect(executionPolicyDigest(policyCase.input)).toBe(policyCase.sha256);
+    }
+    for (const snapshotCase of legacyResourceFixtures.snapshot_cases) {
+      expect(validateExecutionSecuritySnapshot(snapshotCase.input)).toEqual(
+        snapshotCase.input,
+      );
+      const snapshot = executionSecuritySnapshotSchema.parse(
+        snapshotCase.input,
+      );
+      expect(executionResourceEvidenceFromSecurity(snapshot)).toBeUndefined();
+      if (
+        snapshot.kind === "policy" &&
+        snapshot.schema_version === 4 &&
+        snapshot.resources.status !== "not_requested"
+      ) {
+        expect(
+          executionResourceEvidenceV4Schema.parse(snapshot.resources),
+        ).toEqual(snapshot.resources);
+      }
+    }
+    const legacyAll = legacyResourceFixtures.policy_cases.find(
+      ({ name }) => name === "all_resources",
+    )!.input as Record<string, unknown>;
+    const currentAll = resourceFixtures.policy_cases.find(
+      ({ name }) => name === "all_resources",
+    )!.input as Record<string, unknown>;
+    expect(
+      executionPolicySchema.safeParse({ ...legacyAll, schema_version: 3 })
+        .success,
+    ).toBe(false);
+    expect(
+      executionPolicySchema.safeParse({ ...currentAll, schema_version: 2 })
+        .success,
+    ).toBe(false);
+  });
+
+  it("exposes the stable post-release resource-integrity error without details", () => {
+    const error = new ExecutionPolicyError("RESOURCE_LIMIT_INTEGRITY_LOST");
+    expect(error.code).toBe("RESOURCE_LIMIT_INTEGRITY_LOST");
+    expect(error.message).toBe(
+      "The operating system resource limit contract lost integrity.",
+    );
   });
 
   it.each(resourceFixtures.capability_cases)(
@@ -874,8 +940,8 @@ describe("Phase 4C4A1 resource policy contract", () => {
         (candidate) => candidate.name === name,
       );
       const capability = resourceCapabilities[index]!;
-      if (capability.schema_version !== 4) {
-        throw new Error("Expected schema-v4 resource capabilities.");
+      if (capability.schema_version !== 5) {
+        throw new Error("Expected schema-v5 resource capabilities.");
       }
       expect(executionCapabilitiesSchema.parse(capability)).toEqual(capability);
       expect(canonicalExecutionCapabilities(reverseKeys(capability))).toBe(
@@ -899,10 +965,25 @@ describe("Phase 4C4A1 resource policy contract", () => {
     },
   );
 
-  it("rejects fabricated v4 support and wrapping an already wrapped capability", () => {
+  it("keeps a truthful all-unsupported v5 macOS wrapper usable for no-resource admission", () => {
+    const capability = resourceContractExecutionCapabilities(macosCaps);
+    const policy = (
+      resourceFixtures.snapshot_cases.find(
+        ({ name }) => name === "macos_admission",
+      )!.input as { policy: ExecutionPolicy }
+    ).policy;
+    expect(createExecutionAdmissionSnapshot(policy, capability)).toMatchObject({
+      schema_version: 5,
+      platform: "macos",
+      capabilities_digest: executionCapabilitiesDigest(capability),
+      resources: { status: "not_requested" },
+    });
+  });
+
+  it("rejects fabricated v5 support and wrapping an already wrapped capability", () => {
     const capability = resourceCapabilities[0]!;
-    if (capability.schema_version !== 4) {
-      throw new Error("Expected schema-v4 resource capabilities.");
+    if (capability.schema_version !== 5) {
+      throw new Error("Expected schema-v5 resource capabilities.");
     }
     const fabricated = {
       ...capability,
@@ -935,7 +1016,7 @@ describe("Phase 4C4A1 resource policy contract", () => {
     for (const name of [
       "process_cpu_time_ms",
       "process_address_space_bytes",
-      "job_process_count",
+      "job_task_count",
       "process_open_files",
       "process_file_size_bytes",
     ] as const) {
@@ -961,8 +1042,8 @@ describe("Phase 4C4A1 resource policy contract", () => {
     const capability = macosResourceExecutionCapabilities();
     const golden = resourceFixtures.macos_rlimit_capability;
     expect(executionCapabilitiesSchema.parse(capability)).toEqual(capability);
-    if (capability.schema_version !== 4) {
-      throw new Error("Expected schema-v4 macOS resource capabilities.");
+    if (capability.schema_version !== 5) {
+      throw new Error("Expected schema-v5 macOS resource capabilities.");
     }
     expect(capability.resource_limits).toEqual(golden.resource_limits);
     expect(capability.resource_limits).toEqual(
@@ -1086,7 +1167,7 @@ describe("Phase 4C4A1 resource policy contract", () => {
   });
 
   it.each(resourceFixtures.snapshot_cases)(
-    "validates shared v4 retained evidence: $name",
+    "validates shared v5 retained evidence: $name",
     ({ input, valid }) => {
       expect(valid).toBe(true);
       expect(
@@ -1165,10 +1246,10 @@ describe("Phase 4C4A1 resource policy contract", () => {
     );
   });
 
-  it("resolves trusted profiles to v2 and normalizes resource limits", () => {
+  it("resolves trusted profiles to v3 and normalizes resource limits", () => {
     expect(resolveExecutionPolicy({ workspaceRoot: "/workspace" })).toEqual({
       ...base,
-      schema_version: 2,
+      schema_version: 3,
     });
     expect(
       resolveExecutionPolicy({
@@ -1182,7 +1263,7 @@ describe("Phase 4C4A1 resource policy contract", () => {
         },
       }),
     ).toMatchObject({
-      schema_version: 2,
+      schema_version: 3,
       resources: { process_open_files: 64 },
     });
   });

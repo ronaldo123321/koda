@@ -1,0 +1,454 @@
+{
+  "policy_cases": [
+    {
+      "name": "no_resources",
+      "input": {
+        "schema_version": 3,
+        "workspace_root": "/workspace",
+        "filesystem": "unrestricted",
+        "network": "inherit",
+        "process_isolation": "inherit",
+        "environment": "explicit"
+      },
+      "normalized": {
+        "schema_version": 3,
+        "workspace_root": "/workspace",
+        "filesystem": "unrestricted",
+        "network": "inherit",
+        "process_isolation": "inherit",
+        "environment": "explicit"
+      },
+      "canonical": "{\"schema_version\":3,\"workspace_root\":\"/workspace\",\"filesystem\":\"unrestricted\",\"network\":\"inherit\",\"process_isolation\":\"inherit\",\"environment\":\"explicit\"}",
+      "sha256": "e94b7fda7cfdf7c3f17931d96f7b799cb59aabcdf2c6ac2ff76d562e71207ba5"
+    },
+    {
+      "name": "empty_resources",
+      "input": {
+        "schema_version": 3,
+        "workspace_root": "/workspace",
+        "filesystem": "unrestricted",
+        "network": "inherit",
+        "process_isolation": "inherit",
+        "environment": "explicit",
+        "resources": {}
+      },
+      "normalized": {
+        "schema_version": 3,
+        "workspace_root": "/workspace",
+        "filesystem": "unrestricted",
+        "network": "inherit",
+        "process_isolation": "inherit",
+        "environment": "explicit"
+      },
+      "canonical": "{\"schema_version\":3,\"workspace_root\":\"/workspace\",\"filesystem\":\"unrestricted\",\"network\":\"inherit\",\"process_isolation\":\"inherit\",\"environment\":\"explicit\"}",
+      "sha256": "e94b7fda7cfdf7c3f17931d96f7b799cb59aabcdf2c6ac2ff76d562e71207ba5"
+    },
+    {
+      "name": "all_resources",
+      "input": {
+        "schema_version": 3,
+        "workspace_root": "/workspace",
+        "filesystem": "unrestricted",
+        "network": "inherit",
+        "process_isolation": "inherit",
+        "environment": "explicit",
+        "resources": {
+          "process_cpu_time_ms": 60000,
+          "process_address_space_bytes": 1073741824,
+          "job_task_count": 64,
+          "process_open_files": 1024,
+          "process_file_size_bytes": 268435456
+        }
+      },
+      "normalized": {
+        "schema_version": 3,
+        "workspace_root": "/workspace",
+        "filesystem": "unrestricted",
+        "network": "inherit",
+        "process_isolation": "inherit",
+        "environment": "explicit",
+        "resources": {
+          "process_cpu_time_ms": 60000,
+          "process_address_space_bytes": 1073741824,
+          "job_task_count": 64,
+          "process_open_files": 1024,
+          "process_file_size_bytes": 268435456
+        }
+      },
+      "canonical": "{\"schema_version\":3,\"workspace_root\":\"/workspace\",\"filesystem\":\"unrestricted\",\"network\":\"inherit\",\"process_isolation\":\"inherit\",\"environment\":\"explicit\",\"resources\":{\"process_cpu_time_ms\":60000,\"process_address_space_bytes\":1073741824,\"job_task_count\":64,\"process_open_files\":1024,\"process_file_size_bytes\":268435456}}",
+      "sha256": "0b59f398f87e80a018586ad60b34c6b0a54e438c74aa1b9fa8f951feb16fe905"
+    }
+  ],
+  "resource_canonical": "{\"process_cpu_time_ms\":60000,\"process_address_space_bytes\":1073741824,\"job_task_count\":64,\"process_open_files\":1024,\"process_file_size_bytes\":268435456}",
+  "resource_sha256": "430a02cfcc1db2de75f783bef0754734621563d388df81ec177dd38a6d33c2b1",
+  "macos_rlimit_capability": {
+    "resource_limits": {
+      "process_cpu_time_ms": {
+        "status": "supported",
+        "backend": "posix_rlimit",
+        "scope": "process",
+        "enforcement": "kernel_hard",
+        "granularity": 1000
+      },
+      "process_address_space_bytes": {
+        "status": "unsupported"
+      },
+      "job_task_count": {
+        "status": "unsupported"
+      },
+      "process_open_files": {
+        "status": "supported",
+        "backend": "posix_rlimit",
+        "scope": "process",
+        "enforcement": "kernel_hard",
+        "granularity": 1
+      },
+      "process_file_size_bytes": {
+        "status": "supported",
+        "backend": "posix_rlimit",
+        "scope": "process",
+        "enforcement": "kernel_hard",
+        "granularity": 1
+      }
+    },
+    "resource_canonical": "{\"process_cpu_time_ms\":{\"status\":\"supported\",\"backend\":\"posix_rlimit\",\"scope\":\"process\",\"enforcement\":\"kernel_hard\",\"granularity\":1000},\"process_address_space_bytes\":{\"status\":\"unsupported\"},\"job_task_count\":{\"status\":\"unsupported\"},\"process_open_files\":{\"status\":\"supported\",\"backend\":\"posix_rlimit\",\"scope\":\"process\",\"enforcement\":\"kernel_hard\",\"granularity\":1},\"process_file_size_bytes\":{\"status\":\"supported\",\"backend\":\"posix_rlimit\",\"scope\":\"process\",\"enforcement\":\"kernel_hard\",\"granularity\":1}}",
+    "resource_sha256": "f466e8669c1979e476d2a8d26b753a1a3fdcfedf791b1640739768650deb2d00",
+    "canonical": "{\"schema_version\":5,\"platform\":\"macos\",\"backend\":\"native_posix\",\"filesystem\":{\"supported\":[\"unrestricted\",\"read_only\",\"workspace_write\"],\"mechanism\":\"macos_seatbelt\"},\"network\":{\"supported\":[\"inherit\",\"deny\"],\"mechanism\":\"macos_seatbelt\"},\"process_isolation\":{\"supported\":[\"inherit\"],\"mechanism\":\"none\"},\"environment\":{\"supported\":[\"explicit\"],\"mechanism\":\"explicit_environment\",\"layer\":\"application\"},\"supervision\":{\"mechanism\":\"posix_process_group\",\"layer\":\"os\",\"durable\":true},\"resource_limits\":{\"process_cpu_time_ms\":{\"status\":\"supported\",\"backend\":\"posix_rlimit\",\"scope\":\"process\",\"enforcement\":\"kernel_hard\",\"granularity\":1000},\"process_address_space_bytes\":{\"status\":\"unsupported\"},\"job_task_count\":{\"status\":\"unsupported\"},\"process_open_files\":{\"status\":\"supported\",\"backend\":\"posix_rlimit\",\"scope\":\"process\",\"enforcement\":\"kernel_hard\",\"granularity\":1},\"process_file_size_bytes\":{\"status\":\"supported\",\"backend\":\"posix_rlimit\",\"scope\":\"process\",\"enforcement\":\"kernel_hard\",\"granularity\":1}}}",
+    "sha256": "6de32784d16e76df4bface190ed8062a27f2c561a240f5fe9f865b77a439e6a2"
+  },
+  "capability_cases": [
+    {
+      "name": "generic_native_posix",
+      "canonical": "{\"schema_version\":5,\"backend\":\"native_posix\",\"filesystem\":{\"supported\":[\"unrestricted\"],\"mechanism\":\"none\"},\"network\":{\"supported\":[\"inherit\"],\"mechanism\":\"none\"},\"process_isolation\":{\"supported\":[\"inherit\"],\"mechanism\":\"none\"},\"environment\":{\"supported\":[\"explicit\"],\"mechanism\":\"explicit_environment\",\"layer\":\"application\"},\"supervision\":{\"mechanism\":\"posix_process_group\",\"layer\":\"os\",\"durable\":true},\"resource_limits\":{\"process_cpu_time_ms\":{\"status\":\"unsupported\"},\"process_address_space_bytes\":{\"status\":\"unsupported\"},\"job_task_count\":{\"status\":\"unsupported\"},\"process_open_files\":{\"status\":\"unsupported\"},\"process_file_size_bytes\":{\"status\":\"unsupported\"}}}",
+      "sha256": "90805ce2408c2555d2b8c441feb4f1696e0877e08a38e2a18be19c98cdb73e8e"
+    },
+    {
+      "name": "macos_seatbelt",
+      "canonical": "{\"schema_version\":5,\"platform\":\"macos\",\"backend\":\"native_posix\",\"filesystem\":{\"supported\":[\"unrestricted\",\"read_only\",\"workspace_write\"],\"mechanism\":\"macos_seatbelt\"},\"network\":{\"supported\":[\"inherit\",\"deny\"],\"mechanism\":\"macos_seatbelt\"},\"process_isolation\":{\"supported\":[\"inherit\"],\"mechanism\":\"none\"},\"environment\":{\"supported\":[\"explicit\"],\"mechanism\":\"explicit_environment\",\"layer\":\"application\"},\"supervision\":{\"mechanism\":\"posix_process_group\",\"layer\":\"os\",\"durable\":true},\"resource_limits\":{\"process_cpu_time_ms\":{\"status\":\"unsupported\"},\"process_address_space_bytes\":{\"status\":\"unsupported\"},\"job_task_count\":{\"status\":\"unsupported\"},\"process_open_files\":{\"status\":\"unsupported\"},\"process_file_size_bytes\":{\"status\":\"unsupported\"}}}",
+      "sha256": "19021f6f9be09ae63666dc27adea7978b7e4f28f0c66dcc412121bf06a8ecc3e"
+    },
+    {
+      "name": "linux_bubblewrap",
+      "canonical": "{\"schema_version\":5,\"platform\":\"linux\",\"backend\":\"native_posix\",\"sandbox_runtime\":{\"schema_version\":1,\"mechanism\":\"linux_bubblewrap\",\"canonical_path\":\"/usr/bin/bwrap\",\"device\":\"2049\",\"inode\":\"123456789\",\"size\":123456,\"mtime_ns\":\"1788076800123456789\",\"sha256\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"version\":\"bubblewrap 0.11.0\",\"probe_revision\":1},\"filesystem\":{\"supported\":[\"unrestricted\",\"read_only\",\"workspace_write\"],\"mechanism\":\"linux_bubblewrap_mount_namespace\"},\"network\":{\"supported\":[\"inherit\",\"deny\"],\"mechanism\":\"linux_network_namespace_seccomp\"},\"process_isolation\":{\"supported\":[\"inherit\"],\"mechanism\":\"none\"},\"environment\":{\"supported\":[\"explicit\"],\"mechanism\":\"explicit_environment\",\"layer\":\"application\"},\"supervision\":{\"mechanism\":\"posix_process_group\",\"layer\":\"os\",\"durable\":true},\"resource_limits\":{\"process_cpu_time_ms\":{\"status\":\"unsupported\"},\"process_address_space_bytes\":{\"status\":\"unsupported\"},\"job_task_count\":{\"status\":\"unsupported\"},\"process_open_files\":{\"status\":\"unsupported\"},\"process_file_size_bytes\":{\"status\":\"unsupported\"}}}",
+      "sha256": "9c68f9fed3d895916562dfa031151585922c783a7ee9b312153288574c237023"
+    }
+  ],
+  "snapshot_cases": [
+    {
+      "name": "generic_admission",
+      "input": {
+        "schema_version": 5,
+        "kind": "policy",
+        "stage": "admission",
+        "policy": {
+          "schema_version": 3,
+          "workspace_root": "/workspace",
+          "filesystem": "unrestricted",
+          "network": "inherit",
+          "process_isolation": "inherit",
+          "environment": "explicit"
+        },
+        "policy_digest": "e94b7fda7cfdf7c3f17931d96f7b799cb59aabcdf2c6ac2ff76d562e71207ba5",
+        "capabilities_digest": "90805ce2408c2555d2b8c441feb4f1696e0877e08a38e2a18be19c98cdb73e8e",
+        "backend": "native_posix",
+        "filesystem": {
+          "status": "not_requested"
+        },
+        "network": {
+          "status": "not_requested"
+        },
+        "process_isolation": {
+          "status": "not_requested"
+        },
+        "environment": {
+          "status": "not_applied"
+        },
+        "supervision": {
+          "status": "not_applied"
+        },
+        "resources": {
+          "status": "not_requested"
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "macos_admission",
+      "input": {
+        "schema_version": 5,
+        "kind": "policy",
+        "platform": "macos",
+        "stage": "admission",
+        "policy": {
+          "schema_version": 3,
+          "workspace_root": "/workspace",
+          "filesystem": "workspace_write",
+          "network": "deny",
+          "process_isolation": "inherit",
+          "environment": "explicit"
+        },
+        "policy_digest": "d4e37511ba543cdc101f5a46132a43c2b0d8f77b7df54a4cea8e096f83a529b7",
+        "capabilities_digest": "6de32784d16e76df4bface190ed8062a27f2c561a240f5fe9f865b77a439e6a2",
+        "backend": "native_posix",
+        "filesystem": {
+          "status": "not_applied"
+        },
+        "network": {
+          "status": "not_applied"
+        },
+        "process_isolation": {
+          "status": "not_requested"
+        },
+        "environment": {
+          "status": "not_applied"
+        },
+        "supervision": {
+          "status": "not_applied"
+        },
+        "resources": {
+          "status": "not_requested"
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "macos_rlimit_admission",
+      "input": {
+        "schema_version": 5,
+        "kind": "policy",
+        "platform": "macos",
+        "stage": "admission",
+        "policy": {
+          "schema_version": 3,
+          "workspace_root": "/workspace",
+          "filesystem": "unrestricted",
+          "network": "inherit",
+          "process_isolation": "inherit",
+          "environment": "explicit",
+          "resources": {
+            "process_cpu_time_ms": 1000,
+            "process_open_files": 64,
+            "process_file_size_bytes": 4096
+          }
+        },
+        "policy_digest": "cac68abda8d30d82eab3e455489f12ae969b851ee109376e32af52a6b7d0eff2",
+        "capabilities_digest": "6de32784d16e76df4bface190ed8062a27f2c561a240f5fe9f865b77a439e6a2",
+        "backend": "native_posix",
+        "filesystem": {
+          "status": "not_requested"
+        },
+        "network": {
+          "status": "not_requested"
+        },
+        "process_isolation": {
+          "status": "not_requested"
+        },
+        "environment": {
+          "status": "not_applied"
+        },
+        "supervision": {
+          "status": "not_applied"
+        },
+        "resources": {
+          "status": "not_applied",
+          "requested": {
+            "process_cpu_time_ms": 1000,
+            "process_open_files": 64,
+            "process_file_size_bytes": 4096
+          },
+          "requested_digest": "0923a5f7ac4fe7b87afe7a1d772cd3a1a1a80892a9ee341dc188b8e740c0a169",
+          "available": {
+            "process_cpu_time_ms": {
+              "status": "supported",
+              "backend": "posix_rlimit",
+              "scope": "process",
+              "enforcement": "kernel_hard",
+              "granularity": 1000
+            },
+            "process_address_space_bytes": {
+              "status": "unsupported"
+            },
+            "job_task_count": {
+              "status": "unsupported"
+            },
+            "process_open_files": {
+              "status": "supported",
+              "backend": "posix_rlimit",
+              "scope": "process",
+              "enforcement": "kernel_hard",
+              "granularity": 1
+            },
+            "process_file_size_bytes": {
+              "status": "supported",
+              "backend": "posix_rlimit",
+              "scope": "process",
+              "enforcement": "kernel_hard",
+              "granularity": 1
+            }
+          },
+          "available_digest": "f466e8669c1979e476d2a8d26b753a1a3fdcfedf791b1640739768650deb2d00"
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "macos_rlimit_applied",
+      "input": {
+        "schema_version": 5,
+        "kind": "policy",
+        "platform": "macos",
+        "stage": "launch_setup",
+        "policy": {
+          "schema_version": 3,
+          "workspace_root": "/workspace",
+          "filesystem": "unrestricted",
+          "network": "inherit",
+          "process_isolation": "inherit",
+          "environment": "explicit",
+          "resources": {
+            "process_cpu_time_ms": 1000,
+            "process_open_files": 64,
+            "process_file_size_bytes": 4096
+          }
+        },
+        "policy_digest": "cac68abda8d30d82eab3e455489f12ae969b851ee109376e32af52a6b7d0eff2",
+        "capabilities_digest": "6de32784d16e76df4bface190ed8062a27f2c561a240f5fe9f865b77a439e6a2",
+        "backend": "native_posix",
+        "filesystem": {
+          "status": "not_requested"
+        },
+        "network": {
+          "status": "not_requested"
+        },
+        "process_isolation": {
+          "status": "not_requested"
+        },
+        "environment": {
+          "status": "applied",
+          "mechanism": "explicit_environment",
+          "layer": "application"
+        },
+        "supervision": {
+          "status": "applied",
+          "mechanism": "posix_process_group",
+          "layer": "os"
+        },
+        "resources": {
+          "status": "applied",
+          "requested": {
+            "process_cpu_time_ms": 1000,
+            "process_open_files": 64,
+            "process_file_size_bytes": 4096
+          },
+          "requested_digest": "0923a5f7ac4fe7b87afe7a1d772cd3a1a1a80892a9ee341dc188b8e740c0a169",
+          "available": {
+            "process_cpu_time_ms": {
+              "status": "supported",
+              "backend": "posix_rlimit",
+              "scope": "process",
+              "enforcement": "kernel_hard",
+              "granularity": 1000
+            },
+            "process_address_space_bytes": {
+              "status": "unsupported"
+            },
+            "job_task_count": {
+              "status": "unsupported"
+            },
+            "process_open_files": {
+              "status": "supported",
+              "backend": "posix_rlimit",
+              "scope": "process",
+              "enforcement": "kernel_hard",
+              "granularity": 1
+            },
+            "process_file_size_bytes": {
+              "status": "supported",
+              "backend": "posix_rlimit",
+              "scope": "process",
+              "enforcement": "kernel_hard",
+              "granularity": 1
+            }
+          },
+          "available_digest": "f466e8669c1979e476d2a8d26b753a1a3fdcfedf791b1640739768650deb2d00",
+          "applied": {
+            "process_cpu_time_ms": {
+              "limit": 1000,
+              "backend": "posix_rlimit",
+              "scope": "process",
+              "enforcement": "kernel_hard",
+              "granularity": 1000
+            },
+            "process_open_files": {
+              "limit": 64,
+              "backend": "posix_rlimit",
+              "scope": "process",
+              "enforcement": "kernel_hard",
+              "granularity": 1
+            },
+            "process_file_size_bytes": {
+              "limit": 4096,
+              "backend": "posix_rlimit",
+              "scope": "process",
+              "enforcement": "kernel_hard",
+              "granularity": 1
+            }
+          },
+          "applied_digest": "d3e01054785b92336386f385d42625724f962c88e91a6bff5f3d00d7e8bb945a"
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "linux_admission",
+      "input": {
+        "schema_version": 5,
+        "kind": "policy",
+        "platform": "linux",
+        "sandbox_runtime": {
+          "schema_version": 1,
+          "mechanism": "linux_bubblewrap",
+          "canonical_path": "/usr/bin/bwrap",
+          "device": "2049",
+          "inode": "123456789",
+          "size": 123456,
+          "mtime_ns": "1788076800123456789",
+          "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          "version": "bubblewrap 0.11.0",
+          "probe_revision": 1
+        },
+        "stage": "admission",
+        "policy": {
+          "schema_version": 3,
+          "workspace_root": "/workspace",
+          "filesystem": "workspace_write",
+          "network": "deny",
+          "process_isolation": "inherit",
+          "environment": "explicit"
+        },
+        "policy_digest": "d4e37511ba543cdc101f5a46132a43c2b0d8f77b7df54a4cea8e096f83a529b7",
+        "capabilities_digest": "9c68f9fed3d895916562dfa031151585922c783a7ee9b312153288574c237023",
+        "backend": "native_posix",
+        "filesystem": {
+          "status": "not_applied"
+        },
+        "network": {
+          "status": "not_applied"
+        },
+        "process_isolation": {
+          "status": "not_requested"
+        },
+        "environment": {
+          "status": "not_applied"
+        },
+        "supervision": {
+          "status": "not_applied"
+        },
+        "resources": {
+          "status": "not_requested"
+        }
+      },
+      "valid": true
+    }
+  ]
+}

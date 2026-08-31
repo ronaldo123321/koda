@@ -62,7 +62,7 @@ import { destroyedSecretEvidence } from "./execution-secret-fixtures.js";
 
 describe("app-server protocol", () => {
   it("accepts strict versioned requests and safe JSON-RPC IDs", () => {
-    expect(APP_SERVER_PROTOCOL_VERSION).toBe(17);
+    expect(APP_SERVER_PROTOCOL_VERSION).toBe(18);
     expect(
       jsonRpcRequestSchema.parse({
         jsonrpc: "2.0",
@@ -76,7 +76,7 @@ describe("app-server protocol", () => {
     ).toMatchObject({ id: 1, method: "initialize" });
     expect(() =>
       initializeParamsSchema.parse({
-        protocolVersion: 16,
+        protocolVersion: 17,
         client: { name: "legacy-client" },
       }),
     ).toThrow();
@@ -473,7 +473,7 @@ describe("app-server protocol", () => {
         },
       }).process.security,
     ).toMatchObject({
-      schema_version: 4,
+      schema_version: 5,
       platform: "linux",
       sandbox_runtime: { mechanism: "linux_bubblewrap" },
     });
@@ -543,7 +543,7 @@ describe("app-server protocol", () => {
             available: {
               process_cpu_time_ms: { status: "unsupported" },
               process_address_space_bytes: { status: "unsupported" },
-              job_process_count: { status: "unsupported" },
+              job_task_count: { status: "unsupported" },
               process_open_files: { status: "unsupported" },
               process_file_size_bytes: { status: "unsupported" },
             },

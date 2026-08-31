@@ -128,16 +128,20 @@ pub fn launch_setup(
     start: &StartParams,
     retained: &ExecutionSecuritySnapshot,
 ) -> Result<ExecutionSecuritySnapshot, ProtocolError> {
-    let capabilities =
-        match retained {
-            ExecutionSecuritySnapshot::Policy(security) if security.schema_version == 4 => {
-                crate::execution_policy::resource_contract_execution_capabilities(
-                    &native_capabilities(),
-                )
+    let capabilities = match retained {
+        ExecutionSecuritySnapshot::Policy(security) if security.schema_version == 4 => {
+            crate::execution_policy::historical_resource_contract_execution_capabilities(
+                &native_capabilities(),
+                false,
+            )
+            .map_err(policy_error)?
+        }
+        ExecutionSecuritySnapshot::Policy(security) if security.schema_version == 5 => {
+            crate::execution_policy::current_resource_execution_capabilities(&native_capabilities())
                 .map_err(policy_error)?
-            }
-            _ => native_capabilities(),
-        };
+        }
+        _ => native_capabilities(),
+    };
     launch_setup_with_capabilities(start, retained, &capabilities, false, false)
 }
 
@@ -156,9 +160,11 @@ pub fn launch_setup_with_capabilities(
     let protected = security.policy.filesystem != FilesystemPolicy::Unrestricted
         || security.policy.network != NetworkPolicy::Inherit;
     let macos_contract = security.schema_version == 2
-        || (security.schema_version == 4 && security.platform == Some(ExecutionPlatform::Macos));
+        || (matches!(security.schema_version, 4 | 5)
+            && security.platform == Some(ExecutionPlatform::Macos));
     let linux_contract = security.schema_version == 3
-        || (security.schema_version == 4 && security.platform == Some(ExecutionPlatform::Linux));
+        || (matches!(security.schema_version, 4 | 5)
+            && security.platform == Some(ExecutionPlatform::Linux));
     let os_sandbox_contract = macos_contract || linux_contract;
     if !os_sandbox_contract && os_sandbox_confirmed {
         return Err(corrupt());

@@ -49,7 +49,7 @@ describeNative("NativeExecutorClient", () => {
   it("negotiates explicit POSIX capabilities", async () => {
     const hello = await client.hello();
     expect(hello).toMatchObject({
-      protocol_version: 7,
+      protocol_version: 8,
       platform: process.platform === "darwin" ? "macos" : "linux",
       capabilities: {
         process_group: true,
@@ -61,7 +61,7 @@ describeNative("NativeExecutorClient", () => {
     });
     if (process.platform === "darwin") {
       expect(hello.execution_security).toMatchObject({
-        schema_version: 4,
+        schema_version: 5,
         platform: "macos",
         resource_limits: MACOS_EXECUTION_RESOURCE_CAPABILITIES,
       });
@@ -301,7 +301,7 @@ describeNative("NativeExecutorClient", () => {
   it("injects file secrets once, redacts Pipe output before persistence, and cleans up", async () => {
     const hello = await client.hello();
     if (
-      hello.execution_security.schema_version !== 4 ||
+      hello.execution_security.schema_version !== 5 ||
       !("platform" in hello.execution_security)
     )
       return;
@@ -344,7 +344,7 @@ describeNative("NativeExecutorClient", () => {
   it("redacts PTY output before segments and live attachment reads", async () => {
     const hello = await client.hello();
     if (
-      hello.execution_security.schema_version !== 4 ||
+      hello.execution_security.schema_version !== 5 ||
       !("platform" in hello.execution_security)
     )
       return;
@@ -388,7 +388,7 @@ describeNative("NativeExecutorClient", () => {
   it("keeps secret files through execution and removes them after cancellation", async () => {
     const hello = await client.hello();
     if (
-      hello.execution_security.schema_version !== 4 ||
+      hello.execution_security.schema_version !== 5 ||
       !("platform" in hello.execution_security)
     )
       return;
@@ -420,7 +420,7 @@ describeNative("NativeExecutorClient", () => {
   it("rejects an expired native lease with a fixed value-free error", async () => {
     const hello = await client.hello();
     if (
-      hello.execution_security.schema_version !== 4 ||
+      hello.execution_security.schema_version !== 5 ||
       !("platform" in hello.execution_security)
     )
       return;
@@ -1255,7 +1255,7 @@ function expectAppliedResources(
     }),
   );
   expect(snapshot.security).toMatchObject({
-    schema_version: 4,
+    schema_version: 5,
     stage: "launch_setup",
     resources: {
       status: "applied",

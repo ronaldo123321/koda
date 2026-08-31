@@ -25,8 +25,9 @@ use crate::attachment::AttachmentRegistry;
 use crate::durable::{JobLock, JobRecord, JobStore, StoredJobState, sha256_hex};
 use crate::execution_policy::{
     ExecutionCapabilities, ExecutionPlatform, ExecutionSecuritySnapshot, c1_execution_capabilities,
-    linux_bubblewrap_execution_capabilities, macos_resource_execution_capabilities,
-    macos_seatbelt_execution_capabilities, resource_contract_execution_capabilities,
+    historical_resource_contract_execution_capabilities, linux_bubblewrap_execution_capabilities,
+    macos_resource_execution_capabilities, macos_seatbelt_execution_capabilities,
+    resource_contract_execution_capabilities,
 };
 #[cfg(unix)]
 use crate::execution_policy::{ExecutionResourceLimits, FilesystemPolicy};
@@ -214,14 +215,47 @@ fn worker_execution_capabilities(
                 }
                 _ => execution_security::native_capabilities(),
             };
-            let historical = resource_contract_execution_capabilities(&legacy)
+            let historical = historical_resource_contract_execution_capabilities(&legacy, false)
+                .map_err(execution_security::policy_error)?;
+            let current = if security.platform == Some(ExecutionPlatform::Macos) {
+                Some(
+                    historical_resource_contract_execution_capabilities(&legacy, true)
+                        .map_err(execution_security::policy_error)?,
+                )
+            } else {
+                None
+            };
+            [Some(historical), current]
+                .into_iter()
+                .flatten()
+                .find(|candidate| {
+                    candidate.digest().ok().as_deref()
+                        == Some(security.capabilities_digest.as_str())
+                })
+                .ok_or_else(execution_security::corrupt)
+        }
+        Some(ExecutionSecuritySnapshot::Policy(security)) if security.schema_version == 5 => {
+            let legacy = match (security.platform, security.sandbox_runtime.as_ref()) {
+                (None, None) => c1_execution_capabilities(security.backend),
+                (Some(ExecutionPlatform::Macos), None)
+                    if crate::macos_seatbelt::launch_available() =>
+                {
+                    macos_seatbelt_execution_capabilities()
+                }
+                (Some(ExecutionPlatform::Linux), Some(runtime)) => {
+                    linux_bubblewrap_execution_capabilities(runtime)
+                        .map_err(execution_security::policy_error)?
+                }
+                _ => execution_security::native_capabilities(),
+            };
+            let wrapped = resource_contract_execution_capabilities(&legacy)
                 .map_err(execution_security::policy_error)?;
             let current = if security.platform == Some(ExecutionPlatform::Macos) {
                 Some(macos_resource_execution_capabilities())
             } else {
                 None
             };
-            [Some(historical), current]
+            [Some(wrapped), current]
                 .into_iter()
                 .flatten()
                 .find(|candidate| {
@@ -2175,17 +2209,28 @@ fn prepare_unix_launch(
     } else {
         None
     };
-    let historical_macos_capabilities =
-        resource_contract_execution_capabilities(&macos_seatbelt_execution_capabilities())
-            .map_err(execution_security::policy_error)?;
+    let historical_macos_capabilities = historical_resource_contract_execution_capabilities(
+        &macos_seatbelt_execution_capabilities(),
+        false,
+    )
+    .map_err(execution_security::policy_error)?;
+    let historical_macos_rlimit_capabilities = historical_resource_contract_execution_capabilities(
+        &macos_seatbelt_execution_capabilities(),
+        true,
+    )
+    .map_err(execution_security::policy_error)?;
     let macos_contract = runtime.execution_capabilities.schema_version == 2
-        || (runtime.execution_capabilities.schema_version == 4
+        || (matches!(runtime.execution_capabilities.schema_version, 4 | 5)
             && runtime.execution_capabilities.platform == Some(ExecutionPlatform::Macos));
     if macos_contract {
         let expected = if runtime.execution_capabilities.schema_version == 2 {
             macos_seatbelt_execution_capabilities()
-        } else if runtime.execution_capabilities == historical_macos_capabilities {
-            historical_macos_capabilities
+        } else if runtime.execution_capabilities.schema_version == 4 {
+            if runtime.execution_capabilities == historical_macos_capabilities {
+                historical_macos_capabilities
+            } else {
+                historical_macos_rlimit_capabilities
+            }
         } else {
             macos_resource_execution_capabilities()
         };
@@ -2227,7 +2272,7 @@ fn prepare_unix_launch(
 
     #[cfg(target_os = "linux")]
     if runtime.execution_capabilities.schema_version == 3
-        || (runtime.execution_capabilities.schema_version == 4
+        || (matches!(runtime.execution_capabilities.schema_version, 4 | 5)
             && runtime.execution_capabilities.platform == Some(ExecutionPlatform::Linux))
     {
         let sandbox_runtime = runtime
@@ -2242,11 +2287,16 @@ fn prepare_unix_launch(
         }
         let legacy_linux_capabilities = linux_bubblewrap_execution_capabilities(sandbox_runtime)
             .map_err(execution_security::policy_error)?;
-        let expected_linux_capabilities = if runtime.execution_capabilities.schema_version == 3 {
-            legacy_linux_capabilities
-        } else {
-            resource_contract_execution_capabilities(&legacy_linux_capabilities)
-                .map_err(execution_security::policy_error)?
+        let expected_linux_capabilities = match runtime.execution_capabilities.schema_version {
+            3 => legacy_linux_capabilities,
+            4 => historical_resource_contract_execution_capabilities(
+                &legacy_linux_capabilities,
+                false,
+            )
+            .map_err(execution_security::policy_error)?,
+            5 => resource_contract_execution_capabilities(&legacy_linux_capabilities)
+                .map_err(execution_security::policy_error)?,
+            _ => return Err(execution_security::corrupt()),
         };
         if runtime.execution_capabilities != expected_linux_capabilities {
             return Err(execution_security::policy_error(

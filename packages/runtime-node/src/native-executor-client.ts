@@ -19,7 +19,7 @@ import {
 } from "./execution-policy.js";
 import type { NativeSecretLeaseInput } from "./secret-policy.js";
 
-const PROTOCOL_VERSION = 7;
+const PROTOCOL_VERSION = 8;
 const MAX_FRAME_BYTES = 1_048_576;
 const DEFAULT_STARTUP_TIMEOUT_MS = 5_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
@@ -37,6 +37,7 @@ export type NativeExecutorErrorCode =
   | "EXECUTION_POLICY_UNAVAILABLE"
   | "RESOURCE_LIMIT_UNAVAILABLE"
   | "RESOURCE_LIMIT_APPLY_FAILED"
+  | "RESOURCE_LIMIT_INTEGRITY_LOST"
   | "EXECUTION_POLICY_CHANGED"
   | "EXECUTION_SECURITY_CORRUPT"
   | "INVALID_REQUEST"
@@ -531,12 +532,14 @@ const helloResultSchema = z
     }
     if (
       ((value.execution_security.schema_version === 2 ||
-        (value.execution_security.schema_version === 4 &&
+        ((value.execution_security.schema_version === 4 ||
+          value.execution_security.schema_version === 5) &&
           "platform" in value.execution_security &&
           value.execution_security.platform === "macos")) &&
         value.platform !== "macos") ||
       ((value.execution_security.schema_version === 3 ||
-        (value.execution_security.schema_version === 4 &&
+        ((value.execution_security.schema_version === 4 ||
+          value.execution_security.schema_version === 5) &&
           "platform" in value.execution_security &&
           value.execution_security.platform === "linux")) &&
         value.platform !== "linux")
@@ -1412,6 +1415,7 @@ function normalizeRemoteCode(
     case "EXECUTION_POLICY_UNAVAILABLE":
     case "RESOURCE_LIMIT_UNAVAILABLE":
     case "RESOURCE_LIMIT_APPLY_FAILED":
+    case "RESOURCE_LIMIT_INTEGRITY_LOST":
     case "EXECUTION_POLICY_CHANGED":
     case "EXECUTION_SECURITY_CORRUPT":
     case "PLATFORM_CAPABILITY_UNAVAILABLE":

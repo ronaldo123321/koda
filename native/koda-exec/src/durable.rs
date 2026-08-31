@@ -17,7 +17,7 @@ use crate::protocol::{
 };
 use crate::secret_policy::SecretExecutionEvidence;
 
-pub const STORE_FORMAT_VERSION: u32 = 7;
+pub const STORE_FORMAT_VERSION: u32 = 8;
 const MAX_MANIFEST_BYTES: u64 = 262_144;
 const MAX_STATE_BYTES: u64 = 65_536;
 const MAX_STATE_HEAD_BYTES: u64 = 4_096;
@@ -794,6 +794,7 @@ fn validate_manifest(manifest: &JobManifest) -> Result<(), ProtocolError> {
                 4 => matches!(policy.schema_version, 1..=3),
                 5 => matches!(policy.schema_version, 1..=3),
                 6 | 7 => policy.schema_version == 4,
+                8 => policy.schema_version == 5,
                 _ => false,
             };
             if !schema_allowed {
@@ -826,13 +827,49 @@ fn validate_manifest(manifest: &JobManifest) -> Result<(), ProtocolError> {
                         .map_err(|_| execution_security::corrupt())?,
                         _ => return Err(execution_security::corrupt()),
                     };
-                    if manifest.format_version == 6 {
+                    crate::execution_policy::historical_resource_contract_execution_capabilities(
+                        &legacy,
+                        manifest.format_version == 7
+                            && policy.platform
+                                == Some(crate::execution_policy::ExecutionPlatform::Macos),
+                    )
+                    .map_err(|_| execution_security::corrupt())?
+                }
+                5 => {
+                    let legacy = match (policy.platform, policy.sandbox_runtime.as_ref()) {
+                        (None, None) => {
+                            crate::execution_policy::c1_execution_capabilities(policy.backend)
+                        }
+                        (Some(crate::execution_policy::ExecutionPlatform::Macos), None) => {
+                            crate::execution_policy::macos_seatbelt_execution_capabilities()
+                        }
+                        (
+                            Some(crate::execution_policy::ExecutionPlatform::Linux),
+                            Some(runtime),
+                        ) => crate::execution_policy::linux_bubblewrap_execution_capabilities(
+                            runtime,
+                        )
+                        .map_err(|_| execution_security::corrupt())?,
+                        _ => return Err(execution_security::corrupt()),
+                    };
+                    let wrapped =
                         crate::execution_policy::resource_contract_execution_capabilities(&legacy)
-                            .map_err(|_| execution_security::corrupt())?
+                            .map_err(|_| execution_security::corrupt())?;
+                    let current = if policy.platform
+                        == Some(crate::execution_policy::ExecutionPlatform::Macos)
+                    {
+                        Some(crate::execution_policy::macos_resource_execution_capabilities())
                     } else {
-                        crate::execution_policy::current_resource_execution_capabilities(&legacy)
-                            .map_err(|_| execution_security::corrupt())?
-                    }
+                        None
+                    };
+                    [Some(wrapped), current]
+                        .into_iter()
+                        .flatten()
+                        .find(|candidate| {
+                            candidate.digest().ok().as_deref()
+                                == Some(policy.capabilities_digest.as_str())
+                        })
+                        .ok_or_else(execution_security::corrupt)?
                 }
                 _ => return Err(execution_security::corrupt()),
             };
@@ -1511,13 +1548,17 @@ mod tests {
     fn v6_records_retain_the_frozen_unsupported_resource_contract() {
         let root = std::env::temp_dir().join(format!("koda-v6-{}", Uuid::new_v4().simple()));
         let store = JobStore::open(&root).unwrap();
-        let capabilities = crate::execution_policy::resource_contract_execution_capabilities(
-            &crate::execution_policy::macos_seatbelt_execution_capabilities(),
-        )
-        .unwrap();
+        let capabilities =
+            crate::execution_policy::historical_resource_contract_execution_capabilities(
+                &crate::execution_policy::macos_seatbelt_execution_capabilities(),
+                false,
+            )
+            .unwrap();
         let expected_digest = capabilities.digest().unwrap();
+        let mut params = start();
+        params.policy.as_mut().unwrap().schema_version = 2;
         let (record, _) = store
-            .create_job_with_capabilities("v6", start(), &capabilities)
+            .create_job_with_capabilities("v6", params, &capabilities)
             .unwrap();
         let previous = versioned_copy(&record, 6);
         let loaded = store.load_job(&previous.directory).unwrap();
@@ -1539,8 +1580,8 @@ mod tests {
     }
 
     #[test]
-    fn v7_records_round_trip_current_macos_resource_admission() {
-        let root = std::env::temp_dir().join(format!("koda-v7-{}", Uuid::new_v4().simple()));
+    fn v8_records_round_trip_current_macos_resource_admission() {
+        let root = std::env::temp_dir().join(format!("koda-v8-{}", Uuid::new_v4().simple()));
         let store = JobStore::open(&root).unwrap();
         let capabilities = crate::execution_policy::macos_resource_execution_capabilities();
         let mut params = start();
@@ -1550,13 +1591,13 @@ mod tests {
                 ..Default::default()
             });
         let (record, _) = store
-            .create_job_with_capabilities("v7", params, &capabilities)
+            .create_job_with_capabilities("v8", params, &capabilities)
             .unwrap();
         let loaded = store.load_job(&record.directory).unwrap();
         let state = loaded.read_state().unwrap();
-        assert_eq!(state.format_version, 7);
+        assert_eq!(state.format_version, 8);
         let Some(ExecutionSecuritySnapshot::Policy(security)) = state.security.as_ref() else {
-            panic!("v7 record must retain resource policy evidence")
+            panic!("v8 record must retain resource policy evidence")
         };
         assert_eq!(security.capabilities_digest, capabilities.digest().unwrap());
         assert!(matches!(
@@ -1641,7 +1682,7 @@ mod tests {
             let path = record.directory.join(name);
             let mut value: serde_json::Value =
                 read_private_json(&path, MAX_MANIFEST_BYTES).unwrap();
-            value["format_version"] = serde_json::json!(8);
+            value["format_version"] = serde_json::json!(9);
             value["future_field"] = serde_json::json!({"preserve":true});
             write_atomic_json(&path, &value, MAX_MANIFEST_BYTES).unwrap();
             let before = std::fs::read(&path).unwrap();
@@ -1734,12 +1775,12 @@ mod tests {
         let (record, token) = store.create_job("request-1", start()).expect("job");
 
         assert_eq!(record.read_token().expect("token"), token);
-        assert_eq!(record.manifest.format_version, 7);
+        assert_eq!(record.manifest.format_version, 8);
         let Some(ExecutionSecuritySnapshot::Policy(security)) = record.manifest.security.as_ref()
         else {
             panic!("current record must retain policy evidence")
         };
-        assert_eq!(security.schema_version, 4);
+        assert_eq!(security.schema_version, 5);
         assert!(matches!(
             security.resources,
             Some(crate::execution_policy::ExecutionResourceEvidence::NotRequested {})

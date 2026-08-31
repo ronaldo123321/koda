@@ -945,11 +945,11 @@ function commandStartFailure(
   snapshot: NativeJobSnapshot,
   executable: string,
 ): CommandError {
-  if (snapshot.failure?.code === "RESOURCE_LIMIT_APPLY_FAILED") {
-    return new CommandError(
-      "RESOURCE_LIMIT_APPLY_FAILED",
-      snapshot.failure.message,
-    );
+  if (
+    snapshot.failure?.code === "RESOURCE_LIMIT_APPLY_FAILED" ||
+    snapshot.failure?.code === "RESOURCE_LIMIT_INTEGRITY_LOST"
+  ) {
+    return new CommandError(snapshot.failure.code, snapshot.failure.message);
   }
   const code =
     snapshot.failure?.code === "COMMAND_NOT_FOUND"
@@ -996,6 +996,7 @@ function mapNativeExecutorError(
       "EXECUTION_POLICY_UNAVAILABLE",
       "RESOURCE_LIMIT_UNAVAILABLE",
       "RESOURCE_LIMIT_APPLY_FAILED",
+      "RESOURCE_LIMIT_INTEGRITY_LOST",
       "EXECUTION_POLICY_CHANGED",
       "INCOMPATIBLE_PROTOCOL",
       "EXECUTION_SECURITY_CORRUPT",

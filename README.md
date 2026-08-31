@@ -10,17 +10,21 @@ The Phase 3 local-agent foundation, Phase 4A crash-safe workspace recovery,
 Phase 4B supervised native execution, Phase 4C1 execution policy/reporting,
 Phase 4C2A macOS Seatbelt delivery, Phase 4C2B Linux Bubblewrap delivery,
 Phase 4C3 secret lifecycle/client closure, Phase 4C4A resource contract/client
-projection, and Phase 4C4B macOS resource enforcement are complete. Verified
-macOS and Linux native executors advertise and enforce protected Pipe/PTY
+projection, Phase 4C4B macOS resource enforcement, and Phase 4C4C1 contract
+evolution are complete; Linux resource enforcement remains in C4C2-C4C4.
+Verified macOS and Linux native executors advertise and enforce protected Pipe/PTY
 execution. macOS additionally enforces exact per-process CPU time, open-file,
 and file-size hard limits through `RLIMIT_CPU`, `RLIMIT_NOFILE`, and
 `RLIMIT_FSIZE`; it verifies the installed values before durably recording
-`applied` evidence and releasing user code. Native protocol v7, durable format
-v7 with exact v1-v6 recovery, app-server v17 resource evidence, grant binding,
+`applied` evidence and releasing user code. Native protocol v8, durable format
+v8 with exact v1-v7 recovery, app-server v18 resource evidence, grant binding,
 background PTY recovery, safe secret lifecycle evidence, adversarial
 syscall/network/resource tests, and dedicated native gates are shared or
-explicitly verified. Linux and Windows resource requests remain fail-closed;
-macOS address-space and aggregate job-process limits also remain unsupported.
+explicitly verified. Current policy v3 and capability/security v5 call the
+cgroup-backed dimension `job_task_count`; frozen policy v2/security v4 records
+retain `job_process_count` without reinterpretation. Linux and Windows resource
+requests remain fail-closed; macOS address-space and aggregate job-task limits
+also remain unsupported.
 Windows sandboxing and resource enforcement remain deferred. Koda has an
 opt-in Rust execution supervisor with a versioned local protocol, reconnectable
 job observation, POSIX process groups, Windows Job Objects and ConPTY, bounded
@@ -88,7 +92,7 @@ matrix in [GitHub Actions run 33354068315](https://github.com/ronaldo123321/koda
 - Durable-before-notify event streaming, one-shot interactive approvals, active-turn cancellation, and graceful shutdown/EOF cleanup.
 - Credential-free app-server thread list/get/search operations, bounded bidirectional JSONL event history, and different-thread concurrency guarded by existing per-thread leases.
 - A reusable Node app-server client with strict NDJSON framing, typed JSON-RPC correlation, bounded stderr diagnostics, request timeouts, and owned child-process cleanup.
-- An Ink `koda-chat` REPL that uses app-server v17 exclusively for sequential chat, approvals, thread browsing, durable search, windowed history navigation, runtime settings, artifact, context, Plan, extension, activity, process/secret/resource evidence, and mutation-recovery inspection, Stage acceptance, and resume.
+- An Ink `koda-chat` REPL that uses app-server v18 exclusively for sequential chat, approvals, thread browsing, durable search, windowed history navigation, runtime settings, artifact, context, Plan, extension, activity, process/secret/resource evidence, and mutation-recovery inspection, Stage acceptance, and resume.
 - Typed bidirectional `thread/events` pages over authoritative JSONL with exclusive sequence cursors, a 200-event cap, a 768 KiB result budget, and explicit corruption/oversize errors.
 - Revision-paginated `thread/search` over normalized SQLite substring projections, with 256-byte queries, eight-term AND semantics, 512-byte snippets, and an approximately 256 KiB result budget.
 - Idle-only `/threads`, `Ctrl+T`, and `/search <query>` interaction across the current canonical workspace, match-centered authoritative preview, metadata recheck before resume, and persisted provider/model adoption.

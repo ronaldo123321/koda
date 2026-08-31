@@ -5,7 +5,7 @@ use crate::secret_policy::{SecretExecutionEvidence, SecretLeaseEnvelope, SecretP
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 pub const MAX_FRAME_BYTES: usize = 1_048_576;
 pub const MAX_ARGUMENTS: usize = 64;
 pub const MAX_ARGUMENT_BYTES: usize = 4_096;
@@ -881,9 +881,9 @@ mod tests {
     }
 
     #[test]
-    fn protocol_v7_rejects_v6_requests_and_clients_without_fallback() {
+    fn protocol_v8_rejects_v7_requests_and_clients_without_fallback() {
         let request = Request {
-            protocol_version: 6,
+            protocol_version: 7,
             request_id: "r1".into(),
             method: "system/hello".into(),
             params: serde_json::json!({}),
@@ -895,7 +895,7 @@ mod tests {
         let hello = HelloParams {
             client_name: "legacy-client".into(),
             client_version: "1.0.0".into(),
-            supported_versions: vec![6],
+            supported_versions: vec![7],
         };
         assert_eq!(
             validate_hello(&hello).unwrap_err().code,

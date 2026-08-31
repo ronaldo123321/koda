@@ -18,6 +18,7 @@ pub enum ExecutionPolicyError {
     ExecutionPolicyUnavailable,
     ResourceLimitUnavailable,
     ResourceLimitApplyFailed,
+    ResourceLimitIntegrityLost,
     ExecutionPolicyChanged,
     IncompatibleProtocol,
     ExecutionSecurityCorrupt,
@@ -30,6 +31,7 @@ impl ExecutionPolicyError {
             Self::ExecutionPolicyUnavailable => "EXECUTION_POLICY_UNAVAILABLE",
             Self::ResourceLimitUnavailable => "RESOURCE_LIMIT_UNAVAILABLE",
             Self::ResourceLimitApplyFailed => "RESOURCE_LIMIT_APPLY_FAILED",
+            Self::ResourceLimitIntegrityLost => "RESOURCE_LIMIT_INTEGRITY_LOST",
             Self::ExecutionPolicyChanged => "EXECUTION_POLICY_CHANGED",
             Self::IncompatibleProtocol => "INCOMPATIBLE_PROTOCOL",
             Self::ExecutionSecurityCorrupt => "EXECUTION_SECURITY_CORRUPT",
@@ -49,6 +51,9 @@ impl std::fmt::Display for ExecutionPolicyError {
             }
             Self::ResourceLimitApplyFailed => {
                 "The operating system could not apply the requested resource limit."
+            }
+            Self::ResourceLimitIntegrityLost => {
+                "The operating system resource limit contract lost integrity."
             }
             Self::ExecutionPolicyChanged => "The prepared execution security contract has changed.",
             Self::IncompatibleProtocol => "The executor protocol is incompatible.",
@@ -99,6 +104,8 @@ pub struct ExecutionResourceLimits {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job_process_count: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_task_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process_open_files: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process_file_size_bytes: Option<u64>,
@@ -113,6 +120,9 @@ impl ExecutionResourceLimits {
     }
 
     pub fn validate(&self) -> Result<(), ExecutionPolicyError> {
+        if self.job_process_count.is_some() && self.job_task_count.is_some() {
+            return Err(ExecutionPolicyError::InvalidExecutionPolicy);
+        }
         if self
             .values()
             .into_iter()
@@ -128,11 +138,12 @@ impl ExecutionResourceLimits {
         self.values().into_iter().all(|value| value.is_none())
     }
 
-    fn values(&self) -> [Option<&u64>; 5] {
+    fn values(&self) -> [Option<&u64>; 6] {
         [
             self.process_cpu_time_ms.as_ref(),
             self.process_address_space_bytes.as_ref(),
             self.job_process_count.as_ref(),
+            self.job_task_count.as_ref(),
             self.process_open_files.as_ref(),
             self.process_file_size_bytes.as_ref(),
         ]
@@ -191,10 +202,12 @@ impl ExecutionPolicy {
     pub fn validate(&self) -> Result<(), ExecutionPolicyError> {
         let version_valid = match self.schema_version {
             1 => self.resources.is_none(),
-            2 => self
-                .resources
-                .as_ref()
-                .is_none_or(|resources| resources.validate().is_ok()),
+            2 => self.resources.as_ref().is_none_or(|resources| {
+                resources.validate().is_ok() && resources.job_task_count.is_none()
+            }),
+            3 => self.resources.as_ref().is_none_or(|resources| {
+                resources.validate().is_ok() && resources.job_process_count.is_none()
+            }),
             _ => false,
         };
         if !version_valid || !is_execution_workspace_path(&self.workspace_root) {
@@ -311,7 +324,7 @@ pub fn resolve_execution_policy(
         }
     };
     let policy = ExecutionPolicy {
-        schema_version: 2,
+        schema_version: 3,
         workspace_root: workspace_root.into(),
         filesystem: config.filesystem,
         network: config.network,
@@ -388,6 +401,7 @@ pub struct SupervisionCapability {
 pub enum ResourceLimitBackend {
     PosixRlimit,
     LinuxCgroupV2,
+    LinuxCgroupV2Pids,
     WindowsJobObject,
 }
 
@@ -433,7 +447,10 @@ impl ResourceLimitCapability {
 pub struct ExecutionResourceCapabilities {
     pub process_cpu_time_ms: ResourceLimitCapability,
     pub process_address_space_bytes: ResourceLimitCapability,
-    pub job_process_count: ResourceLimitCapability,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_process_count: Option<ResourceLimitCapability>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_task_count: Option<ResourceLimitCapability>,
     pub process_open_files: ResourceLimitCapability,
     pub process_file_size_bytes: ResourceLimitCapability,
 }
@@ -443,7 +460,19 @@ impl ExecutionResourceCapabilities {
         Self {
             process_cpu_time_ms: ResourceLimitCapability::Unsupported {},
             process_address_space_bytes: ResourceLimitCapability::Unsupported {},
-            job_process_count: ResourceLimitCapability::Unsupported {},
+            job_process_count: None,
+            job_task_count: Some(ResourceLimitCapability::Unsupported {}),
+            process_open_files: ResourceLimitCapability::Unsupported {},
+            process_file_size_bytes: ResourceLimitCapability::Unsupported {},
+        }
+    }
+
+    fn unsupported_v4() -> Self {
+        Self {
+            process_cpu_time_ms: ResourceLimitCapability::Unsupported {},
+            process_address_space_bytes: ResourceLimitCapability::Unsupported {},
+            job_process_count: Some(ResourceLimitCapability::Unsupported {}),
+            job_task_count: None,
             process_open_files: ResourceLimitCapability::Unsupported {},
             process_file_size_bytes: ResourceLimitCapability::Unsupported {},
         }
@@ -459,14 +488,24 @@ impl ExecutionResourceCapabilities {
         Self {
             process_cpu_time_ms: supported(1_000),
             process_address_space_bytes: ResourceLimitCapability::Unsupported {},
-            job_process_count: ResourceLimitCapability::Unsupported {},
+            job_process_count: None,
+            job_task_count: Some(ResourceLimitCapability::Unsupported {}),
             process_open_files: supported(1),
             process_file_size_bytes: supported(1),
         }
     }
 
+    fn macos_rlimit_v4() -> Self {
+        let mut resources = Self::macos_rlimit();
+        resources.job_process_count = resources.job_task_count.take();
+        resources
+    }
+
     pub fn validate(&self) -> Result<(), ExecutionPolicyError> {
-        for capability in self.values() {
+        if self.job_process_count.is_some() == self.job_task_count.is_some() {
+            return Err(ExecutionPolicyError::InvalidExecutionPolicy);
+        }
+        for capability in self.values().into_iter().flatten() {
             capability.validate()?;
         }
         Ok(())
@@ -479,13 +518,14 @@ impl ExecutionResourceCapabilities {
         Ok(capabilities)
     }
 
-    fn values(&self) -> [&ResourceLimitCapability; 5] {
+    fn values(&self) -> [Option<&ResourceLimitCapability>; 6] {
         [
-            &self.process_cpu_time_ms,
-            &self.process_address_space_bytes,
-            &self.job_process_count,
-            &self.process_open_files,
-            &self.process_file_size_bytes,
+            Some(&self.process_cpu_time_ms),
+            Some(&self.process_address_space_bytes),
+            self.job_process_count.as_ref(),
+            self.job_task_count.as_ref(),
+            Some(&self.process_open_files),
+            Some(&self.process_file_size_bytes),
         ]
     }
 
@@ -695,22 +735,40 @@ pub fn resource_contract_execution_capabilities(
     legacy: &ExecutionCapabilities,
 ) -> Result<ExecutionCapabilities, ExecutionPolicyError> {
     legacy.validate()?;
-    if legacy.schema_version == 4 {
+    if legacy.schema_version >= 4 {
         return Err(ExecutionPolicyError::InvalidExecutionPolicy);
     }
     let mut capabilities = legacy.clone();
-    capabilities.schema_version = 4;
+    capabilities.schema_version = 5;
     capabilities.resource_limits = Some(ExecutionResourceCapabilities::unsupported());
     capabilities.validate()?;
     Ok(capabilities)
 }
 
-/// Current Phase 4C4B macOS capability. Historical schema-v4 records must use
-/// resource_contract_execution_capabilities so their all-unsupported digest is
-/// never reinterpreted.
+pub(crate) fn historical_resource_contract_execution_capabilities(
+    legacy: &ExecutionCapabilities,
+    macos_rlimits: bool,
+) -> Result<ExecutionCapabilities, ExecutionPolicyError> {
+    legacy.validate()?;
+    if legacy.schema_version >= 4 {
+        return Err(ExecutionPolicyError::InvalidExecutionPolicy);
+    }
+    let mut capabilities = legacy.clone();
+    capabilities.schema_version = 4;
+    capabilities.resource_limits = Some(if macos_rlimits && legacy.schema_version == 2 {
+        ExecutionResourceCapabilities::macos_rlimit_v4()
+    } else {
+        ExecutionResourceCapabilities::unsupported_v4()
+    });
+    capabilities.validate()?;
+    Ok(capabilities)
+}
+
+/// Current Phase 4C4C macOS capability. Historical schema-v4 records are
+/// reconstructed only by the private compatibility builder above.
 pub fn macos_resource_execution_capabilities() -> ExecutionCapabilities {
     let mut capabilities = macos_seatbelt_execution_capabilities();
-    capabilities.schema_version = 4;
+    capabilities.schema_version = 5;
     capabilities.resource_limits = Some(ExecutionResourceCapabilities::macos_rlimit());
     capabilities
 }
@@ -743,7 +801,7 @@ impl ExecutionCapabilities {
                 .as_ref()
                 .and_then(|runtime| linux_bubblewrap_execution_capabilities(runtime).ok())
                 .is_some_and(|expected| self == &expected),
-            4 => {
+            4 | 5 => {
                 let legacy_version = match (self.platform, self.sandbox_runtime.as_ref()) {
                     (None, None) => Some(1),
                     (Some(ExecutionPlatform::Macos), None) => Some(2),
@@ -754,11 +812,18 @@ impl ExecutionCapabilities {
                     let mut legacy = self.clone();
                     legacy.schema_version = schema_version;
                     legacy.resource_limits = None;
-                    let resources_valid = self.resource_limits
-                        == Some(ExecutionResourceCapabilities::unsupported())
-                        || (self.platform == Some(ExecutionPlatform::Macos)
-                            && self.resource_limits
-                                == Some(ExecutionResourceCapabilities::macos_rlimit()));
+                    let resources_valid = if self.schema_version == 4 {
+                        self.resource_limits
+                            == Some(ExecutionResourceCapabilities::unsupported_v4())
+                            || (self.platform == Some(ExecutionPlatform::Macos)
+                                && self.resource_limits
+                                    == Some(ExecutionResourceCapabilities::macos_rlimit_v4()))
+                    } else {
+                        self.resource_limits == Some(ExecutionResourceCapabilities::unsupported())
+                            || (self.platform == Some(ExecutionPlatform::Macos)
+                                && self.resource_limits
+                                    == Some(ExecutionResourceCapabilities::macos_rlimit()))
+                    };
                     legacy.validate().is_ok() && resources_valid
                 })
             }
@@ -790,6 +855,7 @@ pub enum ExecutionPolicyDimension {
     ProcessCpuTimeMs,
     ProcessAddressSpaceBytes,
     JobProcessCount,
+    JobTaskCount,
     ProcessOpenFiles,
     ProcessFileSizeBytes,
 }
@@ -848,10 +914,10 @@ pub fn evaluate_execution_policy(
             });
         }
     }
-    if policy.schema_version == 2 {
+    if matches!(policy.schema_version, 2 | 3) {
         let resources = policy.resources.as_ref();
         let capabilities = caps.resource_limits.as_ref();
-        for (dimension, requested, capability) in [
+        let mut requested_limits = vec![
             (
                 ExecutionPolicyDimension::ProcessCpuTimeMs,
                 resources.and_then(|value| value.process_cpu_time_ms),
@@ -863,11 +929,6 @@ pub fn evaluate_execution_policy(
                 capabilities.map(|value| &value.process_address_space_bytes),
             ),
             (
-                ExecutionPolicyDimension::JobProcessCount,
-                resources.and_then(|value| value.job_process_count),
-                capabilities.map(|value| &value.job_process_count),
-            ),
-            (
                 ExecutionPolicyDimension::ProcessOpenFiles,
                 resources.and_then(|value| value.process_open_files),
                 capabilities.map(|value| &value.process_open_files),
@@ -877,7 +938,21 @@ pub fn evaluate_execution_policy(
                 resources.and_then(|value| value.process_file_size_bytes),
                 capabilities.map(|value| &value.process_file_size_bytes),
             ),
-        ] {
+        ];
+        if policy.schema_version == 2 {
+            requested_limits.push((
+                ExecutionPolicyDimension::JobProcessCount,
+                resources.and_then(|value| value.job_process_count),
+                capabilities.and_then(|value| value.job_process_count.as_ref()),
+            ));
+        } else {
+            requested_limits.push((
+                ExecutionPolicyDimension::JobTaskCount,
+                resources.and_then(|value| value.job_task_count),
+                capabilities.and_then(|value| value.job_task_count.as_ref()),
+            ));
+        }
+        for (dimension, requested, capability) in requested_limits {
             let supported = match (requested, capability) {
                 (None, _) => true,
                 (Some(requested), Some(ResourceLimitCapability::Supported { granularity, .. })) => {
@@ -946,6 +1021,8 @@ pub struct ExecutionResourceAppliedLimits {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job_process_count: Option<ResourceAppliedLimit>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_task_count: Option<ResourceAppliedLimit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process_open_files: Option<ResourceAppliedLimit>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process_file_size_bytes: Option<ResourceAppliedLimit>,
@@ -953,10 +1030,14 @@ pub struct ExecutionResourceAppliedLimits {
 
 impl ExecutionResourceAppliedLimits {
     fn validate(&self) -> Result<(), ExecutionPolicyError> {
+        if self.job_process_count.is_some() && self.job_task_count.is_some() {
+            return Err(ExecutionPolicyError::InvalidExecutionPolicy);
+        }
         let values = [
             self.process_cpu_time_ms.as_ref(),
             self.process_address_space_bytes.as_ref(),
             self.job_process_count.as_ref(),
+            self.job_task_count.as_ref(),
             self.process_open_files.as_ref(),
             self.process_file_size_bytes.as_ref(),
         ];
@@ -1114,6 +1195,7 @@ impl ExecutionSecuritySnapshot {
         }
         if (snapshot.schema_version <= 3 && snapshot.policy.schema_version != 1)
             || (snapshot.schema_version == 4 && snapshot.policy.schema_version != 2)
+            || (snapshot.schema_version == 5 && snapshot.policy.schema_version != 3)
         {
             return Err(corrupt);
         }
@@ -1151,13 +1233,48 @@ impl ExecutionSecuritySnapshot {
                     _ => return Err(corrupt),
                 };
                 let historical =
+                    historical_resource_contract_execution_capabilities(&legacy, false)
+                        .map_err(|_| corrupt)?;
+                let current = if snapshot.platform == Some(ExecutionPlatform::Macos) {
+                    Some(
+                        historical_resource_contract_execution_capabilities(&legacy, true)
+                            .map_err(|_| corrupt)?,
+                    )
+                } else {
+                    None
+                };
+                [Some(historical), current]
+                    .into_iter()
+                    .flatten()
+                    .find(|candidate| {
+                        candidate.digest().ok().as_deref()
+                            == Some(snapshot.capabilities_digest.as_str())
+                    })
+                    .ok_or(corrupt)?
+            }
+            5 => {
+                let legacy = match (snapshot.platform, snapshot.sandbox_runtime.as_ref()) {
+                    (None, None) => c1_execution_capabilities(snapshot.backend),
+                    (Some(ExecutionPlatform::Macos), None)
+                        if snapshot.backend == ExecutionBackend::NativePosix =>
+                    {
+                        macos_seatbelt_execution_capabilities()
+                    }
+                    (Some(ExecutionPlatform::Linux), Some(runtime))
+                        if snapshot.backend == ExecutionBackend::NativePosix =>
+                    {
+                        linux_bubblewrap_execution_capabilities(runtime).map_err(|_| corrupt)?
+                    }
+                    _ => return Err(corrupt),
+                };
+                let wrapped =
                     resource_contract_execution_capabilities(&legacy).map_err(|_| corrupt)?;
                 let current = if snapshot.platform == Some(ExecutionPlatform::Macos) {
                     Some(macos_resource_execution_capabilities())
                 } else {
                     None
                 };
-                [Some(historical), current]
+                [Some(wrapped), current]
                     .into_iter()
                     .flatten()
                     .find(|candidate| {
@@ -1174,18 +1291,20 @@ impl ExecutionSecuritySnapshot {
         if snapshot.schema_version <= 3 && snapshot.resources.is_some() {
             return Err(corrupt);
         }
-        if snapshot.schema_version == 4 {
+        if matches!(snapshot.schema_version, 4 | 5) {
             let resources = snapshot.resources.as_ref().ok_or(corrupt)?;
             resources.validate().map_err(|_| corrupt)?;
             validate_resource_evidence(snapshot, &expected_capabilities)?;
         }
         if snapshot.schema_version == 2
-            || (snapshot.schema_version == 4 && snapshot.platform == Some(ExecutionPlatform::Macos))
+            || (matches!(snapshot.schema_version, 4 | 5)
+                && snapshot.platform == Some(ExecutionPlatform::Macos))
         {
             return validate_macos_snapshot(snapshot);
         }
         if snapshot.schema_version == 3
-            || (snapshot.schema_version == 4 && snapshot.platform == Some(ExecutionPlatform::Linux))
+            || (matches!(snapshot.schema_version, 4 | 5)
+                && snapshot.platform == Some(ExecutionPlatform::Linux))
         {
             return validate_linux_snapshot(snapshot);
         }
@@ -1307,23 +1426,27 @@ fn validate_resource_evidence(
     let expected = ExecutionResourceAppliedLimits {
         process_cpu_time_ms: expected_applied_limit(
             requested.process_cpu_time_ms,
-            &available.process_cpu_time_ms,
+            Some(&available.process_cpu_time_ms),
         )?,
         process_address_space_bytes: expected_applied_limit(
             requested.process_address_space_bytes,
-            &available.process_address_space_bytes,
+            Some(&available.process_address_space_bytes),
         )?,
         job_process_count: expected_applied_limit(
             requested.job_process_count,
-            &available.job_process_count,
+            available.job_process_count.as_ref(),
+        )?,
+        job_task_count: expected_applied_limit(
+            requested.job_task_count,
+            available.job_task_count.as_ref(),
         )?,
         process_open_files: expected_applied_limit(
             requested.process_open_files,
-            &available.process_open_files,
+            Some(&available.process_open_files),
         )?,
         process_file_size_bytes: expected_applied_limit(
             requested.process_file_size_bytes,
-            &available.process_file_size_bytes,
+            Some(&available.process_file_size_bytes),
         )?,
     };
     if applied != &expected {
@@ -1334,19 +1457,19 @@ fn validate_resource_evidence(
 
 fn expected_applied_limit(
     requested: Option<u64>,
-    capability: &ResourceLimitCapability,
+    capability: Option<&ResourceLimitCapability>,
 ) -> Result<Option<ResourceAppliedLimit>, ExecutionPolicyError> {
     let corrupt = ExecutionPolicyError::ExecutionSecurityCorrupt;
     match (requested, capability) {
         (None, _) => Ok(None),
         (
             Some(limit),
-            ResourceLimitCapability::Supported {
+            Some(ResourceLimitCapability::Supported {
                 backend,
                 scope,
                 enforcement,
                 granularity,
-            },
+            }),
         ) if limit % granularity == 0 => Ok(Some(ResourceAppliedLimit {
             limit,
             backend: *backend,
@@ -1503,6 +1626,7 @@ pub fn create_execution_admission_snapshot(
                 ExecutionPolicyDimension::ProcessCpuTimeMs
                     | ExecutionPolicyDimension::ProcessAddressSpaceBytes
                     | ExecutionPolicyDimension::JobProcessCount
+                    | ExecutionPolicyDimension::JobTaskCount
                     | ExecutionPolicyDimension::ProcessOpenFiles
                     | ExecutionPolicyDimension::ProcessFileSizeBytes
             )
@@ -1513,7 +1637,10 @@ pub fn create_execution_admission_snapshot(
             ExecutionPolicyError::ExecutionPolicyUnavailable
         });
     }
-    if (caps.schema_version == 4) != (policy.schema_version == 2) {
+    if !matches!(
+        (policy.schema_version, caps.schema_version),
+        (1, 1..=3) | (2, 4) | (3, 5)
+    ) {
         return Err(ExecutionPolicyError::InvalidExecutionPolicy);
     }
     let snapshot = ExecutionSecuritySnapshot::Policy(Box::new(PolicySecuritySnapshot {
@@ -1538,7 +1665,7 @@ pub fn create_execution_admission_snapshot(
         process_isolation: ExecutionEnforcementEvidence::NotRequested {},
         environment: ExecutionEnforcementEvidence::NotApplied {},
         supervision: ExecutionEnforcementEvidence::NotApplied {},
-        resources: if caps.schema_version == 4 {
+        resources: if matches!(caps.schema_version, 4 | 5) {
             let requested = policy
                 .resources
                 .as_ref()
@@ -1574,7 +1701,10 @@ pub fn create_execution_resource_applied_evidence(
         .as_ref()
         .filter(|resources| !resources.is_empty())
         .ok_or(ExecutionPolicyError::InvalidExecutionPolicy)?;
-    if capabilities.schema_version != 4 || !evaluate_execution_policy(policy, capabilities)?.allowed
+    if !matches!(
+        (policy.schema_version, capabilities.schema_version),
+        (2, 4) | (3, 5)
+    ) || !evaluate_execution_policy(policy, capabilities)?.allowed
     {
         return Err(ExecutionPolicyError::InvalidExecutionPolicy);
     }
@@ -1585,27 +1715,32 @@ pub fn create_execution_resource_applied_evidence(
     let applied = ExecutionResourceAppliedLimits {
         process_cpu_time_ms: expected_applied_limit(
             requested.process_cpu_time_ms,
-            &available.process_cpu_time_ms,
+            Some(&available.process_cpu_time_ms),
         )
         .map_err(|_| ExecutionPolicyError::InvalidExecutionPolicy)?,
         process_address_space_bytes: expected_applied_limit(
             requested.process_address_space_bytes,
-            &available.process_address_space_bytes,
+            Some(&available.process_address_space_bytes),
         )
         .map_err(|_| ExecutionPolicyError::InvalidExecutionPolicy)?,
         job_process_count: expected_applied_limit(
             requested.job_process_count,
-            &available.job_process_count,
+            available.job_process_count.as_ref(),
+        )
+        .map_err(|_| ExecutionPolicyError::InvalidExecutionPolicy)?,
+        job_task_count: expected_applied_limit(
+            requested.job_task_count,
+            available.job_task_count.as_ref(),
         )
         .map_err(|_| ExecutionPolicyError::InvalidExecutionPolicy)?,
         process_open_files: expected_applied_limit(
             requested.process_open_files,
-            &available.process_open_files,
+            Some(&available.process_open_files),
         )
         .map_err(|_| ExecutionPolicyError::InvalidExecutionPolicy)?,
         process_file_size_bytes: expected_applied_limit(
             requested.process_file_size_bytes,
-            &available.process_file_size_bytes,
+            Some(&available.process_file_size_bytes),
         )
         .map_err(|_| ExecutionPolicyError::InvalidExecutionPolicy)?,
     };

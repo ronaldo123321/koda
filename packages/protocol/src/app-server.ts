@@ -37,7 +37,7 @@ import {
 } from "./execution-policy.js";
 import { secretExecutionEvidenceSchema } from "./execution-secrets.js";
 
-export const APP_SERVER_PROTOCOL_VERSION = 17 as const;
+export const APP_SERVER_PROTOCOL_VERSION = 18 as const;
 
 export const THREAD_EVENTS_DEFAULT_LIMIT = 200;
 export const THREAD_EVENTS_MAXIMUM_LIMIT = 200;

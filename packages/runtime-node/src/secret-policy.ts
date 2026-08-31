@@ -496,7 +496,8 @@ function assertSecretSecurityAvailable(
     security.kind === "policy" &&
     (security.schema_version === 2 ||
       security.schema_version === 3 ||
-      (security.schema_version === 4 && "platform" in security));
+      ((security.schema_version === 4 || security.schema_version === 5) &&
+        "platform" in security));
   if (
     security.kind !== "policy" ||
     security.stage !== "admission" ||

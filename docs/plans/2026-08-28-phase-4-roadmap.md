@@ -275,10 +275,13 @@ The Phase 4C4B implementation was finalized at commit `490d316` and passed
 
 The approved next resource slice is
 [Phase 4C4C Linux resource enforcement](2026-08-31-phase-4c4c-linux-resource-enforcement-design.md).
-It evolves the current contract to `job_task_count`, adds exact Linux rlimits,
-and advertises cgroup v2 `pids.max` only when Koda owns a verified delegated
-subtree and can prevent same-UID command code from modifying it. Historical
-`job_process_count` records remain readable without reinterpretation.
+C4C1 is implemented: current policy v3, capability/security v5, native
+protocol/durable v8, and app-server v18 use `job_task_count`, while historical
+policy-v2/security-v4 `job_process_count` records remain readable without
+reinterpretation. C4C2 will add exact Linux rlimits; C4C3 will advertise cgroup
+v2 `pids.max` only when Koda owns a verified delegated subtree and can prevent
+same-UID command code from modifying it. C4C4 remains the acceptance and
+closure slice.
 
 Deferred Windows sandbox work remains explicit: restricted-token and privilege
 policy, filesystem workspace/scratch rules, network denial, launch confirmation,
