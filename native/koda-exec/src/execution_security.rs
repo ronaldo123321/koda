@@ -138,7 +138,7 @@ pub fn launch_setup(
             }
             _ => native_capabilities(),
         };
-    launch_setup_with_capabilities(start, retained, &capabilities, false)
+    launch_setup_with_capabilities(start, retained, &capabilities, false, false)
 }
 
 pub fn launch_setup_with_capabilities(
@@ -146,6 +146,7 @@ pub fn launch_setup_with_capabilities(
     retained: &ExecutionSecuritySnapshot,
     capabilities: &ExecutionCapabilities,
     os_sandbox_confirmed: bool,
+    resources_confirmed: bool,
 ) -> Result<ExecutionSecuritySnapshot, ProtocolError> {
     validate_worker_admission_with_capabilities(start, retained, capabilities)?;
     let mut snapshot = retained.clone();
@@ -168,6 +169,17 @@ pub fn launch_setup_with_capabilities(
         ));
     }
     if os_sandbox_contract && !protected && os_sandbox_confirmed {
+        return Err(corrupt());
+    }
+    let resources_requested = security
+        .policy
+        .resources
+        .as_ref()
+        .is_some_and(|resources| !resources.is_empty());
+    if resources_requested && !resources_confirmed {
+        return Err(policy_error(ExecutionPolicyError::ResourceLimitApplyFailed));
+    }
+    if !resources_requested && resources_confirmed {
         return Err(corrupt());
     }
     if macos_contract && os_sandbox_confirmed {
@@ -208,6 +220,15 @@ pub fn launch_setup_with_capabilities(
         mechanism: supervision.mechanism,
         layer: supervision.layer,
     };
+    if resources_requested {
+        security.resources = Some(
+            crate::execution_policy::create_execution_resource_applied_evidence(
+                &security.policy,
+                capabilities,
+            )
+            .map_err(policy_error)?,
+        );
+    }
     snapshot.validate().map_err(policy_error)?;
     Ok(snapshot)
 }
@@ -268,9 +289,12 @@ mod tests {
             secrets: None,
         };
         let admission = admit_with_capabilities(&start, &capabilities).unwrap();
-        assert!(launch_setup_with_capabilities(&start, &admission, &capabilities, false).is_err());
+        assert!(
+            launch_setup_with_capabilities(&start, &admission, &capabilities, false, false)
+                .is_err()
+        );
         let applied =
-            launch_setup_with_capabilities(&start, &admission, &capabilities, true).unwrap();
+            launch_setup_with_capabilities(&start, &admission, &capabilities, true, false).unwrap();
         let ExecutionSecuritySnapshot::Policy(applied) = applied else {
             panic!("expected policy evidence");
         };

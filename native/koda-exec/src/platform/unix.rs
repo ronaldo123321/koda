@@ -23,6 +23,12 @@ pub struct SandboxBootstrapChannels<'a> {
     pub release_target: RawFd,
 }
 
+pub struct ResourceBootstrapChannels<'a> {
+    pub confirmation_read: &'a BootstrapRead,
+    pub confirmation_write: &'a BootstrapWrite,
+    pub confirmation_target: RawFd,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProcessTreeSignal {
     Graceful,
@@ -339,15 +345,17 @@ pub fn configure_pipe_command(
     write: &BootstrapWrite,
     target: RawFd,
     sandbox: Option<SandboxBootstrapChannels<'_>>,
+    resources: Option<ResourceBootstrapChannels<'_>>,
 ) {
     let read = read.as_raw_fd();
     let write = write.as_raw_fd();
     let sandbox = sandbox.map(raw_sandbox_channels);
+    let resources = resources.map(raw_resource_channels);
     CommandExt::process_group(command.as_std_mut(), 0);
     // SAFETY: the closure performs only async-signal-safe descriptor operations before exec.
     unsafe {
         CommandExt::pre_exec(command.as_std_mut(), move || {
-            inherit_launch_descriptors(read, write, target, sandbox)
+            inherit_launch_descriptors(read, write, target, sandbox, resources)
         });
     }
 }
@@ -360,12 +368,14 @@ pub fn configure_pty_command(
     slave: &OwnedFd,
     gate_target: RawFd,
     sandbox: Option<SandboxBootstrapChannels<'_>>,
+    resources: Option<ResourceBootstrapChannels<'_>>,
 ) {
     let read = read.as_raw_fd();
     let write = write.as_raw_fd();
     let master = master.as_raw_fd();
     let slave = slave.as_raw_fd();
     let sandbox = sandbox.map(raw_sandbox_channels);
+    let resources = resources.map(raw_resource_channels);
     // SAFETY: the closure performs only async-signal-safe session, ioctl, and descriptor
     // operations before exec. All descriptors are Worker-owned.
     unsafe {
@@ -374,14 +384,17 @@ pub fn configure_pty_command(
             // low descriptor numbers. Preserve every bootstrap source first, then
             // install the fixed child descriptors only after the controlling TTY
             // has been configured.
-            let launch_descriptors = prepare_launch_descriptors(read, gate_target, sandbox)
-                .map_err(|error| {
-                    launch_descriptor_error("preserve PTY bootstrap channels", error)
-                })?;
+            let launch_descriptors =
+                prepare_launch_descriptors(read, gate_target, sandbox, resources).map_err(
+                    |error| launch_descriptor_error("preserve PTY bootstrap channels", error),
+                )?;
             libc::close(write);
             if let Some(sandbox) = sandbox {
                 libc::close(sandbox.confirmation_read);
                 libc::close(sandbox.release_write);
+            }
+            if let Some(resources) = resources {
+                libc::close(resources.confirmation_read);
             }
             libc::close(master);
             if libc::setsid() < 0 {
@@ -424,6 +437,13 @@ struct RawSandboxBootstrapChannels {
 }
 
 #[derive(Clone, Copy)]
+struct RawResourceBootstrapChannels {
+    confirmation_read: RawFd,
+    confirmation_write: RawFd,
+    confirmation_target: RawFd,
+}
+
+#[derive(Clone, Copy)]
 struct PreparedSandboxBootstrapChannels {
     confirmation_copy: RawFd,
     release_copy: RawFd,
@@ -432,10 +452,17 @@ struct PreparedSandboxBootstrapChannels {
 }
 
 #[derive(Clone, Copy)]
+struct PreparedResourceBootstrapChannels {
+    confirmation_copy: RawFd,
+    confirmation_target: RawFd,
+}
+
+#[derive(Clone, Copy)]
 struct PreparedLaunchDescriptors {
     gate_copy: RawFd,
     gate_target: RawFd,
     sandbox: Option<PreparedSandboxBootstrapChannels>,
+    resources: Option<PreparedResourceBootstrapChannels>,
 }
 
 fn raw_sandbox_channels(channels: SandboxBootstrapChannels<'_>) -> RawSandboxBootstrapChannels {
@@ -449,23 +476,38 @@ fn raw_sandbox_channels(channels: SandboxBootstrapChannels<'_>) -> RawSandboxBoo
     }
 }
 
+fn raw_resource_channels(channels: ResourceBootstrapChannels<'_>) -> RawResourceBootstrapChannels {
+    RawResourceBootstrapChannels {
+        confirmation_read: channels.confirmation_read.as_raw_fd(),
+        confirmation_write: channels.confirmation_write.as_raw_fd(),
+        confirmation_target: channels.confirmation_target,
+    }
+}
+
 fn inherit_launch_descriptors(
     gate_read: RawFd,
     gate_write: RawFd,
     gate_target: RawFd,
     sandbox: Option<RawSandboxBootstrapChannels>,
+    resources: Option<RawResourceBootstrapChannels>,
 ) -> io::Result<()> {
-    let Some(sandbox) = sandbox else {
+    if sandbox.is_none() && resources.is_none() {
         // SAFETY: the child never reads the Worker's gate endpoint.
         unsafe { libc::close(gate_write) };
         return inherit_descriptor(gate_read, gate_target);
-    };
-    let launch_descriptors = prepare_launch_descriptors(gate_read, gate_target, Some(sandbox))?;
+    }
+    let launch_descriptors =
+        prepare_launch_descriptors(gate_read, gate_target, sandbox, resources)?;
     // SAFETY: these are the parent-only ends of dedicated Worker-owned pipes.
     unsafe {
         libc::close(gate_write);
-        libc::close(sandbox.confirmation_read);
-        libc::close(sandbox.release_write);
+        if let Some(sandbox) = sandbox {
+            libc::close(sandbox.confirmation_read);
+            libc::close(sandbox.release_write);
+        }
+        if let Some(resources) = resources {
+            libc::close(resources.confirmation_read);
+        }
     }
     install_launch_descriptors(launch_descriptors)
 }
@@ -474,9 +516,10 @@ fn prepare_launch_descriptors(
     gate_read: RawFd,
     gate_target: RawFd,
     sandbox: Option<RawSandboxBootstrapChannels>,
+    resources: Option<RawResourceBootstrapChannels>,
 ) -> io::Result<PreparedLaunchDescriptors> {
+    validate_launch_targets(gate_target, sandbox, resources)?;
     let sandbox = if let Some(sandbox) = sandbox {
-        validate_launch_targets(gate_target, sandbox)?;
         Some(PreparedSandboxBootstrapChannels {
             confirmation_copy: duplicate_descriptor(sandbox.confirmation_write)?,
             release_copy: duplicate_descriptor(sandbox.release_read)?,
@@ -486,21 +529,36 @@ fn prepare_launch_descriptors(
     } else {
         None
     };
+    let resources = if let Some(resources) = resources {
+        Some(PreparedResourceBootstrapChannels {
+            confirmation_copy: duplicate_descriptor(resources.confirmation_write)?,
+            confirmation_target: resources.confirmation_target,
+        })
+    } else {
+        None
+    };
     Ok(PreparedLaunchDescriptors {
         gate_copy: duplicate_descriptor(gate_read)?,
         gate_target,
         sandbox,
+        resources,
     })
 }
 
 fn install_launch_descriptors(descriptors: PreparedLaunchDescriptors) -> io::Result<()> {
-    let result =
-        inherit_descriptor(descriptors.gate_copy, descriptors.gate_target).and_then(|_| {
+    let result = inherit_descriptor(descriptors.gate_copy, descriptors.gate_target)
+        .and_then(|_| {
             let Some(sandbox) = descriptors.sandbox else {
                 return Ok(());
             };
             inherit_descriptor(sandbox.confirmation_copy, sandbox.confirmation_target)
                 .and_then(|_| inherit_descriptor(sandbox.release_copy, sandbox.release_target))
+        })
+        .and_then(|_| {
+            let Some(resources) = descriptors.resources else {
+                return Ok(());
+            };
+            inherit_descriptor(resources.confirmation_copy, resources.confirmation_target)
         });
     // SAFETY: the duplicated sources are no longer needed after target assignment.
     unsafe {
@@ -509,28 +567,31 @@ fn install_launch_descriptors(descriptors: PreparedLaunchDescriptors) -> io::Res
             libc::close(sandbox.confirmation_copy);
             libc::close(sandbox.release_copy);
         }
+        if let Some(resources) = descriptors.resources {
+            libc::close(resources.confirmation_copy);
+        }
     }
     result
 }
 
 fn validate_launch_targets(
     gate_target: RawFd,
-    sandbox: RawSandboxBootstrapChannels,
+    sandbox: Option<RawSandboxBootstrapChannels>,
+    resources: Option<RawResourceBootstrapChannels>,
 ) -> io::Result<()> {
-    if [
-        gate_target,
-        sandbox.confirmation_target,
-        sandbox.release_target,
-    ]
-    .iter()
-    .any(|target| *target < 3)
-        || gate_target == sandbox.confirmation_target
-        || gate_target == sandbox.release_target
-        || sandbox.confirmation_target == sandbox.release_target
+    let mut targets = vec![gate_target];
+    if let Some(sandbox) = sandbox {
+        targets.extend([sandbox.confirmation_target, sandbox.release_target]);
+    }
+    if let Some(resources) = resources {
+        targets.push(resources.confirmation_target);
+    }
+    targets.sort_unstable();
+    if targets.iter().any(|target| *target < 3) || targets.windows(2).any(|pair| pair[0] == pair[1])
     {
         Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "sandbox bootstrap targets must be distinct non-standard descriptors",
+            "bootstrap targets must be distinct non-standard descriptors",
         ))
     } else {
         Ok(())

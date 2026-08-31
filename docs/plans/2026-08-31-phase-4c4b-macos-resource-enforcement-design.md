@@ -1,6 +1,6 @@
 # Phase 4C4B macOS Resource Enforcement
 
-- Status: Approved — implementation pending
+- Status: Implemented — local acceptance complete; same-commit CI pending
 - Date: 2026-08-31
 - Depends on: completed Phase 4C4A resource policy, trusted admission,
   durability, and client projection
@@ -114,11 +114,11 @@ Failure rules are:
 - partial application followed by failure: terminate the gated child and
   retain `not_applied`; never fabricate an applied claim.
 
-Public errors name the affected Koda resource and failure stage only. They do
-not disclose the host's previous hard limits, unrelated process state, or
-UID-wide resource usage. A resource-triggered exit retains the actual exit
-code or signal; applied evidence means the limit was installed, not that the
-command completed successfully.
+The fixed public error identifies the resource-limit application stage without
+disclosing the host's previous hard limits, unrelated process state, or
+UID-wide resource usage. A resource-triggered exit retains the actual exit code
+or signal; applied evidence means the limit was installed, not that the command
+completed successfully.
 
 Recovery never reconstructs applied evidence from current host state. A
 Running record must already contain valid applied evidence. A record left in a
@@ -198,3 +198,19 @@ Windows native CI jobs from the same commit.
 - Windows resource enforcement; and
 - new CLI/TUI configuration or presentation beyond the existing trusted
   application profile and shared evidence formatter.
+
+## Implementation result
+
+The implementation follows the approved strict subset without widening any
+public scope. Native protocol and durable format are v7; v6 capability
+reconstruction remains frozen to the C4A all-unsupported contract. The macOS
+command bootstrap installs equal soft/hard limits in fixed order, reads them
+back exactly, writes a request-bound confirmation, and remains behind the
+existing command gate until the Worker persists applied evidence.
+
+Shared TypeScript/Rust golden fixtures cover the current macOS capability,
+canonical digests, admission and applied snapshots, and tampering. Rust tests
+cover v1-v6 reads and v7 round trips. Real macOS integration tests cover CPU,
+file-size, descriptor exhaustion, Pipe, protected background PTY, attach/list/
+terminate retention, app-server projection, and all three injected bootstrap
+failure modes with a sentinel proving user code did not run.

@@ -8,6 +8,7 @@ mod executor_runtime;
 mod framing;
 mod internal_protocol;
 mod linux_bubblewrap;
+mod macos_resource_limits;
 mod macos_seatbelt;
 mod platform;
 mod protocol;
@@ -54,7 +55,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             job_dir,
             token_handle,
         } => async_runtime()?.block_on(run_worker(job_dir, token_handle)),
-        Arguments::CommandBootstrap { gate_fd, argv } => run_command_bootstrap(gate_fd, argv),
+        Arguments::CommandBootstrap {
+            gate_fd,
+            resource_confirmation_fd,
+            resources,
+            resource_test_fault,
+            argv,
+        } => run_command_bootstrap(
+            gate_fd,
+            resource_confirmation_fd,
+            resources,
+            resource_test_fault,
+            argv,
+        ),
         Arguments::SandboxBootstrap {
             confirmation_fd,
             release_fd,
@@ -123,15 +136,27 @@ async fn run_worker(
 #[cfg(unix)]
 fn run_command_bootstrap(
     gate_fd: i32,
+    resource_confirmation_fd: Option<i32>,
+    resources: Option<execution_policy::ExecutionResourceLimits>,
+    resource_test_fault: Option<macos_resource_limits::ResourceTestFault>,
     argv: Vec<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    worker::run_command_bootstrap(gate_fd, argv)?;
+    worker::run_command_bootstrap(
+        gate_fd,
+        resource_confirmation_fd,
+        resources,
+        resource_test_fault,
+        argv,
+    )?;
     Ok(())
 }
 
 #[cfg(windows)]
 fn run_command_bootstrap(
     _gate_fd: i32,
+    _resource_confirmation_fd: Option<i32>,
+    _resources: Option<execution_policy::ExecutionResourceLimits>,
+    _resource_test_fault: Option<macos_resource_limits::ResourceTestFault>,
     _argv: Vec<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     Err("PLATFORM_CAPABILITY_UNAVAILABLE: Windows command startup requires Phase 4B4B".into())
@@ -183,6 +208,9 @@ enum Arguments {
     },
     CommandBootstrap {
         gate_fd: i32,
+        resource_confirmation_fd: Option<i32>,
+        resources: Option<execution_policy::ExecutionResourceLimits>,
+        resource_test_fault: Option<macos_resource_limits::ResourceTestFault>,
         argv: Vec<String>,
     },
     SandboxBootstrap {
@@ -255,14 +283,63 @@ fn parse_arguments(
                 .next()
                 .ok_or("--gate-fd is required")?
                 .parse::<i32>()?;
-            if gate_fd < 3 || arguments.next().as_deref() != Some("--") {
+            if gate_fd < 3 {
+                return Err("command bootstrap descriptor or separator is invalid".into());
+            }
+            let mut next = arguments.next();
+            let (resource_confirmation_fd, resources, resource_test_fault) =
+                if next.as_deref() == Some("--resource-confirm-fd") {
+                    let descriptor = arguments
+                        .next()
+                        .ok_or("--resource-confirm-fd is required")?
+                        .parse::<i32>()?;
+                    if descriptor != macos_resource_limits::RESOURCE_CONFIRMATION_FD
+                        || descriptor == gate_fd
+                        || arguments.next().as_deref() != Some("--resources")
+                    {
+                        return Err("command bootstrap resource descriptor is invalid".into());
+                    }
+                    let json = arguments.next().ok_or("--resources is required")?;
+                    if json.len() > 1_024 {
+                        return Err("command bootstrap resources are too large".into());
+                    }
+                    let value = serde_json::from_str(&json)?;
+                    let resources = execution_policy::ExecutionResourceLimits::parse(value)
+                        .map_err(|_| "command bootstrap resources are invalid")?;
+                    macos_resource_limits::confirmation_frame(&resources)
+                        .map_err(|_| "command bootstrap resources are unsupported")?;
+                    next = arguments.next();
+                    let resource_test_fault = if next.as_deref()
+                        == Some("--resource-test-fault")
+                    {
+                        let fault = macos_resource_limits::ResourceTestFault::parse(
+                            &arguments
+                                .next()
+                                .ok_or("--resource-test-fault is required")?,
+                        )?;
+                        next = arguments.next();
+                        Some(fault)
+                    } else {
+                        None
+                    };
+                    (Some(descriptor), Some(resources), resource_test_fault)
+                } else {
+                    (None, None, None)
+                };
+            if next.as_deref() != Some("--") {
                 return Err("command bootstrap descriptor or separator is invalid".into());
             }
             let argv = arguments.collect::<Vec<_>>();
             if argv.is_empty() {
                 return Err("command bootstrap argv is required".into());
             }
-            Ok(Arguments::CommandBootstrap { gate_fd, argv })
+            Ok(Arguments::CommandBootstrap {
+                gate_fd,
+                resource_confirmation_fd,
+                resources,
+                resource_test_fault,
+                argv,
+            })
         }
         Some("sandbox-bootstrap") => {
             if arguments.next().as_deref() != Some("--confirm-fd") {
@@ -675,6 +752,57 @@ mod tests {
             .map(str::to_owned),
         );
         assert!(relative_probe.is_err());
+    }
+
+    #[test]
+    fn command_bootstrap_resource_arguments_are_strict_and_bounded() {
+        let valid = parse_arguments(
+            [
+                "command-bootstrap",
+                "--gate-fd",
+                "3",
+                "--resource-confirm-fd",
+                "6",
+                "--resources",
+                r#"{"process_cpu_time_ms":1000,"process_open_files":64}"#,
+                "--",
+                "/usr/bin/true",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        );
+        assert!(matches!(
+            valid,
+            Ok(Arguments::CommandBootstrap {
+                resource_confirmation_fd: Some(6),
+                resources: Some(_),
+                resource_test_fault: None,
+                ..
+            })
+        ));
+
+        for resources in [
+            r#"{"process_cpu_time_ms":1001}"#,
+            r#"{"process_address_space_bytes":4096}"#,
+            r#"{"unknown_limit":1}"#,
+        ] {
+            let invalid = parse_arguments(
+                [
+                    "command-bootstrap",
+                    "--gate-fd",
+                    "3",
+                    "--resource-confirm-fd",
+                    "6",
+                    "--resources",
+                    resources,
+                    "--",
+                    "/usr/bin/true",
+                ]
+                .into_iter()
+                .map(str::to_owned),
+            );
+            assert!(invalid.is_err());
+        }
     }
 
     #[test]

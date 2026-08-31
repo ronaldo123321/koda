@@ -19,7 +19,7 @@ import {
 } from "./execution-policy.js";
 import type { NativeSecretLeaseInput } from "./secret-policy.js";
 
-const PROTOCOL_VERSION = 6;
+const PROTOCOL_VERSION = 7;
 const MAX_FRAME_BYTES = 1_048_576;
 const DEFAULT_STARTUP_TIMEOUT_MS = 5_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
@@ -36,6 +36,7 @@ export type NativeExecutorErrorCode =
   | "INVALID_EXECUTION_POLICY"
   | "EXECUTION_POLICY_UNAVAILABLE"
   | "RESOURCE_LIMIT_UNAVAILABLE"
+  | "RESOURCE_LIMIT_APPLY_FAILED"
   | "EXECUTION_POLICY_CHANGED"
   | "EXECUTION_SECURITY_CORRUPT"
   | "INVALID_REQUEST"
@@ -1372,7 +1373,7 @@ function parseResponse(value: unknown): ExecutorResponse {
   if (parsed.data.protocol_version !== PROTOCOL_VERSION) {
     throw new NativeExecutorError(
       "INCOMPATIBLE_PROTOCOL",
-      "Executor protocol v6 is required. Finish or stop the older Supervisor explicitly before upgrading; no fallback was attempted.",
+      "Executor protocol v7 is required. Finish or stop the older Supervisor explicitly before upgrading; no fallback was attempted.",
     );
   }
   return parsed.data;
@@ -1410,6 +1411,7 @@ function normalizeRemoteCode(
     case "INVALID_EXECUTION_POLICY":
     case "EXECUTION_POLICY_UNAVAILABLE":
     case "RESOURCE_LIMIT_UNAVAILABLE":
+    case "RESOURCE_LIMIT_APPLY_FAILED":
     case "EXECUTION_POLICY_CHANGED":
     case "EXECUTION_SECURITY_CORRUPT":
     case "PLATFORM_CAPABILITY_UNAVAILABLE":

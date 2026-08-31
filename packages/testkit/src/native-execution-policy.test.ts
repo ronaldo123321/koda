@@ -87,7 +87,7 @@ describe("Phase 4C2 native admission and evidence", () => {
         else process.env.KODA_REQUIRE_MACOS_SEATBELT = previous;
       }
       await expect(client!.hello()).resolves.toMatchObject({
-        protocol_version: 6,
+        protocol_version: 7,
         platform: "macos",
         execution_security: {
           schema_version: 4,
@@ -117,7 +117,7 @@ describe("Phase 4C2 native admission and evidence", () => {
       }
       const hello = await client!.hello();
       expect(hello).toMatchObject({
-        protocol_version: 6,
+        protocol_version: 7,
         platform: "linux",
         execution_security: {
           schema_version: 4,
@@ -220,7 +220,7 @@ describe("Phase 4C2 native admission and evidence", () => {
     const fixture = await setup();
     const client = await open(fixture);
     const hello = await client.hello();
-    expect(hello.protocol_version).toBe(6);
+    expect(hello.protocol_version).toBe(7);
     expect(hello.execution_security.schema_version).toBe(4);
     expect(hello.execution_security.filesystem).toEqual(
       process.platform === "darwin"
@@ -242,12 +242,12 @@ describe("Phase 4C2 native admission and evidence", () => {
     const currentManifest = await onlyManifest(fixture.root);
     expect(
       JSON.parse(await readFile(currentManifest.path, "utf8")).format_version,
-    ).toBe(6);
+    ).toBe(7);
     expect(
       JSON.parse(
         await readFile(join(currentManifest.directory, "state.json"), "utf8"),
       ).format_version,
-    ).toBe(6);
+    ).toBe(7);
     expect(terminal).toMatchObject({
       state: "exited",
       exit_code: 0,
@@ -304,18 +304,26 @@ describe("Phase 4C2 native admission and evidence", () => {
               { network: "deny" },
               { process_isolation: "required" },
             ] as const);
+      const unavailableResourceNames =
+        process.platform === "darwin"
+          ? [
+              "process_cpu_time_ms",
+              "process_address_space_bytes",
+              "job_process_count",
+            ]
+          : [
+              "process_cpu_time_ms",
+              "process_address_space_bytes",
+              "job_process_count",
+              "process_open_files",
+              "process_file_size_bytes",
+            ];
       const restrictions = [
         ...isolationRestrictions.map((restriction) => ({
           restriction,
           code: "EXECUTION_POLICY_UNAVAILABLE" as const,
         })),
-        ...[
-          "process_cpu_time_ms",
-          "process_address_space_bytes",
-          "job_process_count",
-          "process_open_files",
-          "process_file_size_bytes",
-        ].map((name) => ({
+        ...unavailableResourceNames.map((name) => ({
           restriction: { resources: { [name]: 1 } },
           code: "RESOURCE_LIMIT_UNAVAILABLE" as const,
         })),
@@ -930,7 +938,7 @@ describe("Phase 4C2 native admission and evidence", () => {
       { ...input.policy!, secret: "fixture-sensitive-marker" },
     ]) {
       const value = policy === undefined ? params : { ...params, policy };
-      const response = await rpc(client.socketPath, 6, "job/start", value);
+      const response = await rpc(client.socketPath, 7, "job/start", value);
       expect(response).toMatchObject({
         ok: false,
         error: { code: "INVALID_EXECUTION_POLICY" },
@@ -1002,7 +1010,7 @@ describe("Phase 4C2 native admission and evidence", () => {
 // Optional cross-version acceptance uses the real pinned v1 binary, not a fake
 // Worker. Build commit 3aa84ee and set KODA_LEGACY_EXECUTOR_BINARY to run it.
 describe.skipIf(legacyBinary === undefined || process.platform === "win32")(
-  "native v1 -> v6 live compatibility",
+  "native v1 -> v7 live compatibility",
   () => {
     it("refuses a live v1 Supervisor without replacing it", async () => {
       const fixture = await setup();

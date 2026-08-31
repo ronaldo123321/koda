@@ -82,9 +82,9 @@ The completed Windows terminal contract and acceptance evidence are in [Phase 4B
 
 ### Phase 4C: sandbox, network, and secret policy
 
-Status: In progress — Phase 4C1, Phase 4C2A/C2B, Phase 4C3, and Phase 4C4A
-are complete; operating-system resource enforcement, provider/MCP/plugin,
-finer network, and Windows sandbox slices remain
+Status: In progress — Phase 4C1, Phase 4C2A/C2B, Phase 4C3, and Phase 4C4A/C4B
+are complete; Linux/Windows resource enforcement, provider/MCP/plugin, finer
+network, and Windows sandbox slices remain
 
 - Add explicit filesystem, process, environment, and network capabilities.
 - Implement available OS isolation mechanisms and expose their effective strength rather than a portable boolean claim.
@@ -213,20 +213,20 @@ execution, and Windows injection remain explicitly deferred.
 
 Safe evidence is now projected consistently by every client and the
 same-implementation-commit platform acceptance matrix is complete.
-Resource quotas, finer-grained network policy, provider/MCP/plugin sandboxing,
-shell syntax, Landlock fallback, bundled Bubblewrap distribution, and all
-Windows sandbox controls remain later Phase 4C/4E work rather than implicit
-parts of Linux or Phase 4C3 completion.
+Aggregate job quotas, Linux/Windows resource enforcement, finer-grained network
+policy, provider/MCP/plugin sandboxing, shell syntax, Landlock fallback,
+bundled Bubblewrap distribution, and all Windows sandbox controls remain later
+Phase 4C/4E work rather than implicit parts of Linux or Phase 4C3 completion.
 
-The approved next slice is
+The completed resource-contract foundation is
 [Phase 4C4A resource policy contract and evidence](2026-08-31-phase-4c4a-resource-policy-contract-design.md).
 It defines five explicitly scoped limits, strict policy/capability/applied
 evidence separation, fail-closed admission, approval binding, durable history,
 and client projection before any operating-system resource backend is claimed.
 C4A is split into standalone contracts, trusted native admission/durability,
-and projection/acceptance. macOS enforcement follows in Phase 4C4B, Linux
-follows in Phase 4C4C, and Windows resource enforcement remains explicitly
-deferred.
+and projection/acceptance. macOS enforcement is now complete in Phase 4C4B,
+Linux follows in Phase 4C4C, and Windows resource enforcement remains
+explicitly deferred.
 
 C4A1 implementation commit `ca5c5a9` adds the standalone TypeScript/Rust
 policy-v2 and security/capability-v4 contracts, canonical digests, shared golden
@@ -251,7 +251,7 @@ closing Phase 4C4A. No operating-system resource backend is claimed; macOS and
 Linux enforcement remain Phase 4C4B/C4C, and Windows enforcement remains
 deferred.
 
-The approved next slice is
+The completed macOS resource slice is
 [Phase 4C4B macOS resource enforcement](2026-08-31-phase-4c4b-macos-resource-enforcement-design.md).
 It enables only exact per-process `RLIMIT_CPU`, `RLIMIT_NOFILE`, and
 `RLIMIT_FSIZE` hard limits, with gated bootstrap confirmation and retained
@@ -259,6 +259,15 @@ applied evidence. macOS address-space and job-tree process limits remain
 unsupported because the available Darwin interfaces do not match those public
 scopes. Native protocol and durable format advance to v7 so historical v6
 unsupported-resource evidence remains readable without reinterpretation.
+
+Phase 4C4B implementation adds exact-granularity admission, a dedicated
+resource confirmation descriptor in the command bootstrap, `setrlimit` plus
+exact `getrlimit` verification, pre-release failure handling, and durable
+applied evidence shared by Pipe, PTY, background, and Seatbelt launches. Real
+macOS tests prove CPU termination, file-size truncation, `EMFILE`, identical
+app-server process projection, and application/corruption/timeout gate
+failures with a never-executed sentinel. Linux resource enforcement remains
+Phase 4C4C; Windows resource enforcement remains deferred.
 
 Deferred Windows sandbox work remains explicit: restricted-token and privilege
 policy, filesystem workspace/scratch rules, network denial, launch confirmation,

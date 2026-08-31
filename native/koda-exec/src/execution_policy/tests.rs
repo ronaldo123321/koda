@@ -407,6 +407,88 @@ fn resource_requests_are_reported_and_rejected_before_admission() {
 }
 
 #[test]
+fn macos_rlimit_capability_admits_only_the_exact_supported_subset() {
+    let fixture = resource_fixtures();
+    let golden = &fixture["macos_rlimit_capability"];
+    let capabilities = macos_resource_execution_capabilities();
+    capabilities.validate().unwrap();
+    let resources = capabilities.resource_limits.as_ref().unwrap();
+    assert_eq!(
+        resources,
+        &ExecutionResourceCapabilities::parse(golden["resource_limits"].clone()).unwrap()
+    );
+    assert_eq!(resources, &ExecutionResourceCapabilities::macos_rlimit());
+    assert_eq!(
+        resources.canonical_json().unwrap(),
+        golden["resource_canonical"].as_str().unwrap()
+    );
+    assert_eq!(
+        resources.digest().unwrap(),
+        golden["resource_sha256"].as_str().unwrap()
+    );
+    assert_eq!(
+        capabilities.canonical_json().unwrap(),
+        golden["canonical"].as_str().unwrap()
+    );
+    assert_eq!(
+        capabilities.digest().unwrap(),
+        golden["sha256"].as_str().unwrap()
+    );
+    assert_ne!(
+        capabilities.digest().unwrap(),
+        resource_contract_execution_capabilities(&macos_seatbelt_execution_capabilities())
+            .unwrap()
+            .digest()
+            .unwrap()
+    );
+
+    let mut policy =
+        ExecutionPolicy::parse(resource_fixtures()["policy_cases"][0]["input"].clone()).unwrap();
+    policy.resources = Some(ExecutionResourceLimits {
+        process_cpu_time_ms: Some(1_000),
+        process_address_space_bytes: None,
+        job_process_count: None,
+        process_open_files: Some(64),
+        process_file_size_bytes: Some(4_096),
+    });
+    assert!(
+        evaluate_execution_policy(&policy, &capabilities)
+            .unwrap()
+            .allowed
+    );
+    let admission = create_execution_admission_snapshot(&policy, &capabilities).unwrap();
+    let ExecutionSecuritySnapshot::Policy(admission) = admission else {
+        panic!("expected policy admission")
+    };
+    assert!(matches!(
+        admission.resources,
+        Some(ExecutionResourceEvidence::NotApplied { .. })
+    ));
+    assert!(matches!(
+        create_execution_resource_applied_evidence(&policy, &capabilities).unwrap(),
+        ExecutionResourceEvidence::Applied { .. }
+    ));
+
+    policy.resources.as_mut().unwrap().process_cpu_time_ms = Some(1_001);
+    assert!(
+        !evaluate_execution_policy(&policy, &capabilities)
+            .unwrap()
+            .allowed
+    );
+    policy.resources.as_mut().unwrap().process_cpu_time_ms = None;
+    policy
+        .resources
+        .as_mut()
+        .unwrap()
+        .process_address_space_bytes = Some(4_096);
+    assert!(
+        !evaluate_execution_policy(&policy, &capabilities)
+            .unwrap()
+            .allowed
+    );
+}
+
+#[test]
 fn shared_v4_snapshots_preserve_resource_absence_without_inference() {
     for case in resource_fixtures()["snapshot_cases"].as_array().unwrap() {
         let parsed = ExecutionSecuritySnapshot::parse(case["input"].clone());
@@ -424,6 +506,32 @@ fn shared_v4_snapshots_preserve_resource_absence_without_inference() {
             );
         }
     }
+}
+
+#[test]
+fn applied_resource_evidence_rejects_digest_and_value_tampering() {
+    let fixture = resource_fixtures();
+    let input = fixture["snapshot_cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|case| case["name"] == "macos_rlimit_applied")
+        .unwrap()["input"]
+        .clone();
+
+    let mut digest_tampered = input.clone();
+    digest_tampered["resources"]["applied_digest"] = json!("a".repeat(64));
+    assert_eq!(
+        ExecutionSecuritySnapshot::parse(digest_tampered).unwrap_err(),
+        ExecutionPolicyError::ExecutionSecurityCorrupt
+    );
+
+    let mut value_tampered = input;
+    value_tampered["resources"]["applied"]["process_open_files"]["limit"] = json!(65);
+    assert_eq!(
+        ExecutionSecuritySnapshot::parse(value_tampered).unwrap_err(),
+        ExecutionPolicyError::ExecutionSecurityCorrupt
+    );
 }
 
 #[test]

@@ -426,6 +426,36 @@ export const executionResourceCapabilitiesSchema = z
   })
   .strict();
 
+/** Exact Phase 4C4B macOS kernel-hard subset. The two unsupported entries are
+ * intentional: Darwin's RLIMIT_AS/RSS and RLIMIT_NPROC do not match Koda's
+ * address-space and job-tree contracts.
+ */
+export const MACOS_EXECUTION_RESOURCE_CAPABILITIES = {
+  process_cpu_time_ms: {
+    status: "supported",
+    backend: "posix_rlimit",
+    scope: "process",
+    enforcement: "kernel_hard",
+    granularity: 1_000,
+  },
+  process_address_space_bytes: { status: "unsupported" },
+  job_process_count: { status: "unsupported" },
+  process_open_files: {
+    status: "supported",
+    backend: "posix_rlimit",
+    scope: "process",
+    enforcement: "kernel_hard",
+    granularity: 1,
+  },
+  process_file_size_bytes: {
+    status: "supported",
+    backend: "posix_rlimit",
+    scope: "process",
+    enforcement: "kernel_hard",
+    granularity: 1,
+  },
+} as const satisfies z.infer<typeof executionResourceCapabilitiesSchema>;
+
 const executionCapabilitiesV4CommonShape = {
   schema_version: z.literal(4),
   backend: executionBackendSchema,
@@ -498,10 +528,17 @@ function refineExecutionCapabilitiesV4(
   const unsupported = Object.values(value.resource_limits).every(
     (entry) => entry.status === "unsupported",
   );
-  if (!legacy.success || !unsupported) {
+  const macosRlimits =
+    legacyVersion === 2 &&
+    EXECUTION_RESOURCE_LIMIT_NAMES.every(
+      (name) =>
+        JSON.stringify(value.resource_limits[name]) ===
+        JSON.stringify(MACOS_EXECUTION_RESOURCE_CAPABILITIES[name]),
+    );
+  if (!legacy.success || (!unsupported && !macosRlimits)) {
     context.addIssue({
       code: "custom",
-      message: "Inconsistent Phase 4C4A resource capability.",
+      message: "Inconsistent resource capability.",
     });
   }
 }

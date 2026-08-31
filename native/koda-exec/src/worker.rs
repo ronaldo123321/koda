@@ -23,13 +23,13 @@ use uuid::Uuid;
 
 use crate::attachment::AttachmentRegistry;
 use crate::durable::{JobLock, JobRecord, JobStore, StoredJobState, sha256_hex};
-#[cfg(unix)]
-use crate::execution_policy::FilesystemPolicy;
 use crate::execution_policy::{
     ExecutionCapabilities, ExecutionPlatform, ExecutionSecuritySnapshot, c1_execution_capabilities,
-    linux_bubblewrap_execution_capabilities, macos_seatbelt_execution_capabilities,
-    resource_contract_execution_capabilities,
+    linux_bubblewrap_execution_capabilities, macos_resource_execution_capabilities,
+    macos_seatbelt_execution_capabilities, resource_contract_execution_capabilities,
 };
+#[cfg(unix)]
+use crate::execution_policy::{ExecutionResourceLimits, FilesystemPolicy};
 use crate::execution_security;
 use crate::framing::{read_json_frame, write_json_frame};
 use crate::internal_protocol::{
@@ -40,8 +40,9 @@ use crate::internal_protocol::{
 use crate::platform::bootstrap::{BootstrapHandle, read_inherited_secret};
 #[cfg(unix)]
 use crate::platform::bootstrap::{
-    BootstrapRead, BootstrapWrite, SandboxBootstrapChannels, await_gate_and_exec,
-    configure_pipe_command, configure_pty_command, create_bootstrap_channel, release_gate,
+    BootstrapRead, BootstrapWrite, ResourceBootstrapChannels, SandboxBootstrapChannels,
+    await_gate_and_exec, configure_pipe_command, configure_pty_command, create_bootstrap_channel,
+    release_gate,
 };
 use crate::platform::identity::current_process_identity;
 #[cfg(windows)]
@@ -79,6 +80,8 @@ const OUTPUT_BUFFER_BYTES: usize = 16_384;
 const PTY_COMMAND_QUEUE_DEPTH: usize = 64;
 #[cfg(unix)]
 const COMMAND_GATE_FD: RawFd = 3;
+#[cfg(unix)]
+const RESOURCE_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(3);
 #[cfg(windows)]
 const WINDOWS_PTY_FAULT_MARKER: &[u8] = b"RETAINED-BEFORE-WORKER-LOSS";
 
@@ -211,8 +214,21 @@ fn worker_execution_capabilities(
                 }
                 _ => execution_security::native_capabilities(),
             };
-            resource_contract_execution_capabilities(&legacy)
-                .map_err(execution_security::policy_error)
+            let historical = resource_contract_execution_capabilities(&legacy)
+                .map_err(execution_security::policy_error)?;
+            let current = if security.platform == Some(ExecutionPlatform::Macos) {
+                Some(macos_resource_execution_capabilities())
+            } else {
+                None
+            };
+            [Some(historical), current]
+                .into_iter()
+                .flatten()
+                .find(|candidate| {
+                    candidate.digest().ok().as_deref()
+                        == Some(security.capabilities_digest.as_str())
+                })
+                .ok_or_else(execution_security::corrupt)
         }
         _ => Ok(execution_security::native_capabilities()),
     }
@@ -413,6 +429,7 @@ impl WorkerRuntime {
         pid: u32,
         identity: String,
         macos_seatbelt_confirmed: bool,
+        resources_confirmed: bool,
     ) -> Result<(), ProtocolError> {
         #[cfg(windows)]
         let _ = macos_seatbelt_confirmed;
@@ -428,6 +445,7 @@ impl WorkerRuntime {
                     .ok_or_else(execution_security::corrupt)?,
                 &self.execution_capabilities,
                 macos_seatbelt_confirmed,
+                resources_confirmed,
             )?);
         }
         next.state = JobState::Running;
@@ -502,6 +520,26 @@ impl WorkerRuntime {
                 "COMMAND_START_FAILED".to_owned()
             },
             message: format!("Command could not start: {error}"),
+        });
+        self.finalize_secret_evidence(&mut next, false);
+        *guard = self.record.transition(&guard, next)?;
+        Ok(())
+    }
+
+    async fn publish_resource_start_failed(&self) -> Result<(), ProtocolError> {
+        self.stdout_complete.store(true, Ordering::Release);
+        self.stderr_complete.store(true, Ordering::Release);
+        if let Some(pty) = &self.pty {
+            pty.complete.store(true, Ordering::Release);
+        }
+        let mut guard = self.state.lock().await;
+        let mut next = guard.clone();
+        next.state = JobState::StartFailed;
+        next.duration_ms = duration_millis(self.started_at.elapsed());
+        next.failure = Some(JobFailure {
+            code: "RESOURCE_LIMIT_APPLY_FAILED".to_owned(),
+            message: "The operating system could not apply the requested resource limit."
+                .to_owned(),
         });
         self.finalize_secret_evidence(&mut next, false);
         *guard = self.record.transition(&guard, next)?;
@@ -1317,7 +1355,7 @@ async fn execute_windows_pipe_job(runtime: Arc<WorkerRuntime>) -> Result<(), Pro
         Ok(process) => process,
         Err(error) => return runtime.publish_start_failed(error).await,
     };
-    if let Err(error) = runtime.publish_running(pid, identity, false).await {
+    if let Err(error) = runtime.publish_running(pid, identity, false, false).await {
         let _ = tree.terminate(1);
         return Err(error);
     }
@@ -1535,7 +1573,7 @@ async fn execute_windows_pty_job(runtime: Arc<WorkerRuntime>) -> Result<(), Prot
             let _ = reader_failure_sender.send(error.to_string()).await;
         }
     });
-    if let Err(error) = runtime.publish_running(pid, identity, false).await {
+    if let Err(error) = runtime.publish_running(pid, identity, false, false).await {
         drop(input);
         let _ = tree.terminate(1);
         let _ = close_windows_pseudo_console(tree.clone(), Duration::from_secs(2)).await;
@@ -1980,6 +2018,49 @@ struct UnixSandboxChannels {
 }
 
 #[cfg(unix)]
+struct UnixResourceChannels {
+    confirmation_read: BootstrapRead,
+    confirmation_write: BootstrapWrite,
+}
+
+#[cfg(unix)]
+struct UnixResourceLaunch {
+    channels: UnixResourceChannels,
+    requested: ExecutionResourceLimits,
+}
+
+#[cfg(unix)]
+impl UnixResourceLaunch {
+    fn child_descriptors(&self) -> ResourceBootstrapChannels<'_> {
+        self.channels.child_descriptors()
+    }
+
+    fn into_parent(self) -> (BootstrapRead, ExecutionResourceLimits) {
+        (self.channels.into_parent_read(), self.requested)
+    }
+}
+
+#[cfg(unix)]
+impl UnixResourceChannels {
+    fn child_descriptors(&self) -> ResourceBootstrapChannels<'_> {
+        ResourceBootstrapChannels {
+            confirmation_read: &self.confirmation_read,
+            confirmation_write: &self.confirmation_write,
+            confirmation_target: crate::macos_resource_limits::RESOURCE_CONFIRMATION_FD,
+        }
+    }
+
+    fn into_parent_read(self) -> BootstrapRead {
+        let Self {
+            confirmation_read,
+            confirmation_write,
+        } = self;
+        drop(confirmation_write);
+        confirmation_read
+    }
+}
+
+#[cfg(unix)]
 impl UnixSandboxChannels {
     fn child_descriptors(
         &self,
@@ -2085,7 +2166,7 @@ fn prepare_unix_launch(
     } else {
         None
     };
-    let macos_capabilities =
+    let historical_macos_capabilities =
         resource_contract_execution_capabilities(&macos_seatbelt_execution_capabilities())
             .map_err(execution_security::policy_error)?;
     let macos_contract = runtime.execution_capabilities.schema_version == 2
@@ -2094,8 +2175,10 @@ fn prepare_unix_launch(
     if macos_contract {
         let expected = if runtime.execution_capabilities.schema_version == 2 {
             macos_seatbelt_execution_capabilities()
+        } else if runtime.execution_capabilities == historical_macos_capabilities {
+            historical_macos_capabilities
         } else {
-            macos_capabilities
+            macos_resource_execution_capabilities()
         };
         if runtime.execution_capabilities != expected || !crate::macos_seatbelt::launch_available()
         {
@@ -2240,6 +2323,100 @@ fn create_unix_sandbox_channels() -> Result<UnixSandboxChannels, ProtocolError> 
 }
 
 #[cfg(unix)]
+fn requested_macos_resources(
+    runtime: &WorkerRuntime,
+    params: &crate::protocol::StartParams,
+) -> Result<Option<ExecutionResourceLimits>, ProtocolError> {
+    let requested = params
+        .policy
+        .as_ref()
+        .and_then(|policy| policy.resources.as_ref())
+        .filter(|resources| !resources.is_empty())
+        .cloned();
+    if requested.is_some()
+        && runtime.execution_capabilities != macos_resource_execution_capabilities()
+    {
+        return Err(execution_security::policy_error(
+            crate::execution_policy::ExecutionPolicyError::ExecutionPolicyChanged,
+        ));
+    }
+    Ok(requested)
+}
+
+#[cfg(unix)]
+fn create_resource_channels() -> Result<UnixResourceChannels, ProtocolError> {
+    let (confirmation_read, confirmation_write) = create_bootstrap_channel().map_err(|_| {
+        execution_security::policy_error(
+            crate::execution_policy::ExecutionPolicyError::ResourceLimitApplyFailed,
+        )
+    })?;
+    Ok(UnixResourceChannels {
+        confirmation_read,
+        confirmation_write,
+    })
+}
+
+#[cfg(unix)]
+fn prepare_resource_launch(
+    runtime: &WorkerRuntime,
+    params: &crate::protocol::StartParams,
+) -> Result<Option<UnixResourceLaunch>, ProtocolError> {
+    requested_macos_resources(runtime, params)?
+        .map(|requested| {
+            Ok(UnixResourceLaunch {
+                channels: create_resource_channels()?,
+                requested,
+            })
+        })
+        .transpose()
+}
+
+#[cfg(unix)]
+fn configure_command_bootstrap_arguments(
+    command: &mut Command,
+    resources: Option<&ExecutionResourceLimits>,
+    argv: &[std::ffi::OsString],
+) -> Result<(), ProtocolError> {
+    command
+        .arg("command-bootstrap")
+        .arg("--gate-fd")
+        .arg(COMMAND_GATE_FD.to_string());
+    if let Some(resources) = resources {
+        let json = resources.canonical_json().map_err(|_| {
+            execution_security::policy_error(
+                crate::execution_policy::ExecutionPolicyError::InvalidExecutionPolicy,
+            )
+        })?;
+        command
+            .arg("--resource-confirm-fd")
+            .arg(crate::macos_resource_limits::RESOURCE_CONFIRMATION_FD.to_string())
+            .arg("--resources")
+            .arg(json);
+        if let Some(fault) = resource_bootstrap_test_fault() {
+            command.arg("--resource-test-fault").arg(fault);
+        }
+    }
+    command.arg("--").args(argv);
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn wait_for_resource_confirmation(
+    read: BootstrapRead,
+    resources: ExecutionResourceLimits,
+) -> io::Result<()> {
+    tokio::task::spawn_blocking(move || {
+        crate::macos_resource_limits::wait_for_confirmation(
+            read,
+            &resources,
+            RESOURCE_CONFIRMATION_TIMEOUT,
+        )
+    })
+    .await
+    .map_err(|_| io::Error::other("resource confirmation task failed"))?
+}
+
+#[cfg(unix)]
 async fn wait_for_sandbox_confirmation(read: BootstrapRead, pid: u32) -> io::Result<()> {
     tokio::task::spawn_blocking(move || {
         crate::macos_seatbelt::wait_for_confirmation(read, pid, Duration::from_secs(3))
@@ -2279,10 +2456,27 @@ async fn activate_unix_launch(
     command_identity: String,
     gate_write: BootstrapWrite,
     sandbox: Option<UnixSandboxLaunch>,
+    resources: Option<UnixResourceLaunch>,
     params: &crate::protocol::StartParams,
 ) -> Result<(), ProtocolError> {
+    let resources_confirmed = if let Some(resources) = resources {
+        let (confirmation_read, requested) = resources.into_parent();
+        if wait_for_resource_confirmation(confirmation_read, requested)
+            .await
+            .is_err()
+        {
+            drop(gate_write);
+            return fail_unix_resource_launch(runtime, child, pid, params).await;
+        }
+        true
+    } else {
+        false
+    };
     let Some(sandbox) = sandbox else {
-        if let Err(error) = runtime.publish_running(pid, command_identity, false).await {
+        if let Err(error) = runtime
+            .publish_running(pid, command_identity, false, resources_confirmed)
+            .await
+        {
             drop(gate_write);
             let _ = terminate_child(
                 child,
@@ -2391,7 +2585,10 @@ async fn activate_unix_launch(
     if linux_bubblewrap {
         fault_point("after_linux_sandbox_confirmation");
     }
-    if let Err(error) = runtime.publish_running(pid, command_identity, true).await {
+    if let Err(error) = runtime
+        .publish_running(pid, command_identity, true, resources_confirmed)
+        .await
+    {
         drop(sandbox_release_write);
         let _ = terminate_child(
             child,
@@ -2417,6 +2614,43 @@ async fn activate_unix_launch(
         .await;
     }
     Ok(())
+}
+
+#[cfg(unix)]
+async fn fail_unix_resource_launch(
+    runtime: &WorkerRuntime,
+    child: &mut Child,
+    pid: u32,
+    params: &crate::protocol::StartParams,
+) -> Result<(), ProtocolError> {
+    let termination = terminate_child(
+        child,
+        pid,
+        TerminationReason::OutputFailure,
+        params.termination_grace_ms,
+        params.termination_confirmation_ms,
+    )
+    .await;
+    if termination.snapshot.outcome == "uncertain" {
+        runtime
+            .publish_terminal(
+                JobState::TerminationUncertain,
+                termination.status,
+                false,
+                Some(termination.snapshot),
+                Some(JobFailure {
+                    code: "RESOURCE_LIMIT_APPLY_FAILED".to_owned(),
+                    message: "The operating system could not apply the requested resource limit."
+                        .to_owned(),
+                }),
+            )
+            .await?;
+    } else {
+        runtime.publish_resource_start_failed().await?;
+    }
+    Err(execution_security::policy_error(
+        crate::execution_policy::ExecutionPolicyError::ResourceLimitApplyFailed,
+    ))
 }
 
 #[cfg(unix)]
@@ -2531,13 +2765,14 @@ async fn execute_pty_job(runtime: Arc<WorkerRuntime>) -> Result<(), ProtocolErro
         environment,
         sandbox,
     } = launch;
+    let resources = prepare_resource_launch(&runtime, &params)?;
     let mut command = Command::new(&bootstrap);
+    configure_command_bootstrap_arguments(
+        &mut command,
+        resources.as_ref().map(|launch| &launch.requested),
+        &argv,
+    )?;
     command
-        .arg("command-bootstrap")
-        .arg("--gate-fd")
-        .arg(COMMAND_GATE_FD.to_string())
-        .arg("--")
-        .args(&argv)
         .current_dir(&params.cwd)
         .env_clear()
         .envs(&environment)
@@ -2554,6 +2789,9 @@ async fn execute_pty_job(runtime: Arc<WorkerRuntime>) -> Result<(), ProtocolErro
         &slave,
         COMMAND_GATE_FD,
         sandbox.as_ref().map(UnixSandboxLaunch::child_descriptors),
+        resources
+            .as_ref()
+            .map(UnixResourceLaunch::child_descriptors),
     );
 
     if sandbox
@@ -2613,6 +2851,7 @@ async fn execute_pty_job(runtime: Arc<WorkerRuntime>) -> Result<(), ProtocolErro
         command_identity,
         gate_write,
         sandbox,
+        resources,
         &params,
     )
     .await?;
@@ -2888,13 +3127,14 @@ async fn execute_pipe_job(runtime: Arc<WorkerRuntime>) -> Result<(), ProtocolErr
         environment,
         sandbox,
     } = launch;
+    let resources = prepare_resource_launch(&runtime, &params)?;
     let mut command = Command::new(&bootstrap);
+    configure_command_bootstrap_arguments(
+        &mut command,
+        resources.as_ref().map(|launch| &launch.requested),
+        &argv,
+    )?;
     command
-        .arg("command-bootstrap")
-        .arg("--gate-fd")
-        .arg(COMMAND_GATE_FD.to_string())
-        .arg("--")
-        .args(&argv)
         .current_dir(&params.cwd)
         .env_clear()
         .envs(&environment)
@@ -2908,6 +3148,9 @@ async fn execute_pipe_job(runtime: Arc<WorkerRuntime>) -> Result<(), ProtocolErr
         &gate_write,
         COMMAND_GATE_FD,
         sandbox.as_ref().map(UnixSandboxLaunch::child_descriptors),
+        resources
+            .as_ref()
+            .map(UnixResourceLaunch::child_descriptors),
     );
 
     if sandbox
@@ -2970,6 +3213,7 @@ async fn execute_pipe_job(runtime: Arc<WorkerRuntime>) -> Result<(), ProtocolErr
         command_identity,
         gate_write,
         sandbox,
+        resources,
         &params,
     )
     .await?;
@@ -3148,8 +3392,40 @@ async fn execute_pipe_job(runtime: Arc<WorkerRuntime>) -> Result<(), ProtocolErr
 }
 
 #[cfg(unix)]
-pub fn run_command_bootstrap(gate_fd: RawFd, argv: Vec<String>) -> io::Result<()> {
+pub fn run_command_bootstrap(
+    gate_fd: RawFd,
+    resource_confirmation_fd: Option<RawFd>,
+    resources: Option<ExecutionResourceLimits>,
+    resource_test_fault: Option<crate::macos_resource_limits::ResourceTestFault>,
+    argv: Vec<String>,
+) -> io::Result<()> {
+    match (resource_confirmation_fd, resources.as_ref()) {
+        (Some(confirmation_fd), Some(resources)) => {
+            crate::macos_resource_limits::apply_and_confirm(
+                confirmation_fd,
+                resources,
+                resource_test_fault,
+            )?;
+        }
+        (None, None) if resource_test_fault.is_none() => {}
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "resource bootstrap arguments are incomplete",
+            ));
+        }
+    }
     await_gate_and_exec(gate_fd, argv)
+}
+
+#[cfg(unix)]
+fn resource_bootstrap_test_fault() -> Option<&'static str> {
+    match std::env::var("KODA_EXEC_TEST_FAULT_POINT").as_deref() {
+        Ok("resource_apply_failed") => Some("apply"),
+        Ok("resource_confirmation_corrupt") => Some("confirmation_corrupt"),
+        Ok("resource_confirmation_timeout") => Some("confirmation_timeout"),
+        _ => None,
+    }
 }
 
 #[cfg(unix)]

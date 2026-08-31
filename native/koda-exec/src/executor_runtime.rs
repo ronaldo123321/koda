@@ -74,7 +74,7 @@ impl ExecutorRuntime {
             crate::execution_security::native_capabilities()
         };
         let execution_capabilities =
-            crate::execution_policy::resource_contract_execution_capabilities(&legacy_capabilities)
+            crate::execution_policy::current_resource_execution_capabilities(&legacy_capabilities)
                 .map_err(|_| {
                     ProtocolError::new(
                         ExecutionPolicyError::ExecutionPolicyUnavailable.code(),

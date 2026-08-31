@@ -1,8 +1,8 @@
 # Koda Execution Security Guarantees
 
-- Scope: Phase 4C1, Phase 4C2A, Phase 4C2B, Phase 4C3A-C3D, and Phase 4C4A
-- Status: Current through C4A3 — sandbox and secret guarantees are complete;
-  resource requests fail closed before spawn and enforcement is not enabled
+- Scope: Phase 4C1, Phase 4C2A, Phase 4C2B, Phase 4C3A-C3D, and Phase 4C4A-C4B
+- Status: Current through C4B — sandbox and secret guarantees are complete;
+  exact macOS per-process CPU, open-file, and file-size hard limits are enabled
 - Last updated: 2026-08-31
 
 Koda separates execution admission, process supervision, and operating-system
@@ -34,11 +34,14 @@ workspace root is added only after trusted workspace opening.
 
 ### macOS
 
-The native Supervisor advertises the current schema-v4 resource wrapper over
-macOS schema-v2 protection only after a real startup self-test through the fixed
-system `/usr/bin/sandbox-exec` proves normal reads, denied writes, denied
-network access, and sandbox-internal confirmation. Pipe and PTY jobs share the
-same bounded SBPL builder and two-way launch gate.
+The native Supervisor advertises the current schema-v4 macOS contract only
+after a real startup self-test through the fixed system
+`/usr/bin/sandbox-exec` proves normal reads, denied writes, denied network
+access, and sandbox-internal confirmation. Pipe and PTY jobs share the same
+bounded SBPL builder and two-way launch gate. Resource-bearing jobs additionally
+use a dedicated outer bootstrap confirmation: the bootstrap installs and reads
+back the exact kernel hard limits, the Worker persists `applied` evidence, and
+only then can either an unconfined command gate or the final Seatbelt gate open.
 
 ### Linux
 
@@ -81,30 +84,43 @@ resize, detach, Supervisor restart, reattach, and completion.
 
 ## Resource contract status
 
-Phase 4C4A1 defines TypeScript/Rust policy-v2 resource limits and
-schema-v4 capability/security evidence for per-process CPU time, per-process
-address space, job-tree process count, per-process open files, and per-process
-file size. Every current v4 capability wrapper reports every resource limit as
-`unsupported`; no capability can fabricate applied evidence.
+Phase 4C4A defines TypeScript/Rust policy-v2 resource limits and schema-v4
+capability/security evidence for per-process CPU time, per-process address
+space, job-tree process count, per-process open files, and per-process file
+size. It also binds trusted configuration, approval identity, native admission,
+durability, and app-server/CLI/TUI projection without fabricating applied
+evidence.
 
-C4A2 connects strict, frozen trusted configuration to policy v2, approval and
-exact-command grant binding, native protocol v6, schema-v4 Supervisor/Worker
-revalidation, and durable format v6. Formats v1-v5 remain readable without
-implicit upgrade. A command without limits retains explicit `not_requested`
-evidence. Any request for one of the five limits fails with
-`RESOURCE_LIMIT_UNAVAILABLE` before a native job is created, so user code does
-not run and no `applied` evidence exists.
+C4B enables the exact macOS subset whose operating-system semantics match the
+public contract:
 
-Consequently C4A2 is still not a resource-quota claim. App-server/CLI/TUI
-projection and the same-commit C4A acceptance matrix are delivered by C4A3;
-macOS/Linux enforcement remains Phase 4C4B/C4C. Windows enforcement is still
-deferred.
+| Limit                     | Kernel control  | Scope       | Granularity |
+| ------------------------- | --------------- | ----------- | ----------: |
+| `process_cpu_time_ms`     | `RLIMIT_CPU`    | per process |    1,000 ms |
+| `process_open_files`      | `RLIMIT_NOFILE` | per process |           1 |
+| `process_file_size_bytes` | `RLIMIT_FSIZE`  | per process |      1 byte |
 
-C4A3 advances app-server to v17 with `resourceEvidence: true` and projects the
-same optional strict evidence through command/terminal results, process events,
-and process list/attach/read/terminate summaries. Present public evidence must
-match retained schema-v4 security; historical absence remains absent. CLI and
-TUI use one bounded formatter and never expand capability objects or digests.
+Soft and hard values are equal, read back exactly with `getrlimit`, inherited
+across `exec`, and never rounded. An inexact CPU request fails admission.
+`process_address_space_bytes` remains unsupported because Darwin's available
+limit does not provide the promised hard virtual-address-space semantics.
+`job_process_count` remains unsupported because `RLIMIT_NPROC` is user-wide,
+not scoped to a Koda job tree.
+
+Native protocol and durable format are v7. Formats v1-v6 remain readable
+without implicit upgrade; v6 always reconstructs the frozen all-unsupported
+C4A capability digest. A command without limits retains explicit
+`not_requested` evidence. Unsupported Linux, Windows, macOS address-space, and
+macOS job-count requests fail before job creation with
+`RESOURCE_LIMIT_UNAVAILABLE`. Application, read-back, malformed confirmation,
+and confirmation-timeout failures retain `not_applied`, terminate the still
+gated child, and report `RESOURCE_LIMIT_APPLY_FAILED`.
+
+App-server v17 projects the same strict evidence through command/terminal
+results, process events, and process list/attach/read/terminate summaries.
+Present public evidence must match retained schema-v4 security; historical
+absence remains absent. CLI and TUI use one bounded formatter and never expand
+capability objects or digests.
 
 ## What is not guaranteed
 

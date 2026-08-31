@@ -1,5 +1,11 @@
 import { ToolRegistry, type ToolOperationalEvent } from "@koda/agent-core";
-import { threadIdSchema, toolCallIdSchema, turnIdSchema } from "@koda/protocol";
+import {
+  MACOS_EXECUTION_RESOURCE_CAPABILITIES,
+  threadIdSchema,
+  toolCallIdSchema,
+  turnIdSchema,
+  type ExecutionResourceLimits,
+} from "@koda/protocol";
 import {
   ArtifactStore,
   InteractiveProcessService,
@@ -12,7 +18,7 @@ import {
   type NativeSecretLeaseInput,
 } from "@koda/runtime-node";
 import { randomUUID } from "node:crypto";
-import { access, mkdtemp, realpath, rm } from "node:fs/promises";
+import { access, mkdtemp, realpath, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -41,8 +47,9 @@ describeNative("NativeExecutorClient", () => {
   });
 
   it("negotiates explicit POSIX capabilities", async () => {
-    await expect(client.hello()).resolves.toMatchObject({
-      protocol_version: 6,
+    const hello = await client.hello();
+    expect(hello).toMatchObject({
+      protocol_version: 7,
       platform: process.platform === "darwin" ? "macos" : "linux",
       capabilities: {
         process_group: true,
@@ -52,6 +59,243 @@ describeNative("NativeExecutorClient", () => {
         durable_restart_recovery: true,
       },
     });
+    if (process.platform === "darwin") {
+      expect(hello.execution_security).toMatchObject({
+        schema_version: 4,
+        platform: "macos",
+        resource_limits: MACOS_EXECUTION_RESOURCE_CAPABILITIES,
+      });
+    }
+  });
+
+  it.runIf(process.platform === "darwin")(
+    "applies the exact macOS rlimit subset before a Pipe command runs",
+    async () => {
+      const workspace = await mkdtemp(join(root, "resource-pipe-"));
+      const resources = {
+        process_cpu_time_ms: 2_000,
+        process_open_files: 128,
+        process_file_size_bytes: 1_048_576,
+      } satisfies ExecutionResourceLimits;
+      const started = await client.start({
+        argv: [process.execPath, "-e", "process.stdout.write('limited')"],
+        cwd: workspace,
+        policy: await resourcePolicyFor(workspace, resources),
+        environment: { PATH: process.env.PATH },
+        timeoutMs: 3_000,
+        outputLimitBytes: 65_536,
+        terminationGraceMs: 25,
+        terminationConfirmationMs: 1_000,
+      });
+      const terminal = await waitTerminal(client, started.job_id);
+      const output = await client.readOutput(terminal.job_id, "stdout", 0);
+
+      expect(terminal).toMatchObject({
+        state: "exited",
+        exit_code: 0,
+        timed_out: false,
+        failure: null,
+      });
+      expect(output.data.toString("utf8")).toBe("limited");
+      expectAppliedResources(terminal, resources);
+    },
+  );
+
+  it.runIf(process.platform === "darwin")(
+    "terminates a CPU-bound process through RLIMIT_CPU before wall timeout",
+    async () => {
+      const resources = {
+        process_cpu_time_ms: 1_000,
+      } satisfies ExecutionResourceLimits;
+      const started = await client.start({
+        argv: [process.execPath, "-e", "while(true){}"],
+        cwd: root,
+        policy: await resourcePolicyFor(root, resources),
+        environment: { PATH: process.env.PATH },
+        timeoutMs: 5_000,
+        outputLimitBytes: 1_024,
+        terminationGraceMs: 25,
+        terminationConfirmationMs: 1_000,
+      });
+      const terminal = await waitTerminal(client, started.job_id);
+
+      expect(terminal).toMatchObject({
+        state: "exited",
+        exit_code: null,
+        timed_out: false,
+        failure: null,
+      });
+      expect(terminal.signal).not.toBeNull();
+      expect(terminal.duration_ms).toBeLessThan(5_000);
+      expectAppliedResources(terminal, resources);
+    },
+  );
+
+  it.runIf(process.platform === "darwin")(
+    "prevents a file from growing past RLIMIT_FSIZE",
+    async () => {
+      const workspace = await mkdtemp(join(root, "resource-file-size-"));
+      const outputPath = join(workspace, "limited.bin");
+      const limit = 65_536;
+      const resources = {
+        process_file_size_bytes: limit,
+      } satisfies ExecutionResourceLimits;
+      const started = await client.start({
+        argv: [
+          process.execPath,
+          "-e",
+          `require('node:fs').writeFileSync(${JSON.stringify(outputPath)},Buffer.alloc(${limit * 2}))`,
+        ],
+        cwd: workspace,
+        policy: await resourcePolicyFor(workspace, resources),
+        environment: { PATH: process.env.PATH },
+        timeoutMs: 3_000,
+        outputLimitBytes: 65_536,
+        terminationGraceMs: 25,
+        terminationConfirmationMs: 1_000,
+      });
+      const terminal = await waitTerminal(client, started.job_id);
+
+      expect(terminal).toMatchObject({ state: "exited", timed_out: false });
+      expect(terminal.exit_code === 0 && terminal.signal === null).toBe(false);
+      await expect(stat(outputPath)).resolves.toMatchObject({ size: limit });
+      expectAppliedResources(terminal, resources);
+    },
+  );
+
+  it.runIf(process.platform === "darwin")(
+    "reports EMFILE when descriptor allocation reaches RLIMIT_NOFILE",
+    async () => {
+      const resources = {
+        process_open_files: 64,
+      } satisfies ExecutionResourceLimits;
+      const started = await client.start({
+        argv: [
+          process.execPath,
+          "-e",
+          [
+            "const fs=require('node:fs');const stdout=process.stdout;const fds=[];",
+            "try{while(true)fds.push(fs.openSync('/dev/null','r'))}",
+            "catch(error){stdout.write(error.code+':'+fds.length)}",
+          ].join(""),
+        ],
+        cwd: root,
+        policy: await resourcePolicyFor(root, resources),
+        environment: { PATH: process.env.PATH },
+        timeoutMs: 3_000,
+        outputLimitBytes: 65_536,
+        terminationGraceMs: 25,
+        terminationConfirmationMs: 1_000,
+      });
+      const terminal = await waitTerminal(client, started.job_id);
+      const output = await client.readOutput(terminal.job_id, "stdout", 0);
+
+      expect(terminal).toMatchObject({
+        state: "exited",
+        exit_code: 0,
+        timed_out: false,
+      });
+      expect(output.data.toString("utf8")).toMatch(/^EMFILE:\d+$/u);
+      expectAppliedResources(terminal, resources);
+    },
+  );
+
+  it.runIf(process.platform === "darwin")(
+    "retains applied evidence across protected background PTY attach and termination",
+    async () => {
+      const workspace = await mkdtemp(join(root, "resource-pty-"));
+      const resources = {
+        process_cpu_time_ms: 5_000,
+        process_open_files: 128,
+      } satisfies ExecutionResourceLimits;
+      const started = await client.startPty({
+        argv: [
+          process.execPath,
+          "-e",
+          "console.log('RESOURCE_READY');setInterval(()=>{},1000)",
+        ],
+        cwd: workspace,
+        policy: await protectedResourcePolicyFor(workspace, resources),
+        environment: { PATH: process.env.PATH },
+        timeoutMs: 10_000,
+        outputLimitBytes: 65_536,
+        terminationGraceMs: 25,
+        terminationConfirmationMs: 1_000,
+        rows: 24,
+        cols: 80,
+        lifecycle: "background",
+      });
+      const first = await client.openAttachment(started.job_id);
+      await expect(readPtyUntil(first, "RESOURCE_READY")).resolves.toContain(
+        "RESOURCE_READY",
+      );
+      await first.close();
+      const listed = await client.list({ limit: 100 });
+      const retained = listed.jobs.find(
+        ({ job_id }) => job_id === started.job_id,
+      );
+      expect(retained).toBeDefined();
+      if (retained === undefined)
+        throw new Error("Resource PTY was not listed.");
+      expectAppliedResources(retained, resources);
+
+      const second = await client.openAttachment(started.job_id);
+      await client.terminate(started.job_id, "cancellation");
+      const terminal = await waitTerminal(client, started.job_id);
+      await second.close();
+
+      expect(terminal).toMatchObject({
+        state: "exited",
+        lifecycle: "background",
+        termination: { reason: "cancellation", outcome: "terminated" },
+      });
+      expectAppliedResources(terminal, resources);
+      expect(terminal.security).toEqual(retained.security);
+    },
+  );
+
+  it
+    .runIf(process.platform === "darwin")
+    .each([
+      "resource_apply_failed",
+      "resource_confirmation_corrupt",
+      "resource_confirmation_timeout",
+    ])("never releases user code after injected %s", async (faultPoint) => {
+    const faultRoot = await mkdtemp(join(tmpdir(), "koda-resource-fault-"));
+    const marker = join(faultRoot, "must-not-run");
+    const faultClient = await openFaultClient(faultRoot, faultPoint);
+    try {
+      const started = await faultClient.start({
+        argv: [
+          process.execPath,
+          "-e",
+          `require('node:fs').writeFileSync(${JSON.stringify(marker)},'bad')`,
+        ],
+        cwd: faultRoot,
+        policy: await resourcePolicyFor(faultRoot, {
+          process_open_files: 128,
+        }),
+        environment: { PATH: process.env.PATH },
+        timeoutMs: 8_000,
+        outputLimitBytes: 1_024,
+        terminationGraceMs: 25,
+        terminationConfirmationMs: 1_000,
+      });
+      const terminal = await waitTerminal(faultClient, started.job_id);
+
+      expect(terminal).toMatchObject({
+        state: "start_failed",
+        failure: { code: "RESOURCE_LIMIT_APPLY_FAILED" },
+        security: {
+          stage: "admission",
+          resources: { status: "not_applied" },
+        },
+      });
+      await expect(access(marker)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await faultClient.closeOwnedSupervisorForTests();
+      await rm(faultRoot, { recursive: true, force: true });
+    }
   });
 
   it("injects file secrets once, redacts Pipe output before persistence, and cleans up", async () => {
@@ -959,6 +1203,66 @@ async function protectedPolicyFor(root: string) {
   return resolveExecutionPolicy({
     workspaceRoot: await realpath(root),
     environmentProfile: "read-only",
+  });
+}
+
+async function resourcePolicyFor(
+  root: string,
+  resources: ExecutionResourceLimits,
+) {
+  return resolveExecutionPolicy({
+    workspaceRoot: await realpath(root),
+    policy: {
+      filesystem: "unrestricted",
+      network: "inherit",
+      process_isolation: "inherit",
+      environment: "explicit",
+      resources,
+    },
+  });
+}
+
+async function protectedResourcePolicyFor(
+  root: string,
+  resources: ExecutionResourceLimits,
+) {
+  return resolveExecutionPolicy({
+    workspaceRoot: await realpath(root),
+    policy: {
+      filesystem: "read_only",
+      network: "deny",
+      process_isolation: "inherit",
+      environment: "explicit",
+      resources,
+    },
+  });
+}
+
+function expectAppliedResources(
+  snapshot: Pick<NativeJobSnapshot, "security">,
+  resources: ExecutionResourceLimits,
+): void {
+  const applied = Object.fromEntries(
+    Object.entries(resources).map(([rawName, limit]) => {
+      const name =
+        rawName as keyof typeof MACOS_EXECUTION_RESOURCE_CAPABILITIES;
+      const capability = MACOS_EXECUTION_RESOURCE_CAPABILITIES[name];
+      if (capability.status !== "supported") {
+        throw new Error(`Test requested unsupported resource '${name}'.`);
+      }
+      const { status: _status, ...enforcement } = capability;
+      return [name, { limit, ...enforcement }];
+    }),
+  );
+  expect(snapshot.security).toMatchObject({
+    schema_version: 4,
+    stage: "launch_setup",
+    resources: {
+      status: "applied",
+      requested: resources,
+      available: MACOS_EXECUTION_RESOURCE_CAPABILITIES,
+      applied,
+    },
   });
 }
 

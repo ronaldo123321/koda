@@ -500,6 +500,134 @@ describe("KodaAppServer", () => {
     },
   );
 
+  it.runIf(process.platform === "darwin")(
+    "projects identical applied resource evidence through process APIs",
+    async () => {
+      const fixture = await createFixture();
+      const service = await InteractiveProcessService.open({
+        binaryPath: resolve("target/debug/koda-exec"),
+        stateDirectory: join(fixture.kodaHome, "executor"),
+        socketPath: join(fixture.root, "exec.sock"),
+        leaseRenewalMs: 100,
+      });
+      const writer = new MemoryProtocolWriter();
+      const application = new KodaApplication({
+        environment: {
+          OPENAI_API_KEY: "offline-test-key",
+          KODA_HOME: fixture.kodaHome,
+        },
+        processDirectory: fixture.root,
+        dependencies: dependencies(
+          new ScriptedModelProvider([]),
+          "server-resource-projection",
+        ),
+        interactiveProcessService: service,
+      });
+      const server = new KodaAppServer({
+        application,
+        writer,
+        serverVersion: "test",
+        interactiveProcessService: service,
+      });
+      try {
+        await initialize(server, 1);
+        const workspace = await realpath(fixture.workspaceRoot);
+        const started = await service.startTerminal({
+          argv: [
+            process.execPath,
+            "-e",
+            "console.log('RESOURCE_APP_SERVER_READY');setInterval(()=>{},1000)",
+          ],
+          cwd: workspace,
+          environment: { PATH: process.env.PATH },
+          timeoutMs: 10_000,
+          outputLimitBytes: 65_536,
+          terminationGraceMs: 25,
+          terminationConfirmationMs: 1_000,
+          rows: 24,
+          cols: 80,
+          lifecycle: "background",
+          displayName: "Resource projection",
+          policy: resolveExecutionPolicy({
+            workspaceRoot: workspace,
+            policy: {
+              filesystem: "read_only",
+              network: "deny",
+              process_isolation: "inherit",
+              environment: "explicit",
+              resources: {
+                process_cpu_time_ms: 5_000,
+                process_open_files: 128,
+              },
+            },
+          }),
+        });
+        expect(started.resources).toMatchObject({
+          status: "applied",
+          requested: {
+            process_cpu_time_ms: 5_000,
+            process_open_files: 128,
+          },
+        });
+
+        await request(server, 2, "process/list", { workspace });
+        const listed = responseResult(writer, 2);
+        if (!isObject(listed) || !Array.isArray(listed.processes)) {
+          throw new Error("Resource process list response is invalid.");
+        }
+        const summary = listed.processes.find(
+          (value) => isObject(value) && value.jobId === started.job_id,
+        );
+        expect(summary).toMatchObject({ resources: started.resources });
+
+        await request(server, 3, "process/attach", {
+          workspace,
+          jobId: started.job_id,
+          rows: 24,
+          cols: 80,
+        });
+        const attached = responseResult(writer, 3);
+        if (
+          !isObject(attached) ||
+          typeof attached.processSessionId !== "string"
+        ) {
+          throw new Error("Resource process attachment response is invalid.");
+        }
+        expect(attached).toMatchObject({
+          process: { resources: started.resources },
+        });
+
+        await request(server, 4, "process/read", {
+          processSessionId: attached.processSessionId,
+        });
+        expect(responseResult(writer, 4)).toMatchObject({
+          process: { resources: started.resources },
+        });
+
+        await request(server, 5, "process/terminate", {
+          workspace,
+          jobId: started.job_id,
+        });
+        expect(responseResult(writer, 5)).toMatchObject({
+          process: { resources: started.resources },
+        });
+        const terminal = await waitNativeTerminal(
+          service.nativeExecutor,
+          started.job_id,
+        );
+        expect(terminal.security).toEqual(started.security);
+
+        await request(server, 6, "process/detach", {
+          processSessionId: attached.processSessionId,
+        });
+        await request(server, 7, "shutdown", {});
+      } finally {
+        await service.close();
+        await service.nativeExecutor.closeOwnedSupervisorForTests();
+      }
+    },
+  );
+
   it("serves thread-authorized artifact lists and UTF-8 ranges", async () => {
     const fixture = await createFixture();
     const threadId = threadIdSchema.parse("server-artifact-thread");

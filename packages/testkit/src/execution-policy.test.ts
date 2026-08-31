@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import {
+  MACOS_EXECUTION_RESOURCE_CAPABILITIES,
   EXECUTION_RESOURCE_LIMIT_MAX,
   executionCapabilitiesSchema,
   linuxBubblewrapRuntimeDescriptorSchema,
@@ -35,6 +36,7 @@ import {
   ExecutionPolicyError,
   linuxBubblewrapExecutionCapabilities,
   macosSeatbeltExecutionCapabilities,
+  macosResourceExecutionCapabilities,
   normalizeExecutionPolicy,
   resourceContractExecutionCapabilities,
   resolveExecutionPolicy,
@@ -93,6 +95,13 @@ interface ResourceContractFixtures {
   }[];
   resource_canonical: string;
   resource_sha256: string;
+  macos_rlimit_capability: {
+    resource_limits: unknown;
+    resource_canonical: string;
+    resource_sha256: string;
+    canonical: string;
+    sha256: string;
+  };
   capability_cases: { name: string; canonical: string; sha256: string }[];
   snapshot_cases: { name: string; input: unknown; valid: boolean }[];
 }
@@ -948,6 +957,66 @@ describe("Phase 4C4A1 resource policy contract", () => {
     }
   });
 
+  it("admits only the exact macOS rlimit subset and records not-applied evidence", () => {
+    const capability = macosResourceExecutionCapabilities();
+    const golden = resourceFixtures.macos_rlimit_capability;
+    expect(executionCapabilitiesSchema.parse(capability)).toEqual(capability);
+    if (capability.schema_version !== 4) {
+      throw new Error("Expected schema-v4 macOS resource capabilities.");
+    }
+    expect(capability.resource_limits).toEqual(golden.resource_limits);
+    expect(capability.resource_limits).toEqual(
+      MACOS_EXECUTION_RESOURCE_CAPABILITIES,
+    );
+    expect(canonicalExecutionCapabilities(reverseKeys(capability))).toBe(
+      golden.canonical,
+    );
+    expect(executionCapabilitiesDigest(capability)).toBe(golden.sha256);
+    expect(
+      canonicalExecutionResourceCapabilities(
+        reverseKeys(capability.resource_limits),
+      ),
+    ).toBe(golden.resource_canonical);
+    expect(
+      executionResourceCapabilitiesDigest(capability.resource_limits),
+    ).toBe(golden.resource_sha256);
+    const policy = {
+      ...(resourceFixtures.policy_cases[0]!.normalized as Record<
+        string,
+        unknown
+      >),
+      resources: {
+        process_cpu_time_ms: 1_000,
+        process_open_files: 64,
+        process_file_size_bytes: 4_096,
+      },
+    };
+    expect(evaluateExecutionPolicy(policy, capability)).toEqual({
+      allowed: true,
+      unmet: [],
+    });
+    expect(createExecutionAdmissionSnapshot(policy, capability)).toMatchObject({
+      stage: "admission",
+      resources: {
+        status: "not_applied",
+        requested: policy.resources,
+        available: MACOS_EXECUTION_RESOURCE_CAPABILITIES,
+      },
+    });
+    expect(
+      evaluateExecutionPolicy(
+        { ...policy, resources: { process_cpu_time_ms: 1_001 } },
+        capability,
+      ).allowed,
+    ).toBe(false);
+    expect(
+      evaluateExecutionPolicy(
+        { ...policy, resources: { process_address_space_bytes: 4_096 } },
+        capability,
+      ).allowed,
+    ).toBe(false);
+  });
+
   it("projects only current retained evidence and formats every status deterministically", () => {
     const current = validateExecutionSecuritySnapshot(
       resourceFixtures.snapshot_cases[0]!.input,
@@ -1055,6 +1124,41 @@ describe("Phase 4C4A1 resource policy contract", () => {
           resources: {
             status: "not_requested",
             secret: "fixture-secret-marker",
+          },
+        }),
+      "EXECUTION_SECURITY_CORRUPT",
+    );
+    const applied = resourceFixtures.snapshot_cases.find(
+      ({ name }) => name === "macos_rlimit_applied",
+    )!.input as Record<string, unknown>;
+    const appliedResources = applied.resources as Record<string, unknown>;
+    expectCode(
+      () =>
+        validateExecutionSecuritySnapshot({
+          ...applied,
+          resources: {
+            ...appliedResources,
+            applied_digest: "a".repeat(64),
+          },
+        }),
+      "EXECUTION_SECURITY_CORRUPT",
+    );
+    expectCode(
+      () =>
+        validateExecutionSecuritySnapshot({
+          ...applied,
+          resources: {
+            ...appliedResources,
+            applied: {
+              ...(appliedResources.applied as Record<string, unknown>),
+              process_open_files: {
+                limit: 65,
+                backend: "posix_rlimit",
+                scope: "process",
+                enforcement: "kernel_hard",
+                granularity: 1,
+              },
+            },
           },
         }),
       "EXECUTION_SECURITY_CORRUPT",

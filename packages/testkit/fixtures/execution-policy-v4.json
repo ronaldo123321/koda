@@ -81,6 +81,37 @@
   ],
   "resource_canonical": "{\"process_cpu_time_ms\":60000,\"process_address_space_bytes\":1073741824,\"job_process_count\":64,\"process_open_files\":1024,\"process_file_size_bytes\":268435456}",
   "resource_sha256": "87109d529e21152f6c8b937ea9f0fcf0959375a4a0e1590aa799f3f5f94028a6",
+  "macos_rlimit_capability": {
+    "resource_limits": {
+      "process_cpu_time_ms": {
+        "status": "supported",
+        "backend": "posix_rlimit",
+        "scope": "process",
+        "enforcement": "kernel_hard",
+        "granularity": 1000
+      },
+      "process_address_space_bytes": { "status": "unsupported" },
+      "job_process_count": { "status": "unsupported" },
+      "process_open_files": {
+        "status": "supported",
+        "backend": "posix_rlimit",
+        "scope": "process",
+        "enforcement": "kernel_hard",
+        "granularity": 1
+      },
+      "process_file_size_bytes": {
+        "status": "supported",
+        "backend": "posix_rlimit",
+        "scope": "process",
+        "enforcement": "kernel_hard",
+        "granularity": 1
+      }
+    },
+    "resource_canonical": "{\"process_cpu_time_ms\":{\"status\":\"supported\",\"backend\":\"posix_rlimit\",\"scope\":\"process\",\"enforcement\":\"kernel_hard\",\"granularity\":1000},\"process_address_space_bytes\":{\"status\":\"unsupported\"},\"job_process_count\":{\"status\":\"unsupported\"},\"process_open_files\":{\"status\":\"supported\",\"backend\":\"posix_rlimit\",\"scope\":\"process\",\"enforcement\":\"kernel_hard\",\"granularity\":1},\"process_file_size_bytes\":{\"status\":\"supported\",\"backend\":\"posix_rlimit\",\"scope\":\"process\",\"enforcement\":\"kernel_hard\",\"granularity\":1}}",
+    "resource_sha256": "525edf885c37d78807abef5af59a9fdc37765a6530b25d206a75d40e9e5c0c97",
+    "canonical": "{\"schema_version\":4,\"platform\":\"macos\",\"backend\":\"native_posix\",\"filesystem\":{\"supported\":[\"unrestricted\",\"read_only\",\"workspace_write\"],\"mechanism\":\"macos_seatbelt\"},\"network\":{\"supported\":[\"inherit\",\"deny\"],\"mechanism\":\"macos_seatbelt\"},\"process_isolation\":{\"supported\":[\"inherit\"],\"mechanism\":\"none\"},\"environment\":{\"supported\":[\"explicit\"],\"mechanism\":\"explicit_environment\",\"layer\":\"application\"},\"supervision\":{\"mechanism\":\"posix_process_group\",\"layer\":\"os\",\"durable\":true},\"resource_limits\":{\"process_cpu_time_ms\":{\"status\":\"supported\",\"backend\":\"posix_rlimit\",\"scope\":\"process\",\"enforcement\":\"kernel_hard\",\"granularity\":1000},\"process_address_space_bytes\":{\"status\":\"unsupported\"},\"job_process_count\":{\"status\":\"unsupported\"},\"process_open_files\":{\"status\":\"supported\",\"backend\":\"posix_rlimit\",\"scope\":\"process\",\"enforcement\":\"kernel_hard\",\"granularity\":1},\"process_file_size_bytes\":{\"status\":\"supported\",\"backend\":\"posix_rlimit\",\"scope\":\"process\",\"enforcement\":\"kernel_hard\",\"granularity\":1}}}",
+    "sha256": "d7158aa84d67b2d9bab42036b0bc5e08c7092371d35369f2e71b2e356f00c9ca"
+  },
   "capability_cases": [
     {
       "name": "generic_native_posix",
@@ -149,6 +180,170 @@
         "environment": { "status": "not_applied" },
         "supervision": { "status": "not_applied" },
         "resources": { "status": "not_requested" }
+      },
+      "valid": true
+    },
+    {
+      "name": "macos_rlimit_admission",
+      "input": {
+        "schema_version": 4,
+        "kind": "policy",
+        "platform": "macos",
+        "stage": "admission",
+        "policy": {
+          "schema_version": 2,
+          "workspace_root": "/workspace",
+          "filesystem": "unrestricted",
+          "network": "inherit",
+          "process_isolation": "inherit",
+          "environment": "explicit",
+          "resources": {
+            "process_cpu_time_ms": 1000,
+            "process_open_files": 64,
+            "process_file_size_bytes": 4096
+          }
+        },
+        "policy_digest": "da07762f0d8ab306fe87a0eb00796b0bce3d24268d4ef39807207ead8641d374",
+        "capabilities_digest": "d7158aa84d67b2d9bab42036b0bc5e08c7092371d35369f2e71b2e356f00c9ca",
+        "backend": "native_posix",
+        "filesystem": { "status": "not_requested" },
+        "network": { "status": "not_requested" },
+        "process_isolation": { "status": "not_requested" },
+        "environment": { "status": "not_applied" },
+        "supervision": { "status": "not_applied" },
+        "resources": {
+          "status": "not_applied",
+          "requested": {
+            "process_cpu_time_ms": 1000,
+            "process_open_files": 64,
+            "process_file_size_bytes": 4096
+          },
+          "requested_digest": "0923a5f7ac4fe7b87afe7a1d772cd3a1a1a80892a9ee341dc188b8e740c0a169",
+          "available": {
+            "process_cpu_time_ms": {
+              "status": "supported",
+              "backend": "posix_rlimit",
+              "scope": "process",
+              "enforcement": "kernel_hard",
+              "granularity": 1000
+            },
+            "process_address_space_bytes": { "status": "unsupported" },
+            "job_process_count": { "status": "unsupported" },
+            "process_open_files": {
+              "status": "supported",
+              "backend": "posix_rlimit",
+              "scope": "process",
+              "enforcement": "kernel_hard",
+              "granularity": 1
+            },
+            "process_file_size_bytes": {
+              "status": "supported",
+              "backend": "posix_rlimit",
+              "scope": "process",
+              "enforcement": "kernel_hard",
+              "granularity": 1
+            }
+          },
+          "available_digest": "525edf885c37d78807abef5af59a9fdc37765a6530b25d206a75d40e9e5c0c97"
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "macos_rlimit_applied",
+      "input": {
+        "schema_version": 4,
+        "kind": "policy",
+        "platform": "macos",
+        "stage": "launch_setup",
+        "policy": {
+          "schema_version": 2,
+          "workspace_root": "/workspace",
+          "filesystem": "unrestricted",
+          "network": "inherit",
+          "process_isolation": "inherit",
+          "environment": "explicit",
+          "resources": {
+            "process_cpu_time_ms": 1000,
+            "process_open_files": 64,
+            "process_file_size_bytes": 4096
+          }
+        },
+        "policy_digest": "da07762f0d8ab306fe87a0eb00796b0bce3d24268d4ef39807207ead8641d374",
+        "capabilities_digest": "d7158aa84d67b2d9bab42036b0bc5e08c7092371d35369f2e71b2e356f00c9ca",
+        "backend": "native_posix",
+        "filesystem": { "status": "not_requested" },
+        "network": { "status": "not_requested" },
+        "process_isolation": { "status": "not_requested" },
+        "environment": {
+          "status": "applied",
+          "mechanism": "explicit_environment",
+          "layer": "application"
+        },
+        "supervision": {
+          "status": "applied",
+          "mechanism": "posix_process_group",
+          "layer": "os"
+        },
+        "resources": {
+          "status": "applied",
+          "requested": {
+            "process_cpu_time_ms": 1000,
+            "process_open_files": 64,
+            "process_file_size_bytes": 4096
+          },
+          "requested_digest": "0923a5f7ac4fe7b87afe7a1d772cd3a1a1a80892a9ee341dc188b8e740c0a169",
+          "available": {
+            "process_cpu_time_ms": {
+              "status": "supported",
+              "backend": "posix_rlimit",
+              "scope": "process",
+              "enforcement": "kernel_hard",
+              "granularity": 1000
+            },
+            "process_address_space_bytes": { "status": "unsupported" },
+            "job_process_count": { "status": "unsupported" },
+            "process_open_files": {
+              "status": "supported",
+              "backend": "posix_rlimit",
+              "scope": "process",
+              "enforcement": "kernel_hard",
+              "granularity": 1
+            },
+            "process_file_size_bytes": {
+              "status": "supported",
+              "backend": "posix_rlimit",
+              "scope": "process",
+              "enforcement": "kernel_hard",
+              "granularity": 1
+            }
+          },
+          "available_digest": "525edf885c37d78807abef5af59a9fdc37765a6530b25d206a75d40e9e5c0c97",
+          "applied": {
+            "process_cpu_time_ms": {
+              "limit": 1000,
+              "backend": "posix_rlimit",
+              "scope": "process",
+              "enforcement": "kernel_hard",
+              "granularity": 1000
+            },
+            "process_open_files": {
+              "limit": 64,
+              "backend": "posix_rlimit",
+              "scope": "process",
+              "enforcement": "kernel_hard",
+              "granularity": 1
+            },
+            "process_file_size_bytes": {
+              "limit": 4096,
+              "backend": "posix_rlimit",
+              "scope": "process",
+              "enforcement": "kernel_hard",
+              "granularity": 1
+            }
+          },
+          "applied_digest": "d3e01054785b92336386f385d42625724f962c88e91a6bff5f3d00d7e8bb945a"
+        }
       },
       "valid": true
     },

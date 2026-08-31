@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import {
+  MACOS_EXECUTION_RESOURCE_CAPABILITIES,
   executionBackendSchema,
   executionCapabilitiesSchema,
   executionResourceCapabilitiesSchema,
@@ -28,6 +29,7 @@ export type ExecutionPolicyErrorCode =
   | "INVALID_EXECUTION_POLICY"
   | "EXECUTION_POLICY_UNAVAILABLE"
   | "RESOURCE_LIMIT_UNAVAILABLE"
+  | "RESOURCE_LIMIT_APPLY_FAILED"
   | "EXECUTION_POLICY_CHANGED"
   | "INCOMPATIBLE_PROTOCOL"
   | "EXECUTION_SECURITY_CORRUPT";
@@ -38,6 +40,8 @@ const errorMessages: Record<ExecutionPolicyErrorCode, string> = {
     "The selected backend cannot enforce the requested execution policy.",
   RESOURCE_LIMIT_UNAVAILABLE:
     "The selected backend cannot enforce the requested resource limit.",
+  RESOURCE_LIMIT_APPLY_FAILED:
+    "The operating system could not apply the requested resource limit.",
   EXECUTION_POLICY_CHANGED:
     "The prepared execution security contract has changed.",
   INCOMPATIBLE_PROTOCOL: "The executor protocol is incompatible.",
@@ -331,6 +335,25 @@ export function resourceContractExecutionCapabilities(
   );
 }
 
+/** Current Phase 4C4B macOS native contract. Historical schema-v4 records
+ * continue to use resourceContractExecutionCapabilities for their frozen
+ * all-unsupported digest.
+ */
+export function macosResourceExecutionCapabilities(): ExecutionCapabilities {
+  const legacy = macosSeatbeltExecutionCapabilities();
+  return freezeRecord(
+    parse(
+      executionCapabilitiesSchema,
+      {
+        ...legacy,
+        schema_version: 4,
+        resource_limits: MACOS_EXECUTION_RESOURCE_CAPABILITIES,
+      },
+      "INVALID_EXECUTION_POLICY",
+    ),
+  );
+}
+
 export function canonicalExecutionCapabilities(value: unknown): string {
   const caps = parse(
     executionCapabilitiesSchema,
@@ -416,11 +439,13 @@ export function evaluateExecutionPolicy(
     for (const name of RESOURCE_LIMIT_NAMES) {
       if (!("resources" in policy) || policy.resources[name] === undefined)
         continue;
-      const supported =
-        caps.schema_version === 4 &&
-        caps.resource_limits[name].status === "supported";
-      if (!supported)
-        unmet.push({ dimension: name, reason: "not_implemented" });
+      const capability =
+        caps.schema_version === 4 ? caps.resource_limits[name] : undefined;
+      const requested = policy.resources[name]!;
+      const exact =
+        capability?.status === "supported" &&
+        requested % capability.granularity === 0;
+      if (!exact) unmet.push({ dimension: name, reason: "not_implemented" });
     }
   }
   return { allowed: unmet.length === 0, unmet };
@@ -477,7 +502,22 @@ export function createExecutionAdmissionSnapshot(
     environment: { status: "not_applied" },
     supervision: { status: "not_applied" },
     ...(caps.schema_version === 4
-      ? { resources: { status: "not_requested" } }
+      ? {
+          resources:
+            "resources" in policy && Object.keys(policy.resources).length > 0
+              ? {
+                  status: "not_applied" as const,
+                  requested: canonicalResourceLimitsObject(policy.resources),
+                  requested_digest: executionResourceLimitsDigest(
+                    policy.resources,
+                  ),
+                  available: caps.resource_limits,
+                  available_digest: executionResourceCapabilitiesDigest(
+                    caps.resource_limits,
+                  ),
+                }
+              : { status: "not_requested" as const },
+        }
       : {}),
   });
 }
@@ -590,29 +630,46 @@ export function validateExecutionSecuritySnapshot(
     "EXECUTION_SECURITY_CORRUPT",
   );
   if (snapshot.kind === "policy") {
-    const capabilities =
-      snapshot.schema_version === 1
-        ? c1ExecutionCapabilities(snapshot.backend)
-        : snapshot.schema_version === 2
-          ? macosSeatbeltExecutionCapabilities()
-          : snapshot.schema_version === 3
-            ? linuxBubblewrapExecutionCapabilities(snapshot.sandbox_runtime)
-            : resourceContractExecutionCapabilities(
-                !("platform" in snapshot)
-                  ? c1ExecutionCapabilities(snapshot.backend)
-                  : snapshot.platform === "macos"
-                    ? macosSeatbeltExecutionCapabilities()
-                    : linuxBubblewrapExecutionCapabilities(
-                        snapshot.sandbox_runtime,
-                      ),
-              );
+    const capabilityCandidates: ExecutionCapabilities[] = (() => {
+      if (snapshot.schema_version === 1)
+        return [c1ExecutionCapabilities(snapshot.backend)];
+      if (snapshot.schema_version === 2)
+        return [macosSeatbeltExecutionCapabilities()];
+      if (snapshot.schema_version === 3)
+        return [linuxBubblewrapExecutionCapabilities(snapshot.sandbox_runtime)];
+      if (!("platform" in snapshot))
+        return [
+          resourceContractExecutionCapabilities(
+            c1ExecutionCapabilities(snapshot.backend),
+          ),
+        ];
+      if (snapshot.platform === "macos")
+        return [
+          resourceContractExecutionCapabilities(
+            macosSeatbeltExecutionCapabilities(),
+          ),
+          macosResourceExecutionCapabilities(),
+        ];
+      return [
+        resourceContractExecutionCapabilities(
+          linuxBubblewrapExecutionCapabilities(snapshot.sandbox_runtime),
+        ),
+      ];
+    })();
+    const capabilities = capabilityCandidates.find(
+      (candidate) =>
+        snapshot.capabilities_digest === executionCapabilitiesDigest(candidate),
+    );
     if (
       snapshot.policy_digest !== executionPolicyDigest(snapshot.policy) ||
-      snapshot.capabilities_digest !== executionCapabilitiesDigest(capabilities)
+      capabilities === undefined
     ) {
       throw new ExecutionPolicyError("EXECUTION_SECURITY_CORRUPT");
     }
     if (snapshot.schema_version === 4) {
+      if (capabilities.schema_version !== 4) {
+        throw new ExecutionPolicyError("EXECUTION_SECURITY_CORRUPT");
+      }
       const requested =
         "resources" in snapshot.policy ? snapshot.policy.resources : undefined;
       if (
@@ -622,11 +679,71 @@ export function validateExecutionSecuritySnapshot(
         throw new ExecutionPolicyError("EXECUTION_SECURITY_CORRUPT");
       }
       if (requested !== undefined && Object.keys(requested).length > 0) {
-        throw new ExecutionPolicyError("EXECUTION_SECURITY_CORRUPT");
+        const evidence = snapshot.resources;
+        if (
+          evidence.status === "not_requested" ||
+          evidence.status === "unknown" ||
+          evidence.requested_digest !==
+            executionResourceLimitsDigest(requested) ||
+          canonicalExecutionResourceLimits(evidence.requested) !==
+            canonicalExecutionResourceLimits(requested) ||
+          evidence.available_digest !==
+            executionResourceCapabilitiesDigest(capabilities.resource_limits) ||
+          canonicalExecutionResourceCapabilities(evidence.available) !==
+            canonicalExecutionResourceCapabilities(
+              capabilities.resource_limits,
+            ) ||
+          (snapshot.stage === "admission" &&
+            evidence.status !== "not_applied") ||
+          (snapshot.stage === "launch_setup" && evidence.status !== "applied")
+        ) {
+          throw new ExecutionPolicyError("EXECUTION_SECURITY_CORRUPT");
+        }
+        if (evidence.status === "applied") {
+          for (const name of RESOURCE_LIMIT_NAMES) {
+            const limit = requested[name];
+            const applied = evidence.applied[name];
+            const available = capabilities.resource_limits[name];
+            if (limit === undefined) {
+              if (applied !== undefined)
+                throw new ExecutionPolicyError("EXECUTION_SECURITY_CORRUPT");
+              continue;
+            }
+            if (
+              available.status !== "supported" ||
+              applied === undefined ||
+              applied.limit !== limit ||
+              applied.backend !== available.backend ||
+              applied.scope !== available.scope ||
+              applied.enforcement !== available.enforcement ||
+              applied.granularity !== available.granularity
+            ) {
+              throw new ExecutionPolicyError("EXECUTION_SECURITY_CORRUPT");
+            }
+          }
+          if (
+            evidence.applied_digest !==
+            sha256(
+              JSON.stringify(canonicalAppliedResourceLimits(evidence.applied)),
+            )
+          ) {
+            throw new ExecutionPolicyError("EXECUTION_SECURITY_CORRUPT");
+          }
+        }
       }
     }
   }
   return freezeRecord(snapshot);
+}
+
+function canonicalAppliedResourceLimits(
+  applied: Record<string, unknown>,
+): Record<string, unknown> {
+  return Object.fromEntries(
+    RESOURCE_LIMIT_NAMES.flatMap((name) =>
+      applied[name] === undefined ? [] : [[name, applied[name]]],
+    ),
+  );
 }
 
 function canonicalSandboxRuntime(

@@ -69,9 +69,10 @@ pub mod state_security {
 #[cfg(unix)]
 pub mod bootstrap {
     pub use super::unix::{
-        BootstrapHandle, BootstrapRead, BootstrapWrite, SandboxBootstrapChannels,
-        await_gate_and_exec, configure_pipe_command, configure_pty_command,
-        create_bootstrap_channel, read_inherited_secret, release_gate, spawn_worker_process,
+        BootstrapHandle, BootstrapRead, BootstrapWrite, ResourceBootstrapChannels,
+        SandboxBootstrapChannels, await_gate_and_exec, configure_pipe_command,
+        configure_pty_command, create_bootstrap_channel, read_inherited_secret, release_gate,
+        spawn_worker_process,
     };
 }
 
