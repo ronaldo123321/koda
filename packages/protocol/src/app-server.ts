@@ -29,10 +29,15 @@ import {
   planStageIdSchema,
 } from "./plans.js";
 import { workspaceChangeSetResolutionSchema } from "./change-sets.js";
-import { executionSecuritySnapshotSchema } from "./execution-policy.js";
+import {
+  executionResourceEvidenceFromSecurity,
+  executionResourceEvidenceEqual,
+  executionResourceEvidenceSchema,
+  executionSecuritySnapshotSchema,
+} from "./execution-policy.js";
 import { secretExecutionEvidenceSchema } from "./execution-secrets.js";
 
-export const APP_SERVER_PROTOCOL_VERSION = 16 as const;
+export const APP_SERVER_PROTOCOL_VERSION = 17 as const;
 
 export const THREAD_EVENTS_DEFAULT_LIMIT = 200;
 export const THREAD_EVENTS_MAXIMUM_LIMIT = 200;
@@ -200,6 +205,7 @@ export const initializeResultSchema = z
         workspaceMutationRecovery: z.literal(true),
         interactiveProcesses: z.boolean(),
         secretEvidence: z.literal(true),
+        resourceEvidence: z.literal(true),
       })
       .strict(),
     providers: z.array(runtimeProviderMetadataSchema).min(1),
@@ -252,9 +258,26 @@ export const interactiveProcessSummarySchema = z
     updatedAtMs: z.number().int().safe().nonnegative(),
     pid: z.number().int().safe().positive().nullable(),
     security: executionSecuritySnapshotSchema,
+    // Historical process records may predate the public resource projection.
+    resources: executionResourceEvidenceSchema.optional(),
     secrets: secretExecutionEvidenceSchema.optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((summary, context) => {
+    const retained = executionResourceEvidenceFromSecurity(summary.security);
+    if (
+      (retained === undefined) !== (summary.resources === undefined) ||
+      (retained !== undefined &&
+        !executionResourceEvidenceEqual(retained, summary.resources))
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["resources"],
+        message:
+          "Process resource evidence is inconsistent with security evidence.",
+      });
+    }
+  });
 
 export const processListParamsSchema = z
   .object({

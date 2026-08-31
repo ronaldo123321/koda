@@ -7,6 +7,7 @@ import type {
   ProcessTerminationOutcome,
   ProcessTerminationReason,
   ExecutionSecuritySnapshot,
+  ExecutionResourceEvidence,
   SecretExecutionEvidence,
   PlanUpdatedPayload,
   PlanAcceptanceRequest,
@@ -47,6 +48,7 @@ export type ToolOperationalEvent =
         pid: number;
         ownership: ProcessOwnership;
         security: ExecutionSecuritySnapshot;
+        resources?: ExecutionResourceEvidence;
         secrets?: SecretExecutionEvidence;
       };
     }
@@ -56,6 +58,7 @@ export type ToolOperationalEvent =
         pid: number;
         exitCode: number | null;
         signal: string | null;
+        resources?: ExecutionResourceEvidence;
         secrets?: SecretExecutionEvidence;
       };
     }

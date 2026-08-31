@@ -78,13 +78,17 @@ const executionResourceLimitSchema = z
   .positive()
   .max(EXECUTION_RESOURCE_LIMIT_MAX);
 
-export const executionResourceLimitNameSchema = z.enum([
+export const EXECUTION_RESOURCE_LIMIT_NAMES = [
   "process_cpu_time_ms",
   "process_address_space_bytes",
   "job_process_count",
   "process_open_files",
   "process_file_size_bytes",
-]);
+] as const;
+
+export const executionResourceLimitNameSchema = z.enum(
+  EXECUTION_RESOURCE_LIMIT_NAMES,
+);
 
 function rejectUnknownResourceLimitNames(
   value: Record<string, unknown>,
@@ -965,6 +969,83 @@ export type ExecutionEnforcementEvidence = z.infer<
 export type ExecutionSecuritySnapshot = z.infer<
   typeof executionSecuritySnapshotSchema
 >;
+
+/** Copies resource evidence only from the current verified security contract.
+ * Historical snapshots deliberately remain absent rather than being promoted
+ * to a successful `not_requested` state.
+ */
+export function executionResourceEvidenceFromSecurity(
+  security: ExecutionSecuritySnapshot | undefined,
+): ExecutionResourceEvidence | undefined {
+  return security?.kind === "policy" && security.schema_version === 4
+    ? security.resources
+    : undefined;
+}
+
+export function executionResourceEvidenceEqual(
+  leftInput: unknown,
+  rightInput: unknown,
+): boolean {
+  const left = executionResourceEvidenceSchema.safeParse(leftInput);
+  const right = executionResourceEvidenceSchema.safeParse(rightInput);
+  return (
+    left.success &&
+    right.success &&
+    JSON.stringify(canonicalJsonObject(left.data)) ===
+      JSON.stringify(canonicalJsonObject(right.data))
+  );
+}
+
+/** Deterministic bounded client presentation. Capability objects and digests
+ * stay in structured audit evidence and are not expanded into routine output.
+ */
+export function executionResourceSummary(input: unknown): string {
+  const evidence = executionResourceEvidenceSchema.parse(input);
+  if (evidence.status === "not_requested") return "resources not requested";
+  const requested = EXECUTION_RESOURCE_LIMIT_NAMES.flatMap((name) => {
+    const limit = evidence.requested[name];
+    return limit === undefined
+      ? []
+      : [formatExecutionResourceLimit(name, limit)];
+  });
+  const status =
+    evidence.status === "not_applied"
+      ? "unavailable"
+      : evidence.status === "unknown"
+        ? "unknown"
+        : "applied";
+  return `resources ${requested.join(", ")} · ${status}`;
+}
+
+function formatExecutionResourceLimit(
+  name: ExecutionResourceLimitName,
+  limit: number,
+): string {
+  switch (name) {
+    case "process_cpu_time_ms":
+      return `CPU time ${limit} ms`;
+    case "process_address_space_bytes":
+      return `address space ${limit} bytes`;
+    case "job_process_count":
+      return `processes ${limit}`;
+    case "process_open_files":
+      return `open files ${limit}`;
+    case "process_file_size_bytes":
+      return `file size ${limit} bytes`;
+  }
+}
+
+function canonicalJsonObject(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalJsonObject);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value)
+        .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+        .map(([key, nested]) => [key, canonicalJsonObject(nested)]),
+    );
+  }
+  return value;
+}
 
 /** Produces the user-facing OS sandbox claim from retained evidence only.
  * Admission snapshots describe an expected backend; launch snapshots must

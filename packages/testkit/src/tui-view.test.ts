@@ -27,6 +27,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   linuxProtectedLaunchSecurity,
   macosProtectedLaunchSecurity,
+  notRequestedResourceEvidence,
 } from "./execution-security-fixtures.js";
 import { destroyedSecretEvidence } from "./execution-secret-fixtures.js";
 
@@ -414,6 +415,7 @@ describe("Koda Ink view", () => {
       updatedAtMs: 2,
       pid: 42,
       security,
+      resources: notRequestedResourceEvidence(),
       secrets: destroyedSecretEvidence(),
     };
     state.mode = "process_view";
@@ -446,6 +448,7 @@ describe("Koda Ink view", () => {
     expect(frame).toContain("Ctrl+C interrupt");
     expect(frame).toContain("OS sandbox: macOS Seatbelt");
     expect(frame).toContain("native_posix");
+    expect(frame).toContain("resources not requested");
     expect(frame).toContain("secrets api-token");
     expect(frame).toContain("destroyed · cleanup completed · redacted 1");
     expect(frame).not.toContain("0123456789abcdef");
@@ -1028,6 +1031,7 @@ function baseState(): TuiState {
       workspaceMutationRecovery: true,
       interactiveProcesses: false,
       secretEvidence: true,
+      resourceEvidence: true,
     },
     providers: [
       {

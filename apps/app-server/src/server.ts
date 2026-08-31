@@ -383,6 +383,7 @@ export class KodaAppServer {
           workspaceMutationRecovery: true,
           interactiveProcesses: this.interactiveProcessService !== undefined,
           secretEvidence: true,
+          resourceEvidence: true,
         },
         providers: this.application.listProviders(),
       }),

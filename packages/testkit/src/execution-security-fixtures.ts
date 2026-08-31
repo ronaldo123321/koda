@@ -1,4 +1,7 @@
-import type { ExecutionSecuritySnapshot } from "@koda/protocol";
+import type {
+  ExecutionResourceEvidence,
+  ExecutionSecuritySnapshot,
+} from "@koda/protocol";
 import {
   createExecutionAdmissionSnapshot,
   linuxBubblewrapExecutionCapabilities,
@@ -20,6 +23,10 @@ export function macosProtectedAdmissionSecurity(): ExecutionSecuritySnapshot {
     }),
     resourceContractExecutionCapabilities(macosSeatbeltExecutionCapabilities()),
   );
+}
+
+export function notRequestedResourceEvidence(): ExecutionResourceEvidence {
+  return { status: "not_requested" };
 }
 
 const linuxBubblewrapRuntime = {

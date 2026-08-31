@@ -16,6 +16,7 @@ import {
   artifactIdSchema,
   approvalGrantIdSchema,
   executionOsSandboxSummary,
+  executionResourceSummary,
   secretExecutionSummary,
   modelProviderIdSchema,
   runtimeSettingsModelSchema,
@@ -5333,14 +5334,17 @@ export class TuiController {
         next = updateTool(next, event.payload.callId, event.payload.name, {
           status: "running",
           safetyRelevant: true,
-          detail: `process ${event.payload.pid}${event.payload.secrets === undefined ? "" : ` · ${secretExecutionSummary(event.payload.secrets)}`}`,
+          detail: `process ${event.payload.pid}${event.payload.resources === undefined ? "" : ` · ${executionResourceSummary(event.payload.resources)}`}${event.payload.secrets === undefined ? "" : ` · ${secretExecutionSummary(event.payload.secrets)}`}`,
         });
         break;
       case "process.exited":
         next = updateTool(next, event.payload.callId, event.payload.name, {
           status: "success",
-          safetyRelevant: event.payload.secrets !== undefined,
-          detail: `process ${event.payload.pid} · ${event.payload.signal ?? `exit ${event.payload.exitCode ?? "unknown"}`}${event.payload.secrets === undefined ? "" : ` · ${secretExecutionSummary(event.payload.secrets)}`}`,
+          safetyRelevant:
+            (event.payload.resources !== undefined &&
+              event.payload.resources.status !== "not_requested") ||
+            event.payload.secrets !== undefined,
+          detail: `process ${event.payload.pid} · ${event.payload.signal ?? `exit ${event.payload.exitCode ?? "unknown"}`}${event.payload.resources === undefined ? "" : ` · ${executionResourceSummary(event.payload.resources)}`}${event.payload.secrets === undefined ? "" : ` · ${secretExecutionSummary(event.payload.secrets)}`}`,
         });
         break;
       case "process.termination_requested":
@@ -6518,9 +6522,9 @@ function activityEventDetail(event: AgentEvent): string | undefined {
     case "tool.completed":
       return `${event.payload.name} · ${event.payload.status} · call ${event.payload.callId}`;
     case "process.started":
-      return `${event.payload.name} · pid ${event.payload.pid} · ${event.payload.ownership} · ${event.payload.security === undefined || event.payload.security.kind === "legacy_unknown" ? "security unknown (legacy)" : `${executionOsSandboxSummary(event.payload.security)} · ${event.payload.security.backend}`}${event.payload.secrets === undefined ? "" : ` · ${secretExecutionSummary(event.payload.secrets)}`} · call ${event.payload.callId}`;
+      return `${event.payload.name} · pid ${event.payload.pid} · ${event.payload.ownership} · ${event.payload.security === undefined || event.payload.security.kind === "legacy_unknown" ? "security unknown (legacy)" : `${executionOsSandboxSummary(event.payload.security)} · ${event.payload.security.backend}`}${event.payload.resources === undefined ? "" : ` · ${executionResourceSummary(event.payload.resources)}`}${event.payload.secrets === undefined ? "" : ` · ${secretExecutionSummary(event.payload.secrets)}`} · call ${event.payload.callId}`;
     case "process.exited":
-      return `${event.payload.name} · pid ${event.payload.pid} · ${event.payload.signal ?? `exit ${event.payload.exitCode ?? "unknown"}`}${event.payload.secrets === undefined ? "" : ` · ${secretExecutionSummary(event.payload.secrets)}`} · call ${event.payload.callId}`;
+      return `${event.payload.name} · pid ${event.payload.pid} · ${event.payload.signal ?? `exit ${event.payload.exitCode ?? "unknown"}`}${event.payload.resources === undefined ? "" : ` · ${executionResourceSummary(event.payload.resources)}`}${event.payload.secrets === undefined ? "" : ` · ${secretExecutionSummary(event.payload.secrets)}`} · call ${event.payload.callId}`;
     case "process.termination_requested":
       return `${event.payload.name} · pid ${event.payload.pid} · ${event.payload.reason}/${event.payload.attempt} · call ${event.payload.callId}`;
     case "process.termination_completed":

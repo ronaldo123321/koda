@@ -123,6 +123,7 @@ const initialization = initializeResultSchema.parse({
     workspaceMutationRecovery: true,
     interactiveProcesses: true,
     secretEvidence: true,
+    resourceEvidence: true,
   },
   providers: [
     {

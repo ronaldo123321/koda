@@ -9,9 +9,11 @@ import type {
   ArtifactReference,
   ExecutionCapabilities,
   ExecutionPolicy,
+  ExecutionResourceEvidence,
   ExecutionSecuritySnapshot,
   SecretExecutionEvidence,
 } from "@koda/protocol";
+import { executionResourceEvidenceFromSecurity } from "@koda/protocol";
 
 import {
   ArtifactStore,
@@ -103,6 +105,7 @@ export interface ExecCommandResult {
   duration_ms: number;
   termination?: ProcessTerminationReport;
   security: ExecutionSecuritySnapshot;
+  resources?: ExecutionResourceEvidence;
   secrets?: SecretExecutionEvidence;
 }
 
@@ -657,6 +660,7 @@ async function runNativeForegroundCommand(
   let reportedPid: number | undefined;
   const reportStarted = async (current: NativeJobSnapshot): Promise<void> => {
     if (reportedPid !== undefined || current.pid === null) return;
+    const resources = executionResourceEvidenceFromSecurity(current.security);
     try {
       await options.report?.({
         type: "process.started",
@@ -667,6 +671,7 @@ async function runNativeForegroundCommand(
               ? "windows_job_object"
               : "posix_process_group",
           security: current.security,
+          ...(resources === undefined ? {} : { resources }),
           ...(current.secrets === undefined
             ? {}
             : { secrets: current.secrets }),
@@ -753,6 +758,7 @@ async function runNativeForegroundCommand(
     materializeNativeOutput(executor, snapshot, "stdout", options),
     materializeNativeOutput(executor, snapshot, "stderr", options),
   ]);
+  const resources = executionResourceEvidenceFromSecurity(snapshot.security);
   return {
     argv: [...options.argv],
     cwd: options.workspacePath,
@@ -781,6 +787,7 @@ async function runNativeForegroundCommand(
           },
         }),
     security: snapshot.security,
+    ...(resources === undefined ? {} : { resources }),
     ...(snapshot.secrets === undefined ? {} : { secrets: snapshot.secrets }),
   };
 }
@@ -816,6 +823,7 @@ async function reportNativeCompletion(
   snapshot: NativeJobSnapshot,
   pid: number,
 ): Promise<void> {
+  const resources = executionResourceEvidenceFromSecurity(snapshot.security);
   for (const attempt of snapshot.termination?.attempts ?? []) {
     if (attempt.attempt === "identity_check") {
       continue;
@@ -845,6 +853,7 @@ async function reportNativeCompletion(
         pid,
         exitCode: snapshot.exit_code,
         signal: snapshot.signal,
+        ...(resources === undefined ? {} : { resources }),
         ...(snapshot.secrets === undefined
           ? {}
           : { secrets: snapshot.secrets }),
@@ -1119,9 +1128,15 @@ async function runForegroundCommand(
       options.policy,
       options.capabilities,
     );
+    const resources = executionResourceEvidenceFromSecurity(security);
     await options.report?.({
       type: "process.started",
-      payload: { pid, ownership: ownedProcess.ownership, security },
+      payload: {
+        pid,
+        ownership: ownedProcess.ownership,
+        security,
+        ...(resources === undefined ? {} : { resources }),
+      },
     });
   } catch (error) {
     await ownedProcess.terminate("output_failure").catch(() => undefined);
@@ -1132,12 +1147,14 @@ async function runForegroundCommand(
   }
 
   const exited = rawExit.then(async (outcome) => {
+    const resources = executionResourceEvidenceFromSecurity(security);
     await options.report?.({
       type: "process.exited",
       payload: {
         pid,
         exitCode: outcome.exitCode,
         signal: outcome.signal,
+        ...(resources === undefined ? {} : { resources }),
       },
     });
     return outcome;
@@ -1222,6 +1239,7 @@ async function runForegroundCommand(
       stdout.finish(),
       stderr.finish(),
     ]);
+    const resources = executionResourceEvidenceFromSecurity(security);
     return {
       argv: [...options.argv],
       cwd: options.workspacePath,
@@ -1243,6 +1261,7 @@ async function runForegroundCommand(
       duration_ms: Math.max(0, Date.now() - startedAt),
       ...(termination === undefined ? {} : { termination }),
       security,
+      ...(resources === undefined ? {} : { resources }),
     };
   } catch (error) {
     let failure = error;

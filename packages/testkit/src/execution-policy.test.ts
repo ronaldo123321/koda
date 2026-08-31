@@ -6,8 +6,11 @@ import {
   executionOsSandboxSummary,
   executionPolicySchema,
   executionResourceCapabilitiesSchema,
+  executionResourceEvidenceEqual,
+  executionResourceEvidenceFromSecurity,
   executionResourceEvidenceSchema,
   executionResourceLimitsSchema,
+  executionResourceSummary,
   executionSecuritySnapshotSchema,
   isExecutionWorkspacePath,
   type ExecutionBackend,
@@ -943,6 +946,74 @@ describe("Phase 4C4A1 resource policy contract", () => {
         "RESOURCE_LIMIT_UNAVAILABLE",
       );
     }
+  });
+
+  it("projects only current retained evidence and formats every status deterministically", () => {
+    const current = validateExecutionSecuritySnapshot(
+      resourceFixtures.snapshot_cases[0]!.input,
+    );
+    expect(executionResourceEvidenceFromSecurity(current)).toEqual({
+      status: "not_requested",
+    });
+    expect(
+      executionResourceEvidenceFromSecurity(
+        createExecutionAdmissionSnapshot(base, caps),
+      ),
+    ).toBeUndefined();
+    expect(executionResourceSummary({ status: "not_requested" })).toBe(
+      "resources not requested",
+    );
+    const unavailable = {
+      status: "not_applied" as const,
+      requested: {
+        process_file_size_bytes: 4_096,
+        process_cpu_time_ms: 1_000,
+      },
+      requested_digest: "a".repeat(64),
+      available: unsupportedExecutionResourceCapabilities(),
+      available_digest: "b".repeat(64),
+    };
+    expect(executionResourceSummary(unavailable)).toBe(
+      "resources CPU time 1000 ms, file size 4096 bytes · unavailable",
+    );
+    expect(
+      executionResourceEvidenceEqual(unavailable, {
+        ...unavailable,
+        requested: {
+          process_cpu_time_ms: 1_000,
+          process_file_size_bytes: 4_096,
+        },
+      }),
+    ).toBe(true);
+    expect(
+      executionResourceSummary({ ...unavailable, status: "unknown" }),
+    ).toContain("· unknown");
+    expect(
+      executionResourceSummary({
+        ...unavailable,
+        status: "applied",
+        applied: {
+          process_cpu_time_ms: {
+            limit: 1_000,
+            backend: "posix_rlimit",
+            scope: "process",
+            enforcement: "kernel_hard",
+            granularity: 1,
+          },
+          process_file_size_bytes: {
+            limit: 4_096,
+            backend: "posix_rlimit",
+            scope: "process",
+            enforcement: "kernel_hard",
+            granularity: 1,
+          },
+        },
+        applied_digest: "c".repeat(64),
+      }),
+    ).toBe("resources CPU time 1000 ms, file size 4096 bytes · applied");
+    expect(() =>
+      executionResourceSummary({ ...unavailable, unexpected: true }),
+    ).toThrow();
   });
 
   it.each(resourceFixtures.snapshot_cases)(

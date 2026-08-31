@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useSyncExternalStore } from "react";
 import { Box, Static, Text, useApp, useInput, useStdout, type Key } from "ink";
 import {
   executionOsSandboxSummary,
+  executionResourceSummary,
   secretExecutionSummary,
   type ExecutionSecuritySnapshot,
 } from "@koda/protocol";
@@ -1239,7 +1240,7 @@ function ProcessList({ state }: { state: TuiState }) {
               bold={index === navigation.selectedIndex}
               {...(index === navigation.selectedIndex ? { color: "cyan" } : {})}
             >
-              {`${index === navigation.selectedIndex ? ">" : " "} ${boundPresentationText(process.displayName, 128)} · ${process.jobId.slice(0, 8)} · ${process.state} · ${process.lifecycle} · pid ${process.pid ?? "—"} · ${compactExecutionSecurity(process.security)}${process.secrets === undefined ? "" : ` · ${secretExecutionSummary(process.secrets)}`} · ${process.updatedAtMs}`}
+              {`${index === navigation.selectedIndex ? ">" : " "} ${boundPresentationText(process.displayName, 128)} · ${process.jobId.slice(0, 8)} · ${process.state} · ${process.lifecycle} · pid ${process.pid ?? "—"} · ${compactExecutionSecurity(process.security)}${process.resources === undefined ? " · resources unknown (historical)" : ` · ${executionResourceSummary(process.resources)}`}${process.secrets === undefined ? "" : ` · ${secretExecutionSummary(process.secrets)}`} · ${process.updatedAtMs}`}
             </Text>
           );
         })
@@ -1265,7 +1266,7 @@ function ProcessView({ state }: { state: TuiState }) {
         {`${session.process.displayName} · ${session.process.jobId.slice(0, 8)} · ${session.process.state}`}
       </Text>
       <Text dimColor>
-        {`${session.inputState === "owned" ? "input owned" : "read-only"} · ${session.rows}×${session.cols} · cursor ${session.cursor} · retained ${session.earliestCursor}–${session.latestCursor}${session.complete ? " · complete" : ""} · ${compactExecutionSecurity(session.process.security)}${session.process.secrets === undefined ? "" : ` · ${secretExecutionSummary(session.process.secrets)}`}`}
+        {`${session.inputState === "owned" ? "input owned" : "read-only"} · ${session.rows}×${session.cols} · cursor ${session.cursor} · retained ${session.earliestCursor}–${session.latestCursor}${session.complete ? " · complete" : ""} · ${compactExecutionSecurity(session.process.security)}${session.process.resources === undefined ? " · resources unknown (historical)" : ` · ${executionResourceSummary(session.process.resources)}`}${session.process.secrets === undefined ? "" : ` · ${secretExecutionSummary(session.process.secrets)}`}`}
       </Text>
       {session.screenRows.length === 0 ? (
         <Text dimColor>Waiting for terminal output…</Text>

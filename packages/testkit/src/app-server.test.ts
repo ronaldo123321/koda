@@ -76,7 +76,7 @@ describe("KodaAppServer", () => {
     await server.handleLine("not-json");
     await request(server, 1, "thread/list", {});
     await request(server, 2, "initialize", {
-      protocolVersion: 11,
+      protocolVersion: 16,
       client: { name: "wrong-version" },
     });
     await initialize(server, 3);
@@ -114,6 +114,7 @@ describe("KodaAppServer", () => {
         workspaceMutationRecovery: true,
         interactiveProcesses: false,
         secretEvidence: true,
+        resourceEvidence: true,
       },
       providers: [
         { id: "openai", defaultModel: "gpt-5.6-terra", configured: true },
@@ -234,7 +235,10 @@ describe("KodaAppServer", () => {
     try {
       await initialize(server, 1);
       expect(responseResult(writer, 1)).toMatchObject({
-        capabilities: { interactiveProcesses: true },
+        capabilities: {
+          interactiveProcesses: true,
+          resourceEvidence: true,
+        },
       });
       await request(server, 2, "turn/start", {
         prompt: "Start the interactive fixture.",
@@ -278,6 +282,7 @@ describe("KodaAppServer", () => {
         throw new Error("Started terminal was not discoverable.");
       }
       expect(processSummary).toMatchObject({
+        resources: { status: "not_requested" },
         security: {
           kind: "policy",
           stage: "launch_setup",
@@ -296,6 +301,7 @@ describe("KodaAppServer", () => {
       );
       expect(attached).toMatchObject({
         process: {
+          resources: { status: "not_requested" },
           security: {
             kind: "policy",
             stage: "launch_setup",
@@ -319,6 +325,9 @@ describe("KodaAppServer", () => {
           processSessionId: attached.processSessionId,
         });
         const read = responseResult(writer, requestId);
+        expect(read).toMatchObject({
+          process: { resources: { status: "not_requested" } },
+        });
         if (isObject(read) && typeof read.dataBase64 === "string") {
           terminalOutput += Buffer.from(read.dataBase64, "base64").toString(
             "utf8",
@@ -408,6 +417,7 @@ describe("KodaAppServer", () => {
           cleanup: "completed",
           redactions: { pty: 1 },
         });
+        expect(started.resources).toEqual({ status: "not_requested" });
 
         await request(server, 2, "process/list", { workspace });
         const listed = responseResult(writer, 2);
@@ -417,7 +427,10 @@ describe("KodaAppServer", () => {
         const summary = listed.processes.find(
           (value) => isObject(value) && value.jobId === started.job_id,
         );
-        expect(summary).toMatchObject({ secrets: terminal.secrets });
+        expect(summary).toMatchObject({
+          resources: { status: "not_requested" },
+          secrets: terminal.secrets,
+        });
 
         await request(server, 3, "process/attach", {
           workspace,
@@ -433,7 +446,10 @@ describe("KodaAppServer", () => {
           throw new Error("Secret process attachment response is invalid.");
         }
         expect(attached).toMatchObject({
-          process: { secrets: terminal.secrets },
+          process: {
+            resources: { status: "not_requested" },
+            secrets: terminal.secrets,
+          },
         });
 
         await request(server, 4, "process/read", {
@@ -442,7 +458,10 @@ describe("KodaAppServer", () => {
         const read = responseResult(writer, 4);
         expect(read).toMatchObject({
           status: "ok",
-          process: { secrets: terminal.secrets },
+          process: {
+            resources: { status: "not_requested" },
+            secrets: terminal.secrets,
+          },
         });
         if (!isObject(read) || typeof read.dataBase64 !== "string") {
           throw new Error("Secret process read response is invalid.");
@@ -456,7 +475,10 @@ describe("KodaAppServer", () => {
         });
         const terminated = responseResult(writer, 5);
         expect(terminated).toMatchObject({
-          process: { secrets: terminal.secrets },
+          process: {
+            resources: { status: "not_requested" },
+            secrets: terminal.secrets,
+          },
         });
         const serialized = JSON.stringify({
           listed,

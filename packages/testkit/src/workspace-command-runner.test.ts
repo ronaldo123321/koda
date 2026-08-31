@@ -96,6 +96,7 @@ describe("WorkspaceCommandRunner", () => {
         environment: { status: "applied" },
         supervision: { status: "applied" },
       },
+      resources: { status: "not_requested" },
     });
     expect(result.duration_ms).toBeGreaterThanOrEqual(0);
     expect(lifecycle.map((event) => event.type)).toEqual([
@@ -106,6 +107,7 @@ describe("WorkspaceCommandRunner", () => {
       type: "process.started",
       payload: {
         security: { kind: "policy", stage: "launch_setup" },
+        resources: { status: "not_requested" },
       },
     });
   });
@@ -184,6 +186,7 @@ describe("WorkspaceCommandRunner", () => {
       },
     );
     expect(result.security).toEqual(launchSecurity);
+    expect(result.resources).toEqual({ status: "not_requested" });
     expect(result.secrets).toEqual(secrets);
     expect(events).toContainEqual({
       type: "process.started",
@@ -191,6 +194,7 @@ describe("WorkspaceCommandRunner", () => {
         pid: 4242,
         ownership: "posix_process_group",
         security: launchSecurity,
+        resources: { status: "not_requested" },
         secrets,
       },
     });
@@ -200,6 +204,7 @@ describe("WorkspaceCommandRunner", () => {
         pid: 4242,
         exitCode: 0,
         signal: null,
+        resources: { status: "not_requested" },
         secrets,
       },
     });
@@ -270,6 +275,7 @@ describe("WorkspaceCommandRunner", () => {
         pid: 4243,
         exitCode: 0,
         signal: null,
+        resources: { status: "not_requested" },
         secrets,
       },
     });

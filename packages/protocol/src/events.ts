@@ -35,7 +35,12 @@ import {
   turnContextSnapshotSchema,
 } from "./context.js";
 import { toolCatalogChangedPayloadSchema } from "./tool-catalogs.js";
-import { executionSecuritySnapshotSchema } from "./execution-policy.js";
+import {
+  executionResourceEvidenceFromSecurity,
+  executionResourceEvidenceEqual,
+  executionResourceEvidenceSchema,
+  executionSecuritySnapshotSchema,
+} from "./execution-policy.js";
 import { secretExecutionEvidenceSchema } from "./execution-secrets.js";
 
 const metadataShape = {
@@ -100,6 +105,35 @@ export const processTerminationOutcomeSchema = z.enum([
   "already_exited",
   "uncertain",
 ]);
+
+const processStartedPayloadSchema = z
+  .object({
+    callId: toolCallIdSchema,
+    name: z.string().min(1),
+    pid: z.number().int().positive(),
+    ownership: processOwnershipSchema,
+    // Historical JSONL records predate execution-security evidence.
+    security: executionSecuritySnapshotSchema.optional(),
+    // C4A2 records can contain v4 security while predating public projection.
+    resources: executionResourceEvidenceSchema.optional(),
+    // Historical records and non-secret executions omit this field.
+    secrets: secretExecutionEvidenceSchema.optional(),
+  })
+  .superRefine((payload, context) => {
+    if (payload.resources === undefined) return;
+    const retained = executionResourceEvidenceFromSecurity(payload.security);
+    if (
+      retained === undefined ||
+      !executionResourceEvidenceEqual(retained, payload.resources)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["resources"],
+        message:
+          "Process resource evidence is inconsistent with security evidence.",
+      });
+    }
+  });
 
 export const agentEventSchema = z.discriminatedUnion("type", [
   z.object({
@@ -171,16 +205,7 @@ export const agentEventSchema = z.discriminatedUnion("type", [
   z.object({
     ...metadataShape,
     type: z.literal("process.started"),
-    payload: z.object({
-      callId: toolCallIdSchema,
-      name: z.string().min(1),
-      pid: z.number().int().positive(),
-      ownership: processOwnershipSchema,
-      // Historical JSONL records predate execution-security evidence.
-      security: executionSecuritySnapshotSchema.optional(),
-      // Historical records and non-secret executions omit this field.
-      secrets: secretExecutionEvidenceSchema.optional(),
-    }),
+    payload: processStartedPayloadSchema,
   }),
   z.object({
     ...metadataShape,
@@ -191,6 +216,8 @@ export const agentEventSchema = z.discriminatedUnion("type", [
       pid: z.number().int().positive(),
       exitCode: z.number().int().nullable(),
       signal: z.string().min(1).nullable(),
+      // Historical records predate public resource projection.
+      resources: executionResourceEvidenceSchema.optional(),
       secrets: secretExecutionEvidenceSchema.optional(),
     }),
   }),

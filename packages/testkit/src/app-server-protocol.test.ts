@@ -56,12 +56,13 @@ import { describe, expect, it } from "vitest";
 import {
   linuxProtectedLaunchSecurity,
   macosProtectedLaunchSecurity,
+  notRequestedResourceEvidence,
 } from "./execution-security-fixtures.js";
 import { destroyedSecretEvidence } from "./execution-secret-fixtures.js";
 
 describe("app-server protocol", () => {
   it("accepts strict versioned requests and safe JSON-RPC IDs", () => {
-    expect(APP_SERVER_PROTOCOL_VERSION).toBe(16);
+    expect(APP_SERVER_PROTOCOL_VERSION).toBe(17);
     expect(
       jsonRpcRequestSchema.parse({
         jsonrpc: "2.0",
@@ -75,7 +76,7 @@ describe("app-server protocol", () => {
     ).toMatchObject({ id: 1, method: "initialize" });
     expect(() =>
       initializeParamsSchema.parse({
-        protocolVersion: 8,
+        protocolVersion: 16,
         client: { name: "legacy-client" },
       }),
     ).toThrow();
@@ -128,6 +129,7 @@ describe("app-server protocol", () => {
           workspaceMutationRecovery: true,
           interactiveProcesses: false,
           secretEvidence: true,
+          resourceEvidence: true,
         },
         providers: [
           {
@@ -151,6 +153,7 @@ describe("app-server protocol", () => {
       workspaceMutationRecovery: true,
       interactiveProcesses: false,
       secretEvidence: true,
+      resourceEvidence: true,
     });
 
     expect(
@@ -433,6 +436,7 @@ describe("app-server protocol", () => {
   it("validates bounded process sessions without native credentials", () => {
     const processSessionId = "00000000-0000-4000-8000-000000000001";
     const security = macosProtectedLaunchSecurity();
+    const resources = notRequestedResourceEvidence();
     const attached = processAttachResultSchema.parse({
       processSessionId,
       process: {
@@ -445,6 +449,7 @@ describe("app-server protocol", () => {
         updatedAtMs: 2,
         pid: 42,
         security,
+        resources,
         secrets: destroyedSecretEvidence(),
       },
       inputState: "owned",
@@ -457,6 +462,7 @@ describe("app-server protocol", () => {
     });
     expect(attached).not.toHaveProperty("capabilityToken");
     expect(attached.process.security).toEqual(security);
+    expect(attached.process.resources).toEqual(resources);
     expect(attached.process.secrets).toEqual(destroyedSecretEvidence());
     expect(
       processAttachResultSchema.parse({
@@ -484,6 +490,7 @@ describe("app-server protocol", () => {
           updatedAtMs: 2,
           pid: 42,
           security,
+          resources,
           secrets: destroyedSecretEvidence(),
         },
         inputState: "owned",
@@ -509,6 +516,7 @@ describe("app-server protocol", () => {
           updatedAtMs: 3,
           pid: 42,
           security,
+          resources,
           secrets: destroyedSecretEvidence(),
         },
         inputState: "read_only",
@@ -521,8 +529,29 @@ describe("app-server protocol", () => {
       }),
     ).toMatchObject({
       inputState: "read_only",
-      process: { secrets: destroyedSecretEvidence() },
+      process: { resources, secrets: destroyedSecretEvidence() },
     });
+    expect(() =>
+      processAttachResultSchema.parse({
+        ...attached,
+        process: {
+          ...attached.process,
+          resources: {
+            status: "not_applied",
+            requested: { process_cpu_time_ms: 1 },
+            requested_digest: "a".repeat(64),
+            available: {
+              process_cpu_time_ms: { status: "unsupported" },
+              process_address_space_bytes: { status: "unsupported" },
+              job_process_count: { status: "unsupported" },
+              process_open_files: { status: "unsupported" },
+              process_file_size_bytes: { status: "unsupported" },
+            },
+            available_digest: "b".repeat(64),
+          },
+        },
+      }),
+    ).toThrow("inconsistent with security evidence");
     expect(() =>
       processReadResultSchema.parse({
         status: "ok",
@@ -551,6 +580,49 @@ describe("app-server protocol", () => {
         processSessionId,
         dataBase64: "YWJj",
         leaseToken: "must-stay-server-side",
+      }),
+    ).toThrow();
+  });
+
+  it("keeps historical process events readable and rejects conflicting resource projection", () => {
+    const security = macosProtectedLaunchSecurity();
+    const event = {
+      schemaVersion: 1 as const,
+      sequence: 1,
+      timestamp: "2026-08-31T00:00:00.000Z",
+      threadId: "resource-thread",
+      turnId: "resource-turn",
+      type: "process.started" as const,
+      payload: {
+        callId: "resource-call",
+        name: "exec_command",
+        pid: 42,
+        ownership: "posix_process_group" as const,
+        security,
+      },
+    };
+    expect(agentEventSchema.parse(event).payload).not.toHaveProperty(
+      "resources",
+    );
+    expect(
+      agentEventSchema.parse({
+        ...event,
+        payload: {
+          ...event.payload,
+          resources: notRequestedResourceEvidence(),
+        },
+      }).payload,
+    ).toMatchObject({ resources: { status: "not_requested" } });
+    expect(() =>
+      agentEventSchema.parse({
+        ...event,
+        payload: {
+          ...event.payload,
+          resources: {
+            status: "not_requested",
+            unexpected: true,
+          },
+        },
       }),
     ).toThrow();
   });

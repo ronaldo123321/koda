@@ -14,7 +14,9 @@ import {
   type ProcessResizeResult,
   type ProcessTerminateResult,
   type ExecutionSecuritySnapshot,
+  type ExecutionResourceEvidence,
   type SecretExecutionEvidence,
+  executionResourceEvidenceFromSecurity,
 } from "@koda/protocol";
 
 import {
@@ -71,6 +73,7 @@ export interface InteractiveTerminalStartResult {
   lifecycle: "foreground" | "background";
   pid: number | null;
   security: ExecutionSecuritySnapshot;
+  resources?: ExecutionResourceEvidence;
   secrets?: SecretExecutionEvidence;
 }
 
@@ -179,6 +182,7 @@ export class InteractiveProcessService {
       lifecycle: input.lifecycle ?? "foreground",
       pid: snapshot.pid,
       security: snapshot.security,
+      ...projectResourceEvidence(snapshot.security),
       ...(snapshot.secrets === undefined ? {} : { secrets: snapshot.secrets }),
     };
   }
@@ -496,6 +500,7 @@ function toProcessSummary(job: NativeJobSummary): InteractiveProcessSummary {
     updatedAtMs: job.updated_at_ms,
     pid: job.pid,
     security: job.security,
+    ...projectResourceEvidence(job.security),
     ...(job.secrets === undefined ? {} : { secrets: job.secrets }),
   };
 }
@@ -514,8 +519,16 @@ function refreshProcessSummary(
     updatedAtMs: Date.now(),
     pid: snapshot.pid,
     security: snapshot.security,
+    ...projectResourceEvidence(snapshot.security),
     ...(snapshot.secrets === undefined ? {} : { secrets: snapshot.secrets }),
   };
+}
+
+function projectResourceEvidence(security: ExecutionSecuritySnapshot): {
+  resources?: ExecutionResourceEvidence;
+} {
+  const resources = executionResourceEvidenceFromSecurity(security);
+  return resources === undefined ? {} : { resources };
 }
 
 async function canonicalWorkspace(input: string): Promise<string> {

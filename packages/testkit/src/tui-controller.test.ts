@@ -75,7 +75,10 @@ import {
 } from "@koda/tui";
 import { describe, expect, it, vi } from "vitest";
 
-import { macosProtectedLaunchSecurity } from "./execution-security-fixtures.js";
+import {
+  macosProtectedLaunchSecurity,
+  notRequestedResourceEvidence,
+} from "./execution-security-fixtures.js";
 import { destroyedSecretEvidence } from "./execution-secret-fixtures.js";
 
 describe("TuiController", () => {
@@ -736,6 +739,7 @@ describe("TuiController", () => {
           pid: 42,
           ownership: "posix_process_group",
           security: macosProtectedLaunchSecurity(),
+          resources: notRequestedResourceEvidence(),
           secrets: destroyedSecretEvidence(),
         },
       }),
@@ -780,7 +784,7 @@ describe("TuiController", () => {
     expect(controller.getSnapshot().activityNavigation?.rows).toEqual([
       "#11 tool.started · read_file · call activity-call",
       "#12 tool.execution_started · read_file · read · call activity-call",
-      "#13 process.started · exec_terminal · pid 42 · posix_process_group · OS sandbox: macOS Seatbelt · native_posix · secrets api-token · destroyed · cleanup completed · redacted 1 · call activity-call",
+      "#13 process.started · exec_terminal · pid 42 · posix_process_group · OS sandbox: macOS Seatbelt · native_posix · resources not requested · secrets api-token · destroyed · cleanup completed · redacted 1 · call activity-call",
     ]);
     expect(
       controller.getSnapshot().activityNavigation?.rows.join("\n"),
@@ -2360,6 +2364,7 @@ class FakeAppServerClient implements AppServerClientApi {
         workspaceMutationRecovery: true,
         interactiveProcesses: false,
         secretEvidence: true,
+        resourceEvidence: true,
       },
       providers: [
         provider("openai", "OpenAI", "OPENAI_API_KEY", "gpt-5.6-terra"),

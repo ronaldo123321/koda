@@ -1,6 +1,7 @@
 import type { EventSink } from "@koda/agent-core";
 import {
   executionOsSandboxSummary,
+  executionResourceSummary,
   secretExecutionSummary,
   type AgentEvent,
 } from "@koda/protocol";
@@ -89,14 +90,14 @@ export class ConsoleEventSink implements EventSink {
     if (event.type === "process.started") {
       const security = event.payload.security;
       this.writeDiagnostic(
-        `process ${event.payload.pid} started; ${executionOsSandboxSummary(security)}${security === undefined || security.kind === "legacy_unknown" ? "" : `; backend ${security.backend}`}${event.payload.secrets === undefined ? "" : `; ${secretExecutionSummary(event.payload.secrets)}`}`,
+        `process ${event.payload.pid} started; ${executionOsSandboxSummary(security)}${security === undefined || security.kind === "legacy_unknown" ? "" : `; backend ${security.backend}`}${event.payload.resources === undefined ? "" : `; ${executionResourceSummary(event.payload.resources)}`}${event.payload.secrets === undefined ? "" : `; ${secretExecutionSummary(event.payload.secrets)}`}`,
       );
       return;
     }
 
     if (event.type === "process.exited") {
       this.writeDiagnostic(
-        `process ${event.payload.pid} exited; ${event.payload.signal ?? `exit ${event.payload.exitCode ?? "unknown"}`}${event.payload.secrets === undefined ? "" : `; ${secretExecutionSummary(event.payload.secrets)}`}`,
+        `process ${event.payload.pid} exited; ${event.payload.signal ?? `exit ${event.payload.exitCode ?? "unknown"}`}${event.payload.resources === undefined ? "" : `; ${executionResourceSummary(event.payload.resources)}`}${event.payload.secrets === undefined ? "" : `; ${secretExecutionSummary(event.payload.secrets)}`}`,
       );
       return;
     }

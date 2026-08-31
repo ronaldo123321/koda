@@ -41,6 +41,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   linuxProtectedLaunchSecurity,
   macosProtectedLaunchSecurity,
+  notRequestedResourceEvidence,
 } from "./execution-security-fixtures.js";
 import { destroyedSecretEvidence } from "./execution-secret-fixtures.js";
 
@@ -244,6 +245,7 @@ describe("Phase 1A CLI", () => {
         pid: 42,
         ownership: "posix_process_group",
         security: macosProtectedLaunchSecurity(),
+        resources: notRequestedResourceEvidence(),
         secrets: destroyedSecretEvidence(),
       },
     });
@@ -256,6 +258,7 @@ describe("Phase 1A CLI", () => {
         pid: 42,
         exitCode: 0,
         signal: null,
+        resources: notRequestedResourceEvidence(),
         secrets: destroyedSecretEvidence(),
       },
     });
@@ -269,6 +272,7 @@ describe("Phase 1A CLI", () => {
         pid: 43,
         ownership: "posix_process_group",
         security: linuxProtectedLaunchSecurity(),
+        resources: notRequestedResourceEvidence(),
       },
     });
     await sink.append({
@@ -297,6 +301,7 @@ describe("Phase 1A CLI", () => {
     expect(stderr.value).toContain("[koda] artifact sha256:");
     expect(stderr.value).toContain("OS sandbox: macOS Seatbelt");
     expect(stderr.value).toContain("OS sandbox: Linux Bubblewrap + seccomp");
+    expect(stderr.value).toContain("resources not requested");
     expect(stderr.value).toContain(
       "secrets api-token · destroyed · cleanup completed · redacted 1",
     );
