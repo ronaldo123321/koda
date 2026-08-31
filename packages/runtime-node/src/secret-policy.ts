@@ -492,10 +492,15 @@ export class SecretLeaseManager {
 function assertSecretSecurityAvailable(
   security: ExecutionSecuritySnapshot,
 ): asserts security is Extract<ExecutionSecuritySnapshot, { kind: "policy" }> {
+  const protectedNativeContract =
+    security.kind === "policy" &&
+    (security.schema_version === 2 ||
+      security.schema_version === 3 ||
+      (security.schema_version === 4 && "platform" in security));
   if (
     security.kind !== "policy" ||
     security.stage !== "admission" ||
-    (security.schema_version !== 2 && security.schema_version !== 3) ||
+    !protectedNativeContract ||
     security.backend !== "native_posix" ||
     security.policy.network !== "deny" ||
     (security.policy.filesystem !== "read_only" &&

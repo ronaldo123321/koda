@@ -164,6 +164,8 @@ pub struct ExecutionPolicyConfig {
     pub network: NetworkPolicy,
     pub process_isolation: ProcessIsolationPolicy,
     pub environment: EnvironmentPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resources: Option<ExecutionResourceLimits>,
 }
 
 impl ExecutionPolicy {
@@ -300,16 +302,17 @@ pub fn resolve_execution_policy(
             network,
             process_isolation: ProcessIsolationPolicy::Inherit,
             environment: EnvironmentPolicy::Explicit,
+            resources: None,
         }
     };
     let policy = ExecutionPolicy {
-        schema_version: 1,
+        schema_version: 2,
         workspace_root: workspace_root.into(),
         filesystem: config.filesystem,
         network: config.network,
         process_isolation: config.process_isolation,
         environment: config.environment,
-        resources: None,
+        resources: config.resources.filter(|resources| !resources.is_empty()),
     };
     policy.validate()?;
     Ok(policy)

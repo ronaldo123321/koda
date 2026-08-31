@@ -19,7 +19,7 @@ import {
 } from "./execution-policy.js";
 import type { NativeSecretLeaseInput } from "./secret-policy.js";
 
-const PROTOCOL_VERSION = 5;
+const PROTOCOL_VERSION = 6;
 const MAX_FRAME_BYTES = 1_048_576;
 const DEFAULT_STARTUP_TIMEOUT_MS = 5_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
@@ -35,6 +35,7 @@ export type NativeExecutorErrorCode =
   | "INCOMPATIBLE_STATE_VERSION"
   | "INVALID_EXECUTION_POLICY"
   | "EXECUTION_POLICY_UNAVAILABLE"
+  | "RESOURCE_LIMIT_UNAVAILABLE"
   | "EXECUTION_POLICY_CHANGED"
   | "EXECUTION_SECURITY_CORRUPT"
   | "INVALID_REQUEST"
@@ -528,9 +529,15 @@ const helloResultSchema = z
       });
     }
     if (
-      (value.execution_security.schema_version === 2 &&
+      ((value.execution_security.schema_version === 2 ||
+        (value.execution_security.schema_version === 4 &&
+          "platform" in value.execution_security &&
+          value.execution_security.platform === "macos")) &&
         value.platform !== "macos") ||
-      (value.execution_security.schema_version === 3 &&
+      ((value.execution_security.schema_version === 3 ||
+        (value.execution_security.schema_version === 4 &&
+          "platform" in value.execution_security &&
+          value.execution_security.platform === "linux")) &&
         value.platform !== "linux")
     ) {
       context.addIssue({
@@ -1365,7 +1372,7 @@ function parseResponse(value: unknown): ExecutorResponse {
   if (parsed.data.protocol_version !== PROTOCOL_VERSION) {
     throw new NativeExecutorError(
       "INCOMPATIBLE_PROTOCOL",
-      "Executor protocol v5 is required. Finish or stop the older Supervisor explicitly before upgrading; no fallback was attempted.",
+      "Executor protocol v6 is required. Finish or stop the older Supervisor explicitly before upgrading; no fallback was attempted.",
     );
   }
   return parsed.data;
@@ -1402,6 +1409,7 @@ function normalizeRemoteCode(
     case "INCOMPATIBLE_STATE_VERSION":
     case "INVALID_EXECUTION_POLICY":
     case "EXECUTION_POLICY_UNAVAILABLE":
+    case "RESOURCE_LIMIT_UNAVAILABLE":
     case "EXECUTION_POLICY_CHANGED":
     case "EXECUTION_SECURITY_CORRUPT":
     case "PLATFORM_CAPABILITY_UNAVAILABLE":

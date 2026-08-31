@@ -42,7 +42,7 @@ describeNative("NativeExecutorClient", () => {
 
   it("negotiates explicit POSIX capabilities", async () => {
     await expect(client.hello()).resolves.toMatchObject({
-      protocol_version: 5,
+      protocol_version: 6,
       platform: process.platform === "darwin" ? "macos" : "linux",
       capabilities: {
         process_group: true,
@@ -56,7 +56,11 @@ describeNative("NativeExecutorClient", () => {
 
   it("injects file secrets once, redacts Pipe output before persistence, and cleans up", async () => {
     const hello = await client.hello();
-    if (![2, 3].includes(hello.execution_security.schema_version)) return;
+    if (
+      hello.execution_security.schema_version !== 4 ||
+      !("platform" in hello.execution_security)
+    )
+      return;
     const workspace = await mkdtemp(join(root, "secret-workspace-"));
     const value = Buffer.from("c3c-native-secret-value", "utf8");
     const started = await client.start({
@@ -95,7 +99,11 @@ describeNative("NativeExecutorClient", () => {
 
   it("redacts PTY output before segments and live attachment reads", async () => {
     const hello = await client.hello();
-    if (![2, 3].includes(hello.execution_security.schema_version)) return;
+    if (
+      hello.execution_security.schema_version !== 4 ||
+      !("platform" in hello.execution_security)
+    )
+      return;
     const workspace = await mkdtemp(join(root, "secret-pty-workspace-"));
     const value = Buffer.from("c3c-pty-secret-value", "utf8");
     const started = await client.startPty({
@@ -135,7 +143,11 @@ describeNative("NativeExecutorClient", () => {
 
   it("keeps secret files through execution and removes them after cancellation", async () => {
     const hello = await client.hello();
-    if (![2, 3].includes(hello.execution_security.schema_version)) return;
+    if (
+      hello.execution_security.schema_version !== 4 ||
+      !("platform" in hello.execution_security)
+    )
+      return;
     const workspace = await mkdtemp(join(root, "secret-cancel-workspace-"));
     const value = Buffer.from("c3c-cancel-secret-value", "utf8");
     const started = await client.start({
@@ -163,7 +175,11 @@ describeNative("NativeExecutorClient", () => {
 
   it("rejects an expired native lease with a fixed value-free error", async () => {
     const hello = await client.hello();
-    if (![2, 3].includes(hello.execution_security.schema_version)) return;
+    if (
+      hello.execution_security.schema_version !== 4 ||
+      !("platform" in hello.execution_security)
+    )
+      return;
     const workspace = await mkdtemp(join(root, "secret-expired-workspace-"));
     const value = Buffer.from("c3c-expired-secret-value", "utf8");
     const lease = nativeSecretLease(value);

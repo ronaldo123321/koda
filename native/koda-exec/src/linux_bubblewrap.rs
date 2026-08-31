@@ -317,7 +317,9 @@ pub fn launch_confirmation_digest(
     runtime.validate()?;
     policy.validate()?;
     capabilities.validate()?;
-    if capabilities.schema_version != 3 || capabilities.sandbox_runtime.as_ref() != Some(runtime) {
+    let contract_matches = (capabilities.schema_version == 3 && policy.schema_version == 1)
+        || (capabilities.schema_version == 4 && policy.schema_version == 2);
+    if !contract_matches || capabilities.sandbox_runtime.as_ref() != Some(runtime) {
         return Err(ExecutionPolicyError::ExecutionPolicyUnavailable);
     }
     let mut digest = Sha256::new();
@@ -2002,6 +2004,17 @@ mod tests {
         assert_eq!(
             first,
             launch_confirmation_digest(&runtime, &read_only, &capabilities).unwrap()
+        );
+        let current_policy = ExecutionPolicy {
+            schema_version: 2,
+            ..read_only.clone()
+        };
+        let current_capabilities =
+            crate::execution_policy::resource_contract_execution_capabilities(&capabilities)
+                .unwrap();
+        assert_ne!(
+            first,
+            launch_confirmation_digest(&runtime, &current_policy, &current_capabilities,).unwrap()
         );
         let inherited_network = ExecutionPolicy {
             network: NetworkPolicy::Inherit,

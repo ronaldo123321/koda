@@ -17,7 +17,7 @@ use crate::protocol::{
 };
 use crate::secret_policy::SecretExecutionEvidence;
 
-pub const STORE_FORMAT_VERSION: u32 = 5;
+pub const STORE_FORMAT_VERSION: u32 = 6;
 const MAX_MANIFEST_BYTES: u64 = 262_144;
 const MAX_STATE_BYTES: u64 = 65_536;
 const MAX_STATE_HEAD_BYTES: u64 = 4_096;
@@ -117,11 +117,11 @@ impl JobStore {
         request_id: &str,
         start: StartParams,
     ) -> Result<(JobRecord, Vec<u8>), ProtocolError> {
-        self.create_job_with_capabilities(
-            request_id,
-            start,
+        let capabilities = crate::execution_policy::resource_contract_execution_capabilities(
             &execution_security::native_capabilities(),
         )
+        .map_err(execution_security::policy_error)?;
+        self.create_job_with_capabilities(request_id, start, &capabilities)
     }
 
     pub fn create_job_with_capabilities(
@@ -793,6 +793,7 @@ fn validate_manifest(manifest: &JobManifest) -> Result<(), ProtocolError> {
                 3 => matches!(policy.schema_version, 1..=2),
                 4 => matches!(policy.schema_version, 1..=3),
                 5 => matches!(policy.schema_version, 1..=3),
+                6 => policy.schema_version == 4,
                 _ => false,
             };
             if !schema_allowed {
@@ -808,6 +809,26 @@ fn validate_manifest(manifest: &JobManifest) -> Result<(), ProtocolError> {
                         .ok_or_else(execution_security::corrupt)?,
                 )
                 .map_err(|_| execution_security::corrupt())?,
+                4 => {
+                    let legacy = match (policy.platform, policy.sandbox_runtime.as_ref()) {
+                        (None, None) => {
+                            crate::execution_policy::c1_execution_capabilities(policy.backend)
+                        }
+                        (Some(crate::execution_policy::ExecutionPlatform::Macos), None) => {
+                            crate::execution_policy::macos_seatbelt_execution_capabilities()
+                        }
+                        (
+                            Some(crate::execution_policy::ExecutionPlatform::Linux),
+                            Some(runtime),
+                        ) => crate::execution_policy::linux_bubblewrap_execution_capabilities(
+                            runtime,
+                        )
+                        .map_err(|_| execution_security::corrupt())?,
+                        _ => return Err(execution_security::corrupt()),
+                    };
+                    crate::execution_policy::resource_contract_execution_capabilities(&legacy)
+                        .map_err(|_| execution_security::corrupt())?
+                }
                 _ => return Err(execution_security::corrupt()),
             };
             let expected = crate::execution_policy::create_execution_admission_snapshot(
@@ -1180,6 +1201,14 @@ mod tests {
         }
     }
 
+    fn legacy_start() -> StartParams {
+        let mut value = start();
+        let policy = value.policy.as_mut().unwrap();
+        policy.schema_version = 1;
+        policy.resources = None;
+        value
+    }
+
     fn legacy_copy(record: &JobRecord) -> JobRecord {
         let mut manifest = record.manifest.clone();
         manifest.format_version = 1;
@@ -1262,6 +1291,32 @@ mod tests {
         }
     }
 
+    fn versioned_copy(record: &JobRecord, format_version: u32) -> JobRecord {
+        let mut manifest = record.manifest.clone();
+        manifest.format_version = format_version;
+        manifest.manifest_digest = manifest_digest(&manifest).unwrap();
+        let mut state = record.read_state().unwrap();
+        state.format_version = format_version;
+        state.state_digest = state_digest(&state).unwrap();
+        write_atomic_json(
+            &record.directory.join("manifest.json"),
+            &manifest,
+            MAX_MANIFEST_BYTES,
+        )
+        .unwrap();
+        write_atomic_json(&record.state_path(), &state, MAX_STATE_BYTES).unwrap();
+        write_atomic_json(
+            &record.state_head_path(),
+            &StateHead::from_state(&state),
+            MAX_STATE_HEAD_BYTES,
+        )
+        .unwrap();
+        JobRecord {
+            directory: record.directory.clone(),
+            manifest,
+        }
+    }
+
     #[test]
     fn legacy_hashes_remain_stable_and_reads_do_not_upgrade_records() {
         let root = std::env::temp_dir().join(format!("koda-legacy-{}", Uuid::new_v4().simple()));
@@ -1303,7 +1358,13 @@ mod tests {
     fn v2_records_remain_readable_and_transitions_do_not_upgrade_them() {
         let root = std::env::temp_dir().join(format!("koda-v2-{}", Uuid::new_v4().simple()));
         let store = JobStore::open(&root).unwrap();
-        let (record, _) = store.create_job("v2", start()).unwrap();
+        let (record, _) = store
+            .create_job_with_capabilities(
+                "v2",
+                legacy_start(),
+                &execution_security::native_capabilities(),
+            )
+            .unwrap();
         assert_eq!(record.manifest.format_version, STORE_FORMAT_VERSION);
         let previous = v2_copy(&record);
         let paths = [
@@ -1346,7 +1407,13 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("koda-v2-evidence-{}", Uuid::new_v4().simple()));
         let store = JobStore::open(&root).unwrap();
-        let (record, _) = store.create_job("v2-evidence", start()).unwrap();
+        let (record, _) = store
+            .create_job_with_capabilities(
+                "v2-evidence",
+                legacy_start(),
+                &execution_security::native_capabilities(),
+            )
+            .unwrap();
         let mut manifest = record.manifest.clone();
         manifest.format_version = 2;
         manifest.security = Some(
@@ -1371,7 +1438,7 @@ mod tests {
         let (record, _) = store
             .create_job_with_capabilities(
                 "v3",
-                start(),
+                legacy_start(),
                 &crate::execution_policy::macos_seatbelt_execution_capabilities(),
             )
             .unwrap();
@@ -1398,11 +1465,55 @@ mod tests {
     }
 
     #[test]
+    fn v4_and_v5_records_remain_readable_and_transitions_do_not_upgrade_them() {
+        for format_version in [4, 5] {
+            let root = std::env::temp_dir().join(format!(
+                "koda-v{format_version}-{}",
+                Uuid::new_v4().simple()
+            ));
+            let store = JobStore::open(&root).unwrap();
+            let (record, _) = store
+                .create_job_with_capabilities(
+                    &format!("v{format_version}"),
+                    legacy_start(),
+                    &crate::execution_policy::macos_seatbelt_execution_capabilities(),
+                )
+                .unwrap();
+            let previous = versioned_copy(&record, format_version);
+            let loaded = store.load_job(&previous.directory).unwrap();
+            let state = loaded.read_state().unwrap();
+            let Some(ExecutionSecuritySnapshot::Policy(security)) = state.security.as_ref() else {
+                panic!("historical record must retain policy evidence")
+            };
+            assert_eq!(security.schema_version, 2);
+            let mut next = state.clone();
+            next.state = JobState::StartFailed;
+            let next = loaded.transition(&state, next).unwrap();
+            assert_eq!(next.format_version, format_version);
+            assert_eq!(
+                store
+                    .load_job(&previous.directory)
+                    .unwrap()
+                    .manifest
+                    .format_version,
+                format_version
+            );
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
     fn durable_format_versions_bind_the_allowed_security_schema() {
         let root =
             std::env::temp_dir().join(format!("koda-format-schema-{}", Uuid::new_v4().simple()));
         let store = JobStore::open(&root).unwrap();
-        let (record, _) = store.create_job("format-schema", start()).unwrap();
+        let (record, _) = store
+            .create_job_with_capabilities(
+                "format-schema",
+                legacy_start(),
+                &execution_security::native_capabilities(),
+            )
+            .unwrap();
         let policy = record.manifest.start.policy.as_ref().unwrap();
 
         let mut macos = record.manifest.clone();
@@ -1440,6 +1551,7 @@ mod tests {
         let linux_caps =
             crate::execution_policy::linux_bubblewrap_execution_capabilities(&runtime).unwrap();
         let mut linux = record.manifest.clone();
+        linux.format_version = 4;
         linux.security = Some(
             crate::execution_policy::create_execution_admission_snapshot(policy, &linux_caps)
                 .unwrap(),
@@ -1465,7 +1577,7 @@ mod tests {
             let path = record.directory.join(name);
             let mut value: serde_json::Value =
                 read_private_json(&path, MAX_MANIFEST_BYTES).unwrap();
-            value["format_version"] = serde_json::json!(6);
+            value["format_version"] = serde_json::json!(7);
             value["future_field"] = serde_json::json!({"preserve":true});
             write_atomic_json(&path, &value, MAX_MANIFEST_BYTES).unwrap();
             let before = std::fs::read(&path).unwrap();
@@ -1558,6 +1670,16 @@ mod tests {
         let (record, token) = store.create_job("request-1", start()).expect("job");
 
         assert_eq!(record.read_token().expect("token"), token);
+        assert_eq!(record.manifest.format_version, 6);
+        let Some(ExecutionSecuritySnapshot::Policy(security)) = record.manifest.security.as_ref()
+        else {
+            panic!("current record must retain policy evidence")
+        };
+        assert_eq!(security.schema_version, 4);
+        assert!(matches!(
+            security.resources,
+            Some(crate::execution_policy::ExecutionResourceEvidence::NotRequested {})
+        ));
         assert_eq!(
             record.read_state().expect("state").state,
             JobState::Accepted

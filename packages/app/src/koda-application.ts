@@ -436,7 +436,12 @@ export class KodaApplication {
           "Execution policy configuration is invalid.",
         );
       }
-      this.executionPolicyConfig = Object.freeze({ ...parsed.data });
+      this.executionPolicyConfig = Object.freeze({
+        ...parsed.data,
+        ...(parsed.data.resources === undefined
+          ? {}
+          : { resources: Object.freeze({ ...parsed.data.resources }) }),
+      });
       this.executionProfile = undefined;
     } else {
       const configuredProfile =

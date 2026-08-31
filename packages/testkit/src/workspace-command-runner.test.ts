@@ -1,6 +1,7 @@
 import {
   ArtifactStore,
   c1ExecutionCapabilities,
+  resourceContractExecutionCapabilities,
   type NativeExecutorClient,
   type NativeJobSnapshot,
   WorkspaceCommandRunner,
@@ -59,6 +60,7 @@ describe("WorkspaceCommandRunner", () => {
     expect(command.preview).toContain("timeout: 2000 ms");
     expect(command.preview).toContain(JSON.stringify(process.execPath));
     expect(command.preview).toContain("OS sandbox: none");
+    expect(command.preview).toContain("resource limits: not requested");
     expect(command.security).toMatchObject({
       kind: "policy",
       stage: "admission",
@@ -108,7 +110,7 @@ describe("WorkspaceCommandRunner", () => {
     });
   });
 
-  it("retains schema-v3 Linux evidence from approval preview through result and process event", async () => {
+  it("retains schema-v4 Linux evidence from approval preview through result and process event", async () => {
     const root = await createWorkspace();
     const canonicalRoot = await realpath(root);
     const capabilities = linuxProtectedExecutionCapabilities();
@@ -167,7 +169,7 @@ describe("WorkspaceCommandRunner", () => {
       "expected OS sandbox: Linux Bubblewrap + seccomp",
     );
     expect(command.security).toMatchObject({
-      schema_version: 3,
+      schema_version: 4,
       platform: "linux",
       stage: "admission",
       sandbox_runtime: { mechanism: "linux_bubblewrap" },
@@ -297,8 +299,10 @@ describe("WorkspaceCommandRunner", () => {
     let startCalls = 0;
     const nativeExecutor = {
       hello: async () => ({
-        execution_security: c1ExecutionCapabilities(
-          helloCalls++ === 0 ? "native_posix" : "native_windows",
+        execution_security: resourceContractExecutionCapabilities(
+          c1ExecutionCapabilities(
+            helloCalls++ === 0 ? "native_posix" : "native_windows",
+          ),
         ),
       }),
       start: async () => {

@@ -216,15 +216,16 @@ describe("Phase 4C1A execution policy contract", () => {
   });
 
   it("resolves default, named profiles, and explicit configuration priority", () => {
+    const currentBase = { ...base, schema_version: 2 } as const;
     expect(resolveExecutionPolicy({ workspaceRoot: "/workspace" })).toEqual(
-      base,
+      currentBase,
     );
     expect(
       resolveExecutionPolicy({
         workspaceRoot: "/workspace",
         environmentProfile: "unconfined",
       }),
-    ).toEqual(base);
+    ).toEqual(currentBase);
     expect(
       resolveExecutionPolicy({
         workspaceRoot: "/workspace",
@@ -242,6 +243,7 @@ describe("Phase 4C1A execution policy contract", () => {
       network: "inherit",
       process_isolation: "required",
       environment: "explicit",
+      resources: { process_cpu_time_ms: 1_000 },
     };
     const resolved = resolveExecutionPolicy({
       workspaceRoot: "/workspace",
@@ -249,6 +251,7 @@ describe("Phase 4C1A execution policy contract", () => {
       environmentProfile: "invalid-ignored-by-explicit-option",
     });
     expect(resolved).toMatchObject(config);
+    expect(resolved.schema_version).toBe(2);
     config.filesystem = "unrestricted";
     expect(resolved.filesystem).toBe("read_only");
     expect(Object.isFrozen(resolved)).toBe(true);
@@ -262,19 +265,29 @@ describe("Phase 4C1A execution policy contract", () => {
           processDirectory: "/workspace",
         }),
     ).toThrow("KODA_EXECUTION_PROFILE must be one of");
-    expect(
-      () =>
-        new KodaApplication({
-          environment: { KODA_EXECUTION_PROFILE: "invalid-profile" },
-          processDirectory: "/workspace",
-          executionPolicy: {
-            filesystem: "unrestricted",
-            network: "inherit",
-            process_isolation: "inherit",
-            environment: "explicit",
-          },
-        }),
-    ).not.toThrow();
+    const resources = { process_cpu_time_ms: 1_000 };
+    const application = new KodaApplication({
+      environment: { KODA_EXECUTION_PROFILE: "invalid-profile" },
+      processDirectory: "/workspace",
+      executionPolicy: {
+        filesystem: "unrestricted",
+        network: "inherit",
+        process_isolation: "inherit",
+        environment: "explicit",
+        resources,
+      },
+    });
+    const captured = application as unknown as {
+      executionPolicyConfig: ExecutionPolicyConfig;
+    };
+    resources.process_cpu_time_ms = 2_000;
+    expect(captured.executionPolicyConfig.resources).toEqual({
+      process_cpu_time_ms: 1_000,
+    });
+    expect(Object.isFrozen(captured.executionPolicyConfig)).toBe(true);
+    expect(Object.isFrozen(captured.executionPolicyConfig.resources)).toBe(
+      true,
+    );
   });
 
   it("never falls back on invalid configured values or accepts a workspace override", () => {
@@ -977,10 +990,26 @@ describe("Phase 4C4A1 resource policy contract", () => {
     );
   });
 
-  it("keeps the trusted resolver on v1 until C4A2 wiring", () => {
-    expect(resolveExecutionPolicy({ workspaceRoot: "/workspace" })).toEqual(
-      base,
-    );
+  it("resolves trusted profiles to v2 and normalizes resource limits", () => {
+    expect(resolveExecutionPolicy({ workspaceRoot: "/workspace" })).toEqual({
+      ...base,
+      schema_version: 2,
+    });
+    expect(
+      resolveExecutionPolicy({
+        workspaceRoot: "/workspace",
+        policy: {
+          filesystem: "unrestricted",
+          network: "inherit",
+          process_isolation: "inherit",
+          environment: "explicit",
+          resources: { process_open_files: 64 },
+        },
+      }),
+    ).toMatchObject({
+      schema_version: 2,
+      resources: { process_open_files: 64 },
+    });
   });
 });
 

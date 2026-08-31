@@ -121,7 +121,7 @@ export function resolveExecutionPolicy(
     };
   }
   return normalizeExecutionPolicy({
-    schema_version: 1,
+    schema_version: 2,
     workspace_root: options.workspaceRoot,
     ...config,
   });
@@ -504,12 +504,19 @@ export function createExecutionLaunchSetupSnapshot(
         ? "RESOURCE_LIMIT_UNAVAILABLE"
         : "EXECUTION_POLICY_UNAVAILABLE",
     );
-  // C2A1 defines the v2 evidence shape, but only the trusted native launch
-  // path may construct it after C2A2/C2A3 confirm Seatbelt installation.
-  if (caps.schema_version !== 1)
+  // OS-backed launch evidence remains native-only. Retain the v1 pure builder
+  // for historical evidence tests while current TypeScript execution emits
+  // only the generic v4 wrapper after it owns the child tree.
+  const legacyContract =
+    caps.schema_version === 1 && policy.schema_version === 1;
+  const currentContract =
+    caps.schema_version === 4 &&
+    !("platform" in caps) &&
+    policy.schema_version === 2;
+  if (!legacyContract && !currentContract)
     throw new ExecutionPolicyError("EXECUTION_POLICY_UNAVAILABLE");
   return validateExecutionSecuritySnapshot({
-    schema_version: 1,
+    schema_version: caps.schema_version,
     kind: "policy",
     stage: "launch_setup",
     policy,
@@ -529,6 +536,9 @@ export function createExecutionLaunchSetupSnapshot(
       mechanism: caps.supervision.mechanism,
       layer: caps.supervision.layer,
     },
+    ...(caps.schema_version === 4
+      ? { resources: { status: "not_requested" as const } }
+      : {}),
   });
 }
 
@@ -545,9 +555,27 @@ export function executionPolicyPreview(snapshotInput: unknown): string {
     `network: ${snapshot.policy.network}`,
     `process isolation: ${snapshot.policy.process_isolation}`,
     "environment: explicit application filtering",
+    executionResourcePolicyPreview(snapshot.policy),
     `expected process supervision: ${supervision.mechanism} (${supervision.layer})`,
     executionOsSandboxSummary(snapshot),
   ].join("\n");
+}
+
+function executionResourcePolicyPreview(policy: ExecutionPolicy): string {
+  if (policy.schema_version === 1) {
+    return "resource limits: unknown (historical policy)";
+  }
+  if (!("resources" in policy)) {
+    return "resource limits: not requested";
+  }
+  const entries = RESOURCE_LIMIT_NAMES.flatMap((name) =>
+    policy.resources[name] === undefined
+      ? []
+      : [`${name}=${policy.resources[name]}`],
+  );
+  return entries.length === 0
+    ? "resource limits: not requested"
+    : `resource limits: ${entries.join(", ")}`;
 }
 
 /** Use at trust boundaries in addition to the structural protocol schema.

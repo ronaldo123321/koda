@@ -25,6 +25,7 @@ import {
   WorkspaceCommandRunner,
   createExecutionAdmissionSnapshot,
   macosSeatbeltExecutionCapabilities,
+  resourceContractExecutionCapabilities,
   registerExecCommandTool,
   registerExecTerminalTool,
   resolveExecutionPolicy,
@@ -264,23 +265,26 @@ describe("Phase 4C3B secret leases", () => {
       },
     });
     const unconfined = resolveExecutionPolicy({ workspaceRoot: "/workspace" });
-    const unsupported = createExecutionAdmissionSnapshot(unconfined, {
-      schema_version: 1,
-      backend: "typescript_posix",
-      filesystem: { supported: ["unrestricted"], mechanism: "none" },
-      network: { supported: ["inherit"], mechanism: "none" },
-      process_isolation: { supported: ["inherit"], mechanism: "none" },
-      environment: {
-        supported: ["explicit"],
-        mechanism: "explicit_environment",
-        layer: "application",
-      },
-      supervision: {
-        mechanism: "posix_process_group",
-        layer: "os",
-        durable: false,
-      },
-    });
+    const unsupported = createExecutionAdmissionSnapshot(
+      unconfined,
+      resourceContractExecutionCapabilities({
+        schema_version: 1,
+        backend: "typescript_posix",
+        filesystem: { supported: ["unrestricted"], mechanism: "none" },
+        network: { supported: ["inherit"], mechanism: "none" },
+        process_isolation: { supported: ["inherit"], mechanism: "none" },
+        environment: {
+          supported: ["explicit"],
+          mechanism: "explicit_environment",
+          layer: "application",
+        },
+        supervision: {
+          mechanism: "posix_process_group",
+          layer: "os",
+          durable: false,
+        },
+      }),
+    );
     await expectCode(
       manager.prepare("exec_command", ["api-token"], {
         ...commandBinding(),
@@ -374,7 +378,9 @@ describe("Phase 4C3B/C3C command approval", () => {
     });
     const nativeExecutor = {
       hello: async () => ({
-        execution_security: macosSeatbeltExecutionCapabilities(),
+        execution_security: resourceContractExecutionCapabilities(
+          macosSeatbeltExecutionCapabilities(),
+        ),
       }),
       start: async (input: { secretLease?: { destroy(): void } }) => {
         expect(input.secretLease).toBeDefined();
@@ -586,7 +592,7 @@ function commandBinding(): SecretCommandBinding {
   });
   const security: ExecutionSecuritySnapshot = createExecutionAdmissionSnapshot(
     policy,
-    macosSeatbeltExecutionCapabilities(),
+    resourceContractExecutionCapabilities(macosSeatbeltExecutionCapabilities()),
   );
   return {
     toolName: "exec_command",

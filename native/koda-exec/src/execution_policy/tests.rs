@@ -34,7 +34,15 @@ fn resource_fixtures() -> Value {
 }
 
 fn base() -> ExecutionPolicy {
-    resolve_execution_policy("/workspace", None, None).unwrap()
+    ExecutionPolicy {
+        schema_version: 1,
+        workspace_root: "/workspace".to_owned(),
+        filesystem: FilesystemPolicy::Unrestricted,
+        network: NetworkPolicy::Inherit,
+        process_isolation: ProcessIsolationPolicy::Inherit,
+        environment: EnvironmentPolicy::Explicit,
+        resources: None,
+    }
 }
 
 #[test]
@@ -538,10 +546,11 @@ fn invalid_and_missing_policy_fields_fail_safely() {
 
 #[test]
 fn profile_resolution_and_config_priority() {
-    assert_eq!(
-        resolve_execution_policy("/workspace", None, Some("unconfined")).unwrap(),
-        base()
-    );
+    let unconfined = resolve_execution_policy("/workspace", None, Some("unconfined")).unwrap();
+    assert_eq!(unconfined.schema_version, 2);
+    assert_eq!(unconfined.filesystem, FilesystemPolicy::Unrestricted);
+    assert_eq!(unconfined.network, NetworkPolicy::Inherit);
+    assert!(unconfined.resources.is_none());
     let read_only = resolve_execution_policy("/workspace", None, Some("read-only")).unwrap();
     assert_eq!(read_only.filesystem, FilesystemPolicy::ReadOnly);
     assert_eq!(read_only.network, NetworkPolicy::Deny);
@@ -554,6 +563,10 @@ fn profile_resolution_and_config_priority() {
         network: NetworkPolicy::Inherit,
         process_isolation: ProcessIsolationPolicy::Required,
         environment: EnvironmentPolicy::Explicit,
+        resources: Some(ExecutionResourceLimits {
+            process_cpu_time_ms: Some(1_000),
+            ..ExecutionResourceLimits::default()
+        }),
     };
     let resolved = resolve_execution_policy(
         "/workspace",
@@ -563,6 +576,7 @@ fn profile_resolution_and_config_priority() {
     .unwrap();
     assert_eq!(resolved.filesystem, config.filesystem);
     assert_eq!(resolved.process_isolation, config.process_isolation);
+    assert_eq!(resolved.resources, config.resources);
     for invalid in [
         "",
         "READ-ONLY",

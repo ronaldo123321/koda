@@ -59,7 +59,7 @@ impl ExecutorRuntime {
                 format!("The Linux Bubblewrap capability probe failed because {reason}."),
             ));
         }
-        let execution_capabilities = if macos_seatbelt.is_verified() {
+        let legacy_capabilities = if macos_seatbelt.is_verified() {
             crate::execution_policy::macos_seatbelt_execution_capabilities()
         } else if let Some(runtime) = linux_bubblewrap.descriptor() {
             crate::execution_policy::linux_bubblewrap_execution_capabilities(runtime).map_err(
@@ -73,6 +73,14 @@ impl ExecutorRuntime {
         } else {
             crate::execution_security::native_capabilities()
         };
+        let execution_capabilities =
+            crate::execution_policy::resource_contract_execution_capabilities(&legacy_capabilities)
+                .map_err(|_| {
+                    ProtocolError::new(
+                        ExecutionPolicyError::ExecutionPolicyUnavailable.code(),
+                        "The current resource capability contract is invalid.",
+                    )
+                })?;
         let supervisor = crate::supervisor::Supervisor::open(
             state_directory,
             binary_path,

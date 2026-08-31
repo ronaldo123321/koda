@@ -132,9 +132,17 @@ export const executionPolicySchema = z.union([
   executionPolicyV2Schema,
 ]);
 
-// Workspace authority is deliberately absent from the configuration surface.
-export const executionPolicyConfigSchema = executionPolicyV1Schema
-  .omit({ schema_version: true, workspace_root: true })
+// Workspace authority and schema selection are deliberately absent from the
+// trusted configuration surface. The application always resolves this shape
+// into the current policy schema.
+export const executionPolicyConfigSchema = z
+  .object({
+    filesystem: executionPolicyBaseShape.filesystem,
+    network: executionPolicyBaseShape.network,
+    process_isolation: executionPolicyBaseShape.process_isolation,
+    environment: executionPolicyBaseShape.environment,
+    resources: executionResourceLimitsSchema.optional(),
+  })
   .strict();
 export const executionProfileSchema = z.enum([
   "unconfined",

@@ -19,6 +19,7 @@ import {
   executionCapabilitiesDigest,
   executionPolicyDigest,
   linuxBubblewrapExecutionCapabilities,
+  resourceContractExecutionCapabilities,
   type NativeExecutorClient,
   resolveExecutionPolicy,
   registerExecCommandTool,
@@ -53,8 +54,12 @@ describe("exec_command approval grant identity", () => {
     expect(explicitDefaults.key).toBe(defaults.key);
     const canonicalRoot = await realpath(firstRoot);
     const policy = resolveExecutionPolicy({ workspaceRoot: canonicalRoot });
-    const capabilities = c1ExecutionCapabilities(
-      process.platform === "win32" ? "typescript_windows" : "typescript_posix",
+    const capabilities = resourceContractExecutionCapabilities(
+      c1ExecutionCapabilities(
+        process.platform === "win32"
+          ? "typescript_windows"
+          : "typescript_posix",
+      ),
     );
     expect(defaults.key).toBe(
       createHash("sha256")
@@ -73,6 +78,32 @@ describe("exec_command approval grant identity", () => {
         )
         .digest("hex"),
     );
+    const resourcePolicy = resolveExecutionPolicy({
+      workspaceRoot: canonicalRoot,
+      policy: {
+        filesystem: "unrestricted",
+        network: "inherit",
+        process_isolation: "inherit",
+        environment: "explicit",
+        resources: { process_open_files: 64 },
+      },
+    });
+    const resourceBoundKey = createHash("sha256")
+      .update(
+        JSON.stringify({
+          version: 2,
+          toolName: "exec_command",
+          workspaceRoot: canonicalRoot,
+          cwd: ".",
+          argv,
+          timeoutMs: 30_000,
+          policyDigest: executionPolicyDigest(resourcePolicy),
+          backend: capabilities.backend,
+          capabilitiesDigest: executionCapabilitiesDigest(capabilities),
+        }),
+      )
+      .digest("hex");
+    expect(resourceBoundKey).not.toBe(defaults.key);
     await expect(
       grantCandidate(first, { argv: [...argv, "extra"] }, "different-argv"),
     ).resolves.not.toMatchObject({ key: defaults.key });
@@ -92,8 +123,10 @@ describe("exec_command approval grant identity", () => {
     const native = await createRegistry(firstRoot, {
       nativeExecutor: {
         hello: async () => ({
-          execution_security: c1ExecutionCapabilities(
-            process.platform === "win32" ? "native_windows" : "native_posix",
+          execution_security: resourceContractExecutionCapabilities(
+            c1ExecutionCapabilities(
+              process.platform === "win32" ? "native_windows" : "native_posix",
+            ),
           ),
         }),
       } as NativeExecutorClient,
@@ -207,10 +240,12 @@ describe("exec_command approval grant identity", () => {
         executionPolicy: policy,
         nativeExecutor: {
           hello: async () => ({
-            execution_security: linuxBubblewrapExecutionCapabilities({
-              ...runtime,
-              sha256,
-            }),
+            execution_security: resourceContractExecutionCapabilities(
+              linuxBubblewrapExecutionCapabilities({
+                ...runtime,
+                sha256,
+              }),
+            ),
           }),
         } as NativeExecutorClient,
       });

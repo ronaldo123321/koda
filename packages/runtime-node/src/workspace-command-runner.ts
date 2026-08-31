@@ -40,6 +40,7 @@ import {
   executionPolicyPreview,
   normalizeExecutionPolicy,
   resolveExecutionPolicy,
+  resourceContractExecutionCapabilities,
   type ExecutionPolicyErrorCode,
 } from "./execution-policy.js";
 import {
@@ -272,10 +273,12 @@ export class WorkspaceCommandRunner {
       options.interactiveProcessService?.nativeExecutor;
     const executionCapabilities =
       nativeExecutor === undefined
-        ? c1ExecutionCapabilities(
-            process.platform === "win32"
-              ? "typescript_windows"
-              : "typescript_posix",
+        ? resourceContractExecutionCapabilities(
+            c1ExecutionCapabilities(
+              process.platform === "win32"
+                ? "typescript_windows"
+                : "typescript_posix",
+            ),
           )
         : (await nativeExecutor.hello()).execution_security;
     return new WorkspaceCommandRunner(
@@ -475,10 +478,12 @@ export class WorkspaceCommandRunner {
     }
     const current =
       this.nativeExecutor === undefined
-        ? c1ExecutionCapabilities(
-            process.platform === "win32"
-              ? "typescript_windows"
-              : "typescript_posix",
+        ? resourceContractExecutionCapabilities(
+            c1ExecutionCapabilities(
+              process.platform === "win32"
+                ? "typescript_windows"
+                : "typescript_posix",
+            ),
           )
         : (await this.nativeExecutor.hello()).execution_security;
     if (

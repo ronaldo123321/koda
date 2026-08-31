@@ -467,7 +467,7 @@ describe("app-server protocol", () => {
         },
       }).process.security,
     ).toMatchObject({
-      schema_version: 3,
+      schema_version: 4,
       platform: "linux",
       sandbox_runtime: { mechanism: "linux_bubblewrap" },
     });

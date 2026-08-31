@@ -4,20 +4,21 @@ import {
   linuxBubblewrapExecutionCapabilities,
   macosSeatbeltExecutionCapabilities,
   normalizeExecutionPolicy,
+  resourceContractExecutionCapabilities,
   validateExecutionSecuritySnapshot,
 } from "@koda/runtime-node";
 
 export function macosProtectedAdmissionSecurity(): ExecutionSecuritySnapshot {
   return createExecutionAdmissionSnapshot(
     normalizeExecutionPolicy({
-      schema_version: 1,
+      schema_version: 2,
       workspace_root: "/workspace",
       filesystem: "workspace_write",
       network: "deny",
       process_isolation: "inherit",
       environment: "explicit",
     }),
-    macosSeatbeltExecutionCapabilities(),
+    resourceContractExecutionCapabilities(macosSeatbeltExecutionCapabilities()),
   );
 }
 
@@ -35,7 +36,9 @@ const linuxBubblewrapRuntime = {
 };
 
 export function linuxProtectedExecutionCapabilities() {
-  return linuxBubblewrapExecutionCapabilities(linuxBubblewrapRuntime);
+  return resourceContractExecutionCapabilities(
+    linuxBubblewrapExecutionCapabilities(linuxBubblewrapRuntime),
+  );
 }
 
 export function linuxProtectedAdmissionSecurity(
@@ -43,7 +46,7 @@ export function linuxProtectedAdmissionSecurity(
 ): ExecutionSecuritySnapshot {
   return createExecutionAdmissionSnapshot(
     normalizeExecutionPolicy({
-      schema_version: 1,
+      schema_version: 2,
       workspace_root: workspaceRoot,
       filesystem: "workspace_write",
       network: "deny",
@@ -58,8 +61,8 @@ export function linuxProtectedLaunchSecurity(
   workspaceRoot = "/workspace",
 ): ExecutionSecuritySnapshot {
   const admission = linuxProtectedAdmissionSecurity(workspaceRoot);
-  if (admission.kind !== "policy" || admission.schema_version !== 3) {
-    throw new Error("Expected Linux v3 admission evidence.");
+  if (admission.kind !== "policy" || admission.schema_version !== 4) {
+    throw new Error("Expected Linux v4 admission evidence.");
   }
   return validateExecutionSecuritySnapshot({
     ...admission,
@@ -89,8 +92,8 @@ export function linuxProtectedLaunchSecurity(
 
 export function macosProtectedLaunchSecurity(): ExecutionSecuritySnapshot {
   const admission = macosProtectedAdmissionSecurity();
-  if (admission.kind !== "policy" || admission.schema_version !== 2) {
-    throw new Error("Expected macOS v2 admission evidence.");
+  if (admission.kind !== "policy" || admission.schema_version !== 4) {
+    throw new Error("Expected macOS v4 admission evidence.");
   }
   return validateExecutionSecuritySnapshot({
     ...admission,

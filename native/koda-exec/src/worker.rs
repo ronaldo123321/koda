@@ -26,8 +26,9 @@ use crate::durable::{JobLock, JobRecord, JobStore, StoredJobState, sha256_hex};
 #[cfg(unix)]
 use crate::execution_policy::FilesystemPolicy;
 use crate::execution_policy::{
-    ExecutionCapabilities, ExecutionSecuritySnapshot, linux_bubblewrap_execution_capabilities,
-    macos_seatbelt_execution_capabilities,
+    ExecutionCapabilities, ExecutionPlatform, ExecutionSecuritySnapshot, c1_execution_capabilities,
+    linux_bubblewrap_execution_capabilities, macos_seatbelt_execution_capabilities,
+    resource_contract_execution_capabilities,
 };
 use crate::execution_security;
 use crate::framing::{read_json_frame, write_json_frame};
@@ -106,7 +107,7 @@ pub async fn run_worker(
             format!("Worker cannot start from state {:?}.", current.state),
         ));
     }
-    let execution_capabilities = worker_execution_capabilities(record.manifest.security.as_ref());
+    let execution_capabilities = worker_execution_capabilities(record.manifest.security.as_ref())?;
     let admission = if record.manifest.format_version == 1 {
         Err(ProtocolError::new(
             "INVALID_EXECUTION_POLICY",
@@ -179,21 +180,41 @@ pub async fn run_worker(
 
 fn worker_execution_capabilities(
     retained: Option<&ExecutionSecuritySnapshot>,
-) -> ExecutionCapabilities {
+) -> Result<ExecutionCapabilities, ProtocolError> {
     match retained {
+        Some(ExecutionSecuritySnapshot::Policy(security)) if security.schema_version == 1 => {
+            Ok(c1_execution_capabilities(security.backend))
+        }
         Some(ExecutionSecuritySnapshot::Policy(security))
             if security.schema_version == 2 && crate::macos_seatbelt::launch_available() =>
         {
-            macos_seatbelt_execution_capabilities()
+            Ok(macos_seatbelt_execution_capabilities())
         }
         Some(ExecutionSecuritySnapshot::Policy(security)) if security.schema_version == 3 => {
-            security
+            Ok(security
                 .sandbox_runtime
                 .as_ref()
                 .and_then(|runtime| linux_bubblewrap_execution_capabilities(runtime).ok())
-                .unwrap_or_else(execution_security::native_capabilities)
+                .unwrap_or_else(execution_security::native_capabilities))
         }
-        _ => execution_security::native_capabilities(),
+        Some(ExecutionSecuritySnapshot::Policy(security)) if security.schema_version == 4 => {
+            let legacy = match (security.platform, security.sandbox_runtime.as_ref()) {
+                (None, None) => c1_execution_capabilities(security.backend),
+                (Some(ExecutionPlatform::Macos), None)
+                    if crate::macos_seatbelt::launch_available() =>
+                {
+                    macos_seatbelt_execution_capabilities()
+                }
+                (Some(ExecutionPlatform::Linux), Some(runtime)) => {
+                    linux_bubblewrap_execution_capabilities(runtime)
+                        .map_err(execution_security::policy_error)?
+                }
+                _ => execution_security::native_capabilities(),
+            };
+            resource_contract_execution_capabilities(&legacy)
+                .map_err(execution_security::policy_error)
+        }
+        _ => Ok(execution_security::native_capabilities()),
     }
 }
 
@@ -2064,10 +2085,19 @@ fn prepare_unix_launch(
     } else {
         None
     };
-    if runtime.execution_capabilities.schema_version == 2 {
-        if runtime.execution_capabilities
-            != crate::execution_policy::macos_seatbelt_execution_capabilities()
-            || !crate::macos_seatbelt::launch_available()
+    let macos_capabilities =
+        resource_contract_execution_capabilities(&macos_seatbelt_execution_capabilities())
+            .map_err(execution_security::policy_error)?;
+    let macos_contract = runtime.execution_capabilities.schema_version == 2
+        || (runtime.execution_capabilities.schema_version == 4
+            && runtime.execution_capabilities.platform == Some(ExecutionPlatform::Macos));
+    if macos_contract {
+        let expected = if runtime.execution_capabilities.schema_version == 2 {
+            macos_seatbelt_execution_capabilities()
+        } else {
+            macos_capabilities
+        };
+        if runtime.execution_capabilities != expected || !crate::macos_seatbelt::launch_available()
         {
             return Err(execution_security::policy_error(
                 crate::execution_policy::ExecutionPolicyError::ExecutionPolicyUnavailable,
@@ -2104,13 +2134,29 @@ fn prepare_unix_launch(
     }
 
     #[cfg(target_os = "linux")]
-    if runtime.execution_capabilities.schema_version == 3 {
+    if runtime.execution_capabilities.schema_version == 3
+        || (runtime.execution_capabilities.schema_version == 4
+            && runtime.execution_capabilities.platform == Some(ExecutionPlatform::Linux))
+    {
         let sandbox_runtime = runtime
             .execution_capabilities
             .sandbox_runtime
             .as_ref()
             .ok_or_else(execution_security::corrupt)?;
         if !crate::linux_bubblewrap::runtime_identity_matches(sandbox_runtime) {
+            return Err(execution_security::policy_error(
+                crate::execution_policy::ExecutionPolicyError::ExecutionPolicyChanged,
+            ));
+        }
+        let legacy_linux_capabilities = linux_bubblewrap_execution_capabilities(sandbox_runtime)
+            .map_err(execution_security::policy_error)?;
+        let expected_linux_capabilities = if runtime.execution_capabilities.schema_version == 3 {
+            legacy_linux_capabilities
+        } else {
+            resource_contract_execution_capabilities(&legacy_linux_capabilities)
+                .map_err(execution_security::policy_error)?
+        };
+        if runtime.execution_capabilities != expected_linux_capabilities {
             return Err(execution_security::policy_error(
                 crate::execution_policy::ExecutionPolicyError::ExecutionPolicyChanged,
             ));
