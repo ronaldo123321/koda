@@ -40,9 +40,9 @@ use crate::internal_protocol::{
 use crate::platform::bootstrap::{BootstrapHandle, read_inherited_secret};
 #[cfg(unix)]
 use crate::platform::bootstrap::{
-    BootstrapRead, BootstrapWrite, ResourceBootstrapChannels, SandboxBootstrapChannels,
-    await_gate_and_exec, configure_pipe_command, configure_pty_command, create_bootstrap_channel,
-    release_gate,
+    BootstrapRead, BootstrapWrite, CommandBootstrapChannels, ResourceBootstrapChannels,
+    SandboxBootstrapChannels, await_gate_and_exec, configure_pipe_command, configure_pty_command,
+    create_bootstrap_channel, release_gate,
 };
 use crate::platform::identity::current_process_identity;
 #[cfg(windows)]
@@ -2030,6 +2030,15 @@ struct UnixResourceLaunch {
 }
 
 #[cfg(unix)]
+struct UnixLaunchActivation {
+    pid: u32,
+    command_identity: String,
+    gate_write: BootstrapWrite,
+    sandbox: Option<UnixSandboxLaunch>,
+    resources: Option<UnixResourceLaunch>,
+}
+
+#[cfg(unix)]
 impl UnixResourceLaunch {
     fn child_descriptors(&self) -> ResourceBootstrapChannels<'_> {
         self.channels.child_descriptors()
@@ -2452,13 +2461,16 @@ async fn wait_for_linux_sandbox_confirmation(
 async fn activate_unix_launch(
     runtime: &WorkerRuntime,
     child: &mut Child,
-    pid: u32,
-    command_identity: String,
-    gate_write: BootstrapWrite,
-    sandbox: Option<UnixSandboxLaunch>,
-    resources: Option<UnixResourceLaunch>,
+    launch: UnixLaunchActivation,
     params: &crate::protocol::StartParams,
 ) -> Result<(), ProtocolError> {
+    let UnixLaunchActivation {
+        pid,
+        command_identity,
+        gate_write,
+        sandbox,
+        resources,
+    } = launch;
     let resources_confirmed = if let Some(resources) = resources {
         let (confirmation_read, requested) = resources.into_parent();
         if wait_for_resource_confirmation(confirmation_read, requested)
@@ -2788,10 +2800,12 @@ async fn execute_pty_job(runtime: Arc<WorkerRuntime>) -> Result<(), ProtocolErro
         &master,
         &slave,
         COMMAND_GATE_FD,
-        sandbox.as_ref().map(UnixSandboxLaunch::child_descriptors),
-        resources
-            .as_ref()
-            .map(UnixResourceLaunch::child_descriptors),
+        CommandBootstrapChannels {
+            sandbox: sandbox.as_ref().map(UnixSandboxLaunch::child_descriptors),
+            resources: resources
+                .as_ref()
+                .map(UnixResourceLaunch::child_descriptors),
+        },
     );
 
     if sandbox
@@ -2847,11 +2861,13 @@ async fn execute_pty_job(runtime: Arc<WorkerRuntime>) -> Result<(), ProtocolErro
     activate_unix_launch(
         &runtime,
         &mut child,
-        pid,
-        command_identity,
-        gate_write,
-        sandbox,
-        resources,
+        UnixLaunchActivation {
+            pid,
+            command_identity,
+            gate_write,
+            sandbox,
+            resources,
+        },
         &params,
     )
     .await?;
@@ -3147,10 +3163,12 @@ async fn execute_pipe_job(runtime: Arc<WorkerRuntime>) -> Result<(), ProtocolErr
         &gate_read,
         &gate_write,
         COMMAND_GATE_FD,
-        sandbox.as_ref().map(UnixSandboxLaunch::child_descriptors),
-        resources
-            .as_ref()
-            .map(UnixResourceLaunch::child_descriptors),
+        CommandBootstrapChannels {
+            sandbox: sandbox.as_ref().map(UnixSandboxLaunch::child_descriptors),
+            resources: resources
+                .as_ref()
+                .map(UnixResourceLaunch::child_descriptors),
+        },
     );
 
     if sandbox
@@ -3209,11 +3227,13 @@ async fn execute_pipe_job(runtime: Arc<WorkerRuntime>) -> Result<(), ProtocolErr
     activate_unix_launch(
         &runtime,
         &mut child,
-        pid,
-        command_identity,
-        gate_write,
-        sandbox,
-        resources,
+        UnixLaunchActivation {
+            pid,
+            command_identity,
+            gate_write,
+            sandbox,
+            resources,
+        },
         &params,
     )
     .await?;

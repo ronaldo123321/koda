@@ -1,3 +1,5 @@
+#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
+
 //! Exact macOS per-process rlimit application and bootstrap confirmation.
 
 use std::io;

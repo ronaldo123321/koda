@@ -29,6 +29,11 @@ pub struct ResourceBootstrapChannels<'a> {
     pub confirmation_target: RawFd,
 }
 
+pub struct CommandBootstrapChannels<'a> {
+    pub sandbox: Option<SandboxBootstrapChannels<'a>>,
+    pub resources: Option<ResourceBootstrapChannels<'a>>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProcessTreeSignal {
     Graceful,
@@ -344,13 +349,12 @@ pub fn configure_pipe_command(
     read: &BootstrapRead,
     write: &BootstrapWrite,
     target: RawFd,
-    sandbox: Option<SandboxBootstrapChannels<'_>>,
-    resources: Option<ResourceBootstrapChannels<'_>>,
+    bootstrap: CommandBootstrapChannels<'_>,
 ) {
     let read = read.as_raw_fd();
     let write = write.as_raw_fd();
-    let sandbox = sandbox.map(raw_sandbox_channels);
-    let resources = resources.map(raw_resource_channels);
+    let sandbox = bootstrap.sandbox.map(raw_sandbox_channels);
+    let resources = bootstrap.resources.map(raw_resource_channels);
     CommandExt::process_group(command.as_std_mut(), 0);
     // SAFETY: the closure performs only async-signal-safe descriptor operations before exec.
     unsafe {
@@ -367,15 +371,14 @@ pub fn configure_pty_command(
     master: &OwnedFd,
     slave: &OwnedFd,
     gate_target: RawFd,
-    sandbox: Option<SandboxBootstrapChannels<'_>>,
-    resources: Option<ResourceBootstrapChannels<'_>>,
+    bootstrap: CommandBootstrapChannels<'_>,
 ) {
     let read = read.as_raw_fd();
     let write = write.as_raw_fd();
     let master = master.as_raw_fd();
     let slave = slave.as_raw_fd();
-    let sandbox = sandbox.map(raw_sandbox_channels);
-    let resources = resources.map(raw_resource_channels);
+    let sandbox = bootstrap.sandbox.map(raw_sandbox_channels);
+    let resources = bootstrap.resources.map(raw_resource_channels);
     // SAFETY: the closure performs only async-signal-safe session, ioctl, and descriptor
     // operations before exec. All descriptors are Worker-owned.
     unsafe {
