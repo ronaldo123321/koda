@@ -6,9 +6,9 @@ The project is building the control plane around a coding model: typed conversat
 
 ## Current status
 
-The Phase 3 local-agent foundation, Phase 4A crash-safe workspace recovery, Phase 4B supervised native execution, Phase 4C1 execution policy/reporting, Phase 4C2A macOS Seatbelt delivery, Phase 4C2B Linux Bubblewrap delivery, and Phase 4C3A-C3C secret runtime are complete. Verified macOS and Linux native executors advertise and enforce protected Pipe/PTY execution. On Linux, Koda discovers only trusted Bubblewrap paths, freezes and revalidates binary identity, constructs a read-only mount/user/network namespace plus Koda-owned seccomp bootstrap, verifies a fixed PID/PGID/namespace/security confirmation, durably records applied evidence, and only then releases user code. Native protocol v5, durable format v5, legacy compatibility, grant binding, background PTY recovery, safe secret lifecycle evidence, adversarial syscall/network tests, and dedicated native gates are shared or explicitly verified. C3D client projection is implemented and awaits same-commit four-job CI closure; Windows sandboxing remains deferred. Koda has an opt-in Rust execution supervisor with a versioned local protocol, reconnectable job observation, POSIX process groups, Windows Job Objects and ConPTY, bounded retained output, explicit native capability reporting, and end-to-end execution-policy evidence on top of those foundations:
+The Phase 3 local-agent foundation, Phase 4A crash-safe workspace recovery, Phase 4B supervised native execution, Phase 4C1 execution policy/reporting, Phase 4C2A macOS Seatbelt delivery, Phase 4C2B Linux Bubblewrap delivery, and Phase 4C3 secret lifecycle/client closure are complete. Verified macOS and Linux native executors advertise and enforce protected Pipe/PTY execution. On Linux, Koda discovers only trusted Bubblewrap paths, freezes and revalidates binary identity, constructs a read-only mount/user/network namespace plus Koda-owned seccomp bootstrap, verifies a fixed PID/PGID/namespace/security confirmation, durably records applied evidence, and only then releases user code. Native protocol v5, durable format v5, legacy compatibility, grant binding, background PTY recovery, safe secret lifecycle evidence, adversarial syscall/network tests, and dedicated native gates are shared or explicitly verified. Windows sandboxing remains deferred. Koda has an opt-in Rust execution supervisor with a versioned local protocol, reconnectable job observation, POSIX process groups, Windows Job Objects and ConPTY, bounded retained output, explicit native capability reporting, and end-to-end execution-policy evidence on top of those foundations:
 
-Phase 4C3A/C3B/C3C are complete with strict value-free secret
+Phase 4C3A/C3B/C3C/C3D are complete with strict value-free secret
 declarations/evidence, stable cross-language digests and limits, matching
 TypeScript/Rust exact-byte streaming redactors, frozen trusted application
 catalogs, host-environment resolution into single-use in-memory leases, and
@@ -17,8 +17,9 @@ native start exchange, per-job `0700` directories and `0400` files, declared
 `*_FILE` targets, exact Seatbelt/Bubblewrap read-only paths, pre-persistence
 Pipe/PTY redaction, and value-free cleanup/redaction evidence. C3D adds strict
 app-server v16 evidence, durable process/result projection, and bounded
-value-free CLI/TUI summaries. Same-commit macOS/Linux/Windows acceptance is the
-remaining closure gate.
+value-free CLI/TUI summaries. Implementation commit `7a34668` passed the
+same-commit Linux verify/native, macOS native, and Windows native acceptance
+matrix in [GitHub Actions run 33354068315](https://github.com/ronaldo123321/koda/actions/runs/33354068315).
 
 - Versioned Thread, Turn, Item, and Agent Event schemas.
 - A provider-neutral streaming model interface.

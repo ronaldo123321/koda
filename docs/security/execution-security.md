@@ -1,8 +1,8 @@
 # Koda Execution Security Guarantees
 
 - Scope: Phase 4C1, Phase 4C2A, Phase 4C2B, and Phase 4C3A-C3D
-- Status: C3D implementation complete — same-commit four-platform acceptance
-  pending
+- Status: Complete — C3D and Phase 4C3 passed same-commit four-platform
+  acceptance
 - Last updated: 2026-08-31
 
 Koda separates execution admission, process supervision, and operating-system
@@ -116,8 +116,10 @@ C3D projects the same strict optional evidence through foreground results,
 list/attach/read/terminate responses. CLI and TUI share a bounded formatter
 that shows at most three aliases, lifecycle, cleanup, and total exact-byte
 redactions; it omits lease IDs, digests, expiry, and target names. Historical
-and non-secret records omit the field rather than inventing success. C3D still
-requires the same implementation commit to close the four-job platform matrix.
+and non-secret records omit the field rather than inventing success.
+Implementation commit `7a34668` passed the four-job platform matrix in
+[GitHub Actions run 33354068315](https://github.com/ronaldo123321/koda/actions/runs/33354068315),
+closing C3D and Phase 4C3.
 C3A is verified by all four jobs in
 [GitHub Actions run 33315958454](https://github.com/ronaldo123321/koda/actions/runs/33315958454),
 and C3B implementation commit `7273895` is verified by all four jobs in
@@ -211,6 +213,14 @@ Phase 4C2B closes only when one implementation commit passes all four jobs:
   compatibility.
 
 The Windows job remains a regression target, not a Windows sandbox claim.
+
+Phase 4C3D uses the same four-job gate. Real macOS/Linux acceptance covers
+protected secret Pipe and background PTY redaction, cleanup, rediscovery, and
+app-server projection. Windows acceptance proves fixed pre-execution
+`SECRET_POLICY_UNAVAILABLE` rejection without claiming injection support.
+Implementation commit `7a34668` passed all four jobs in
+[GitHub Actions run 33354068315](https://github.com/ronaldo123321/koda/actions/runs/33354068315),
+closing Phase 4C3.
 
 Implementation commit `abd6d3c` passed all four jobs in
 [GitHub Actions run 33312729690](https://github.com/ronaldo123321/koda/actions/runs/33312729690).
