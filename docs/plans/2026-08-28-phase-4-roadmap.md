@@ -217,6 +217,16 @@ shell syntax, Landlock fallback, bundled Bubblewrap distribution, and all
 Windows sandbox controls remain later Phase 4C/4E work rather than implicit
 parts of Linux or Phase 4C3 completion.
 
+The approved next slice is
+[Phase 4C4A resource policy contract and evidence](2026-08-31-phase-4c4a-resource-policy-contract-design.md).
+It defines five explicitly scoped limits, strict policy/capability/applied
+evidence separation, fail-closed admission, approval binding, durable history,
+and client projection before any operating-system resource backend is claimed.
+C4A is split into standalone contracts, trusted native admission/durability,
+and projection/acceptance. macOS enforcement follows in Phase 4C4B, Linux
+follows in Phase 4C4C, and Windows resource enforcement remains explicitly
+deferred.
+
 Deferred Windows sandbox work remains explicit: restricted-token and privilege
 policy, filesystem workspace/scratch rules, network denial, launch confirmation,
 Job Object and ConPTY integration, durable evidence, reparse-point and Named
