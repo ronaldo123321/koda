@@ -4,7 +4,11 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
 import {
+  canonicalNodeReleaseProvenance,
+  canonicalMacOSNotarizationEvidence,
+  canonicalMacOSPublicReleaseProvenance,
   canonicalMacOSReleaseSet,
+  KODA_VERSION,
   renderHomebrewFormula,
 } from "@koda/distribution";
 
@@ -15,11 +19,22 @@ import {
   readMacOSReleaseMetadata,
   verifyMacOSReleaseArtifact,
 } from "./release.js";
+import {
+  KodaReleaseSecurityError,
+  verifyNodeReleaseProvenance,
+} from "./release-security.js";
+import {
+  createMacOSNotarizationEvidence,
+  createMacOSPublicReleaseProvenance,
+} from "./release-public.js";
 
 try {
   await main(process.argv.slice(2));
 } catch (error) {
   if (error instanceof KodaReleaseError) {
+    process.stderr.write(`error [${error.code}]: ${error.message}\n`);
+    process.exitCode = 1;
+  } else if (error instanceof KodaReleaseSecurityError) {
     process.stderr.write(`error [${error.code}]: ${error.message}\n`);
     process.exitCode = 1;
   } else if (error instanceof Error) {
@@ -35,6 +50,94 @@ try {
 async function main(argv: readonly string[]): Promise<void> {
   const command = argv[0];
   const options = parseOptions(argv.slice(1));
+  if (command === "version") {
+    rejectUnknown(options, []);
+    process.stdout.write(`${KODA_VERSION}\n`);
+    return;
+  }
+  if (command === "verify-node") {
+    rejectUnknown(options, ["--keyring", "--signed-inventory", "--output"]);
+    const provenance = await verifyNodeReleaseProvenance({
+      keyringPath: requiredPath(options, "--keyring"),
+      signedInventoryPath: requiredPath(options, "--signed-inventory"),
+    });
+    const output = requiredPath(options, "--output");
+    await writeNewFile(
+      output,
+      `${canonicalNodeReleaseProvenance(provenance)}\n`,
+    );
+    process.stdout.write(`${JSON.stringify({ output }, null, 2)}\n`);
+    return;
+  }
+  if (command === "notarization") {
+    rejectUnknown(options, [
+      "--response",
+      "--archive",
+      "--metadata",
+      "--codesign",
+      "--bundle",
+      "--output",
+    ]);
+    const evidence = await createMacOSNotarizationEvidence({
+      responsePath: requiredPath(options, "--response"),
+      archivePath: requiredPath(options, "--archive"),
+      releaseMetadataPath: requiredPath(options, "--metadata"),
+      codeSignatureEvidencePath: requiredPath(options, "--codesign"),
+      bundleRoot: requiredPath(options, "--bundle"),
+    });
+    const output = requiredPath(options, "--output");
+    await writeNewFile(
+      output,
+      `${canonicalMacOSNotarizationEvidence(evidence)}\n`,
+    );
+    process.stdout.write(`${JSON.stringify({ output }, null, 2)}\n`);
+    return;
+  }
+  if (command === "provenance") {
+    rejectUnknown(options, [
+      "--repository",
+      "--tag",
+      "--workflow-run-id",
+      "--workflow-run-attempt",
+      "--node-provenance",
+      "--release-set",
+      "--formula",
+      "--arm64-metadata",
+      "--arm64-codesign",
+      "--arm64-notarization",
+      "--x64-metadata",
+      "--x64-codesign",
+      "--x64-notarization",
+      "--output",
+    ]);
+    const runAttempt = Number(requiredValue(options, "--workflow-run-attempt"));
+    const provenance = await createMacOSPublicReleaseProvenance({
+      repository: requiredValue(options, "--repository"),
+      tag: requiredValue(options, "--tag"),
+      workflowRunId: requiredValue(options, "--workflow-run-id"),
+      workflowRunAttempt: runAttempt,
+      nodeProvenancePath: requiredPath(options, "--node-provenance"),
+      releaseSetPath: requiredPath(options, "--release-set"),
+      formulaPath: requiredPath(options, "--formula"),
+      arm64: {
+        releaseMetadataPath: requiredPath(options, "--arm64-metadata"),
+        codeSignatureEvidencePath: requiredPath(options, "--arm64-codesign"),
+        notarizationEvidencePath: requiredPath(options, "--arm64-notarization"),
+      },
+      x64: {
+        releaseMetadataPath: requiredPath(options, "--x64-metadata"),
+        codeSignatureEvidencePath: requiredPath(options, "--x64-codesign"),
+        notarizationEvidencePath: requiredPath(options, "--x64-notarization"),
+      },
+    });
+    const output = requiredPath(options, "--output");
+    await writeNewFile(
+      output,
+      `${canonicalMacOSPublicReleaseProvenance(provenance)}\n`,
+    );
+    process.stdout.write(`${JSON.stringify({ output }, null, 2)}\n`);
+    return;
+  }
   if (command === "verify") {
     const archivePath = requiredPath(options, "--archive");
     const metadataPath = requiredPath(options, "--metadata");
@@ -106,7 +209,9 @@ async function main(argv: readonly string[]): Promise<void> {
     process.stdout.write(`${JSON.stringify({ output }, null, 2)}\n`);
     return;
   }
-  throw new Error("Expected release command verify, compare, or formula.");
+  throw new Error(
+    "Expected release command version, verify-node, notarization, provenance, verify, compare, or formula.",
+  );
 }
 
 function parseOptions(argv: readonly string[]): Map<string, string | true> {

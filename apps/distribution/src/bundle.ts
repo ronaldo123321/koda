@@ -23,6 +23,7 @@ import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { APP_SERVER_PROTOCOL_VERSION, type JsonValue } from "@koda/protocol";
 import {
   canonicalMacOSReleaseMetadata,
+  canonicalMacOSCodeSignatureEvidence,
   createMacOSReleaseMetadata,
   EMBEDDED_NODE_VERSION,
   embeddedNodeArchiveUrl,
@@ -30,12 +31,19 @@ import {
   embeddedNodeChecksumsUrl,
   KODA_VERSION,
   loadReleaseInstallation,
+  macOSCodeSignatureEvidenceSchema,
+  nodeReleaseProvenanceSchema,
   parseNodeChecksumInventory,
   verifyFullIntegrity,
   writeRuntimeMetadata,
   type EmbeddedNodeArtifact,
 } from "@koda/distribution";
 import { build, type Plugin } from "esbuild";
+
+import {
+  signMacOSNativeFiles,
+  type MacOSCodeSignatureRecord,
+} from "./release-security.js";
 
 const DOWNLOAD_MAXIMUM_BYTES = 128 * 1_024 * 1_024;
 const DOWNLOAD_TIMEOUT_MS = 180_000;
@@ -50,6 +58,7 @@ export interface BundleCommand {
   readonly args: readonly string[];
   readonly cwd: string;
   readonly environment?: NodeJS.ProcessEnv;
+  readonly stdin?: string;
 }
 
 export type BundleCommandRunner = (command: BundleCommand) => Promise<void>;
@@ -64,6 +73,9 @@ export interface AssembleMacOSBundleOptions {
   readonly skipBuild?: boolean;
   readonly skipSmoke?: boolean;
   readonly commandRunner?: BundleCommandRunner;
+  readonly signingIdentity?: string;
+  readonly signingTeamId?: string;
+  readonly nodeProvenancePath?: string;
 }
 
 export interface MacOSBundleResult {
@@ -76,6 +88,7 @@ export interface MacOSBundleResult {
   readonly metadataPath: string;
   readonly sourceCommit: string;
   readonly machOFiles: readonly string[];
+  readonly codeSignatureEvidencePath?: string;
 }
 
 export type BundleAssemblyErrorCode =
@@ -127,6 +140,7 @@ export async function assembleMacOSBundle(
   if (await pathExists(outputDirectory)) {
     throw new KodaBundleAssemblyError("KODA_ASSEMBLY_INVALID");
   }
+  const signing = await resolveSigningOptions(options);
   const outputParent = dirname(outputDirectory);
   await mkdir(outputParent, { recursive: true });
   await mkdir(cacheDirectory, { recursive: true });
@@ -193,7 +207,18 @@ export async function assembleMacOSBundle(
     await installNativeExecutor(repositoryRoot, runtimeRoot);
     await writeLaunchers(bundleRoot);
 
-    const machOFiles = await auditMachOFiles(bundleRoot, architecture);
+    let machOFiles = await auditMachOFiles(bundleRoot, architecture);
+    let signedFiles: readonly MacOSCodeSignatureRecord[] | undefined;
+    if (signing !== undefined) {
+      signedFiles = await signMacOSNativeFiles({
+        bundleRoot,
+        architecture,
+        nativeFiles: machOFiles,
+        identity: signing.identity,
+        teamId: signing.teamId,
+      });
+      machOFiles = await auditMachOFiles(bundleRoot, architecture);
+    }
     await writeRuntimeMetadata(runtimeRoot, {
       arch: architecture,
       nodeVersion: EMBEDDED_NODE_VERSION,
@@ -225,21 +250,34 @@ export async function assembleMacOSBundle(
       await smokeStandaloneBundle(bundleRoot);
     }
 
-    const archiveName = `koda-v${KODA_VERSION}-darwin-${architecture}.tar.gz`;
+    const archiveName = `koda-v${KODA_VERSION}-darwin-${architecture}.${
+      signing === undefined ? "tar.gz" : "zip"
+    }`;
     const archivePath = join(publishRoot, archiveName);
-    const archiveSha256 = await createDeterministicArchive({
-      publishRoot,
-      bundleRoot,
-      archivePath,
-      listPath: join(workRoot, "archive-files.txt"),
-      commandRunner,
-    });
+    const archiveSha256 =
+      signing === undefined
+        ? await createDeterministicArchive({
+            publishRoot,
+            bundleRoot,
+            archivePath,
+            listPath: join(workRoot, "archive-files.txt"),
+            commandRunner,
+          })
+        : await createDeterministicZipArchive({
+            publishRoot,
+            bundleRoot,
+            archivePath,
+            commandRunner,
+          });
     await writeFile(
       `${archivePath}.sha256`,
       `${archiveSha256}  ${archiveName}\n`,
       { encoding: "utf8", flag: "wx", mode: 0o644 },
     );
-    const metadataName = archiveName.replace(/\.tar\.gz$/, ".release.json");
+    const metadataName = archiveName.replace(
+      /\.(?:tar\.gz|zip)$/,
+      ".release.json",
+    );
     const metadataPath = join(publishRoot, metadataName);
     const archiveBytes = (await stat(archivePath)).size;
     const metadata = createMacOSReleaseMetadata({
@@ -255,6 +293,34 @@ export async function assembleMacOSBundle(
       `${canonicalMacOSReleaseMetadata(metadata)}\n`,
       { encoding: "utf8", flag: "wx", mode: 0o644 },
     );
+    let codeSignatureEvidencePath: string | undefined;
+    if (signing !== undefined && signedFiles !== undefined) {
+      const evidenceName = archiveName.replace(/\.zip$/, ".codesign.json");
+      const evidencePath = join(publishRoot, evidenceName);
+      const evidence = macOSCodeSignatureEvidenceSchema.parse({
+        schema_version: 1,
+        product: "koda",
+        version: KODA_VERSION,
+        source_commit: sourceCommit,
+        platform: "darwin",
+        arch: architecture,
+        team_id: signing.teamId,
+        archive: {
+          name: archiveName,
+          bytes: archiveBytes,
+          sha256: archiveSha256,
+        },
+        release_metadata_sha256: await sha256File(metadataPath),
+        node_provenance_sha256: signing.nodeProvenanceSha256,
+        files: signedFiles,
+      });
+      await writeFile(
+        evidencePath,
+        `${canonicalMacOSCodeSignatureEvidence(evidence)}\n`,
+        { encoding: "utf8", flag: "wx", mode: 0o644 },
+      );
+      codeSignatureEvidencePath = join(outputDirectory, evidenceName);
+    }
     await rename(publishRoot, outputDirectory);
     await makeTreeWritable(stagingRoot);
     await rm(stagingRoot, { recursive: true, force: true });
@@ -268,6 +334,9 @@ export async function assembleMacOSBundle(
       metadataPath: join(outputDirectory, metadataName),
       sourceCommit,
       machOFiles,
+      ...(codeSignatureEvidencePath === undefined
+        ? {}
+        : { codeSignatureEvidencePath }),
     };
   } catch (error) {
     await makeTreeWritable(stagingRoot).catch(() => undefined);
@@ -275,6 +344,48 @@ export async function assembleMacOSBundle(
       () => undefined,
     );
     throw error;
+  }
+}
+
+async function resolveSigningOptions(
+  options: AssembleMacOSBundleOptions,
+): Promise<
+  | {
+      identity: string;
+      teamId: string;
+      nodeProvenanceSha256: string;
+    }
+  | undefined
+> {
+  const values = [
+    options.signingIdentity,
+    options.signingTeamId,
+    options.nodeProvenancePath,
+  ];
+  if (values.every((value) => value === undefined)) {
+    return undefined;
+  }
+  if (values.some((value) => value === undefined)) {
+    throw new KodaBundleAssemblyError("KODA_ASSEMBLY_INVALID");
+  }
+  try {
+    const provenancePath = await realpath(options.nodeProvenancePath!);
+    const metadata = await lstat(provenancePath);
+    if (!metadata.isFile() || metadata.size < 1 || metadata.size > 1_048_576) {
+      throw new Error("Invalid Node provenance file.");
+    }
+    nodeReleaseProvenanceSchema.parse(
+      JSON.parse(await readFile(provenancePath, "utf8")) as unknown,
+    );
+    return {
+      identity: options.signingIdentity!,
+      teamId: options.signingTeamId!,
+      nodeProvenanceSha256: await sha256File(provenancePath),
+    };
+  } catch (error) {
+    throw new KodaBundleAssemblyError("KODA_ASSEMBLY_INVALID", {
+      cause: error,
+    });
   }
 }
 
@@ -791,6 +902,25 @@ async function createDeterministicArchive(options: {
   return sha256File(options.archivePath);
 }
 
+async function createDeterministicZipArchive(options: {
+  publishRoot: string;
+  bundleRoot: string;
+  archivePath: string;
+  commandRunner: BundleCommandRunner;
+}): Promise<string> {
+  const files = (await listTreeFiles(options.bundleRoot)).map(
+    (path) => `koda/${path}`,
+  );
+  await options.commandRunner({
+    command: "/usr/bin/zip",
+    args: ["-X", "-q", options.archivePath, "-@"],
+    cwd: options.publishRoot,
+    environment: { ...process.env, COPYFILE_DISABLE: "1", LANG: "C" },
+    stdin: `${files.join("\n")}\n`,
+  });
+  return sha256File(options.archivePath);
+}
+
 async function normalizePublishedTree(
   root: string,
   executablePaths: ReadonlySet<string>,
@@ -926,7 +1056,10 @@ async function runBundleCommand(specification: BundleCommand): Promise<void> {
       cwd: specification.cwd,
       env: specification.environment ?? process.env,
       shell: false,
-      stdio: "inherit",
+      stdio:
+        specification.stdin === undefined
+          ? "inherit"
+          : ["pipe", "inherit", "inherit"],
       windowsHide: true,
     });
     child.once("error", (error) => {
@@ -943,6 +1076,9 @@ async function runBundleCommand(specification: BundleCommand): Promise<void> {
         reject(new KodaBundleAssemblyError("KODA_ASSEMBLY_COMMAND_FAILED"));
       }
     });
+    if (specification.stdin !== undefined) {
+      child.stdin?.end(specification.stdin);
+    }
   });
 }
 

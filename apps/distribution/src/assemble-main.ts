@@ -22,6 +22,7 @@ try {
         metadataPath: result.metadataPath,
         sourceCommit: result.sourceCommit,
         machOFiles: result.machOFiles,
+        codeSignatureEvidencePath: result.codeSignatureEvidencePath,
       },
       null,
       2,
@@ -51,6 +52,9 @@ function parseArguments(argv: readonly string[]) {
   let architecture: MacOSBundleArchitecture | undefined;
   let nodeArchivePath: string | undefined;
   let sourceCommit: string | undefined;
+  let signingIdentity: string | undefined;
+  let signingTeamId: string | undefined;
+  let nodeProvenancePath: string | undefined;
   let skipBuild = false;
   let skipSmoke = false;
   for (let index = 0; index < argv.length; index += 1) {
@@ -79,6 +83,12 @@ function parseArguments(argv: readonly string[]) {
       nodeArchivePath = resolve(repositoryRoot, value);
     } else if (option === "--source-commit") {
       sourceCommit = value;
+    } else if (option === "--signing-identity") {
+      signingIdentity = value;
+    } else if (option === "--signing-team-id") {
+      signingTeamId = value;
+    } else if (option === "--node-provenance") {
+      nodeProvenancePath = resolve(repositoryRoot, value);
     } else if (option === "--arch" && (value === "arm64" || value === "x64")) {
       architecture = value;
     } else {
@@ -92,6 +102,9 @@ function parseArguments(argv: readonly string[]) {
     ...(architecture === undefined ? {} : { architecture }),
     ...(nodeArchivePath === undefined ? {} : { nodeArchivePath }),
     ...(sourceCommit === undefined ? {} : { sourceCommit }),
+    ...(signingIdentity === undefined ? {} : { signingIdentity }),
+    ...(signingTeamId === undefined ? {} : { signingTeamId }),
+    ...(nodeProvenancePath === undefined ? {} : { nodeProvenancePath }),
     ...(skipBuild ? { skipBuild: true } : {}),
     ...(skipSmoke ? { skipSmoke: true } : {}),
   };

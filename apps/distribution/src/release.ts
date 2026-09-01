@@ -130,9 +130,10 @@ export async function verifyMacOSReleaseArtifact(
 
   const verificationRoot = await mkdtemp("/private/tmp/koda-release-verify-");
   try {
+    const zipArchive = metadata.archive.name.endsWith(".zip");
     const listing = await runCapturedTool(
-      "/usr/bin/tar",
-      ["-tzf", archivePath],
+      zipArchive ? "/usr/bin/unzip" : "/usr/bin/tar",
+      zipArchive ? ["-Z1", archivePath] : ["-tzf", archivePath],
       dirname(archivePath),
       ARCHIVE_LIST_MAXIMUM_BYTES,
     );
@@ -142,8 +143,10 @@ export async function verifyMacOSReleaseArtifact(
     validateMacOSArchiveEntries(listing.stdout);
     await mkdir(join(verificationRoot, "extract"), { recursive: true });
     const extraction = await runCapturedTool(
-      "/usr/bin/tar",
-      ["-xzf", archivePath, "-C", join(verificationRoot, "extract")],
+      zipArchive ? "/usr/bin/unzip" : "/usr/bin/tar",
+      zipArchive
+        ? ["-q", archivePath, "-d", join(verificationRoot, "extract")]
+        : ["-xzf", archivePath, "-C", join(verificationRoot, "extract")],
       verificationRoot,
       METADATA_MAXIMUM_BYTES,
     );

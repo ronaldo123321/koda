@@ -16,23 +16,35 @@ import { dirname, join } from "node:path";
 import {
   bundleDoctorExitCode,
   canonicalIntegrityInventory,
+  canonicalNodeReleaseProvenance,
   canonicalMacOSReleaseMetadata,
   canonicalMacOSReleaseSet,
   canonicalRuntimeManifest,
   compareMacOSReleaseMetadata,
   createMacOSReleaseMetadata,
   createIntegrityInventoryFromDirectory,
+  createNodeReleaseProvenance,
   currentRuntimeManifest,
   embeddedNodeArchiveUrl,
   embeddedNodeArtifact,
   embeddedNodeChecksumsUrl,
+  embeddedNodeReleaseKeyringUrl,
+  embeddedNodeSignedChecksumsUrl,
   EMBEDDED_NODE_VERSION,
+  EMBEDDED_NODE_RELEASE_SIGNER_FINGERPRINT,
+  EMBEDDED_NODE_SIGNED_CHECKSUMS_SHA256,
   integrityInventoryDigest,
   integrityInventorySchema,
   KodaDistributionError,
   macOSReleaseMetadataSchema,
+  macOSCodeSignatureEvidenceSchema,
+  macOSNotarizationEvidenceSchema,
+  macOSPublicReleaseProvenanceSchema,
   macOSReleaseSetSchema,
   parseNodeChecksumInventory,
+  nodeReleaseProvenanceSchema,
+  NODE_RELEASE_KEYS_COMMIT,
+  NODE_RELEASE_KEYS_SHA256,
   releaseRelativePathSchema,
   renderHomebrewFormula,
   resolveInstallationEnvironment,
@@ -49,6 +61,7 @@ import {
 } from "@koda/distribution";
 import {
   auditMachOFiles,
+  createMacOSPublicReleaseProvenance,
   createDistributionLaunchPlan,
   DistributionUsageError,
   KodaBundleAssemblyError,
@@ -202,6 +215,15 @@ describe("distribution contracts", () => {
     expect(embeddedNodeChecksumsUrl()).toBe(
       `https://nodejs.org/dist/v${EMBEDDED_NODE_VERSION}/SHASUMS256.txt`,
     );
+    expect(embeddedNodeSignedChecksumsUrl()).toBe(
+      `https://nodejs.org/dist/v${EMBEDDED_NODE_VERSION}/SHASUMS256.txt.asc`,
+    );
+    expect(embeddedNodeReleaseKeyringUrl()).toContain(
+      `${NODE_RELEASE_KEYS_COMMIT}/gpg/pubring.kbx`,
+    );
+    expect(NODE_RELEASE_KEYS_SHA256).toHaveLength(64);
+    expect(EMBEDDED_NODE_SIGNED_CHECKSUMS_SHA256).toHaveLength(64);
+    expect(EMBEDDED_NODE_RELEASE_SIGNER_FINGERPRINT).toHaveLength(40);
     expect(
       parseNodeChecksumInventory(
         `${arm64.sha256}  ${arm64.archive}\n${x64.sha256}  ${x64.archive}\n`,
@@ -222,6 +244,25 @@ describe("distribution contracts", () => {
     ).toThrow();
   });
 
+  it("binds the embedded Node archives to one pinned OpenPGP provenance root", () => {
+    const provenance = createNodeReleaseProvenance(
+      EMBEDDED_NODE_SIGNED_CHECKSUMS_SHA256,
+    );
+
+    expect(nodeReleaseProvenanceSchema.parse(provenance)).toEqual(provenance);
+    expect(canonicalNodeReleaseProvenance(provenance)).toBe(
+      JSON.stringify(provenance),
+    );
+    expect(provenance.artifacts.arm64).toEqual(embeddedNodeArtifact("arm64"));
+    expect(provenance.artifacts.x64).toEqual(embeddedNodeArtifact("x64"));
+    expect(
+      nodeReleaseProvenanceSchema.safeParse({
+        ...provenance,
+        signer_fingerprint: "0".repeat(40),
+      }).success,
+    ).toBe(false);
+  });
+
   it("creates strict canonical release metadata bound to its archive and source commit", () => {
     const metadata = createReleaseMetadataFixture("arm64");
 
@@ -239,6 +280,15 @@ describe("distribution contracts", () => {
       macOSReleaseMetadataSchema.safeParse({ ...metadata, extra: true })
         .success,
     ).toBe(false);
+    expect(
+      macOSReleaseMetadataSchema.safeParse({
+        ...metadata,
+        archive: {
+          ...metadata.archive,
+          name: `koda-v${metadata.version}-darwin-arm64.zip`,
+        },
+      }).success,
+    ).toBe(true);
   });
 
   it("compares exactly one arm64 and Intel artifact from the same runtime contract", () => {
@@ -266,6 +316,204 @@ describe("distribution contracts", () => {
         x64MetadataSha256: "d".repeat(64),
       }),
     ).toThrow("same-commit runtime contract");
+  });
+
+  it("accepts only the fixed signed Mach-O roles and notarized ZIP evidence", () => {
+    const signatures = createCodeSignatureEvidenceFixture("arm64");
+    expect(macOSCodeSignatureEvidenceSchema.parse(signatures)).toEqual(
+      signatures,
+    );
+    expect(
+      macOSCodeSignatureEvidenceSchema.safeParse({
+        ...signatures,
+        files: signatures.files.map((file, index) =>
+          index === 0 ? { ...file, identifier: "dev.koda.unexpected" } : file,
+        ),
+      }).success,
+    ).toBe(false);
+
+    const notarization = {
+      schema_version: 1,
+      product: "koda",
+      version: "0.1.0",
+      source_commit: "e".repeat(40),
+      platform: "darwin",
+      arch: "arm64",
+      archive: signatures.archive,
+      code_signature_evidence_sha256: "5".repeat(64),
+      submission_id: "123e4567-e89b-42d3-a456-426614174000",
+      status: "Accepted",
+      response_sha256: "6".repeat(64),
+      gatekeeper_assessed_files: signatures.files.map((file) => file.path),
+    } as const;
+    expect(macOSNotarizationEvidenceSchema.parse(notarization)).toEqual(
+      notarization,
+    );
+    expect(
+      macOSNotarizationEvidenceSchema.safeParse({
+        ...notarization,
+        status: "Invalid",
+      }).success,
+    ).toBe(false);
+  });
+
+  it("requires a strict dual-architecture public provenance document", () => {
+    const arm64 = createCodeSignatureEvidenceFixture("arm64");
+    const x64 = createCodeSignatureEvidenceFixture("x64");
+    const provenance = {
+      schema_version: 1,
+      product: "koda",
+      version: "0.1.0",
+      tag: "v0.1.0",
+      repository: "ronaldo123321/koda",
+      source_commit: "e".repeat(40),
+      workflow: { run_id: "33478530039", run_attempt: 1 },
+      node_provenance_sha256: "7".repeat(64),
+      release_set_sha256: "8".repeat(64),
+      formula_sha256: "9".repeat(64),
+      architectures: {
+        arm64: {
+          archive: arm64.archive,
+          release_metadata_sha256: "a".repeat(64),
+          code_signature_evidence_sha256: "b".repeat(64),
+          notarization_evidence_sha256: "c".repeat(64),
+        },
+        x64: {
+          archive: x64.archive,
+          release_metadata_sha256: "d".repeat(64),
+          code_signature_evidence_sha256: "e".repeat(64),
+          notarization_evidence_sha256: "f".repeat(64),
+        },
+      },
+    } as const;
+    expect(macOSPublicReleaseProvenanceSchema.parse(provenance)).toEqual(
+      provenance,
+    );
+    expect(
+      macOSPublicReleaseProvenanceSchema.safeParse({
+        ...provenance,
+        tag: "v0.1.1",
+      }).success,
+    ).toBe(false);
+  });
+
+  it("builds public provenance only from transitively bound evidence files", async () => {
+    const root = await createTemporaryDirectory();
+    const node = createNodeReleaseProvenance(
+      EMBEDDED_NODE_SIGNED_CHECKSUMS_SHA256,
+    );
+    const nodeDocument = await writeHashedDocument(
+      join(root, "node.json"),
+      node,
+    );
+    const arm64Metadata = createReleaseMetadataFixture("arm64", "zip");
+    const x64Metadata = createReleaseMetadataFixture("x64", "zip");
+    const arm64MetadataDocument = await writeHashedDocument(
+      join(root, "arm64.release.json"),
+      arm64Metadata,
+    );
+    const x64MetadataDocument = await writeHashedDocument(
+      join(root, "x64.release.json"),
+      x64Metadata,
+    );
+    const releaseSet = compareMacOSReleaseMetadata({
+      arm64: arm64Metadata,
+      x64: x64Metadata,
+      arm64MetadataSha256: arm64MetadataDocument.sha256,
+      x64MetadataSha256: x64MetadataDocument.sha256,
+    });
+    const releaseSetDocument = await writeHashedDocument(
+      join(root, "release-set.json"),
+      releaseSet,
+    );
+    const formulaPath = join(root, "koda.rb");
+    await writeFile(
+      formulaPath,
+      renderHomebrewFormula({
+        arm64Metadata,
+        x64Metadata,
+        repository: "ronaldo123321/koda",
+        tag: "v0.1.0",
+      }),
+      "utf8",
+    );
+
+    const architecturePaths = await Promise.all(
+      (["arm64", "x64"] as const).map(async (architecture) => {
+        const metadataDocument =
+          architecture === "arm64"
+            ? arm64MetadataDocument
+            : x64MetadataDocument;
+        const metadata = architecture === "arm64" ? arm64Metadata : x64Metadata;
+        const signatures = {
+          ...createCodeSignatureEvidenceFixture(architecture),
+          archive: metadata.archive,
+          release_metadata_sha256: metadataDocument.sha256,
+          node_provenance_sha256: nodeDocument.sha256,
+        };
+        const signatureDocument = await writeHashedDocument(
+          join(root, `${architecture}.codesign.json`),
+          signatures,
+        );
+        const notarization = {
+          schema_version: 1,
+          product: "koda",
+          version: "0.1.0",
+          source_commit: metadata.source_commit,
+          platform: "darwin",
+          arch: architecture,
+          archive: metadata.archive,
+          code_signature_evidence_sha256: signatureDocument.sha256,
+          submission_id:
+            architecture === "arm64"
+              ? "123e4567-e89b-42d3-a456-426614174000"
+              : "223e4567-e89b-42d3-a456-426614174000",
+          status: "Accepted",
+          response_sha256: (architecture === "arm64" ? "6" : "7").repeat(64),
+          gatekeeper_assessed_files: signatures.files.map((file) => file.path),
+        } as const;
+        const notarizationDocument = await writeHashedDocument(
+          join(root, `${architecture}.notarization.json`),
+          notarization,
+        );
+        return {
+          releaseMetadataPath: metadataDocument.path,
+          codeSignatureEvidencePath: signatureDocument.path,
+          notarizationEvidencePath: notarizationDocument.path,
+        };
+      }),
+    );
+
+    const provenance = await createMacOSPublicReleaseProvenance({
+      repository: "ronaldo123321/koda",
+      tag: "v0.1.0",
+      workflowRunId: "33478530039",
+      workflowRunAttempt: 1,
+      nodeProvenancePath: nodeDocument.path,
+      releaseSetPath: releaseSetDocument.path,
+      formulaPath,
+      arm64: architecturePaths[0]!,
+      x64: architecturePaths[1]!,
+    });
+
+    expect(provenance.source_commit).toBe("e".repeat(40));
+    expect(provenance.node_provenance_sha256).toBe(nodeDocument.sha256);
+    expect(provenance.architectures.arm64.archive.name).toContain("arm64.zip");
+
+    await writeFile(formulaPath, "class Tampered < Formula\nend\n", "utf8");
+    await expect(
+      createMacOSPublicReleaseProvenance({
+        repository: "ronaldo123321/koda",
+        tag: "v0.1.0",
+        workflowRunId: "33478530039",
+        workflowRunAttempt: 1,
+        nodeProvenancePath: nodeDocument.path,
+        releaseSetPath: releaseSetDocument.path,
+        formulaPath,
+        arm64: architecturePaths[0]!,
+        x64: architecturePaths[1]!,
+      }),
+    ).rejects.toThrow("provenance root");
   });
 
   it("renders architecture-specific Homebrew sources and installed bundle checks", () => {
@@ -809,7 +1057,10 @@ function fatMachOHeader(): Buffer {
   return header;
 }
 
-function createReleaseMetadataFixture(architecture: "arm64" | "x64") {
+function createReleaseMetadataFixture(
+  architecture: "arm64" | "x64",
+  archiveExtension: "tar.gz" | "zip" = "tar.gz",
+) {
   const integrity = integrityInventorySchema.parse({
     schema_version: 1,
     files: [fileRecord("app/dispatcher.mjs", "dispatcher")],
@@ -829,7 +1080,7 @@ function createReleaseMetadataFixture(architecture: "arm64" | "x64") {
   return createMacOSReleaseMetadata({
     sourceCommit: "e".repeat(40),
     manifest,
-    archiveName: `koda-v${manifest.version}-darwin-${architecture}.tar.gz`,
+    archiveName: `koda-v${manifest.version}-darwin-${architecture}.${archiveExtension}`,
     archiveBytes: architecture === "arm64" ? 1_024 : 2_048,
     archiveSha256: (architecture === "arm64" ? "a" : "b").repeat(64),
     nativeFiles: [
@@ -838,6 +1089,63 @@ function createReleaseMetadataFixture(architecture: "arm64" | "x64") {
       "libexec/koda/node/bin/node",
     ],
   });
+}
+
+async function writeHashedDocument(path: string, value: unknown) {
+  const content = `${JSON.stringify(value)}\n`;
+  await writeFile(path, content, "utf8");
+  return {
+    path,
+    sha256: createHash("sha256").update(content, "utf8").digest("hex"),
+  };
+}
+
+function createCodeSignatureEvidenceFixture(architecture: "arm64" | "x64") {
+  return {
+    schema_version: 1,
+    product: "koda",
+    version: "0.1.0",
+    source_commit: "e".repeat(40),
+    platform: "darwin",
+    arch: architecture,
+    team_id: "ABC123DEF4",
+    archive: {
+      name: `koda-v0.1.0-darwin-${architecture}.zip`,
+      bytes: architecture === "arm64" ? 1_024 : 2_048,
+      sha256: (architecture === "arm64" ? "1" : "2").repeat(64),
+    },
+    release_metadata_sha256: "3".repeat(64),
+    node_provenance_sha256: "4".repeat(64),
+    files: [
+      {
+        path: `libexec/koda/app/node_modules/better-sqlite3/prebuilds/darwin-${architecture}.node`,
+        role: "native_addon",
+        identifier: "dev.koda.cli.addon.better-sqlite3",
+        team_id: "ABC123DEF4",
+        cdhash_sha256: "a".repeat(64),
+        hardened_runtime: true,
+        secure_timestamp: true,
+      },
+      {
+        path: "libexec/koda/native/koda-exec",
+        role: "native_executor",
+        identifier: "dev.koda.cli.native.koda-exec",
+        team_id: "ABC123DEF4",
+        cdhash_sha256: "b".repeat(64),
+        hardened_runtime: true,
+        secure_timestamp: true,
+      },
+      {
+        path: "libexec/koda/node/bin/node",
+        role: "embedded_node",
+        identifier: "dev.koda.cli.node",
+        team_id: "ABC123DEF4",
+        cdhash_sha256: "c".repeat(64),
+        hardened_runtime: true,
+        secure_timestamp: true,
+      },
+    ],
+  } as const;
 }
 
 function launchOptions() {

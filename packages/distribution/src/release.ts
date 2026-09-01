@@ -16,7 +16,8 @@ import {
 } from "./version.js";
 
 const SOURCE_COMMIT_PATTERN = /^[0-9a-f]{40}$/;
-const RELEASE_ARCHIVE_PATTERN = /^koda-v[^/]+-darwin-(?:arm64|x64)\.tar\.gz$/;
+const RELEASE_ARCHIVE_PATTERN =
+  /^koda-v[^/]+-darwin-(?:arm64|x64)\.(?:tar\.gz|zip)$/;
 const MAXIMUM_NATIVE_FILES = 64;
 
 export const sourceCommitSchema = z.string().regex(SOURCE_COMMIT_PATTERN);
@@ -98,8 +99,11 @@ export const macOSReleaseMetadataSchema = z
   })
   .strict()
   .superRefine((value, context) => {
-    const expected = `koda-v${value.version}-darwin-${value.arch}.tar.gz`;
-    if (value.archive.name !== expected) {
+    const archivePrefix = `koda-v${value.version}-darwin-${value.arch}`;
+    if (
+      value.archive.name !== `${archivePrefix}.tar.gz` &&
+      value.archive.name !== `${archivePrefix}.zip`
+    ) {
       context.addIssue({
         code: "custom",
         path: ["archive", "name"],

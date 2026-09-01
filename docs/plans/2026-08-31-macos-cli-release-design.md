@@ -1,6 +1,7 @@
 # Koda Mac Release 1A Design
 
-- Status: In progress — MR1A1 through MR1A3 complete; MR1A4 is next
+- Status: In progress — MR1A1 through MR1A3 complete; MR1A4 implementation
+  complete, credentialed publication acceptance pending
 - Date: 2026-08-31
 - Target: macOS CLI/TUI developer preview
 - Depends on: completed Phase 3, Phase 4A, Phase 4B, Phase 4C2A, Phase 4C3,
@@ -144,7 +145,7 @@ The assembly pipeline:
    bundles four stable ESM entry points, and rejects every link in the final
    payload;
 5. downloads an exact Node.js release for the target architecture and verifies
-   its pinned SHA-256 against the official HTTPS checksum inventory;
+   its pinned SHA-256 against an OpenPGP-verified official checksum inventory;
 6. assembles a fresh staging directory with fixed permissions and timestamps;
 7. inventories all payload files and writes the strict manifests;
 8. runs the bundle from outside the repository with development tool paths
@@ -175,12 +176,14 @@ must prove assembly and execution behavior without access to signing secrets.
 Only a protected `v*` tag workflow can create a public release. That workflow:
 
 - verifies the tag version against the manifest version;
-- preserves and verifies the official Node.js signature;
-- signs Koda-owned Mach-O executables and packaged native add-ons using a
-  Developer ID Application identity, Hardened Runtime, and secure timestamp;
+- verifies the official Node.js checksum inventory with a commit- and
+  digest-pinned `nodejs/release-keys` keyring and the expected release signer;
+- signs the embedded Node Mach-O, Koda-owned executables, and packaged native
+  add-ons using a Developer ID Application identity, Hardened Runtime, and
+  secure timestamp;
 - rejects unsigned or unexpectedly signed executable code;
-- submits the exact distribution archive with `notarytool` and waits for an
-  accepted result;
+- submits the exact public ZIP archive with `notarytool` and waits for an
+  accepted result (unsigned CI retains deterministic `.tar.gz` candidates);
 - verifies the resulting Gatekeeper assessment and code signatures;
 - publishes immutable checksums and the Homebrew Formula update.
 
@@ -369,7 +372,8 @@ Implementation notes:
 
 ### MR1A4 — signed public preview
 
-Status: Pending.
+Status: Implementation complete; protected credentials and first publication
+acceptance pending.
 
 - protected Developer ID and notarization credentials;
 - nested Mach-O signing and signature audit;
@@ -377,6 +381,37 @@ Status: Pending.
 - GitHub Release checksums and provenance metadata;
 - Homebrew Tap publication;
 - clean-machine and real-Provider release checklist.
+
+Implementation notes:
+
+- `.github/workflows/macos-public-release.yml` runs only for `v*` tag pushes,
+  requires the exact `v0.1.0` version authority, pins all invoked GitHub Actions
+  by commit, and separates read-only provenance from the protected
+  `macos-public-release` environment;
+- Node `v22.20.0` is bound to the exact signed `SHASUMS256.txt.asc` digest, the
+  exact `nodejs/release-keys` commit/keyring digest, signer fingerprint, and
+  both architecture archive hashes. A missing `gpgv`, changed keyring,
+  unexpected signer, or changed inventory blocks signing;
+- public assembly re-signs all three detected Mach-O roles (embedded Node,
+  `koda-exec`, and `better-sqlite3`) with fixed identifiers. Audit requires one
+  expected Developer ID team, valid strict signatures, Hardened Runtime,
+  secure timestamps, exact architecture, and no extra native payload;
+- signing happens before integrity metadata is generated, so the installed
+  runtime hashes the signed bytes. The exact resulting deterministic ZIP is
+  verified, corruption-tested, submitted to Apple, and never repacked after
+  notarization;
+- accepted Notary response, post-submission code-signature audit, online
+  Gatekeeper assessment, release metadata, Formula, Node provenance, and both
+  architectures are transitively bound by strict canonical evidence documents
+  and `SHA256SUMS`;
+- publication is idempotent but immutable: a retry accepts an existing GitHub
+  prerelease only when every downloaded asset and the complete asset-name set
+  match the locally regenerated checksums. The Tap commit is similarly a no-op
+  only when the Formula already matches;
+- the repository cannot prove possession or correctness of external
+  Developer ID, App Store Connect, protected-environment, or Tap credentials.
+  Their setup and the first clean-machine/real-Provider acceptance are tracked
+  in [the MR1A4 release runbook](../release/macos-public-preview-runbook.md).
 
 ## Completion criterion
 

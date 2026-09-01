@@ -47,8 +47,11 @@ embedded Node.js, release `koda-exec`, target-only native add-ons, full doctor,
 and real app-server/native smoke coverage. Explicit native arm64/Intel jobs now
 retain unsigned artifacts, compare strict same-commit release metadata, rerun
 clean-archive and corruption-negative acceptance, and install/test a generated
-Formula through an isolated Homebrew tap. MR1A4 signing, notarization,
-provenance, GitHub Release, and public Tap publication is next.
+Formula through an isolated Homebrew tap. MR1A4 now implements OpenPGP Node
+provenance, all-Mach-O Developer ID signing/audit, exact-ZIP notarization,
+transitive release evidence, immutable GitHub prerelease publication, and
+idempotent public Tap updates. Protected credential setup and the first
+clean-machine/real-Provider publication acceptance are still pending.
 
 Phase 4C3A/C3B/C3C/C3D are complete with strict value-free secret
 declarations/evidence, stable cross-language digests and limits, matching
@@ -177,9 +180,11 @@ dist/release/local-arm64/koda/bin/koda
 ```
 
 This is an unsigned local developer-preview bundle. MR1A3 supplies native
-dual-architecture CI artifacts and the generated/tested Formula contract;
-Developer ID signing, Node checksum-signature verification, notarization,
-GitHub Release publication, and the public Tap belong to MR1A4.
+dual-architecture CI artifacts and the generated/tested Formula contract.
+MR1A4's protected tag workflow adds Developer ID signing, Node
+checksum-signature verification, notarization, GitHub Release publication, and
+the public Tap; it cannot run until the protected credentials and environment
+described in the release runbook are configured.
 
 ## Run the CLI
 
@@ -505,6 +510,7 @@ pnpm eval:scenarios
 - [Phase 2E SQLite metadata design](docs/plans/2026-08-26-phase-2e-sqlite-metadata-design.md)
 - [Phase 2F scenarios and artifact GC design](docs/plans/2026-08-26-phase-2f-scenarios-artifact-gc-design.md)
 - [Phase 4 hardening roadmap](docs/plans/2026-08-28-phase-4-roadmap.md)
+- [macOS public preview release runbook](docs/release/macos-public-preview-runbook.md)
 - [Phase 4B supervised native execution design](docs/plans/2026-08-28-phase-4b-supervised-native-execution-design.md)
 - [Phase 3 extensibility roadmap](docs/plans/2026-08-26-phase-3-roadmap.md)
 - [Phase 3A local stdio app-server design](docs/plans/2026-08-26-phase-3a-stdio-app-server-design.md)

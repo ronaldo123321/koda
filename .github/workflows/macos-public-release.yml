@@ -1,0 +1,422 @@
+name: macOS Public Preview
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-public-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  provenance:
+    name: tag-and-node-provenance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22.20.0
+      - name: Enable the locked package manager
+        shell: bash
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.28.2 --activate
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: pnpm --filter @koda/distribution-app... build
+      - name: Require the exact release tag
+        shell: bash
+        run: |
+          version="$(node apps/distribution/dist/release-main.js version)"
+          expected="v${version}"
+          if [[ "$GITHUB_REF_TYPE" != "tag" || "$GITHUB_REF_NAME" != "$expected" ]]; then
+            echo "::error title=Invalid release tag::Expected protected tag $expected."
+            exit 1
+          fi
+          if [[ "$(git rev-parse HEAD)" != "$(git rev-parse "$GITHUB_REF^{commit}")" ]]; then
+            echo "::error title=Tag checkout mismatch::The checked-out commit differs from the tag target."
+            exit 1
+          fi
+      - name: Verify the signed Node.js checksum inventory
+        shell: bash
+        run: |
+          mkdir -p dist/release/security
+          curl --fail --silent --show-error --location \
+            --output "$RUNNER_TEMP/node-release-keyring.kbx" \
+            "https://raw.githubusercontent.com/nodejs/release-keys/5b7f55f4a7e35d1176d27a6b81b0c3c3b794216b/gpg/pubring.kbx"
+          curl --fail --silent --show-error --location \
+            --output "$RUNNER_TEMP/SHASUMS256.txt.asc" \
+            "https://nodejs.org/dist/v22.20.0/SHASUMS256.txt.asc"
+          node apps/distribution/dist/release-main.js verify-node \
+            --keyring "$RUNNER_TEMP/node-release-keyring.kbx" \
+            --signed-inventory "$RUNNER_TEMP/SHASUMS256.txt.asc" \
+            --output dist/release/security/node-v22.20.0.provenance.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: koda-node-provenance-${{ github.sha }}
+          path: dist/release/security/node-v22.20.0.provenance.json
+          if-no-files-found: error
+          retention-days: 30
+
+  sign-and-notarize:
+    name: signed-${{ matrix.arch }}
+    needs: provenance
+    environment: macos-public-release
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+            uname: arm64
+          - arch: x64
+            runner: macos-15-intel
+            uname: x86_64
+    env:
+      KODA_DEVELOPER_ID_APPLICATION: ${{ vars.KODA_DEVELOPER_ID_APPLICATION }}
+      KODA_APPLE_TEAM_ID: ${{ vars.KODA_APPLE_TEAM_ID }}
+      KODA_NOTARY_KEY_ID: ${{ vars.KODA_NOTARY_KEY_ID }}
+      KODA_NOTARY_ISSUER_ID: ${{ vars.KODA_NOTARY_ISSUER_ID }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22.20.0
+      - name: Enable locked build tools
+        shell: bash
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.28.2 --activate
+          rustup toolchain install 1.98.0 --profile minimal
+          rustup default 1.98.0
+      - name: Require a native runner and protected credentials
+        shell: bash
+        env:
+          KODA_DEVELOPER_ID_P12_BASE64: ${{ secrets.KODA_DEVELOPER_ID_P12_BASE64 }}
+          KODA_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.KODA_DEVELOPER_ID_P12_PASSWORD }}
+          KODA_NOTARY_KEY_BASE64: ${{ secrets.KODA_NOTARY_KEY_BASE64 }}
+        run: |
+          if [[ "$(uname -m)" != "${{ matrix.uname }}" ]]; then
+            echo "::error title=Unexpected runner architecture::Expected ${{ matrix.uname }}."
+            exit 1
+          fi
+          required=(
+            KODA_DEVELOPER_ID_P12_BASE64
+            KODA_DEVELOPER_ID_P12_PASSWORD
+            KODA_DEVELOPER_ID_APPLICATION
+            KODA_APPLE_TEAM_ID
+            KODA_NOTARY_KEY_BASE64
+            KODA_NOTARY_KEY_ID
+            KODA_NOTARY_ISSUER_ID
+          )
+          for name in "${required[@]}"; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "::error title=Release credential missing::$name is required in the protected environment."
+              exit 1
+            fi
+          done
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: koda-node-provenance-${{ github.sha }}
+          path: dist/release/security
+      - name: Import the Developer ID identity into an ephemeral keychain
+        shell: bash
+        env:
+          KODA_DEVELOPER_ID_P12_BASE64: ${{ secrets.KODA_DEVELOPER_ID_P12_BASE64 }}
+          KODA_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.KODA_DEVELOPER_ID_P12_PASSWORD }}
+        run: |
+          umask 077
+          certificate="$RUNNER_TEMP/koda-developer-id.p12"
+          keychain="$RUNNER_TEMP/koda-signing.keychain-db"
+          keychain_password="$(openssl rand -hex 32)"
+          printf 'KODA_SIGNING_KEYCHAIN=%s\n' "$keychain" >> "$GITHUB_ENV"
+          printf 'KODA_SIGNING_CERTIFICATE=%s\n' "$certificate" >> "$GITHUB_ENV"
+          printf '%s' "$KODA_DEVELOPER_ID_P12_BASE64" | base64 --decode > "$certificate"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$certificate" -k "$keychain" \
+            -P "$KODA_DEVELOPER_ID_P12_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s \
+            -k "$keychain_password" "$keychain"
+          security list-keychains -d user -s "$keychain"
+          security find-identity -v -p codesigning "$keychain" | \
+            grep -F "$KODA_DEVELOPER_ID_APPLICATION"
+      - name: Assemble and sign the public archive
+        shell: bash
+        run: |
+          source_commit="$(git rev-parse HEAD)"
+          pnpm bundle:macos \
+            --arch "${{ matrix.arch }}" \
+            --source-commit "$source_commit" \
+            --output "dist/release/${{ matrix.arch }}" \
+            --node-provenance "dist/release/security/node-v22.20.0.provenance.json" \
+            --signing-identity "$KODA_DEVELOPER_ID_APPLICATION" \
+            --signing-team-id "$KODA_APPLE_TEAM_ID"
+      - name: Verify the exact signed ZIP before submission
+        shell: bash
+        run: |
+          archives=(dist/release/${{ matrix.arch }}/*-darwin-${{ matrix.arch }}.zip)
+          metadata=(dist/release/${{ matrix.arch }}/*-darwin-${{ matrix.arch }}.release.json)
+          codesign_evidence=(dist/release/${{ matrix.arch }}/*-darwin-${{ matrix.arch }}.codesign.json)
+          if (( ${#archives[@]} != 1 || ${#metadata[@]} != 1 || ${#codesign_evidence[@]} != 1 )); then
+            echo "::error title=Signed outputs missing::Expected one ZIP, metadata, and signature evidence file."
+            exit 1
+          fi
+          node apps/distribution/dist/release-main.js verify \
+            --archive "${archives[0]}" \
+            --metadata "${metadata[0]}" \
+            --corruption-check
+          cd "dist/release/${{ matrix.arch }}"
+          shasum -a 256 -c "${archives[0]##*/}.sha256"
+      - name: Submit the exact public ZIP to Apple Notary
+        shell: bash
+        env:
+          KODA_NOTARY_KEY_BASE64: ${{ secrets.KODA_NOTARY_KEY_BASE64 }}
+        run: |
+          umask 077
+          notary_key="$RUNNER_TEMP/AuthKey_${KODA_NOTARY_KEY_ID}.p8"
+          printf 'KODA_NOTARY_PRIVATE_KEY=%s\n' "$notary_key" >> "$GITHUB_ENV"
+          printf '%s' "$KODA_NOTARY_KEY_BASE64" | base64 --decode > "$notary_key"
+          chmod 600 "$notary_key"
+          archive=(dist/release/${{ matrix.arch }}/*-darwin-${{ matrix.arch }}.zip)
+          xcrun notarytool submit "${archive[0]}" \
+            --key "$notary_key" \
+            --key-id "$KODA_NOTARY_KEY_ID" \
+            --issuer "$KODA_NOTARY_ISSUER_ID" \
+            --wait \
+            --output-format json \
+            > "$RUNNER_TEMP/notary-response.json"
+      - name: Require accepted notarization and Gatekeeper assessment
+        shell: bash
+        run: |
+          archive=(dist/release/${{ matrix.arch }}/*-darwin-${{ matrix.arch }}.zip)
+          metadata=(dist/release/${{ matrix.arch }}/*-darwin-${{ matrix.arch }}.release.json)
+          codesign_evidence=(dist/release/${{ matrix.arch }}/*-darwin-${{ matrix.arch }}.codesign.json)
+          node apps/distribution/dist/release-main.js notarization \
+            --response "$RUNNER_TEMP/notary-response.json" \
+            --archive "${archive[0]}" \
+            --metadata "${metadata[0]}" \
+            --codesign "${codesign_evidence[0]}" \
+            --bundle "dist/release/${{ matrix.arch }}/koda" \
+            --output "dist/release/${{ matrix.arch }}/koda-v$(node apps/distribution/dist/release-main.js version)-darwin-${{ matrix.arch }}.notarization.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: koda-macos-signed-${{ matrix.arch }}-${{ github.sha }}
+          path: |
+            dist/release/${{ matrix.arch }}/*.zip
+            dist/release/${{ matrix.arch }}/*.zip.sha256
+            dist/release/${{ matrix.arch }}/*.release.json
+            dist/release/${{ matrix.arch }}/*.codesign.json
+            dist/release/${{ matrix.arch }}/*.notarization.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Delete ephemeral signing material
+        if: always()
+        shell: bash
+        run: |
+          if [[ -n "${KODA_SIGNING_KEYCHAIN:-}" ]]; then
+            security delete-keychain "$KODA_SIGNING_KEYCHAIN" || true
+          fi
+          rm -f "${KODA_SIGNING_CERTIFICATE:-$RUNNER_TEMP/missing-certificate}" \
+            "${KODA_NOTARY_PRIVATE_KEY:-$RUNNER_TEMP/missing-notary-key}"
+
+  publish:
+    name: github-release-and-homebrew-tap
+    needs: sign-and-notarize
+    environment: macos-public-release
+    runs-on: macos-15
+    permissions:
+      contents: write
+    env:
+      KODA_HOMEBREW_TAP_REPOSITORY: ${{ vars.KODA_HOMEBREW_TAP_REPOSITORY }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22.20.0
+      - name: Enable the locked package manager
+        shell: bash
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.28.2 --activate
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: pnpm --filter @koda/distribution-app... build
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: koda-node-provenance-${{ github.sha }}
+          path: dist/release/public
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: koda-macos-signed-*-${{ github.sha }}
+          path: dist/release/public
+          merge-multiple: true
+      - name: Build the final release set, Formula, and provenance
+        shell: bash
+        run: |
+          mkdir -p dist/release/public/Formula
+          arm64_metadata=(dist/release/public/*-darwin-arm64.release.json)
+          x64_metadata=(dist/release/public/*-darwin-x64.release.json)
+          arm64_codesign=(dist/release/public/*-darwin-arm64.codesign.json)
+          x64_codesign=(dist/release/public/*-darwin-x64.codesign.json)
+          arm64_notary=(dist/release/public/*-darwin-arm64.notarization.json)
+          x64_notary=(dist/release/public/*-darwin-x64.notarization.json)
+          node apps/distribution/dist/release-main.js compare \
+            --arm64-metadata "${arm64_metadata[0]}" \
+            --x64-metadata "${x64_metadata[0]}" \
+            --output dist/release/public/macos-release-set.json
+          node apps/distribution/dist/release-main.js formula \
+            --arm64-metadata "${arm64_metadata[0]}" \
+            --x64-metadata "${x64_metadata[0]}" \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$GITHUB_REF_NAME" \
+            --output dist/release/public/Formula/koda.rb
+          node apps/distribution/dist/release-main.js provenance \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$GITHUB_REF_NAME" \
+            --workflow-run-id "$GITHUB_RUN_ID" \
+            --workflow-run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --node-provenance dist/release/public/node-v22.20.0.provenance.json \
+            --release-set dist/release/public/macos-release-set.json \
+            --formula dist/release/public/Formula/koda.rb \
+            --arm64-metadata "${arm64_metadata[0]}" \
+            --arm64-codesign "${arm64_codesign[0]}" \
+            --arm64-notarization "${arm64_notary[0]}" \
+            --x64-metadata "${x64_metadata[0]}" \
+            --x64-codesign "${x64_codesign[0]}" \
+            --x64-notarization "${x64_notary[0]}" \
+            --output dist/release/public/macos-public-release.provenance.json
+          ruby -c dist/release/public/Formula/koda.rb
+      - name: Require Tap credentials before public mutation
+        shell: bash
+        env:
+          KODA_HOMEBREW_TAP_TOKEN: ${{ secrets.KODA_HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [[ -z "$KODA_HOMEBREW_TAP_REPOSITORY" || -z "$KODA_HOMEBREW_TAP_TOKEN" ]]; then
+            echo "::error title=Tap publication blocked::Protected Tap repository and token are required."
+            exit 1
+          fi
+      - name: Smoke the final Formula from immutable local ZIPs
+        shell: bash
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: |
+          arm64_metadata=(dist/release/public/*-darwin-arm64.release.json)
+          x64_metadata=(dist/release/public/*-darwin-x64.release.json)
+          arm64_archive=(dist/release/public/*-darwin-arm64.zip)
+          x64_archive=(dist/release/public/*-darwin-x64.zip)
+          node apps/distribution/dist/release-main.js formula \
+            --arm64-metadata "${arm64_metadata[0]}" \
+            --x64-metadata "${x64_metadata[0]}" \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$GITHUB_REF_NAME" \
+            --arm64-url "file://$GITHUB_WORKSPACE/${arm64_archive[0]}" \
+            --x64-url "file://$GITHUB_WORKSPACE/${x64_archive[0]}" \
+            --output "$RUNNER_TEMP/Koda.rb"
+          brew tap-new --no-git koda/mr1a4
+          tap_path="$(brew --repository koda/mr1a4)"
+          cp "$RUNNER_TEMP/Koda.rb" "$tap_path/Formula/koda.rb"
+          brew install koda/mr1a4/koda
+          brew test koda
+      - name: Generate immutable release checksums
+        shell: bash
+        run: |
+          files=(
+            dist/release/public/*.zip
+            dist/release/public/*.zip.sha256
+            dist/release/public/*.release.json
+            dist/release/public/*.codesign.json
+            dist/release/public/*.notarization.json
+            dist/release/public/node-v22.20.0.provenance.json
+            dist/release/public/macos-release-set.json
+            dist/release/public/macos-public-release.provenance.json
+            dist/release/public/Formula/koda.rb
+          )
+          : > dist/release/public/SHA256SUMS
+          for file in "${files[@]}"; do
+            digest="$(shasum -a 256 "$file" | awk '{print $1}')"
+            printf '%s  %s\n' "$digest" "${file##*/}" >> dist/release/public/SHA256SUMS
+          done
+          LC_ALL=C sort -k2,2 -o dist/release/public/SHA256SUMS dist/release/public/SHA256SUMS
+      - name: Publish the immutable GitHub prerelease
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          assets=(
+            dist/release/public/*.zip
+            dist/release/public/*.zip.sha256
+            dist/release/public/*.release.json
+            dist/release/public/*.codesign.json
+            dist/release/public/*.notarization.json
+            dist/release/public/node-v22.20.0.provenance.json
+            dist/release/public/macos-release-set.json
+            dist/release/public/macos-public-release.provenance.json
+            dist/release/public/SHA256SUMS
+            dist/release/public/Formula/koda.rb
+          )
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            release_state="$(gh release view "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --json isDraft,isPrerelease,tagName \
+              --jq '[.isDraft, .isPrerelease, .tagName] | @tsv')"
+            if [[ "$release_state" != $'false\ttrue\t'"$GITHUB_REF_NAME" ]]; then
+              echo "::error title=Existing release state mismatch::Expected a published prerelease for the exact tag."
+              exit 1
+            fi
+            existing="$RUNNER_TEMP/existing-koda-release"
+            mkdir -p "$existing"
+            gh release download "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --dir "$existing"
+            cmp dist/release/public/SHA256SUMS "$existing/SHA256SUMS"
+            (
+              cd "$existing"
+              shasum -a 256 -c SHA256SUMS
+            )
+            expected="$RUNNER_TEMP/expected-assets.txt"
+            actual="$RUNNER_TEMP/actual-assets.txt"
+            for asset in "${assets[@]}"; do
+              basename "$asset"
+            done | LC_ALL=C sort > "$expected"
+            find "$existing" -maxdepth 1 -type f -exec basename {} \; | \
+              LC_ALL=C sort > "$actual"
+            diff -u "$expected" "$actual"
+          else
+            gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --prerelease \
+              --generate-notes \
+              --title "Koda ${GITHUB_REF_NAME} macOS developer preview"
+          fi
+      - name: Publish the verified Homebrew Formula
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.KODA_HOMEBREW_TAP_TOKEN }}
+        run: |
+          gh auth setup-git
+          gh repo clone "$KODA_HOMEBREW_TAP_REPOSITORY" "$RUNNER_TEMP/koda-homebrew-tap"
+          mkdir -p "$RUNNER_TEMP/koda-homebrew-tap/Formula"
+          cp dist/release/public/Formula/koda.rb \
+            "$RUNNER_TEMP/koda-homebrew-tap/Formula/koda.rb"
+          if [[ -z "$(git -C "$RUNNER_TEMP/koda-homebrew-tap" status --porcelain -- Formula/koda.rb)" ]]; then
+            exit 0
+          fi
+          git -C "$RUNNER_TEMP/koda-homebrew-tap" config user.name "koda-release-bot"
+          git -C "$RUNNER_TEMP/koda-homebrew-tap" config user.email "koda-release-bot@users.noreply.github.com"
+          git -C "$RUNNER_TEMP/koda-homebrew-tap" add Formula/koda.rb
+          git -C "$RUNNER_TEMP/koda-homebrew-tap" commit \
+            -m "koda ${GITHUB_REF_NAME}"
+          git -C "$RUNNER_TEMP/koda-homebrew-tap" push origin HEAD
