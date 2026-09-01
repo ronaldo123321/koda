@@ -69,6 +69,30 @@ jobs:
             --corruption-check
           cd "dist/release/${{ matrix.arch }}"
           shasum -a 256 -c "${archive##*/}.sha256"
+      - name: Exercise unsigned preview install lifecycle
+        shell: bash
+        env:
+          KODA_PREVIEW_ROOT: ${{ runner.temp }}/koda-preview
+          KODA_PREVIEW_BIN_DIR: ${{ runner.temp }}/koda-bin
+          KODA_HOME: ${{ runner.temp }}/koda-runtime
+        run: |
+          archives=(dist/release/${{ matrix.arch }}/*-darwin-${{ matrix.arch }}.tar.gz)
+          archive="${archives[0]}"
+          export PATH="$KODA_PREVIEW_BIN_DIR:$PATH"
+          node apps/distribution/dist/preview-main.js install --archive "$archive"
+          node apps/distribution/dist/preview-main.js status --json
+          koda --version
+          koda doctor --json
+          node apps/distribution/dist/preview-main.js install --archive "$archive"
+          mkdir -p "$KODA_HOME"
+          printf 'preserve\n' > "$KODA_HOME/preview-uninstall-sentinel"
+          node apps/distribution/dist/preview-main.js uninstall --yes
+          test -f "$KODA_HOME/preview-uninstall-sentinel"
+          test ! -e "$KODA_PREVIEW_ROOT"
+          test ! -e "$KODA_PREVIEW_BIN_DIR/koda"
+          test ! -L "$KODA_PREVIEW_BIN_DIR/koda"
+          test ! -e "$KODA_PREVIEW_BIN_DIR/koda-chat"
+          test ! -L "$KODA_PREVIEW_BIN_DIR/koda-chat"
       - name: Retain unsigned release candidate
         uses: actions/upload-artifact@v4
         with:

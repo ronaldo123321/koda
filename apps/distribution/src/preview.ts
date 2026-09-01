@@ -285,7 +285,7 @@ export async function uninstallMacOSPreview(input: {
   token?: () => string;
 }): Promise<MacOSPreviewStatus> {
   if (!input.confirmed) {
-    throw new KodaPreviewError("KODA_PREVIEW_STATE_INVALID");
+    throw new KodaPreviewError("KODA_PREVIEW_CONFIRMATION_REQUIRED");
   }
   const token: () => string = input.token ?? (() => randomUUID());
   const lock = await MacOSPreviewOperationLock.acquire(

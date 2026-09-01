@@ -46,11 +46,14 @@ and no public release tag will be created while they are unavailable. Active
 macOS work moves to unsigned internal testing, client experience, and product
 functionality that does not depend on protected Apple credentials.
 
-The first active follow-up slice is the
+The first unsigned follow-up slice is the
 [unsigned macOS internal preview installer](2026-09-01-unsigned-macos-preview-installer-design.md):
 a user-local, versioned, crash-recoverable install/upgrade/rollback/uninstall
-loop over the existing unsigned release bundle. It does not substitute for or
-complete MR1A4.
+loop over the existing unsigned release bundle. Its core and repository
+commands are implemented, real two-commit arm64 install/upgrade/rollback/remove
+acceptance has passed, and the native arm64/Intel release workflow now includes
+the credential-free install lifecycle. The first CI result is still pending.
+It does not substitute for or complete MR1A4.
 
 ## Guiding policies
 

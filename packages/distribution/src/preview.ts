@@ -39,6 +39,7 @@ export const KODA_PREVIEW_ERROR_CODES = [
   "KODA_PREVIEW_STATE_INVALID",
   "KODA_PREVIEW_RECOVERY_CONFLICT",
   "KODA_PREVIEW_OPERATION_LOCKED",
+  "KODA_PREVIEW_CONFIRMATION_REQUIRED",
 ] as const;
 
 export type KodaPreviewErrorCode = (typeof KODA_PREVIEW_ERROR_CODES)[number];
@@ -51,6 +52,8 @@ const PREVIEW_ERROR_MESSAGES: Readonly<Record<KodaPreviewErrorCode, string>> = {
     "The interrupted Koda preview activation cannot be recovered safely.",
   KODA_PREVIEW_OPERATION_LOCKED:
     "Another Koda preview installation operation is active.",
+  KODA_PREVIEW_CONFIRMATION_REQUIRED:
+    "Uninstall requires an explicit --yes confirmation.",
 };
 
 export class KodaPreviewError extends Error {

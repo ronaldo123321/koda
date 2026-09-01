@@ -86,6 +86,22 @@ describe("unsigned macOS preview commands", () => {
     ).resolves.toBe("retain");
   });
 
+  it("requires explicit uninstall confirmation before inspecting or mutating", async () => {
+    const fixture = await installedFixture();
+    await expect(
+      uninstallMacOSPreview({
+        paths: fixture.paths,
+        confirmed: false,
+        token: tokenSequence(),
+        now: () => 2,
+      }),
+    ).rejects.toMatchObject({ code: "KODA_PREVIEW_CONFIRMATION_REQUIRED" });
+    await expect(inspectMacOSPreview(fixture.paths)).resolves.toMatchObject({
+      status: "ready",
+      active: { identity: fixture.active.identity },
+    });
+  });
+
   it("uninstalls only preview-owned payloads and preserves runtime data", async () => {
     const fixture = await installedFixture();
     const runtimeData = join(fixture.sandbox, "runtime-data", "threads.jsonl");

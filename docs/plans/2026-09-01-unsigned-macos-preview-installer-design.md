@@ -1,6 +1,6 @@
 # Unsigned macOS Internal Preview Installer Design
 
-- Status: Accepted for implementation
+- Status: Implemented and locally accepted; dual-architecture CI lifecycle gate pending its first successful run
 - Date: 2026-09-01
 - Scope: user-local installation, activation, rollback, and removal of unsigned
   macOS internal-preview bundles
@@ -226,6 +226,39 @@ runs:
 
 The job explicitly records `unsigned internal preview`. It does not execute or
 claim Developer ID, Notary, Gatekeeper, public Release, or public Tap checks.
+
+## Implementation and acceptance record
+
+The reusable `@koda/distribution` core now owns strict target/state/journal
+schemas, managed-root validation, atomic JSON and relative-link replacement,
+single-owner operation locking, dead-owner recovery, and exact activation
+reconciliation. The repository-side distribution app implements build,
+install, status, rollback, and confirmed uninstall commands. Candidate archives
+reuse the release verifier, are copied into a controlled staging root, are
+checked for the current architecture and full integrity, and pass one complete
+standalone doctor/app-server/native smoke before activation.
+
+Focused tests cover path and identity validation, canonical projections,
+atomic state/link I/O, live and stale locks, pre-switch and post-switch crash
+recovery, divergent evidence, launcher drift, explicit uninstall confirmation,
+unknown managed-root content, and runtime-data preservation. The existing
+release tests continue to cover archive corruption, malformed entries,
+architecture metadata, integrity inventories, and Mach-O auditing.
+
+Local arm64 acceptance exercised two honest repository commits. It installed
+`0.1.0+db07bc75ff37`, installed `0.1.0+d9393031ac15` as an upgrade with the first
+target preserved as `previous`, rolled back to the first target, and then
+uninstalled. Both active targets passed full integrity plus the native
+supervisor/app-server smoke; the stable launcher passed `koda --version` and
+bundle doctor, and a sibling runtime-data sentinel survived uninstall.
+
+The unsigned macOS release workflow now runs first install, read-only JSON
+status, stable-launcher version and doctor, idempotent reinstall, explicit
+uninstall, launcher removal, and runtime-data preservation on native arm64 and
+Intel runners. Upgrade/rollback remains covered by deterministic state/recovery
+tests and the two-commit local acceptance above; a CI two-version artifact
+matrix is a later hardening item because CI must not fabricate a source commit
+that does not match its checked-out bytes.
 
 ## Acceptance criteria
 

@@ -62,6 +62,13 @@ continues with unsigned macOS internal testing and CLI/TUI experience work; the
 project will not create the public `v0.1.0` tag or weaken signing/notarization
 gates to bypass the missing external credential.
 
+The unsigned internal-preview installer is now implemented. It uses a
+versioned user-local store, atomic `current`/`previous` activation, strict
+release integrity and native smoke checks, stable launchers, exact rollback,
+crash recovery, and ownership-checked uninstall. The macOS release workflow
+also exercises the credential-free lifecycle on native arm64 and Intel runners;
+this remains an unsigned internal path and does not complete MR1A4.
+
 Phase 4C3A/C3B/C3C/C3D are complete with strict value-free secret
 declarations/evidence, stable cross-language digests and limits, matching
 TypeScript/Rust exact-byte streaming redactors, frozen trusted application
@@ -194,6 +201,47 @@ MR1A4's protected tag workflow adds Developer ID signing, Node
 checksum-signature verification, notarization, GitHub Release publication, and
 the public Tap; it cannot run until the protected credentials and environment
 described in the release runbook are configured.
+
+## Install the unsigned macOS internal preview
+
+Build the current native architecture and install it beneath
+`~/.local/share/koda-preview` without `sudo`:
+
+```bash
+pnpm preview:build
+pnpm preview:install
+pnpm preview:status
+```
+
+If `~/.local/bin` is not already on `PATH`, add it in your current shell before
+running the stable commands. Koda reports this remedy but never edits shell
+startup files:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+koda --version
+koda doctor
+```
+
+Install a downloaded CI candidate by passing its absolute archive path. The
+installer uses the sibling `.release.json` automatically; `--metadata` can
+select an explicit metadata document when needed:
+
+```bash
+pnpm preview:install --archive /absolute/path/koda-v0.1.0-darwin-arm64.tar.gz
+```
+
+Every upgrade preserves the former active target as `previous`:
+
+```bash
+pnpm preview:rollback
+pnpm preview:uninstall --yes
+```
+
+Uninstall removes only preview-owned launchers and version state. It does not
+remove `KODA_HOME`, Provider credentials, threads, artifacts, or settings.
+These commands intentionally report `unsigned internal preview`; they do not
+sign, notarize, publish, or claim Gatekeeper acceptance.
 
 ## Run the CLI
 
