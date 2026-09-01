@@ -24,6 +24,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "bundle:macos": "node dist/assemble-main.js",
+    "release:macos": "node dist/release-main.js",
     "start": "node dist/main.js",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },

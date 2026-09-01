@@ -4,4 +4,6 @@ export * from "./embedded-node.js";
 export * from "./errors.js";
 export * from "./installation.js";
 export * from "./inventory.js";
+export * from "./homebrew.js";
+export * from "./release.js";
 export * from "./version.js";

@@ -1,6 +1,6 @@
 # Koda Mac Release 1A Design
 
-- Status: In progress — MR1A1 and MR1A2 complete; MR1A3 is next
+- Status: In progress — MR1A1 through MR1A3 complete; MR1A4 is next
 - Date: 2026-08-31
 - Target: macOS CLI/TUI developer preview
 - Depends on: completed Phase 3, Phase 4A, Phase 4B, Phase 4C2A, Phase 4C3,
@@ -336,13 +336,36 @@ Implementation notes:
 
 ### MR1A3 — dual-architecture CI and Homebrew contract
 
-Status: Pending.
+Status: Complete.
 
 - native arm64 and Intel build jobs;
 - unsigned artifact retention;
 - clean-install and corruption-negative tests;
 - Formula template/generation and Formula smoke;
 - same-commit bundle metadata comparison.
+
+Implementation notes:
+
+- each native job runs on an explicit GitHub-hosted `macos-15` arm64 or
+  `macos-15-intel` x64 runner, rejects an unexpected host architecture, and
+  retains the unsigned archive, checksum, and strict architecture-specific
+  release metadata for 14 days;
+- release metadata binds the exact source commit, runtime contract, manifest
+  and inventory digests, native Mach-O inventory, archive byte length, and
+  archive SHA-256. The aggregate job accepts exactly one arm64 and one x64
+  document and requires their architecture-neutral contracts to match;
+- archive acceptance rechecks size and SHA-256, validates a sorted single-root
+  tar inventory, extracts to a fresh directory outside the repository, reruns
+  full payload and Mach-O verification, executes the standalone smoke on the
+  matching native host, and proves a deterministic byte-flipped archive is
+  rejected before extraction;
+- the Formula generator derives both immutable sources and hashes from the
+  compared metadata. CI checks Ruby syntax, creates an isolated local tap,
+  installs the arm64 candidate through Homebrew, and runs the Formula test
+  against the real Cellar layout;
+- branch and pull-request jobs remain unsigned and read-only with respect to
+  GitHub Releases and the public Tap. Developer ID signing, notarization,
+  signed Node checksum provenance, and publication remain exclusively MR1A4.
 
 ### MR1A4 — signed public preview
 

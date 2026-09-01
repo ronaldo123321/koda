@@ -16,7 +16,11 @@ import { dirname, join } from "node:path";
 import {
   bundleDoctorExitCode,
   canonicalIntegrityInventory,
+  canonicalMacOSReleaseMetadata,
+  canonicalMacOSReleaseSet,
   canonicalRuntimeManifest,
+  compareMacOSReleaseMetadata,
+  createMacOSReleaseMetadata,
   createIntegrityInventoryFromDirectory,
   currentRuntimeManifest,
   embeddedNodeArchiveUrl,
@@ -26,8 +30,11 @@ import {
   integrityInventoryDigest,
   integrityInventorySchema,
   KodaDistributionError,
+  macOSReleaseMetadataSchema,
+  macOSReleaseSetSchema,
   parseNodeChecksumInventory,
   releaseRelativePathSchema,
+  renderHomebrewFormula,
   resolveInstallationEnvironment,
   resolveKodaInstallation,
   resolveNativeExecutorPath,
@@ -45,11 +52,13 @@ import {
   createDistributionLaunchPlan,
   DistributionUsageError,
   KodaBundleAssemblyError,
+  KodaReleaseError,
   makeTreeWritable,
   parseMachOArchitecture,
   renderLauncher,
   routeDistributionCommand,
   runDistributionCommand,
+  validateMacOSArchiveEntries,
   type DistributionLaunchPlan,
 } from "@koda/distribution-app";
 import { afterEach, describe, expect, it } from "vitest";
@@ -210,6 +219,79 @@ describe("distribution contracts", () => {
         `${arm64.sha256}  ${arm64.archive}\n${arm64.sha256}  ${arm64.archive}\n`,
         arm64.archive,
       ),
+    ).toThrow();
+  });
+
+  it("creates strict canonical release metadata bound to its archive and source commit", () => {
+    const metadata = createReleaseMetadataFixture("arm64");
+
+    expect(macOSReleaseMetadataSchema.parse(metadata)).toEqual(metadata);
+    expect(canonicalMacOSReleaseMetadata(metadata)).toBe(
+      JSON.stringify(metadata),
+    );
+    expect(
+      macOSReleaseMetadataSchema.safeParse({
+        ...metadata,
+        archive: { ...metadata.archive, name: "wrong.tar.gz" },
+      }).success,
+    ).toBe(false);
+    expect(
+      macOSReleaseMetadataSchema.safeParse({ ...metadata, extra: true })
+        .success,
+    ).toBe(false);
+  });
+
+  it("compares exactly one arm64 and Intel artifact from the same runtime contract", () => {
+    const arm64 = createReleaseMetadataFixture("arm64");
+    const x64 = createReleaseMetadataFixture("x64");
+    const releaseSet = compareMacOSReleaseMetadata({
+      arm64,
+      x64,
+      arm64MetadataSha256: "c".repeat(64),
+      x64MetadataSha256: "d".repeat(64),
+    });
+
+    expect(macOSReleaseSetSchema.parse(releaseSet)).toEqual(releaseSet);
+    expect(canonicalMacOSReleaseSet(releaseSet)).toBe(
+      JSON.stringify(releaseSet),
+    );
+    expect(releaseSet.architectures.arm64.sha256).not.toBe(
+      releaseSet.architectures.x64.sha256,
+    );
+    expect(() =>
+      compareMacOSReleaseMetadata({
+        arm64,
+        x64: { ...x64, source_commit: "f".repeat(40) },
+        arm64MetadataSha256: "c".repeat(64),
+        x64MetadataSha256: "d".repeat(64),
+      }),
+    ).toThrow("same-commit runtime contract");
+  });
+
+  it("renders architecture-specific Homebrew sources and installed bundle checks", () => {
+    const arm64 = createReleaseMetadataFixture("arm64");
+    const x64 = createReleaseMetadataFixture("x64");
+    const formula = renderHomebrewFormula({
+      arm64Metadata: arm64,
+      x64Metadata: x64,
+      repository: "ronaldo123321/koda",
+      tag: "v0.1.0",
+    });
+
+    expect(formula).toContain("class Koda < Formula");
+    expect(formula).toContain("on_arm do");
+    expect(formula).toContain("on_intel do");
+    expect(formula).toContain(arm64.archive.name);
+    expect(formula).toContain(x64.archive.name);
+    expect(formula).toContain('prefix.install Dir["*"]');
+    expect(formula).toContain('"doctor", "--bundle-only"');
+    expect(() =>
+      renderHomebrewFormula({
+        arm64Metadata: arm64,
+        x64Metadata: x64,
+        repository: "unsafe/repository\nname",
+        tag: "v0.1.0",
+      }),
     ).toThrow();
   });
 
@@ -401,6 +483,26 @@ describe("macOS bundle assembly primitives", () => {
     expect(parseMachOArchitecture(machOHeader("x64"))).toBe("x64");
     expect(parseMachOArchitecture(fatMachOHeader())).toBe("fat");
     expect(parseMachOArchitecture(Buffer.from("not macho"))).toBeUndefined();
+  });
+
+  it("accepts only sorted archive entries beneath the single koda root", () => {
+    expect(
+      validateMacOSArchiveEntries(
+        "koda/bin/koda\nkoda/libexec/koda/runtime-manifest.json\n",
+      ),
+    ).toEqual(["koda/bin/koda", "koda/libexec/koda/runtime-manifest.json"]);
+    for (const listing of [
+      "../escape\n",
+      "koda/../escape\n",
+      "koda/bin/koda\nkoda/bin/koda\n",
+      "koda/z\nkoda/a\n",
+      "other/bin/koda\n",
+      "koda/bin/\n",
+    ]) {
+      expect(() => validateMacOSArchiveEntries(listing)).toThrow(
+        KodaReleaseError,
+      );
+    }
   });
 
   it("requires every release native component to match the target architecture", async () => {
@@ -705,6 +807,37 @@ function fatMachOHeader(): Buffer {
   const header = Buffer.alloc(8);
   header.writeUInt32BE(0xcafebabe, 0);
   return header;
+}
+
+function createReleaseMetadataFixture(architecture: "arm64" | "x64") {
+  const integrity = integrityInventorySchema.parse({
+    schema_version: 1,
+    files: [fileRecord("app/dispatcher.mjs", "dispatcher")],
+  });
+  const manifest = currentRuntimeManifest({
+    arch: architecture,
+    nodeVersion: EMBEDDED_NODE_VERSION,
+    nodePath: "node/bin/node",
+    dispatcherPath: "app/dispatcher.mjs",
+    cliPath: "app/cli.mjs",
+    tuiPath: "app/tui.mjs",
+    appServerPath: "app/app-server.mjs",
+    doctorPath: "app/dispatcher.mjs",
+    nativeExecutorPath: "native/koda-exec",
+    integrity,
+  });
+  return createMacOSReleaseMetadata({
+    sourceCommit: "e".repeat(40),
+    manifest,
+    archiveName: `koda-v${manifest.version}-darwin-${architecture}.tar.gz`,
+    archiveBytes: architecture === "arm64" ? 1_024 : 2_048,
+    archiveSha256: (architecture === "arm64" ? "a" : "b").repeat(64),
+    nativeFiles: [
+      `libexec/koda/app/node_modules/better-sqlite3/prebuilds/darwin-${architecture}.node`,
+      "libexec/koda/native/koda-exec",
+      "libexec/koda/node/bin/node",
+    ],
+  });
 }
 
 function launchOptions() {

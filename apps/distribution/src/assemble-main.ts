@@ -19,6 +19,8 @@ try {
         outputDirectory: result.outputDirectory,
         archivePath: result.archivePath,
         archiveSha256: result.archiveSha256,
+        metadataPath: result.metadataPath,
+        sourceCommit: result.sourceCommit,
         machOFiles: result.machOFiles,
       },
       null,
@@ -48,6 +50,7 @@ function parseArguments(argv: readonly string[]) {
   let cacheDirectory = resolve(repositoryRoot, "dist", "cache", "node");
   let architecture: MacOSBundleArchitecture | undefined;
   let nodeArchivePath: string | undefined;
+  let sourceCommit: string | undefined;
   let skipBuild = false;
   let skipSmoke = false;
   for (let index = 0; index < argv.length; index += 1) {
@@ -74,6 +77,8 @@ function parseArguments(argv: readonly string[]) {
       cacheDirectory = resolve(repositoryRoot, value);
     } else if (option === "--node-archive") {
       nodeArchivePath = resolve(repositoryRoot, value);
+    } else if (option === "--source-commit") {
+      sourceCommit = value;
     } else if (option === "--arch" && (value === "arm64" || value === "x64")) {
       architecture = value;
     } else {
@@ -86,6 +91,7 @@ function parseArguments(argv: readonly string[]) {
     cacheDirectory,
     ...(architecture === undefined ? {} : { architecture }),
     ...(nodeArchivePath === undefined ? {} : { nodeArchivePath }),
+    ...(sourceCommit === undefined ? {} : { sourceCommit }),
     ...(skipBuild ? { skipBuild: true } : {}),
     ...(skipSmoke ? { skipSmoke: true } : {}),
   };

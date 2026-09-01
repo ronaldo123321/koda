@@ -39,14 +39,16 @@ arm64/Intel artifacts, signing/notarization, and Homebrew delivery. Remaining
 Linux resource and new Windows security work is deferred, not removed; existing
 cross-platform CI remains a regression gate.
 
-MR1A1 and MR1A2 are complete: Koda now has one version authority, strict
+MR1A1 through MR1A3 are complete: Koda now has one version authority, strict
 versioned runtime and integrity manifests, structural source/release discovery,
 fail-closed critical-file verification, a unified `koda`/`koda-chat`
 dispatcher, and a reproducible repository-independent macOS arm64 bundle with
 embedded Node.js, release `koda-exec`, target-only native add-ons, full doctor,
-and real app-server/native smoke coverage. MR1A3 is next: native Intel CI,
-unsigned artifact retention, clean-install/corruption gates, and the Homebrew
-contract.
+and real app-server/native smoke coverage. Explicit native arm64/Intel jobs now
+retain unsigned artifacts, compare strict same-commit release metadata, rerun
+clean-archive and corruption-negative acceptance, and install/test a generated
+Formula through an isolated Homebrew tap. MR1A4 signing, notarization,
+provenance, GitHub Release, and public Tap publication is next.
 
 Phase 4C3A/C3B/C3C/C3D are complete with strict value-free secret
 declarations/evidence, stable cross-language digests and limits, matching
@@ -156,7 +158,17 @@ The output directory must not already exist. Assembly builds release
 `koda-exec`, pins and verifies Node.js 22.20.0, rejects mixed Mach-O
 architectures and payload symlinks, runs `koda --version`, full bundle doctor,
 and an app-server/native handshake outside the repository, then emits a
-deterministic archive and `.sha256` file. Try the unpacked candidate directly:
+deterministic archive, `.sha256` file, and strict `.release.json` metadata. Run
+the same clean-extraction and corruption-negative acceptance used by CI:
+
+```bash
+node apps/distribution/dist/release-main.js verify \
+  --archive dist/release/local-arm64/koda-v0.1.0-darwin-arm64.tar.gz \
+  --metadata dist/release/local-arm64/koda-v0.1.0-darwin-arm64.release.json \
+  --corruption-check
+```
+
+Try the unpacked candidate directly:
 
 ```bash
 dist/release/local-arm64/koda/bin/koda --version
@@ -164,9 +176,10 @@ dist/release/local-arm64/koda/bin/koda doctor --bundle-only
 dist/release/local-arm64/koda/bin/koda
 ```
 
-This is an unsigned local developer-preview bundle. Dual-architecture CI and
-Homebrew belong to MR1A3; Developer ID signing, Node checksum-signature
-verification, notarization, and public release provenance belong to MR1A4.
+This is an unsigned local developer-preview bundle. MR1A3 supplies native
+dual-architecture CI artifacts and the generated/tested Formula contract;
+Developer ID signing, Node checksum-signature verification, notarization,
+GitHub Release publication, and the public Tap belong to MR1A4.
 
 ## Run the CLI
 

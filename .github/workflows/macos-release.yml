@@ -1,0 +1,151 @@
+name: macOS Release Contract
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches: [main, "codex/**"]
+
+permissions:
+  contents: read
+
+jobs:
+  bundle:
+    name: unsigned-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+            uname: arm64
+          - arch: x64
+            runner: macos-15-intel
+            uname: x86_64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Require a native runner
+        shell: bash
+        run: |
+          actual="$(uname -m)"
+          if [[ "$actual" != "${{ matrix.uname }}" ]]; then
+            echo "::error title=Unexpected runner architecture::Expected ${{ matrix.uname }}, received $actual."
+            exit 1
+          fi
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Assemble unsigned standalone bundle
+        shell: bash
+        run: |
+          pnpm bundle:macos \
+            --arch "${{ matrix.arch }}" \
+            --source-commit "$GITHUB_SHA" \
+            --output "dist/release/${{ matrix.arch }}"
+      - name: Verify clean archive install and corruption rejection
+        shell: bash
+        run: |
+          archives=(dist/release/${{ matrix.arch }}/*-darwin-${{ matrix.arch }}.tar.gz)
+          metadata_files=(dist/release/${{ matrix.arch }}/*-darwin-${{ matrix.arch }}.release.json)
+          if (( ${#archives[@]} != 1 || ${#metadata_files[@]} != 1 )) || \
+            [[ ! -f "${archives[0]}" || ! -f "${metadata_files[0]}" ]]; then
+            echo "::error title=Release outputs missing::Expected one archive and one metadata document."
+            exit 1
+          fi
+          archive="${archives[0]}"
+          metadata="${metadata_files[0]}"
+          node apps/distribution/dist/release-main.js verify \
+            --archive "$archive" \
+            --metadata "$metadata" \
+            --corruption-check
+          cd "dist/release/${{ matrix.arch }}"
+          shasum -a 256 -c "${archive##*/}.sha256"
+      - name: Retain unsigned release candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: koda-macos-${{ matrix.arch }}-${{ github.sha }}
+          path: |
+            dist/release/${{ matrix.arch }}/*.tar.gz
+            dist/release/${{ matrix.arch }}/*.tar.gz.sha256
+            dist/release/${{ matrix.arch }}/*.release.json
+          if-no-files-found: error
+          retention-days: 14
+
+  contract:
+    name: metadata-and-homebrew
+    needs: bundle
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: pnpm --filter @koda/distribution-app... build
+      - name: Download both native candidates
+        uses: actions/download-artifact@v4
+        with:
+          pattern: koda-macos-*-${{ github.sha }}
+          path: dist/release/artifacts
+          merge-multiple: true
+      - name: Compare same-commit release metadata
+        shell: bash
+        run: |
+          arm64_metadata=(dist/release/artifacts/*-darwin-arm64.release.json)
+          x64_metadata=(dist/release/artifacts/*-darwin-x64.release.json)
+          node apps/distribution/dist/release-main.js compare \
+            --arm64-metadata "${arm64_metadata[0]}" \
+            --x64-metadata "${x64_metadata[0]}" \
+            --output "dist/release/contract/macos-release-set.json"
+      - name: Generate public and local-smoke Formulae
+        shell: bash
+        run: |
+          arm64_metadata=(dist/release/artifacts/*-darwin-arm64.release.json)
+          x64_metadata=(dist/release/artifacts/*-darwin-x64.release.json)
+          arm64_archive=(dist/release/artifacts/*-darwin-arm64.tar.gz)
+          x64_archive=(dist/release/artifacts/*-darwin-x64.tar.gz)
+          node apps/distribution/dist/release-main.js formula \
+            --arm64-metadata "${arm64_metadata[0]}" \
+            --x64-metadata "${x64_metadata[0]}" \
+            --repository "$GITHUB_REPOSITORY" \
+            --output "dist/release/contract/Formula/koda.rb"
+          mkdir -p "$RUNNER_TEMP/koda-formula"
+          node apps/distribution/dist/release-main.js formula \
+            --arm64-metadata "${arm64_metadata[0]}" \
+            --x64-metadata "${x64_metadata[0]}" \
+            --repository "$GITHUB_REPOSITORY" \
+            --arm64-url "file://$GITHUB_WORKSPACE/${arm64_archive[0]}" \
+            --x64-url "file://$GITHUB_WORKSPACE/${x64_archive[0]}" \
+            --output "$RUNNER_TEMP/koda-formula/Koda.rb"
+          ruby -c "dist/release/contract/Formula/koda.rb"
+          ruby -c "$RUNNER_TEMP/koda-formula/Koda.rb"
+      - name: Install and test through Homebrew
+        shell: bash
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: |
+          brew tap-new --no-git koda/mr1a3
+          tap_path="$(brew --repository koda/mr1a3)"
+          cp "$RUNNER_TEMP/koda-formula/Koda.rb" "$tap_path/Formula/koda.rb"
+          brew install koda/mr1a3/koda
+          brew test koda
+      - name: Retain compared contract and Formula
+        uses: actions/upload-artifact@v4
+        with:
+          name: koda-macos-release-contract-${{ github.sha }}
+          path: dist/release/contract
+          if-no-files-found: error
+          retention-days: 14

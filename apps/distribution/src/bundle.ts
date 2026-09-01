@@ -22,6 +22,8 @@ import { basename, dirname, join, relative, resolve, sep } from "node:path";
 
 import { APP_SERVER_PROTOCOL_VERSION, type JsonValue } from "@koda/protocol";
 import {
+  canonicalMacOSReleaseMetadata,
+  createMacOSReleaseMetadata,
   EMBEDDED_NODE_VERSION,
   embeddedNodeArchiveUrl,
   embeddedNodeArtifact,
@@ -58,6 +60,7 @@ export interface AssembleMacOSBundleOptions {
   readonly cacheDirectory: string;
   readonly architecture?: MacOSBundleArchitecture;
   readonly nodeArchivePath?: string;
+  readonly sourceCommit?: string;
   readonly skipBuild?: boolean;
   readonly skipSmoke?: boolean;
   readonly commandRunner?: BundleCommandRunner;
@@ -70,6 +73,8 @@ export interface MacOSBundleResult {
   readonly runtimeRoot: string;
   readonly archivePath: string;
   readonly archiveSha256: string;
+  readonly metadataPath: string;
+  readonly sourceCommit: string;
   readonly machOFiles: readonly string[];
 }
 
@@ -113,6 +118,10 @@ export async function assembleMacOSBundle(
     throw new KodaBundleAssemblyError("KODA_BUNDLE_ARCHITECTURE_INVALID");
   }
   const repositoryRoot = await realDirectory(options.repositoryRoot);
+  const sourceCommit = await resolveSourceCommit(
+    repositoryRoot,
+    options.sourceCommit,
+  );
   const outputDirectory = resolve(options.outputDirectory);
   const cacheDirectory = resolve(options.cacheDirectory);
   if (await pathExists(outputDirectory)) {
@@ -230,6 +239,22 @@ export async function assembleMacOSBundle(
       `${archiveSha256}  ${archiveName}\n`,
       { encoding: "utf8", flag: "wx", mode: 0o644 },
     );
+    const metadataName = archiveName.replace(/\.tar\.gz$/, ".release.json");
+    const metadataPath = join(publishRoot, metadataName);
+    const archiveBytes = (await stat(archivePath)).size;
+    const metadata = createMacOSReleaseMetadata({
+      sourceCommit,
+      manifest: installation.manifest,
+      archiveName,
+      archiveBytes,
+      archiveSha256,
+      nativeFiles: machOFiles,
+    });
+    await writeFile(
+      metadataPath,
+      `${canonicalMacOSReleaseMetadata(metadata)}\n`,
+      { encoding: "utf8", flag: "wx", mode: 0o644 },
+    );
     await rename(publishRoot, outputDirectory);
     await makeTreeWritable(stagingRoot);
     await rm(stagingRoot, { recursive: true, force: true });
@@ -240,6 +265,8 @@ export async function assembleMacOSBundle(
       runtimeRoot: join(outputDirectory, "koda", "libexec", "koda"),
       archivePath: join(outputDirectory, archiveName),
       archiveSha256,
+      metadataPath: join(outputDirectory, metadataName),
+      sourceCommit,
       machOFiles,
     };
   } catch (error) {
@@ -554,7 +581,7 @@ async function writeLaunchers(bundleRoot: string): Promise<void> {
   );
 }
 
-async function smokeStandaloneBundle(bundleRoot: string): Promise<void> {
+export async function smokeStandaloneBundle(bundleRoot: string): Promise<void> {
   const smokeRoot = await mkdtemp("/private/tmp/koda-bundle-smoke-");
   let smokeSupervisor: ChildProcess | undefined;
   try {
@@ -1017,6 +1044,57 @@ async function realDirectory(path: string): Promise<string> {
     throw new KodaBundleAssemblyError("KODA_ASSEMBLY_INVALID");
   }
   return canonical;
+}
+
+async function resolveSourceCommit(
+  repositoryRoot: string,
+  provided: string | undefined,
+): Promise<string> {
+  const candidate = provided ?? process.env.GITHUB_SHA;
+  if (candidate !== undefined) {
+    if (!/^[0-9a-f]{40}$/.test(candidate)) {
+      throw new KodaBundleAssemblyError("KODA_ASSEMBLY_INVALID");
+    }
+    return candidate;
+  }
+  const output = await new Promise<string>((resolvePromise, reject) => {
+    const child = spawn("git", ["rev-parse", "HEAD"], {
+      cwd: repositoryRoot,
+      env: process.env,
+      shell: false,
+      stdio: ["ignore", "pipe", "ignore"],
+      windowsHide: true,
+    });
+    const chunks: Buffer[] = [];
+    let bytes = 0;
+    child.stdout.on("data", (chunk: Buffer) => {
+      bytes += chunk.byteLength;
+      if (bytes > 256) {
+        child.kill("SIGKILL");
+        return;
+      }
+      chunks.push(chunk);
+    });
+    child.once("error", reject);
+    child.once("close", (code, signal) => {
+      if (code !== 0 || signal !== null || bytes > 256) {
+        reject(new KodaBundleAssemblyError("KODA_ASSEMBLY_INVALID"));
+        return;
+      }
+      resolvePromise(Buffer.concat(chunks, bytes).toString("utf8").trim());
+    });
+  }).catch((error: unknown) => {
+    if (error instanceof KodaBundleAssemblyError) {
+      throw error;
+    }
+    throw new KodaBundleAssemblyError("KODA_ASSEMBLY_INVALID", {
+      cause: error,
+    });
+  });
+  if (!/^[0-9a-f]{40}$/.test(output)) {
+    throw new KodaBundleAssemblyError("KODA_ASSEMBLY_INVALID");
+  }
+  return output;
 }
 
 async function pathExists(path: string): Promise<boolean> {

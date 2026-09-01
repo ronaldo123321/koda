@@ -30,9 +30,12 @@ continues to run as a shared regression gate.
 
 Delivery status: MR1A1 (release runtime contract, unified command dispatcher,
 strict installed-runtime resolution, integrity doctor, and deterministic
-fixtures) and MR1A2 (reproducible standalone arm64 bundle, embedded runtime,
-native inventory, and repository-independent smoke) are complete. MR1A3
-dual-architecture CI and Homebrew contract is the next slice.
+fixtures), MR1A2 (reproducible standalone bundle, embedded runtime, native
+inventory, and repository-independent smoke), and MR1A3 (native arm64/Intel
+CI, unsigned artifacts, clean-archive/corruption gates, same-commit metadata,
+and tested Homebrew Formula generation) are complete. MR1A4 signing,
+notarization, release provenance, GitHub Release, and public Tap publication is
+the next slice.
 
 ## Guiding policies
 
