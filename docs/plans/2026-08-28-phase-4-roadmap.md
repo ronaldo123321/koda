@@ -52,8 +52,9 @@ a user-local, versioned, crash-recoverable install/upgrade/rollback/uninstall
 loop over the existing unsigned release bundle. Its core and repository
 commands are implemented, real two-commit arm64 install/upgrade/rollback/remove
 acceptance has passed, and the native arm64/Intel release workflow now includes
-the credential-free install lifecycle. The first CI result is still pending.
-It does not substitute for or complete MR1A4.
+the credential-free install lifecycle. Implementation commit `50ae01c` passed
+[the complete macOS release contract](https://github.com/ronaldo123321/koda/actions/runs/33505291467)
+on both architectures. It does not substitute for or complete MR1A4.
 
 ## Guiding policies
 

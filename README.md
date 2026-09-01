@@ -67,7 +67,9 @@ versioned user-local store, atomic `current`/`previous` activation, strict
 release integrity and native smoke checks, stable launchers, exact rollback,
 crash recovery, and ownership-checked uninstall. The macOS release workflow
 also exercises the credential-free lifecycle on native arm64 and Intel runners;
-this remains an unsigned internal path and does not complete MR1A4.
+implementation commit `50ae01c` passed both architectures in
+[macOS Release Contract run 33505291467](https://github.com/ronaldo123321/koda/actions/runs/33505291467).
+This remains an unsigned internal path and does not complete MR1A4.
 
 Phase 4C3A/C3B/C3C/C3D are complete with strict value-free secret
 declarations/evidence, stable cross-language digests and limits, matching

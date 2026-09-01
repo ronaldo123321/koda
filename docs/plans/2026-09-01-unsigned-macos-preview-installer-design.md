@@ -1,6 +1,6 @@
 # Unsigned macOS Internal Preview Installer Design
 
-- Status: Implemented and locally accepted; dual-architecture CI lifecycle gate pending its first successful run
+- Status: Complete — local two-commit acceptance and native arm64/Intel CI lifecycle verified
 - Date: 2026-09-01
 - Scope: user-local installation, activation, rollback, and removal of unsigned
   macOS internal-preview bundles
@@ -259,6 +259,14 @@ Intel runners. Upgrade/rollback remains covered by deterministic state/recovery
 tests and the two-commit local acceptance above; a CI two-version artifact
 matrix is a later hardening item because CI must not fabricate a source commit
 that does not match its checked-out bytes.
+
+Implementation commit `50ae01c` passed the complete local suite and
+[GitHub Actions macOS Release Contract run 33505291467](https://github.com/ronaldo123321/koda/actions/runs/33505291467):
+native arm64 and Intel bundles both passed the new unsigned lifecycle before
+the shared metadata and isolated Homebrew contract completed successfully. The
+same commit also passed
+[CI run 33505291652](https://github.com/ronaldo123321/koda/actions/runs/33505291652)
+across verify, Linux, macOS, and Windows jobs.
 
 ## Acceptance criteria
 
