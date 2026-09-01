@@ -56,6 +56,13 @@ the credential-free install lifecycle. Implementation commit `50ae01c` passed
 [the complete macOS release contract](https://github.com/ronaldo123321/koda/actions/runs/33505291467)
 on both architectures. It does not substitute for or complete MR1A4.
 
+The active product-experience follow-up is
+[macOS Preview UX1](2026-09-01-macos-preview-ux1-onboarding-design.md): a
+credential-safe `koda setup` workflow, workspace Provider/model preference,
+explicit opt-in connection checking, and actionable CLI/TUI readiness guidance.
+It keeps API keys in the process environment and does not pull Keychain or a
+graphical application into Mac Release 1A.
+
 ## Guiding policies
 
 1. Never claim an outcome that cannot be proven from durable evidence and current operating-system state.
