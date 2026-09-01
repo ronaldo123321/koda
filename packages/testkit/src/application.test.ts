@@ -99,7 +99,10 @@ describe("KodaApplication", () => {
         model: "deepseek-chat",
         expectedRevision: 1,
       }),
-    ).rejects.toMatchObject({ code: "PROVIDER_CREDENTIAL_MISSING" });
+    ).resolves.toMatchObject({
+      revision: 2,
+      preference: { provider: "deepseek", model: "deepseek-chat" },
+    });
     await expect(
       application.updateRuntimeSettings({
         workspace: fixture.workspaceRoot,

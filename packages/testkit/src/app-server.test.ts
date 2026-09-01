@@ -175,7 +175,10 @@ describe("KodaAppServer", () => {
       model: "deepseek-chat",
       expectedRevision: 1,
     });
-    expect(errorDataCode(writer, 5)).toBe("PROVIDER_CREDENTIAL_MISSING");
+    expect(responseResult(writer, 5)).toMatchObject({
+      revision: 2,
+      preference: { provider: "deepseek", model: "deepseek-chat" },
+    });
     await request(server, 6, "workspace/mutation/conflicts", {
       workspace: fixture.workspaceRoot,
     });

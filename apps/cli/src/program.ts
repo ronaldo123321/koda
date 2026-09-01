@@ -9,6 +9,7 @@ import {
   runExtensionReadCommand,
 } from "./extension-command.js";
 import { runCommand, type RunCommandInput } from "./run-command.js";
+import { runSetupCommand } from "./setup-command.js";
 import {
   runThreadListCommand,
   runThreadShowCommand,
@@ -115,6 +116,40 @@ export function createProgram(runtime: ProgramRuntime): Command {
         } finally {
           process.removeListener("SIGINT", onSigint);
         }
+      },
+    );
+
+  program
+    .command("setup")
+    .description("Configure a workspace provider and model")
+    .option("-C, --cwd <directory>", "workspace directory")
+    .option("-m, --model <model>", "model ID for the selected provider")
+    .addOption(
+      new Option("-p, --provider <provider>", "model provider").choices([
+        "openai",
+        "anthropic",
+        "deepseek",
+        "kimi",
+        "glm",
+      ]),
+    )
+    .option("--json", "emit a stable machine-readable result")
+    .action(
+      async (options: {
+        cwd?: string;
+        json?: boolean;
+        model?: string;
+        provider?: string;
+      }) => {
+        runtime.setExitCode(
+          await runSetupCommand(options, {
+            environment: runtime.environment,
+            processDirectory: runtime.processDirectory,
+            stdout: runtime.stdout,
+            stderr: runtime.stderr,
+            ...(runtime.stdin === undefined ? {} : { stdin: runtime.stdin }),
+          }),
+        );
       },
     );
 

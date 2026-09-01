@@ -245,6 +245,33 @@ remove `KODA_HOME`, Provider credentials, threads, artifacts, or settings.
 These commands intentionally report `unsigned internal preview`; they do not
 sign, notarize, publish, or claim Gatekeeper acceptance.
 
+## Configure a workspace
+
+Use the installed `koda setup` command to select a Provider and model before
+starting a task. Setup stores only the non-secret workspace preference. It does
+not require, prompt for, or persist an API key:
+
+```bash
+koda setup --cwd .
+koda setup --cwd . --provider deepseek --model deepseek-v4-pro
+koda setup --cwd . --json
+```
+
+In a terminal, omitted Provider/model values are prompted with current defaults.
+With piped input or `--json`, setup is deterministic and never waits. Its output
+reports the exact credential environment-variable name and whether it is
+currently available, but never its value. Set the reported variable in the
+shell that will start Koda, for example:
+
+```bash
+export DEEPSEEK_API_KEY='<your-key>'
+koda chat --cwd .
+```
+
+Repository development builds expose the same flow through
+`node apps/cli/dist/main.js setup --cwd .`. Repeating an unchanged setup is
+idempotent and does not advance the settings revision.
+
 ## Run the CLI
 
 Build Koda, provide the credential for one built-in provider, and run one task against a workspace. OpenAI remains the default:

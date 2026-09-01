@@ -282,10 +282,7 @@ export class ThreadHistoryError extends Error {
 
 export class RuntimeSettingsError extends Error {
   public constructor(
-    public readonly code:
-      | "INVALID_RUNTIME_SETTINGS"
-      | "PROVIDER_CREDENTIAL_MISSING"
-      | "SETTINGS_CORRUPT",
+    public readonly code: "INVALID_RUNTIME_SETTINGS" | "SETTINGS_CORRUPT",
     message: string,
     options?: ErrorOptions,
   ) {
@@ -704,12 +701,6 @@ export class KodaApplication {
       throw new RuntimeSettingsError(
         "INVALID_RUNTIME_SETTINGS",
         `Provider '${parsedProvider.data}' is not supported.`,
-      );
-    }
-    if (!metadata.configured) {
-      throw new RuntimeSettingsError(
-        "PROVIDER_CREDENTIAL_MISSING",
-        `${metadata.credentialEnvironmentVariable} is required for provider '${metadata.id}'.`,
       );
     }
     const workspace = await this.canonicalSettingsWorkspace(input.workspace);

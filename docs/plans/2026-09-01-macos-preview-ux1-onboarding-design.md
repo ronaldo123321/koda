@@ -1,6 +1,6 @@
 # macOS Preview UX1: First-Run Onboarding and Provider Setup
 
-- Status: Accepted for implementation
+- Status: In progress — UX1A implemented and locally accepted; UX1B/UX1C remain
 - Date: 2026-09-01
 - Scope: credential-safe first-run setup, workspace Provider/model preference,
   explicit connection checking, and clearer CLI/TUI readiness guidance
@@ -81,7 +81,8 @@ value-safe facts. Neither output includes an environment-variable value.
 3. Read the strict Provider list returned by `initialize`.
 4. Read `settings/get` for the canonical workspace.
 5. Resolve selection in this order: explicit flags, interactive choice,
-   workspace preference, `KODA_PROVIDER`/`KODA_MODEL`, built-in default.
+   `KODA_PROVIDER`/`KODA_MODEL`, matching workspace preference, built-in
+   default.
 6. Save Provider/model through `settings/update` with the exact observed
    revision.
 7. Re-read or validate the returned preference and render a bounded result.
@@ -121,6 +122,8 @@ state. No client receives or stores the credential itself.
 
 ### UX1A: setup core and CLI
 
+Status: Complete — implemented on 2026-09-01.
+
 - strict setup input/result contracts;
 - `koda setup` dispatcher and argument parsing;
 - interactive and deterministic non-interactive selection;
@@ -128,7 +131,15 @@ state. No client receives or stores the credential itself.
 - bounded human and JSON output;
 - local credential-availability detection without value projection.
 
+The application settings boundary now deliberately permits a preference for an
+unconfigured Provider. Credential enforcement remains at turn execution, where
+an external Provider request would actually occur. Real app-server acceptance
+proved credential-free first save, unchanged-repeat idempotency, strict JSON,
+human shell guidance, and no credential-value projection.
+
 ### UX1B: existing-client guidance
+
+Status: Next.
 
 - actionable `koda run` missing-credential errors;
 - credential-free TUI startup and readiness notice;
@@ -136,6 +147,8 @@ state. No client receives or stores the credential itself.
 - consistent help and next-command guidance.
 
 ### UX1C: explicit check and dogfooding
+
+Status: Pending after UX1B.
 
 - opt-in minimal live Provider check;
 - fake-Provider conformance and error normalization;

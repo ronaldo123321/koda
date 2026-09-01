@@ -16,5 +16,6 @@ export * from "./plans.js";
 export * from "./plugins.js";
 export * from "./providers.js";
 export * from "./skills.js";
+export * from "./setup.js";
 export * from "./tool-catalogs.js";
 export * from "./usage.js";

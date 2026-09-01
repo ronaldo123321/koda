@@ -61,7 +61,9 @@ The active product-experience follow-up is
 credential-safe `koda setup` workflow, workspace Provider/model preference,
 explicit opt-in connection checking, and actionable CLI/TUI readiness guidance.
 It keeps API keys in the process environment and does not pull Keychain or a
-graphical application into Mac Release 1A.
+graphical application into Mac Release 1A. UX1A setup core and CLI are complete;
+UX1B client readiness guidance is next, followed by UX1C explicit Provider
+checking and installed-preview dogfooding.
 
 ## Guiding policies
 

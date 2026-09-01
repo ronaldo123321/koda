@@ -54,6 +54,9 @@ importers:
       '@koda/app':
         specifier: workspace:*
         version: link:../../packages/app
+      '@koda/app-server-client-node':
+        specifier: workspace:*
+        version: link:../../packages/app-server-client-node
       '@koda/distribution':
         specifier: workspace:*
         version: link:../../packages/distribution

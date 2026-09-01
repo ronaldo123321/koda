@@ -245,7 +245,7 @@ export function renderDistributionVersion(
 }
 
 export function renderDistributionHelp(): string {
-  return `Usage: koda [command] [options]\n\nCommands:\n  koda                         Open interactive Koda\n  koda chat [options]          Open interactive Koda\n  koda run <prompt> [options]  Run one coding-agent turn\n  koda app-server              Run the stdio JSON-RPC app-server\n  koda doctor [options]        Inspect the installed runtime\n\nOptions:\n  -h, --help                   Display help\n  -V, --version                Display component versions\n`;
+  return `Usage: koda [command] [options]\n\nCommands:\n  koda                         Open interactive Koda\n  koda chat [options]          Open interactive Koda\n  koda setup [options]         Configure a workspace provider and model\n  koda run <prompt> [options]  Run one coding-agent turn\n  koda app-server              Run the stdio JSON-RPC app-server\n  koda doctor [options]        Inspect the installed runtime\n\nOptions:\n  -h, --help                   Display help\n  -V, --version                Display component versions\n`;
 }
 
 function resolveDefaultSourceEntrypoints(): DistributionSourceEntrypoints {
