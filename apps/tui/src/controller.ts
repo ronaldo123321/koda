@@ -524,15 +524,26 @@ export class TuiController {
       });
       return "handled";
     }
+    const startsTurn =
+      !input.startsWith("/") ||
+      input === "/template" ||
+      input.startsWith("/template ");
+    if (startsTurn) {
+      const credentialNotice = providerCredentialNotice(
+        this.state.configuration.provider,
+        this.state.providers,
+      );
+      if (credentialNotice !== undefined) {
+        this.update({
+          notice: `Prompt not submitted. ${credentialNotice}`,
+        });
+        return "handled";
+      }
+      this.update({ input: "", notice: undefined });
+      await this.startPrompt(input);
+      return "handled";
+    }
     this.update({ input: "", notice: undefined });
-    if (!input.startsWith("/")) {
-      await this.startPrompt(input);
-      return "handled";
-    }
-    if (input === "/template" || input.startsWith("/template ")) {
-      await this.startPrompt(input);
-      return "handled";
-    }
     if (input.startsWith("/search ")) {
       await this.openThreadSearch(input.slice("/search ".length), "chat");
       return "handled";
@@ -1057,15 +1068,13 @@ export class TuiController {
       this.update({ notice: "A turn is already active." });
       return;
     }
-    const provider = this.state.providers.find(
-      (candidate) => candidate.id === this.state.configuration.provider,
+    const credentialNotice = providerCredentialNotice(
+      this.state.configuration.provider,
+      this.state.providers,
     );
-    if (provider === undefined || !provider.configured) {
+    if (credentialNotice !== undefined) {
       this.update({
-        notice:
-          provider === undefined
-            ? `Provider '${this.state.configuration.provider}' is unavailable.`
-            : `${provider.credentialEnvironmentVariable} is required for provider '${provider.id}'. Use /settings to choose a configured provider.`,
+        notice: credentialNotice,
       });
       return;
     }
@@ -1262,12 +1271,6 @@ export class TuiController {
     ) {
       return;
     }
-    if (!provider.configured) {
-      this.update({
-        notice: `${provider.credentialEnvironmentVariable} is required for provider '${provider.id}'.`,
-      });
-      return;
-    }
     const modelInput =
       settings.draftModels[provider.id] ??
       (settings.persistedPreference?.provider === provider.id
@@ -1353,12 +1356,9 @@ export class TuiController {
     const provider = this.state.providers.find(
       (candidate) => candidate.id === settings.draftProvider,
     );
-    if (provider === undefined || !provider.configured) {
+    if (provider === undefined) {
       this.update({
-        notice:
-          provider === undefined
-            ? "The selected provider is unavailable."
-            : `${provider.credentialEnvironmentVariable} is required for provider '${provider.id}'.`,
+        notice: "The selected provider is unavailable.",
       });
       return;
     }
@@ -1388,6 +1388,13 @@ export class TuiController {
         model: result.preference.model,
       };
       const immediatelyActive = this.state.threadId === undefined;
+      const savedNotice = immediatelyActive
+        ? `Using ${result.preference.provider}/${result.preference.model} for the next prompt.`
+        : `Saved ${result.preference.provider}/${result.preference.model}; run /new to use it.`;
+      const credentialNotice = providerCredentialNotice(
+        result.preference.provider,
+        this.state.providers,
+      );
       this.update({
         mode: "chat",
         configuration: immediatelyActive
@@ -1399,11 +1406,13 @@ export class TuiController {
           : this.state.configuration,
         nextThreadConfiguration,
         runtimeSettings: undefined,
-        notice:
-          runtimeSettingsResultNotice(result) ??
-          (immediatelyActive
-            ? `Using ${result.preference.provider}/${result.preference.model} for the next prompt.`
-            : `Saved ${result.preference.provider}/${result.preference.model}; run /new to use it.`),
+        notice: [
+          runtimeSettingsResultNotice(result),
+          savedNotice,
+          credentialNotice,
+        ]
+          .filter((notice): notice is string => notice !== undefined)
+          .join(" "),
       });
     } catch (error) {
       if (!this.isCurrentNavigation(generation)) {
@@ -5649,11 +5658,17 @@ export class TuiController {
     const nextDiffers =
       next.provider !== this.state.configuration.provider ||
       next.model !== this.state.configuration.model;
+    const credential = resolveTuiProviderCredentialReadiness(
+      this.state.configuration.provider,
+      this.state.providers,
+    );
     return [
       `connection: ${this.state.connection}`,
       `thread: ${this.state.threadId ?? "new"}`,
       `provider: ${this.state.configuration.provider}`,
       `model: ${this.state.configuration.model}`,
+      `credential-ready: ${credential.ready}`,
+      `credential-environment: ${credential.credentialEnvironmentVariable ?? "unknown"}`,
       ...(nextDiffers ? [`next: ${next.provider}/${next.model}`] : []),
       `workspace: ${this.state.configuration.cwd}`,
       `approval: ${this.state.configuration.approvalMode}`,
@@ -5774,6 +5789,39 @@ export class TuiController {
       listener();
     }
   }
+}
+
+export interface TuiProviderCredentialReadiness {
+  ready: boolean;
+  credentialEnvironmentVariable?: string;
+}
+
+export function resolveTuiProviderCredentialReadiness(
+  provider: ModelProviderId,
+  providers: readonly RuntimeProviderMetadata[],
+): TuiProviderCredentialReadiness {
+  const metadata = providers.find((candidate) => candidate.id === provider);
+  if (metadata === undefined) {
+    return { ready: false };
+  }
+  return {
+    ready: metadata.configured,
+    credentialEnvironmentVariable: metadata.credentialEnvironmentVariable,
+  };
+}
+
+export function providerCredentialNotice(
+  provider: ModelProviderId,
+  providers: readonly RuntimeProviderMetadata[],
+): string | undefined {
+  const readiness = resolveTuiProviderCredentialReadiness(provider, providers);
+  if (readiness.ready) {
+    return undefined;
+  }
+  if (readiness.credentialEnvironmentVariable === undefined) {
+    return `Provider '${provider}' is unavailable in app-server. Run 'koda doctor' before starting a model turn.`;
+  }
+  return `${readiness.credentialEnvironmentVariable} is missing for provider '${provider}'. Run 'koda setup --cwd . --provider ${provider}' from the workspace, export ${readiness.credentialEnvironmentVariable}='<your-key>', then restart Koda. History and settings remain available.`;
 }
 
 const defaultNotificationScheduler: TuiNotificationScheduler = {

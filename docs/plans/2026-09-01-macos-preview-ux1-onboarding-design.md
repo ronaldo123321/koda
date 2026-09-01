@@ -1,6 +1,6 @@
 # macOS Preview UX1: First-Run Onboarding and Provider Setup
 
-- Status: In progress — UX1A implemented and locally accepted; UX1B/UX1C remain
+- Status: In progress — UX1A and UX1B implemented and locally accepted; UX1C remains
 - Date: 2026-09-01
 - Scope: credential-safe first-run setup, workspace Provider/model preference,
   explicit connection checking, and clearer CLI/TUI readiness guidance
@@ -139,16 +139,25 @@ human shell guidance, and no credential-value projection.
 
 ### UX1B: existing-client guidance
 
-Status: Next.
+Status: Complete — implemented on 2026-09-01.
 
 - actionable `koda run` missing-credential errors;
 - credential-free TUI startup and readiness notice;
 - Prompt-time request blocking and `/status` projection;
 - consistent help and next-command guidance.
 
+The CLI missing-credential error now names the exact setup command, credential
+variable, export placeholder, and retry step. The TUI starts credential-free,
+combines settings diagnostics with an initial readiness notice, keeps local
+inspection commands available, exposes boolean readiness through `/status`,
+and marks the bottom status line. Prompt and command-template submission fail
+before `turn/start`, preserve the input, and require restart after the parent
+shell receives the credential. TUI settings may persist an unconfigured
+Provider preference through the same revision-safe boundary as `koda setup`.
+
 ### UX1C: explicit check and dogfooding
 
-Status: Pending after UX1B.
+Status: Next.
 
 - opt-in minimal live Provider check;
 - fake-Provider conformance and error normalization;

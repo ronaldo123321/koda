@@ -13,6 +13,7 @@ import {
   compactPlanStatus,
   planEvidenceLabel,
   projectLiveToolActivity,
+  resolveTuiProviderCredentialReadiness,
   type TuiState,
   type TuiTranscriptEntry,
 } from "./controller.js";
@@ -1549,9 +1550,13 @@ function StatusLine({ state }: { state: TuiState }) {
     state.currentPlan,
     state.planNeedsRevalidation,
   );
+  const credential = resolveTuiProviderCredentialReadiness(
+    state.configuration.provider,
+    state.providers,
+  );
   return (
     <Text dimColor>
-      {`${state.connection} · ${active} · approval ${state.configuration.approvalMode}${nextLabel}${plan === undefined ? "" : ` · plan ${plan}`}`}
+      {`${state.connection} · ${active} · approval ${state.configuration.approvalMode}${nextLabel}${plan === undefined ? "" : ` · plan ${plan}`} · credential ${credential.ready ? "ready" : "missing"}`}
       {usage === undefined ? "" : ` · ${usage.tokens.totalTokens} tokens`}
     </Text>
   );

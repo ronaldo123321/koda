@@ -281,7 +281,7 @@ describe("TuiController", () => {
     });
   });
 
-  it("blocks unavailable providers and preserves a conflicting settings draft", async () => {
+  it("blocks unavailable provider prompts but still saves their workspace preference", async () => {
     const client = new FakeAppServerClient();
     const deepseek = client.initialization.providers.find(
       (provider) => provider.id === "deepseek",
@@ -293,22 +293,58 @@ describe("TuiController", () => {
     const unavailableController = createController(client, {
       provider: "deepseek",
     });
-    await unavailableController.startPrompt("Must stay local");
+    unavailableController.setInput("Must stay local");
+    await unavailableController.submitInput();
     expect(client.startRequests).toEqual([]);
+    expect(unavailableController.getSnapshot().input).toBe("Must stay local");
     expect(unavailableController.getSnapshot().notice).toContain(
       "DEEPSEEK_API_KEY",
     );
+    expect(unavailableController.getSnapshot().notice).toContain("koda setup");
+    expect(unavailableController.getSnapshot().notice).toContain(
+      "restart Koda",
+    );
+    unavailableController.setInput("/status");
+    await unavailableController.submitInput();
+    expect(
+      unavailableController.getSnapshot().transcript.at(-1)?.text,
+    ).toContain("credential-ready: false");
+    expect(
+      unavailableController.getSnapshot().transcript.at(-1)?.text,
+    ).toContain("credential-environment: DEEPSEEK_API_KEY");
+
     const controller = createController(client);
     await controller.openRuntimeSettings();
     controller.selectRuntimeSettingsProvider(1);
     controller.selectRuntimeSettingsProvider(1);
     controller.enterRuntimeSettingsModel();
-    expect(controller.getSnapshot().mode).toBe("settings_provider");
+    expect(controller.getSnapshot().mode).toBe("settings_model");
+    controller.setRuntimeSettingsModelInput("deepseek-without-key");
+    await controller.applyRuntimeSettings();
+    expect(client.settingsUpdateRequests).toContainEqual({
+      workspace: "/workspace",
+      provider: "deepseek",
+      model: "deepseek-without-key",
+      expectedRevision: 0,
+    });
+    expect(controller.getSnapshot()).toMatchObject({
+      mode: "chat",
+      configuration: {
+        provider: "deepseek",
+        model: "deepseek-without-key",
+      },
+    });
     expect(controller.getSnapshot().notice).toContain("DEEPSEEK_API_KEY");
+    unavailableController.dispose();
+    controller.dispose();
+  });
 
-    controller.selectRuntimeSettingsProvider(-1);
-    controller.selectRuntimeSettingsProvider(-1);
+  it("preserves a conflicting settings draft", async () => {
+    const client = new FakeAppServerClient();
+    const controller = createController(client);
+    await controller.openRuntimeSettings();
     controller.enterRuntimeSettingsModel();
+
     controller.setRuntimeSettingsModelInput("gpt-draft");
     client.settingsUpdateImplementation = () =>
       Promise.reject(
@@ -342,6 +378,7 @@ describe("TuiController", () => {
     expect(controller.getSnapshot().mode).toBe("settings_provider");
     controller.closeRuntimeSettingsLevel();
     expect(controller.getSnapshot().mode).toBe("chat");
+    controller.dispose();
   });
 
   it("ignores a late settings response after Escape closes the panel", async () => {
@@ -395,6 +432,9 @@ describe("TuiController", () => {
     await expect(controller.submitInput()).resolves.toBe("handled");
     expect(controller.getSnapshot().transcript.at(-1)?.text).toContain(
       "diagnostics: fixture diagnostic",
+    );
+    expect(controller.getSnapshot().transcript.at(-1)?.text).toContain(
+      "credential-ready: true",
     );
     controller.setInput("/help");
     await controller.submitInput();

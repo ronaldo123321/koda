@@ -19,7 +19,7 @@ import {
 } from "@koda/protocol";
 import { render } from "ink";
 
-import { TuiController } from "./controller.js";
+import { TuiController, providerCredentialNotice } from "./controller.js";
 import { KodaTui } from "./view.js";
 
 export interface RunTuiOptions {
@@ -72,6 +72,11 @@ export async function runTui(
       settings.preference,
       client.initialization.providers,
     );
+    const initialNotice = resolveTuiInitialNotice(
+      settings.notice,
+      selection.provider,
+      client.initialization.providers,
+    );
     controller = new TuiController(client, {
       cwd: workspace,
       provider: selection.provider,
@@ -81,9 +86,7 @@ export async function runTui(
       ...(settings.preference === undefined
         ? {}
         : { settingsPreference: settings.preference }),
-      ...(settings.notice === undefined
-        ? {}
-        : { initialNotice: settings.notice }),
+      ...(initialNotice === undefined ? {} : { initialNotice }),
       ...(resumeThreadId === undefined ? {} : { resumeThreadId }),
     });
     const instance = render(<KodaTui controller={controller} />, {
@@ -107,6 +110,17 @@ export async function runTui(
       await client.shutdown().catch(() => undefined);
     }
   }
+}
+
+export function resolveTuiInitialNotice(
+  settingsNotice: string | undefined,
+  provider: ModelProviderId,
+  providers: readonly RuntimeProviderMetadata[],
+): string | undefined {
+  const notice = [settingsNotice, providerCredentialNotice(provider, providers)]
+    .filter((candidate): candidate is string => candidate !== undefined)
+    .join(" ");
+  return notice.length === 0 ? undefined : notice;
 }
 
 async function connectDefaultAppServer(

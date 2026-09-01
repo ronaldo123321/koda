@@ -154,6 +154,13 @@ describe("Phase 1A CLI", () => {
     ).toThrow("ZAI_API_KEY is required for provider 'glm'");
     expect(() =>
       resolveRunConfiguration(
+        { provider: "glm" },
+        { OPENAI_API_KEY: "wrong-provider-key" },
+        "/workspace",
+      ),
+    ).toThrow("koda setup --cwd . --provider glm");
+    expect(() =>
+      resolveRunConfiguration(
         { provider: "unknown" },
         { OPENAI_API_KEY: "test-key" },
         "/workspace",

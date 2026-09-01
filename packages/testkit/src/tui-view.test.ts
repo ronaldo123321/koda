@@ -15,6 +15,7 @@ import {
 import {
   KodaView,
   createTuiProgram,
+  resolveTuiInitialNotice,
   resolveTuiRuntimeSelection,
   routeTuiInput,
   type TuiInputController,
@@ -32,6 +33,20 @@ import {
 import { destroyedSecretEvidence } from "./execution-secret-fixtures.js";
 
 describe("Koda Ink view", () => {
+  it("keeps credential readiness visible in the idle status line", () => {
+    const state = baseState();
+    const selected = state.providers.find(
+      (provider) => provider.id === state.configuration.provider,
+    );
+    if (selected === undefined) {
+      throw new Error("Selected provider fixture is unavailable.");
+    }
+    selected.configured = false;
+
+    const frame = renderToString(createElement(KodaView, { state }));
+    expect(frame).toContain("credential missing");
+  });
+
   it("renders immutable transcript rows and a bounded live region", () => {
     const state = baseState();
     state.transcript = [
@@ -972,6 +987,27 @@ describe("koda-chat program", () => {
         providers,
       ),
     ).toEqual({ provider: "openai", model: "cli-model" });
+  });
+
+  it("creates an actionable credential-free startup notice", () => {
+    const providers = [
+      {
+        id: "deepseek" as const,
+        displayName: "DeepSeek",
+        credentialEnvironmentVariable: "DEEPSEEK_API_KEY",
+        defaultModel: "deepseek-v4-pro",
+        configured: false,
+      },
+    ];
+    const notice = resolveTuiInitialNotice(
+      "Recovered workspace settings.",
+      "deepseek",
+      providers,
+    );
+    expect(notice).toContain("Recovered workspace settings.");
+    expect(notice).toContain("koda setup --cwd . --provider deepseek");
+    expect(notice).toContain("DEEPSEEK_API_KEY");
+    expect(notice).toContain("restart Koda");
   });
 
   it("rejects non-TTY automation before starting app-server", async () => {

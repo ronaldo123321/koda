@@ -71,11 +71,12 @@ export function resolveRunConfiguration(
   }
   const provider = parsedProvider.data;
   const providerProfile = getBuiltInProviderProfile(provider);
+  const cwd = resolve(processDirectory, input.cwd?.trim() || ".");
   const apiKey =
     environment[providerProfile.credentialEnvironmentVariable]?.trim();
   if (apiKey === undefined || apiKey.length === 0) {
     throw new ConfigurationError(
-      `${providerProfile.credentialEnvironmentVariable} is required for provider '${provider}'. Set it in the environment before running Koda.`,
+      `${providerProfile.credentialEnvironmentVariable} is required for provider '${provider}'. Run 'koda setup --cwd . --provider ${provider}' from the target workspace, export ${providerProfile.credentialEnvironmentVariable}='<your-key>' in the same shell, then retry.`,
     );
   }
 
@@ -92,7 +93,6 @@ export function resolveRunConfiguration(
       "Approval mode must be either 'on-request' or 'never'.",
     );
   }
-  const cwd = resolve(processDirectory, input.cwd?.trim() || ".");
   const kodaHome = resolveKodaHome(environment);
   const contextWindowTokens = parsePositiveInteger(
     environment.KODA_CONTEXT_WINDOW_TOKENS,
