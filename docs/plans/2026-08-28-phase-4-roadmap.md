@@ -46,6 +46,12 @@ and no public release tag will be created while they are unavailable. Active
 macOS work moves to unsigned internal testing, client experience, and product
 functionality that does not depend on protected Apple credentials.
 
+The first active follow-up slice is the
+[unsigned macOS internal preview installer](2026-09-01-unsigned-macos-preview-installer-design.md):
+a user-local, versioned, crash-recoverable install/upgrade/rollback/uninstall
+loop over the existing unsigned release bundle. It does not substitute for or
+complete MR1A4.
+
 ## Guiding policies
 
 1. Never claim an outcome that cannot be proven from durable evidence and current operating-system state.
