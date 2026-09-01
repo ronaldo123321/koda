@@ -1,7 +1,8 @@
 # Koda Mac Release 1A Design
 
-- Status: In progress — MR1A1 through MR1A3 complete; MR1A4 implementation
-  complete, credentialed publication acceptance pending
+- Status: In progress — MR1A1 through MR1A3 complete; MR1A4 implementation and
+  credential-free GitHub infrastructure complete, credentialed publication
+  acceptance pending
 - Date: 2026-08-31
 - Target: macOS CLI/TUI developer preview
 - Depends on: completed Phase 3, Phase 4A, Phase 4B, Phase 4C2A, Phase 4C3,
@@ -372,8 +373,8 @@ Implementation notes:
 
 ### MR1A4 — signed public preview
 
-Status: Implementation complete; protected credentials and first publication
-acceptance pending.
+Status: Implementation and credential-free GitHub infrastructure complete;
+protected credentials and first publication acceptance pending.
 
 - protected Developer ID and notarization credentials;
 - nested Mach-O signing and signature audit;
@@ -408,6 +409,9 @@ Implementation notes:
   prerelease only when every downloaded asset and the complete asset-name set
   match the locally regenerated checksums. The Tap commit is similarly a no-op
   only when the Formula already matches;
+- the protected Environment, active `refs/tags/v*` ruleset, initialized public
+  Tap repository, and Tap repository variable are configured. No release tag
+  exists yet, and no private credential is recorded in repository history;
 - the repository cannot prove possession or correctness of external
   Developer ID, App Store Connect, protected-environment, or Tap credentials.
   Their setup and the first clean-machine/real-Provider acceptance are tracked

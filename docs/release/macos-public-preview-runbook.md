@@ -3,8 +3,8 @@
 - Scope: MR1A4 credential activation, publication, and acceptance
 - Current version/tag: `0.1.0` / `v0.1.0`
 - Workflow: `.github/workflows/macos-public-release.yml`
-- Status: automation implemented; credentials and first public acceptance
-  pending
+- Status: automation and credential-free GitHub infrastructure configured;
+  Apple credentials, Tap token, and first public acceptance pending
 
 ## 1. Trust boundary
 
@@ -54,6 +54,18 @@ deletion to release maintainers. Require the release tag to point at an accepted
 `main` commit. The workflow independently checks that the tag name is exactly
 `v${KODA_VERSION}` and that the checked-out commit is the tag target.
 
+Configured on 2026-09-01:
+
+- Environment `macos-public-release` (ID `20995695443`) requires approval from
+  `ronaldo123321`, does not permit administrator bypass, and permits deployment
+  only from tags matching `v*`;
+- active repository ruleset
+  [`Koda public release tags`](https://github.com/ronaldo123321/koda/settings/rules/22005058)
+  targets `refs/tags/v*`, permits only `ronaldo123321` to bypass, and restricts
+  creation, update, deletion, and non-fast-forward changes;
+- no release tag has been created. Keep `v0.1.0` absent until every secret and
+  variable below is configured and re-audited.
+
 ### Environment secrets
 
 | Name                             | Value                                                             |
@@ -81,6 +93,13 @@ access token when a repository-scoped fine-grained Tap token is available.
 Create the public Tap repository named by `KODA_HOMEBREW_TAP_REPOSITORY`. It may
 start with an empty `Formula/` directory. Protect its default branch while
 allowing the release token to update `Formula/koda.rb`.
+
+The public repository
+[`ronaldo123321/homebrew-koda`](https://github.com/ronaldo123321/homebrew-koda)
+was created on 2026-09-01 with initialized `main` commit
+`ffa89160af418f861c8517c5f4d1115aac0eb659`. Environment variable
+`KODA_HOMEBREW_TAP_REPOSITORY=ronaldo123321/homebrew-koda` is configured. The
+repository-scoped `KODA_HOMEBREW_TAP_TOKEN` secret remains pending.
 
 The public workflow first builds and tests the final Formula against the exact
 local notarized ZIP, then publishes the immutable GitHub prerelease, and only

@@ -51,7 +51,11 @@ Formula through an isolated Homebrew tap. MR1A4 now implements OpenPGP Node
 provenance, all-Mach-O Developer ID signing/audit, exact-ZIP notarization,
 transitive release evidence, immutable GitHub prerelease publication, and
 idempotent public Tap updates. Protected credential setup and the first
-clean-machine/real-Provider publication acceptance are still pending.
+clean-machine/real-Provider publication acceptance are still pending. The
+protected Environment, active `v*` tag ruleset, public
+[`homebrew-koda`](https://github.com/ronaldo123321/homebrew-koda) repository,
+and Tap repository variable are configured; Apple credentials and the
+repository-scoped Tap token are not.
 
 Phase 4C3A/C3B/C3C/C3D are complete with strict value-free secret
 declarations/evidence, stable cross-language digests and limits, matching
