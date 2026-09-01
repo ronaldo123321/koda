@@ -63,7 +63,9 @@ explicit opt-in connection checking, and actionable CLI/TUI readiness guidance.
 It keeps API keys in the process environment and does not pull Keychain or a
 graphical application into Mac Release 1A. UX1A setup core/CLI and UX1B
 credential-safe client readiness guidance are complete. UX1C explicit Provider
-checking and installed-preview dogfooding are next.
+checking, fake-Provider conformance, and unsigned installed-preview acceptance
+are implemented and locally verified. A successful live check and the broader
+real-Provider workflow matrix remain an explicit manual acceptance item.
 
 ## Guiding policies
 

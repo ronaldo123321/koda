@@ -31,15 +31,31 @@ export const setupCommandInputSchema = z
     provider: modelProviderIdSchema.optional(),
     model: runtimeSettingsModelSchema.optional(),
     json: z.boolean().optional(),
+    check: z.boolean().optional(),
   })
   .strict();
 
-export const setupCheckResultSchema = z
-  .object({
-    status: z.enum(["not_run", "passed", "failed"]),
-    message: setupMessageSchema.optional(),
-  })
-  .strict();
+export const setupCheckFailureReasonSchema = z.enum([
+  "credential_missing",
+  "authentication_failed",
+  "model_unavailable",
+  "rate_limited",
+  "network_failed",
+  "cancelled",
+  "provider_failed",
+]);
+
+export const setupCheckResultSchema = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("not_run") }).strict(),
+  z.object({ status: z.literal("passed") }).strict(),
+  z
+    .object({
+      status: z.literal("failed"),
+      reason: setupCheckFailureReasonSchema,
+      message: setupMessageSchema,
+    })
+    .strict(),
+]);
 
 export const setupResultSchema = z
   .object({
@@ -70,6 +86,9 @@ export const setupErrorResultSchema = z
   .strict();
 
 export type SetupCheckResult = z.infer<typeof setupCheckResultSchema>;
+export type SetupCheckFailureReason = z.infer<
+  typeof setupCheckFailureReasonSchema
+>;
 export type SetupCommandInput = z.infer<typeof setupCommandInputSchema>;
 export type SetupResult = z.infer<typeof setupResultSchema>;
 export type SetupErrorResult = z.infer<typeof setupErrorResultSchema>;

@@ -1,6 +1,7 @@
 # macOS Preview UX1: First-Run Onboarding and Provider Setup
 
-- Status: In progress — UX1A and UX1B implemented and locally accepted; UX1C remains
+- Status: In progress — UX1A/UX1B complete and UX1C implementation locally
+  accepted; dedicated real-Provider dogfooding remains
 - Date: 2026-09-01
 - Scope: credential-safe first-run setup, workspace Provider/model preference,
   explicit connection checking, and clearer CLI/TUI readiness guidance
@@ -157,13 +158,40 @@ Provider preference through the same revision-safe boundary as `koda setup`.
 
 ### UX1C: explicit check and dogfooding
 
-Status: Next.
+Status: Implementation complete and credential-free macOS acceptance passed on
+2026-09-01; live real-Provider acceptance remains manual.
 
 - opt-in minimal live Provider check;
 - fake-Provider conformance and error normalization;
 - installed unsigned-bundle setup acceptance;
 - explicit real-Provider macOS dogfooding across chat, approval, patch,
   command, PTY, background process, and recovery flows.
+
+`koda setup --check` now performs exactly one explicit, 20-second-bounded,
+no-Tool request through the selected built-in Provider adapter. It consumes no
+assistant output and creates no Thread, Turn, Item, event-log, or workspace
+mutation. Without `--check`, Provider construction and network access do not
+occur. A missing credential fails before Provider construction; all other
+failures are projected as one strict value-safe category:
+`authentication_failed`, `model_unavailable`, `rate_limited`,
+`network_failed`, `cancelled`, or `provider_failed`. Check failure exits with
+status 1 while retaining the successfully saved non-secret preference.
+
+Fake-Provider tests prove the opt-in boundary, the single no-Tool request,
+ignored model output, missing-credential short circuit, bounded error
+normalization, cancellation, strict JSON, and credential/error sentinel
+non-disclosure. An isolated unsigned arm64 candidate installed successfully
+through the preview installer with `status=ready`, `doctor=passed`, no pending
+recovery, and an installed `koda setup --check` returning the expected strict
+`credential_missing` result without network access. The candidate was for local
+acceptance only and was not published because its release metadata identifies
+the preceding committed source revision.
+
+A successful live check and the broader chat/approval/patch/command/PTY/
+background/recovery matrix require an intentionally supplied low-privilege test
+credential. They remain the final UX1 external acceptance item and the MR1A4
+runbook remains authoritative for public-release evidence. No credential is
+introduced into CI or repository state to close that item artificially.
 
 ## Verification
 

@@ -50,8 +50,10 @@ clean-archive and corruption-negative acceptance, and install/test a generated
 Formula through an isolated Homebrew tap. MR1A4 now implements OpenPGP Node
 provenance, all-Mach-O Developer ID signing/audit, exact-ZIP notarization,
 transitive release evidence, immutable GitHub prerelease publication, and
-idempotent public Tap updates. Protected credential setup and the first
-clean-machine/real-Provider publication acceptance are still pending. The
+idempotent public Tap updates. Credential-safe Provider setup, readiness
+guidance, and explicit connection checking are implemented; Apple signing
+credentials and the first clean-machine/real-Provider publication acceptance
+are still pending. The
 protected Environment, active `v*` tag ruleset, public
 [`homebrew-koda`](https://github.com/ronaldo123321/homebrew-koda) repository,
 Tap repository variable, and repository-scoped Tap token secret are configured;
@@ -254,6 +256,7 @@ not require, prompt for, or persist an API key:
 ```bash
 koda setup --cwd .
 koda setup --cwd . --provider deepseek --model deepseek-v4-pro
+koda setup --cwd . --provider deepseek --model deepseek-v4-pro --check
 koda setup --cwd . --json
 ```
 
@@ -271,6 +274,14 @@ koda chat --cwd .
 Repository development builds expose the same flow through
 `node apps/cli/dist/main.js setup --cwd .`. Repeating an unchanged setup is
 idempotent and does not advance the settings revision.
+
+Connection checking is always explicit. `--check` sends one minimal no-Tool
+request through the selected Provider adapter, may consume Provider quota, and
+exits 1 for a missing credential, rejected credential/model, rate limit,
+network failure, cancellation, or other bounded Provider failure. It never
+prints the credential or raw Provider response. Setup without `--check` never
+constructs a Provider or makes a Provider network request; saving a preference
+therefore remains safe before the credential is available.
 
 ## Run the CLI
 

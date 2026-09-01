@@ -133,23 +133,33 @@ export function createProgram(runtime: ProgramRuntime): Command {
         "glm",
       ]),
     )
+    .option("--check", "make one minimal Provider connection check")
     .option("--json", "emit a stable machine-readable result")
     .action(
       async (options: {
         cwd?: string;
+        check?: boolean;
         json?: boolean;
         model?: string;
         provider?: string;
       }) => {
-        runtime.setExitCode(
-          await runSetupCommand(options, {
-            environment: runtime.environment,
-            processDirectory: runtime.processDirectory,
-            stdout: runtime.stdout,
-            stderr: runtime.stderr,
-            ...(runtime.stdin === undefined ? {} : { stdin: runtime.stdin }),
-          }),
-        );
+        const controller = new AbortController();
+        const onSigint = () => controller.abort("Interrupted by user.");
+        if (options.check === true) process.once("SIGINT", onSigint);
+        try {
+          runtime.setExitCode(
+            await runSetupCommand(options, {
+              environment: runtime.environment,
+              processDirectory: runtime.processDirectory,
+              stdout: runtime.stdout,
+              stderr: runtime.stderr,
+              signal: controller.signal,
+              ...(runtime.stdin === undefined ? {} : { stdin: runtime.stdin }),
+            }),
+          );
+        } finally {
+          process.removeListener("SIGINT", onSigint);
+        }
       },
     );
 

@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { createInterface } from "node:readline";
 
 import { NodeAppServerClient } from "@koda/app-server-client-node";
+import type { ModelProvider } from "@koda/agent-core";
 import {
   KODA_VERSION,
   resolveInstallationEnvironment,
@@ -17,6 +18,10 @@ import {
   setupCommandInputSchema,
   setupErrorResultSchema,
   setupResultSchema,
+  itemIdSchema,
+  threadIdSchema,
+  turnIdSchema,
+  userMessageItemSchema,
   type ModelProviderId,
   type RuntimeProviderMetadata,
   type SettingsGetParams,
@@ -24,8 +29,13 @@ import {
   type SettingsUpdateParams,
   type SettingsUpdateResult,
   type SetupResult,
+  type SetupCheckResult,
 } from "@koda/protocol";
-import { BUILT_IN_PROVIDER_METADATA } from "@koda/providers";
+import {
+  BUILT_IN_PROVIDER_METADATA,
+  ProviderError,
+  createRegisteredProvider,
+} from "@koda/providers";
 
 import type { TextWriter } from "./console-event-sink.js";
 
@@ -34,6 +44,13 @@ export interface SetupCommandOptions {
   provider?: string;
   model?: string;
   json?: boolean;
+  check?: boolean;
+}
+
+export interface SetupProviderFactoryInput {
+  provider: ModelProviderId;
+  apiKey: string;
+  model: string;
 }
 
 export interface SetupClient {
@@ -54,7 +71,9 @@ export interface SetupCommandRuntime {
   stdout: TextWriter;
   stderr: TextWriter;
   connectAppServer?(): Promise<SetupClient>;
+  createProvider?(input: SetupProviderFactoryInput): ModelProvider;
   prompt?(question: string): Promise<string>;
+  signal?: AbortSignal;
 }
 
 export async function runSetupCommand(
@@ -101,23 +120,53 @@ export async function runSetupCommand(
           expectedRevision: settings.revision,
         });
     const metadata = providerMetadata(selection.provider, providers);
+    const apiKey =
+      runtime.environment[metadata.credentialEnvironmentVariable]?.trim();
+    const credentialAvailable = apiKey !== undefined && apiKey.length > 0;
+    let check: SetupCheckResult = { status: "not_run" };
+    if (input.check === true) {
+      if (!credentialAvailable) {
+        check = {
+          status: "failed",
+          reason: "credential_missing",
+          message: `${metadata.credentialEnvironmentVariable} is not set for provider '${metadata.id}'.`,
+        };
+      } else {
+        const provider = (runtime.createProvider ?? createSetupProvider)({
+          provider: selection.provider,
+          apiKey,
+          model: selection.model,
+        });
+        const timeoutSignal = AbortSignal.timeout(20_000);
+        const signal =
+          runtime.signal === undefined
+            ? timeoutSignal
+            : AbortSignal.any([runtime.signal, timeoutSignal]);
+        check = await performProviderCheck(
+          provider,
+          signal,
+          selection.provider,
+          selection.model,
+        );
+      }
+    }
     const result = setupResultSchema.parse({
       schema_version: SETUP_RESULT_SCHEMA_VERSION,
       workspace,
       provider: selection.provider,
       model: selection.model,
       credential_environment_variable: metadata.credentialEnvironmentVariable,
-      credential_available: metadata.configured,
+      credential_available: credentialAvailable,
       preference_saved: update !== undefined,
       settings_revision: update?.revision ?? settings.revision,
-      check: { status: "not_run" },
+      check,
     });
     runtime.stdout.write(
       input.json === true
         ? `${JSON.stringify(result)}\n`
         : renderSetupResult(result),
     );
-    return 0;
+    return result.check.status === "failed" ? 1 : 0;
   } catch (error) {
     const message = safeErrorMessage(error, runtime.environment);
     if (options.json === true) {
@@ -211,6 +260,15 @@ export function renderSetupResult(result: SetupResult): string {
       `  export ${result.credential_environment_variable}='<your-key>'`,
     );
   }
+  if (result.check.status === "passed") {
+    lines.push("", "Provider check: passed");
+  } else if (result.check.status === "failed") {
+    lines.push(
+      "",
+      `Provider check: failed (${result.check.reason})`,
+      result.check.message,
+    );
+  }
   lines.push(
     "",
     "Next:",
@@ -219,6 +277,188 @@ export function renderSetupResult(result: SetupResult): string {
     "",
   );
   return lines.join("\n");
+}
+
+export async function performProviderCheck(
+  provider: ModelProvider,
+  signal: AbortSignal,
+  providerId: ModelProviderId,
+  model: string,
+): Promise<SetupCheckResult> {
+  try {
+    signal.throwIfAborted();
+    for await (const event of provider.stream(
+      {
+        threadId: threadIdSchema.parse("setup-check-thread"),
+        turnId: turnIdSchema.parse("setup-check-turn"),
+        step: 1,
+        items: [
+          userMessageItemSchema.parse({
+            type: "user_message",
+            id: itemIdSchema.parse("setup-check-user"),
+            content: "Reply with OK.",
+          }),
+        ],
+        tools: [],
+      },
+      signal,
+    )) {
+      if (event.type === "tool_call") {
+        return {
+          status: "failed",
+          reason: "provider_failed",
+          message: `Provider '${providerId}' returned an unexpected Tool call during its connection check.`,
+        };
+      }
+      if (event.type === "completed") {
+        return { status: "passed" };
+      }
+    }
+    return {
+      status: "failed",
+      reason: "provider_failed",
+      message: `Provider '${providerId}' ended the connection check without completing model '${model}'.`,
+    };
+  } catch (error) {
+    return normalizeProviderCheckError(error, signal, providerId, model);
+  }
+}
+
+export function normalizeProviderCheckError(
+  error: unknown,
+  signal: AbortSignal,
+  provider: ModelProviderId,
+  model: string,
+): SetupCheckResult {
+  if (signal.aborted) {
+    const timeout =
+      signal.reason instanceof DOMException &&
+      signal.reason.name === "TimeoutError";
+    return timeout
+      ? {
+          status: "failed",
+          reason: "network_failed",
+          message: `Provider '${provider}' did not complete the connection check within 20 seconds.`,
+        }
+      : {
+          status: "failed",
+          reason: "cancelled",
+          message: `Provider '${provider}' connection check was cancelled.`,
+        };
+  }
+  if (
+    error instanceof ProviderError &&
+    error.code === "PROVIDER_AUTHENTICATION_FAILED"
+  ) {
+    return {
+      status: "failed",
+      reason: "authentication_failed",
+      message: `Provider '${provider}' rejected the configured credential.`,
+    };
+  }
+  if (
+    error instanceof ProviderError &&
+    error.code === "PROVIDER_RATE_LIMITED"
+  ) {
+    return {
+      status: "failed",
+      reason: "rate_limited",
+      message: `Provider '${provider}' rate-limited the connection check.`,
+    };
+  }
+  const facts = collectProviderErrorFacts(error);
+  if (facts.status === 401 || facts.status === 403) {
+    return {
+      status: "failed",
+      reason: "authentication_failed",
+      message: `Provider '${provider}' rejected the configured credential.`,
+    };
+  }
+  if (facts.status === 429) {
+    return {
+      status: "failed",
+      reason: "rate_limited",
+      message: `Provider '${provider}' rate-limited the connection check.`,
+    };
+  }
+  if (
+    facts.status === 404 ||
+    (facts.status === 400 && facts.codes.some((code) => code.includes("model")))
+  ) {
+    return {
+      status: "failed",
+      reason: "model_unavailable",
+      message: `Provider '${provider}' does not recognize or permit model '${model}'.`,
+    };
+  }
+  if (
+    facts.codes.some((code) =>
+      [
+        "eai_again",
+        "econnrefused",
+        "econnreset",
+        "enotfound",
+        "etimedout",
+        "und_err_connect_timeout",
+      ].includes(code),
+    ) ||
+    facts.fetchFailed
+  ) {
+    return {
+      status: "failed",
+      reason: "network_failed",
+      message: `Provider '${provider}' could not be reached for the connection check.`,
+    };
+  }
+  return {
+    status: "failed",
+    reason: "provider_failed",
+    message: `Provider '${provider}' could not complete the connection check for model '${model}'.`,
+  };
+}
+
+function createSetupProvider(input: SetupProviderFactoryInput): ModelProvider {
+  return createRegisteredProvider({
+    ...input,
+    instructions:
+      "This is a connection check. Reply with OK and do not request tools.",
+    maxOutputTokens: 16,
+  });
+}
+
+function collectProviderErrorFacts(error: unknown): {
+  status?: number;
+  codes: string[];
+  fetchFailed: boolean;
+} {
+  let current: unknown = error;
+  let status: number | undefined;
+  const codes: string[] = [];
+  let fetchFailed = false;
+  const seen = new Set<unknown>();
+  for (let depth = 0; depth < 6 && current !== undefined; depth += 1) {
+    if (current === null || typeof current !== "object" || seen.has(current)) {
+      break;
+    }
+    seen.add(current);
+    const record = current as Record<string, unknown>;
+    if (status === undefined && typeof record.status === "number") {
+      status = record.status;
+    }
+    for (const field of ["code", "type"] as const) {
+      if (typeof record[field] === "string") {
+        codes.push(record[field].toLowerCase());
+      }
+    }
+    fetchFailed ||=
+      current instanceof TypeError && current.message === "fetch failed";
+    current = record.cause ?? record.error;
+  }
+  return {
+    ...(status === undefined ? {} : { status }),
+    codes,
+    fetchFailed,
+  };
 }
 
 async function connectDefaultAppServer(
