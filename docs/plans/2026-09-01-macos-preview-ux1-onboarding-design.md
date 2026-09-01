@@ -183,9 +183,10 @@ normalization, cancellation, strict JSON, and credential/error sentinel
 non-disclosure. An isolated unsigned arm64 candidate installed successfully
 through the preview installer with `status=ready`, `doctor=passed`, no pending
 recovery, and an installed `koda setup --check` returning the expected strict
-`credential_missing` result without network access. The candidate was for local
-acceptance only and was not published because its release metadata identifies
-the preceding committed source revision.
+`credential_missing` result without network access. The final local candidate
+was assembled from implementation commit `a99b0e5`, and its active installed
+identity `0.1.0+a99b0e551fec` bound the acceptance result to that exact source.
+The unsigned candidate remains local and was not published.
 
 A successful live check and the broader chat/approval/patch/command/PTY/
 background/recovery matrix require an intentionally supplied low-privilege test
