@@ -57,6 +57,11 @@ protected Environment, active `v*` tag ruleset, public
 Tap repository variable, and repository-scoped Tap token secret are configured;
 Apple credentials are not.
 
+MR1A4 is therefore paused waiting for an Apple Developer Program account. Koda
+continues with unsigned macOS internal testing and CLI/TUI experience work; the
+project will not create the public `v0.1.0` tag or weaken signing/notarization
+gates to bypass the missing external credential.
+
 Phase 4C3A/C3B/C3C/C3D are complete with strict value-free secret
 declarations/evidence, stable cross-language digests and limits, matching
 TypeScript/Rust exact-byte streaming redactors, frozen trusted application

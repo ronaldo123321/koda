@@ -1,8 +1,9 @@
 # Koda Mac Release 1A Design
 
 - Status: In progress — MR1A1 through MR1A3 complete; MR1A4 implementation and
-  credential-free GitHub infrastructure complete, credentialed publication
-  acceptance pending
+  credential-free GitHub infrastructure complete, but credentialed publication
+  is paused waiting for an Apple Developer Program account. Unsigned macOS
+  internal testing and client-experience development remain active
 - Date: 2026-08-31
 - Target: macOS CLI/TUI developer preview
 - Depends on: completed Phase 3, Phase 4A, Phase 4B, Phase 4C2A, Phase 4C3,
@@ -373,9 +374,9 @@ Implementation notes:
 
 ### MR1A4 — signed public preview
 
-Status: Implementation, credential-free GitHub infrastructure, and scoped Tap
-token provisioning complete; Apple credentials and first publication acceptance
-pending.
+Status: Paused waiting for an Apple Developer Program account. Implementation,
+credential-free GitHub infrastructure, and scoped Tap token provisioning are
+complete; Apple credentials and first publication acceptance remain pending.
 
 - protected Developer ID and notarization credentials;
 - nested Mach-O signing and signature audit;
@@ -419,6 +420,9 @@ Implementation notes:
   secret name, so its operational validity and the first
   clean-machine/real-Provider acceptance remain tracked in
   [the MR1A4 release runbook](../release/macos-public-preview-runbook.md).
+- while the external account is unavailable, unsigned local and CI artifacts
+  remain the internal-test channel. No public release tag is created, and the
+  signed/notarized acceptance contract is not weakened or bypassed.
 
 ## Completion criterion
 

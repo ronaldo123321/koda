@@ -40,6 +40,12 @@ Tap repository variable, and repository-scoped Tap token secret are configured;
 Apple credentials and the first published clean-machine acceptance remain
 before Mac Release 1A can be called complete.
 
+MR1A4 is paused waiting for an Apple Developer Program account. This does not
+relax signing, notarization, provenance, or Gatekeeper acceptance requirements,
+and no public release tag will be created while they are unavailable. Active
+macOS work moves to unsigned internal testing, client experience, and product
+functionality that does not depend on protected Apple credentials.
+
 ## Guiding policies
 
 1. Never claim an outcome that cannot be proven from durable evidence and current operating-system state.

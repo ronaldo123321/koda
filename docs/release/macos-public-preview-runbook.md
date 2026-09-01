@@ -3,8 +3,8 @@
 - Scope: MR1A4 credential activation, publication, and acceptance
 - Current version/tag: `0.1.0` / `v0.1.0`
 - Workflow: `.github/workflows/macos-public-release.yml`
-- Status: automation, credential-free GitHub infrastructure, and the scoped Tap
-  token secret configured; Apple credentials and first public acceptance pending
+- Status: paused — waiting for an Apple Developer Program account and signing
+  credentials; unsigned macOS internal testing and client-experience work continue
 
 ## 1. Trust boundary
 
@@ -16,6 +16,12 @@ Environment rules before secrets become available.
 
 Do not create the tag until every item in sections 2 through 4 is configured.
 A failed attempt does not publish an unsigned fallback.
+
+The absence of an Apple Developer account is an explicit external blocker, not
+a reason to weaken the release contract. While MR1A4 is paused, keep `v0.1.0`
+absent and use only the existing local/CI unsigned artifacts for internal
+testing. Resume this runbook when a release maintainer can provision the Apple
+credentials in section 3.
 
 ## 2. Apple prerequisites
 
