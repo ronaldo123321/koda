@@ -8,9 +8,9 @@ import {
   KodaDistributionError,
   NATIVE_EXECUTOR_PROTOCOL_VERSION,
   renderBundleDoctorReport,
+  resolveInstallationEnvironment,
   resolveInstallationPath,
   resolveKodaInstallation,
-  resolveNativeExecutorPath,
   runBundleDoctor,
   type KodaInstallation,
 } from "@koda/distribution";
@@ -139,8 +139,9 @@ export async function runDistributionCommand(
     environment: runtime.environment,
     nodeExecutable: runtime.nodeExecutable,
     workingDirectory: runtime.processDirectory,
-    sourceEntrypoints:
-      runtime.sourceEntrypoints ?? resolveDefaultSourceEntrypoints(),
+    ...(runtime.sourceEntrypoints === undefined
+      ? {}
+      : { sourceEntrypoints: runtime.sourceEntrypoints }),
   });
   return (runtime.execute ?? executeDistributionLaunchPlan)(plan);
 }
@@ -152,16 +153,14 @@ export function createDistributionLaunchPlan(
     environment: NodeJS.ProcessEnv;
     nodeExecutable: string;
     workingDirectory: string;
-    sourceEntrypoints: DistributionSourceEntrypoints;
+    sourceEntrypoints?: DistributionSourceEntrypoints;
   },
 ): DistributionLaunchPlan {
-  const environment = { ...options.environment };
-  const nativeExecutorPath = resolveNativeExecutorPath(
+  const environment = resolveInstallationEnvironment(
     installation,
-    environment,
+    options.environment,
   );
   if (installation.mode === "release") {
-    environment.KODA_EXEC_PATH = nativeExecutorPath;
     const entry = resolveInstallationPath(
       installation,
       installation.manifest.entrypoints[route.kind],
@@ -177,10 +176,12 @@ export function createDistributionLaunchPlan(
       workingDirectory: options.workingDirectory,
     };
   }
+  const sourceEntrypoints =
+    options.sourceEntrypoints ?? resolveDefaultSourceEntrypoints();
   return {
     kind: route.kind,
     command: options.nodeExecutable,
-    args: [options.sourceEntrypoints[route.kind], ...route.args],
+    args: [sourceEntrypoints[route.kind], ...route.args],
     environment,
     workingDirectory: options.workingDirectory,
   };

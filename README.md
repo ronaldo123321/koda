@@ -39,11 +39,14 @@ arm64/Intel artifacts, signing/notarization, and Homebrew delivery. Remaining
 Linux resource and new Windows security work is deferred, not removed; existing
 cross-platform CI remains a regression gate.
 
-MR1A1 is complete: Koda now has one version authority, strict versioned runtime
-and integrity manifests, structural source/release discovery, fail-closed
-critical-file verification, a unified `koda`/`koda-chat` dispatcher, and the
-offline `koda doctor --bundle-only` core. MR1A2 will assemble these contracts
-into the first repository-independent macOS arm64 bundle.
+MR1A1 and MR1A2 are complete: Koda now has one version authority, strict
+versioned runtime and integrity manifests, structural source/release discovery,
+fail-closed critical-file verification, a unified `koda`/`koda-chat`
+dispatcher, and a reproducible repository-independent macOS arm64 bundle with
+embedded Node.js, release `koda-exec`, target-only native add-ons, full doctor,
+and real app-server/native smoke coverage. MR1A3 is next: native Intel CI,
+unsigned artifact retention, clean-install/corruption gates, and the Homebrew
+contract.
 
 Phase 4C3A/C3B/C3C/C3D are complete with strict value-free secret
 declarations/evidence, stable cross-language digests and limits, matching
@@ -139,6 +142,31 @@ matrix in [GitHub Actions run 33354068315](https://github.com/ronaldo123321/koda
 - Offline provider, runtime, CLI, and deterministic agent-loop tests.
 
 Provider-assisted semantic compaction, exact provider tokenizers and pricing, custom endpoints/profiles, live model discovery, automatic routing/fallback, cross-provider resume, additional providers, FTS5/fuzzy/live or cross-workspace search, alternate-screen navigation, rich Markdown/syntax/diff rendering, binary artifact views, overlapping/fuzzy/directory change operations, and the non-Tool MCP capability surface are deliberately deferred beyond the completed Phase 3 baseline. Phase 4A provides durable post-crash journals, safe automatic change-set recovery, audit reconciliation, conflict write blocking, and explicit human resolution clients. Phase 4B provides restart-safe native process ownership, PTY/background jobs, attachments, POSIX process groups, Windows Job Objects, and ConPTY. Strong sandboxing, remote MCP/HTTP/OAuth, shared storage, remote app-server transports, signed releases, and any high-risk shell-string support remain later Phase 4 work. Parent/child thread lineage and multi-agent scenario matrices remain Phase 5 work. Workspace writes, process execution, and MCP tools not explicitly classified as read require approval by default.
+
+## Build the standalone macOS bundle
+
+On an Apple Silicon Mac, build and verify the local standalone archive with:
+
+```bash
+pnpm install --frozen-lockfile
+pnpm bundle:macos --output dist/release/local-arm64
+```
+
+The output directory must not already exist. Assembly builds release
+`koda-exec`, pins and verifies Node.js 22.20.0, rejects mixed Mach-O
+architectures and payload symlinks, runs `koda --version`, full bundle doctor,
+and an app-server/native handshake outside the repository, then emits a
+deterministic archive and `.sha256` file. Try the unpacked candidate directly:
+
+```bash
+dist/release/local-arm64/koda/bin/koda --version
+dist/release/local-arm64/koda/bin/koda doctor --bundle-only
+dist/release/local-arm64/koda/bin/koda
+```
+
+This is an unsigned local developer-preview bundle. Dual-architecture CI and
+Homebrew belong to MR1A3; Developer ID signing, Node checksum-signature
+verification, notarization, and public release provenance belong to MR1A4.
 
 ## Run the CLI
 

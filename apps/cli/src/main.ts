@@ -2,10 +2,20 @@
 
 import { CommanderError } from "commander";
 
+import {
+  resolveInstallationEnvironment,
+  resolveKodaInstallation,
+} from "@koda/distribution";
+
 import { createProgram } from "./program.js";
 
+const installation = await resolveKodaInstallation({
+  anchor: import.meta.url,
+  verifyCriticalFiles: true,
+});
+const environment = resolveInstallationEnvironment(installation, process.env);
 const program = createProgram({
-  environment: process.env,
+  environment,
   processDirectory: process.cwd(),
   stdin: process.stdin,
   stdout: process.stdout,

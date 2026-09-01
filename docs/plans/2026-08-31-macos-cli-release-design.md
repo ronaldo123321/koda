@@ -1,6 +1,6 @@
 # Koda Mac Release 1A Design
 
-- Status: In progress — MR1A1 complete; MR1A2 is next
+- Status: In progress — MR1A1 and MR1A2 complete; MR1A3 is next
 - Date: 2026-08-31
 - Target: macOS CLI/TUI developer preview
 - Depends on: completed Phase 3, Phase 4A, Phase 4B, Phase 4C2A, Phase 4C3,
@@ -130,18 +130,21 @@ doctor report contract. It depends only on the public protocol package. The
 `@koda/distribution-app` package owns the installed bootstrap and unified
 dispatcher, and depends on `@koda/distribution`, CLI, TUI, and app-server. This
 keeps runtime components free to consume release resolution without creating a
-dependency cycle, while still allowing a production `pnpm deploy` operation to
-create one portable dependency tree after the normal workspace build.
+dependency cycle. MR1A2 uses the frozen lockfile to create a temporary isolated
+production `pnpm deploy` tree, bundles the dispatcher, CLI, TUI, and app-server
+into four ESM entry points, and copies only the target `better-sqlite3` native
+add-on closure. The temporary pnpm links never enter the immutable payload.
 
 The assembly pipeline:
 
 1. checks out an exact commit and installs the frozen lockfile;
 2. runs formatting, type checking, Rust clippy, and the complete test suite;
 3. builds TypeScript packages and `koda-exec` in release mode;
-4. deploys production dependencies without workspace links that escape the
+4. deploys the locked production dependency graph to a temporary build tree,
+   bundles four stable ESM entry points, and rejects every link in the final
    payload;
 5. downloads an exact Node.js release for the target architecture and verifies
-   it against the official signed checksum inventory;
+   its pinned SHA-256 against the official HTTPS checksum inventory;
 6. assembles a fresh staging directory with fixed permissions and timestamps;
 7. inventories all payload files and writes the strict manifests;
 8. runs the bundle from outside the repository with development tool paths
@@ -263,7 +266,7 @@ Packaged smoke tests run with:
 
 - a working directory outside the repository;
 - Node, pnpm, Cargo, and Rust removed from `PATH`;
-- no `KODA_EXEC_PATH`;
+- a malicious `KODA_EXEC_PATH` override that release resolution must ignore;
 - a read-only installed payload;
 - paths containing spaces and Unicode;
 - fresh and pre-existing `KODA_HOME` directories.
@@ -300,7 +303,7 @@ Implementation notes:
 
 ### MR1A2 — local standalone bundle
 
-Status: Next.
+Status: Complete.
 
 - `@koda/distribution` portable production deploy;
 - pinned verified Node acquisition;
@@ -308,6 +311,28 @@ Status: Next.
 - release Rust build and native add-on inventory;
 - deterministic archive assembly;
 - repository-independent arm64 smoke and full doctor.
+
+Implementation notes:
+
+- Node.js 22.20.0 arm64/x64 archive names and SHA-256 digests are exact source
+  constants; local assembly rechecks the official HTTPS inventory and archive
+  bytes. OpenPGP verification of the signed inventory remains MR1A4 release
+  provenance work.
+- The final runtime contains four symlink-free ESM entry points, embedded Node,
+  release `koda-exec`, and only the selected Darwin `better-sqlite3` prebuild.
+  Release CLI, TUI, and app-server resolve their installation from
+  `import.meta.url`; executor and app-server environment overrides cannot move
+  them outside the manifest-owned root.
+- Assembly rejects output replacement, payload links, control-character paths,
+  fat or cross-architecture Mach-O files, corrupt Node downloads, incomplete
+  metadata, and failed repository-independent runtime checks.
+- Local arm64 acceptance passed full integrity, an extracted-archive
+  `--version` and doctor run, app-server initialize/list/shutdown with native
+  interactive-process capability, Unicode/space paths, a restricted tool
+  `PATH`, and a malicious executor override.
+- Two independent assemblies produced byte-identical payloads and the same
+  archive SHA-256. The tar file list and payload metadata are normalized, and
+  gzip runs with filename/timestamp recording disabled.
 
 ### MR1A3 — dual-architecture CI and Homebrew contract
 

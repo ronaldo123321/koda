@@ -30,7 +30,9 @@ continues to run as a shared regression gate.
 
 Delivery status: MR1A1 (release runtime contract, unified command dispatcher,
 strict installed-runtime resolution, integrity doctor, and deterministic
-fixtures) is complete. MR1A2 standalone bundle assembly is the next slice.
+fixtures) and MR1A2 (reproducible standalone arm64 bundle, embedded runtime,
+native inventory, and repository-independent smoke) are complete. MR1A3
+dual-architecture CI and Homebrew contract is the next slice.
 
 ## Guiding policies
 

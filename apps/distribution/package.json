@@ -12,13 +12,18 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
-    "./main": "./dist/main.js"
+    "./main": "./dist/main.js",
+    "./bundle": {
+      "types": "./dist/bundle.d.ts",
+      "import": "./dist/bundle.js"
+    }
   },
   "files": [
     "dist"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "bundle:macos": "node dist/assemble-main.js",
     "start": "node dist/main.js",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
@@ -27,9 +32,11 @@
     "@koda/cli": "workspace:*",
     "@koda/distribution": "workspace:*",
     "@koda/protocol": "workspace:*",
-    "@koda/tui": "workspace:*"
+    "@koda/tui": "workspace:*",
+    "better-sqlite3": "13.0.3"
   },
   "devDependencies": {
-    "@types/node": "^22.18.0"
+    "@types/node": "^22.18.0",
+    "esbuild": "0.28.2"
   }
 }

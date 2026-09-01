@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { lstat, open, opendir, realpath } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { lstat, open, realpath } from "node:fs/promises";
+import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { APP_SERVER_PROTOCOL_VERSION } from "@koda/protocol";
@@ -16,14 +16,16 @@ import {
   type RuntimeManifest,
 } from "./contracts.js";
 import { distributionError } from "./errors.js";
+import {
+  INTEGRITY_INVENTORY_NAME,
+  listImmutablePayloadPaths,
+  RUNTIME_MANIFEST_NAME,
+} from "./inventory.js";
 import { KODA_VERSION, NATIVE_EXECUTOR_PROTOCOL_VERSION } from "./version.js";
 
-const RUNTIME_MANIFEST_NAME = "runtime-manifest.json";
-const INTEGRITY_INVENTORY_NAME = "integrity.json";
 const MAXIMUM_MANIFEST_BYTES = 64 * 1_024;
 const MAXIMUM_INVENTORY_BYTES = 16 * 1_024 * 1_024;
 const MAXIMUM_ANCESTOR_DEPTH = 16;
-const MAXIMUM_DIRECTORY_DEPTH = 64;
 
 export interface DevelopmentInstallation {
   readonly mode: "development";
@@ -149,6 +151,20 @@ export function resolveNativeExecutorPath(
     : configured;
 }
 
+export function resolveInstallationEnvironment(
+  installation: KodaInstallation,
+  environment: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv {
+  const resolved = { ...environment };
+  if (installation.mode === "release") {
+    resolved.KODA_EXEC_PATH = resolveInstallationPath(
+      installation,
+      installation.manifest.native_executor.path,
+    );
+  }
+  return resolved;
+}
+
 export async function verifyCriticalIntegrity(
   installation: ReleaseInstallation,
 ): Promise<void> {
@@ -259,43 +275,10 @@ async function verifyFileRecord(
 async function discoverPayloadFiles(
   root: string,
 ): Promise<ReadonlySet<string>> {
-  const files = new Set<string>();
-  await walk(root, root, 0, files);
-  files.delete(RUNTIME_MANIFEST_NAME);
-  files.delete(INTEGRITY_INVENTORY_NAME);
-  return files;
-}
-
-async function walk(
-  root: string,
-  directory: string,
-  depth: number,
-  files: Set<string>,
-): Promise<void> {
-  if (depth > MAXIMUM_DIRECTORY_DEPTH) {
-    throw distributionError("KODA_BUNDLE_INTEGRITY_FAILED");
-  }
-  let handle;
   try {
-    handle = await opendir(directory);
+    return new Set(await listImmutablePayloadPaths(root));
   } catch (error) {
-    throw distributionError("KODA_BUNDLE_COMPONENT_MISSING", error);
-  }
-  for await (const entry of handle) {
-    const absolute = join(directory, entry.name);
-    const path = relative(root, absolute).split(sep).join("/");
-    if (entry.isSymbolicLink()) {
-      throw distributionError("KODA_BUNDLE_INTEGRITY_FAILED");
-    }
-    if (entry.isDirectory()) {
-      await walk(root, absolute, depth + 1, files);
-      continue;
-    }
-    if (!entry.isFile() || files.size >= 100_002) {
-      throw distributionError("KODA_BUNDLE_INTEGRITY_FAILED");
-    }
-    releaseRelativePathSchema.parse(path);
-    files.add(path);
+    throw distributionError("KODA_BUNDLE_INTEGRITY_FAILED", error);
   }
 }
 

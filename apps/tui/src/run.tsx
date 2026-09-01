@@ -3,7 +3,12 @@ import { resolve } from "node:path";
 
 import { NodeAppServerClient } from "@koda/app-server-client-node";
 import type { AppServerClientApi } from "@koda/app-server-client-node";
-import { KODA_VERSION } from "@koda/distribution";
+import {
+  KODA_VERSION,
+  resolveInstallationEnvironment,
+  resolveInstallationPath,
+  resolveKodaInstallation,
+} from "@koda/distribution";
 import {
   modelProviderIdSchema,
   runtimeSettingsModelSchema,
@@ -58,12 +63,7 @@ export async function runTui(
     const approvalMode = selectedApprovalMode(options, runtime.environment);
     client =
       runtime.connectAppServer === undefined
-        ? await NodeAppServerClient.connect({
-            cwd: runtime.processDirectory,
-            environment: runtime.environment,
-            clientName: "koda-chat",
-            clientVersion: KODA_VERSION,
-          })
+        ? await connectDefaultAppServer(runtime)
         : await runtime.connectAppServer();
     const settings = await loadRuntimeSettings(client, workspace);
     const selection = resolveTuiRuntimeSelection(
@@ -107,6 +107,43 @@ export async function runTui(
       await client.shutdown().catch(() => undefined);
     }
   }
+}
+
+async function connectDefaultAppServer(
+  runtime: TuiRuntime,
+): Promise<NodeAppServerClient> {
+  const installation = await resolveKodaInstallation({
+    anchor: import.meta.url,
+    verifyCriticalFiles: true,
+  });
+  const environment = resolveInstallationEnvironment(
+    installation,
+    runtime.environment,
+  );
+  if (installation.mode === "release") {
+    return NodeAppServerClient.connect({
+      command: resolveInstallationPath(
+        installation,
+        installation.manifest.node.path,
+      ),
+      args: [
+        resolveInstallationPath(
+          installation,
+          installation.manifest.entrypoints.app_server,
+        ),
+      ],
+      cwd: runtime.processDirectory,
+      environment,
+      clientName: "koda-chat",
+      clientVersion: KODA_VERSION,
+    });
+  }
+  return NodeAppServerClient.connect({
+    cwd: runtime.processDirectory,
+    environment,
+    clientName: "koda-chat",
+    clientVersion: KODA_VERSION,
+  });
 }
 
 async function canonicalWorkspace(

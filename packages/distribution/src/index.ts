@@ -1,5 +1,7 @@
 export * from "./contracts.js";
 export * from "./doctor.js";
+export * from "./embedded-node.js";
 export * from "./errors.js";
 export * from "./installation.js";
+export * from "./inventory.js";
 export * from "./version.js";

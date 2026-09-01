@@ -32,7 +32,7 @@ export const releaseRelativePathSchema = z
       });
     }
     if (
-      value.includes("\0") ||
+      /[\u0000-\u001f\u007f]/.test(value) ||
       value.includes("\\") ||
       value.startsWith("/") ||
       value.endsWith("/") ||

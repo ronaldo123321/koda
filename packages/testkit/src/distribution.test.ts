@@ -1,10 +1,12 @@
 import { createHash } from "node:crypto";
 import {
+  chmod,
   mkdir,
   mkdtemp,
   readFile,
   realpath,
   rm,
+  stat,
   symlink,
   writeFile,
 } from "node:fs/promises";
@@ -15,11 +17,18 @@ import {
   bundleDoctorExitCode,
   canonicalIntegrityInventory,
   canonicalRuntimeManifest,
+  createIntegrityInventoryFromDirectory,
   currentRuntimeManifest,
+  embeddedNodeArchiveUrl,
+  embeddedNodeArtifact,
+  embeddedNodeChecksumsUrl,
+  EMBEDDED_NODE_VERSION,
   integrityInventoryDigest,
   integrityInventorySchema,
   KodaDistributionError,
+  parseNodeChecksumInventory,
   releaseRelativePathSchema,
+  resolveInstallationEnvironment,
   resolveKodaInstallation,
   resolveNativeExecutorPath,
   runBundleDoctor,
@@ -32,8 +41,13 @@ import {
   type RuntimeManifest,
 } from "@koda/distribution";
 import {
+  auditMachOFiles,
   createDistributionLaunchPlan,
   DistributionUsageError,
+  KodaBundleAssemblyError,
+  makeTreeWritable,
+  parseMachOArchitecture,
+  renderLauncher,
   routeDistributionCommand,
   runDistributionCommand,
   type DistributionLaunchPlan,
@@ -102,6 +116,7 @@ describe("distribution contracts", () => {
       "app\\main.mjs",
       "app//main.mjs",
       "app/",
+      "app/line\nbreak.mjs",
       `app/${"🙂".repeat(2_048)}`,
     ]) {
       expect(releaseRelativePathSchema.safeParse(path).success).toBe(false);
@@ -163,6 +178,70 @@ describe("distribution contracts", () => {
     );
     expect(runtimeManifestDigest(fixture)).toBe(GOLDEN_RUNTIME_MANIFEST_DIGEST);
   });
+
+  it("pins exact official Node.js archives and parses their checksum inventory strictly", () => {
+    const arm64 = embeddedNodeArtifact("arm64");
+    const x64 = embeddedNodeArtifact("x64");
+
+    expect(EMBEDDED_NODE_VERSION).toBe("22.20.0");
+    expect(arm64.sha256).toHaveLength(64);
+    expect(x64.sha256).toHaveLength(64);
+    expect(arm64.sha256).not.toBe(x64.sha256);
+    expect(embeddedNodeArchiveUrl(arm64)).toBe(
+      `https://nodejs.org/dist/v${EMBEDDED_NODE_VERSION}/${arm64.archive}`,
+    );
+    expect(embeddedNodeChecksumsUrl()).toBe(
+      `https://nodejs.org/dist/v${EMBEDDED_NODE_VERSION}/SHASUMS256.txt`,
+    );
+    expect(
+      parseNodeChecksumInventory(
+        `${arm64.sha256}  ${arm64.archive}\n${x64.sha256}  ${x64.archive}\n`,
+        arm64.archive,
+      ),
+    ).toBe(arm64.sha256);
+    expect(() =>
+      parseNodeChecksumInventory(
+        `${arm64.sha256}  other.tar.gz\n`,
+        arm64.archive,
+      ),
+    ).toThrow();
+    expect(() =>
+      parseNodeChecksumInventory(
+        `${arm64.sha256}  ${arm64.archive}\n${arm64.sha256}  ${arm64.archive}\n`,
+        arm64.archive,
+      ),
+    ).toThrow();
+  });
+
+  it("builds a sorted, metadata-free integrity inventory from regular files", async () => {
+    const root = await createTemporaryDirectory();
+    await mkdir(join(root, "z"));
+    await writeFile(join(root, "z", "last.txt"), "last", "utf8");
+    await writeFile(join(root, "first.txt"), "first", "utf8");
+    await writeFile(join(root, "integrity.json"), "ignored", "utf8");
+    await writeFile(join(root, "runtime-manifest.json"), "ignored", "utf8");
+
+    const inventory = await createIntegrityInventoryFromDirectory(root);
+
+    expect(inventory.files.map((file) => file.path)).toEqual([
+      "first.txt",
+      "z/last.txt",
+    ]);
+    expect(inventory.files[0]).toEqual(fileRecord("first.txt", "first"));
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "rejects symbolic links while building an immutable inventory",
+    async () => {
+      const root = await createTemporaryDirectory();
+      await writeFile(join(root, "payload"), "payload", "utf8");
+      await symlink("payload", join(root, "alias"), "file");
+
+      await expect(createIntegrityInventoryFromDirectory(root)).rejects.toThrow(
+        "symbolic links",
+      );
+    },
+  );
 });
 
 describe("installed runtime resolution", () => {
@@ -180,6 +259,15 @@ describe("installed runtime resolution", () => {
         KODA_EXEC_PATH: "/tmp/untrusted-executor",
       }),
     ).toBe(join(fixture.root, "native/koda-exec"));
+    expect(
+      resolveInstallationEnvironment(installation, {
+        KODA_EXEC_PATH: "/tmp/untrusted-executor",
+        KODA_PROVIDER: "deepseek",
+      }),
+    ).toEqual({
+      KODA_EXEC_PATH: join(fixture.root, "native/koda-exec"),
+      KODA_PROVIDER: "deepseek",
+    });
   });
 
   it("preserves explicit executor overrides only in source mode", async () => {
@@ -295,6 +383,71 @@ describe("installed runtime resolution", () => {
   });
 });
 
+describe("macOS bundle assembly primitives", () => {
+  it("renders location-relative launchers without evaluating user input", () => {
+    const koda = renderLauncher("koda");
+    const chat = renderLauncher("koda-chat");
+
+    expect(koda).toContain('exec "$RUNTIME_DIR/node/bin/node"');
+    expect(koda).toContain('"$RUNTIME_DIR/app/dispatcher.mjs" "$@"');
+    expect(chat).toContain('"$RUNTIME_DIR/app/dispatcher.mjs" chat "$@"');
+    expect(koda).toContain("unset NODE_OPTIONS NODE_PATH");
+    expect(koda).toContain("unset DEV");
+    expect(koda).not.toContain("eval ");
+  });
+
+  it("parses thin arm64 and x64 Mach-O headers and identifies fat binaries", () => {
+    expect(parseMachOArchitecture(machOHeader("arm64"))).toBe("arm64");
+    expect(parseMachOArchitecture(machOHeader("x64"))).toBe("x64");
+    expect(parseMachOArchitecture(fatMachOHeader())).toBe("fat");
+    expect(parseMachOArchitecture(Buffer.from("not macho"))).toBeUndefined();
+  });
+
+  it("requires every release native component to match the target architecture", async () => {
+    const root = await createTemporaryDirectory();
+    const nativePaths = [
+      "libexec/koda/native/koda-exec",
+      "libexec/koda/node/bin/node",
+      "libexec/koda/app/node_modules/better-sqlite3/prebuilds/darwin-arm64.node",
+    ];
+    for (const path of nativePaths) {
+      const absolute = join(root, path);
+      await mkdir(dirname(absolute), { recursive: true });
+      await writeFile(absolute, machOHeader("arm64"));
+    }
+    await writeFile(join(root, "README.txt"), "not native", "utf8");
+
+    expect(await auditMachOFiles(root, "arm64")).toEqual(
+      [...nativePaths].sort(),
+    );
+
+    await writeFile(join(root, nativePaths[2]!), machOHeader("x64"));
+    await expect(auditMachOFiles(root, "arm64")).rejects.toMatchObject({
+      code: "KODA_BUNDLE_ARCHITECTURE_INVALID",
+    } satisfies Partial<KodaBundleAssemblyError>);
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "never follows deployment symlinks while making staging writable",
+    async () => {
+      const staging = await createTemporaryDirectory();
+      const workspacePackage = await createTemporaryDirectory();
+      await chmod(workspacePackage, 0o755);
+      await symlink(
+        workspacePackage,
+        join(staging, "workspace-package"),
+        "dir",
+      );
+      await chmod(staging, 0o555);
+
+      await makeTreeWritable(staging);
+
+      expect((await stat(workspacePackage)).mode & 0o777).toBe(0o755);
+      expect((await stat(staging)).mode & 0o777).toBe(0o700);
+    },
+  );
+});
+
 describe("bundle doctor", () => {
   it("returns a versioned development report without exposing paths", async () => {
     const report = await runBundleDoctor({ anchor: import.meta.url });
@@ -396,7 +549,11 @@ describe("unified command dispatcher", () => {
     const releasePlan = createDistributionLaunchPlan(
       { kind: "app_server", args: ["--stdio"] },
       installation,
-      launchOptions(),
+      {
+        environment: { KODA_EXEC_PATH: "/source/koda-exec" },
+        nodeExecutable: "/runtime/node",
+        workingDirectory: "/workspace",
+      },
     );
     expect(releasePlan).toMatchObject({
       command: join(fixture.root, "node/bin/node"),
@@ -535,6 +692,19 @@ function fileRecord(path: string, content: string) {
     bytes: Buffer.byteLength(content, "utf8"),
     sha256: createHash("sha256").update(content, "utf8").digest("hex"),
   };
+}
+
+function machOHeader(architecture: "arm64" | "x64"): Buffer {
+  const header = Buffer.alloc(8);
+  header.writeUInt32LE(0xfeedfacf, 0);
+  header.writeUInt32LE(architecture === "arm64" ? 0x0100000c : 0x01000007, 4);
+  return header;
+}
+
+function fatMachOHeader(): Buffer {
+  const header = Buffer.alloc(8);
+  header.writeUInt32BE(0xcafebabe, 0);
+  return header;
 }
 
 function launchOptions() {
