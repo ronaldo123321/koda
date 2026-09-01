@@ -3,8 +3,8 @@
 - Scope: MR1A4 credential activation, publication, and acceptance
 - Current version/tag: `0.1.0` / `v0.1.0`
 - Workflow: `.github/workflows/macos-public-release.yml`
-- Status: automation and credential-free GitHub infrastructure configured;
-  Apple credentials, Tap token, and first public acceptance pending
+- Status: automation, credential-free GitHub infrastructure, and the scoped Tap
+  token secret configured; Apple credentials and first public acceptance pending
 
 ## 1. Trust boundary
 
@@ -63,6 +63,10 @@ Configured on 2026-09-01:
   [`Koda public release tags`](https://github.com/ronaldo123321/koda/settings/rules/22005058)
   targets `refs/tags/v*`, permits only `ronaldo123321` to bypass, and restricts
   creation, update, deletion, and non-fast-forward changes;
+- environment secret `KODA_HOMEBREW_TAP_TOKEN` is configured with a fine-grained
+  token limited to `ronaldo123321/homebrew-koda`, with repository Contents
+  read/write permission and no account permission. GitHub reports only the
+  secret name; token validity remains a first-release acceptance check;
 - no release tag has been created. Keep `v0.1.0` absent until every secret and
   variable below is configured and re-audited.
 
@@ -99,7 +103,8 @@ The public repository
 was created on 2026-09-01 with initialized `main` commit
 `ffa89160af418f861c8517c5f4d1115aac0eb659`. Environment variable
 `KODA_HOMEBREW_TAP_REPOSITORY=ronaldo123321/homebrew-koda` is configured. The
-repository-scoped `KODA_HOMEBREW_TAP_TOKEN` secret remains pending.
+repository-scoped `KODA_HOMEBREW_TAP_TOKEN` environment secret is configured;
+its ability to update the Tap must still pass the protected release workflow.
 
 The public workflow first builds and tests the final Formula against the exact
 local notarized ZIP, then publishes the immutable GitHub prerelease, and only

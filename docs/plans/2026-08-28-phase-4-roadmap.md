@@ -36,9 +36,9 @@ CI, unsigned artifacts, clean-archive/corruption gates, same-commit metadata,
 and tested Homebrew Formula generation) are complete. MR1A4 signing,
 notarization, release provenance, GitHub Release, and public Tap automation is
 implemented. The protected Environment, active `v*` tag ruleset, public Tap,
-and Tap repository variable are configured; Apple credentials, the
-repository-scoped Tap token, and the first published clean-machine acceptance
-remain before Mac Release 1A can be called complete.
+Tap repository variable, and repository-scoped Tap token secret are configured;
+Apple credentials and the first published clean-machine acceptance remain
+before Mac Release 1A can be called complete.
 
 ## Guiding policies
 

@@ -373,8 +373,9 @@ Implementation notes:
 
 ### MR1A4 — signed public preview
 
-Status: Implementation and credential-free GitHub infrastructure complete;
-protected credentials and first publication acceptance pending.
+Status: Implementation, credential-free GitHub infrastructure, and scoped Tap
+token provisioning complete; Apple credentials and first publication acceptance
+pending.
 
 - protected Developer ID and notarization credentials;
 - nested Mach-O signing and signature audit;
@@ -410,12 +411,14 @@ Implementation notes:
   match the locally regenerated checksums. The Tap commit is similarly a no-op
   only when the Formula already matches;
 - the protected Environment, active `refs/tags/v*` ruleset, initialized public
-  Tap repository, and Tap repository variable are configured. No release tag
-  exists yet, and no private credential is recorded in repository history;
-- the repository cannot prove possession or correctness of external
-  Developer ID, App Store Connect, protected-environment, or Tap credentials.
-  Their setup and the first clean-machine/real-Provider acceptance are tracked
-  in [the MR1A4 release runbook](../release/macos-public-preview-runbook.md).
+  Tap repository, Tap repository variable, and repository-scoped Tap token
+  secret are configured. No release tag exists yet, and no private credential
+  is recorded in repository history;
+- the repository cannot prove possession or correctness of external Developer
+  ID or App Store Connect credentials. GitHub exposes only the configured Tap
+  secret name, so its operational validity and the first
+  clean-machine/real-Provider acceptance remain tracked in
+  [the MR1A4 release runbook](../release/macos-public-preview-runbook.md).
 
 ## Completion criterion
 
