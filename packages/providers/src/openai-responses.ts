@@ -375,7 +375,8 @@ function toOpenAIFunctionTool(
     name: tool.name,
     description: tool.description,
     parameters: tool.inputJsonSchema,
-    strict: true,
+    // Koda validates arguments locally; some tool schemas use unsupported strict-mode keywords.
+    strict: false,
   };
 }
 

@@ -150,7 +150,7 @@ describe("OpenAIResponsesProvider", () => {
         name: "read_file",
         description: "Read a file.",
         parameters: toolDefinition.inputJsonSchema,
-        strict: true,
+        strict: false,
       },
     ]);
 
