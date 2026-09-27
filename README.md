@@ -243,7 +243,7 @@ Intel Mac 将 `arm64` 换成 `x64`。打包脚本会验证复制后的运行时�
 apps/macos-gui/package-unsigned-pkg.sh dist/Koda.app dist/Koda-unsigned.pkg
 ```
 
-该预览安装包尚未签名或公证，也没有自动更新。图形应用的“检查更新”读取项目 [GitHub Releases](https://github.com/ronaldo123321/koda/releases)，只列出版本较新、含当前 Mac 架构对应 `Koda-v<版本>-darwin-<架构>.pkg` 和 `.update.json` 资产的已发布版本，并提供 Release 页面入口。它只做发现，不下载或安装；签名元数据验证、包完整性验证和安装仍待实现。当前发布流程只生成命令行资产，尚无可用的图形应用更新。制作 `.pkg` 时应用目录必须命名为 `Koda.app`，以确保安装路径一致。已在本机验证 SwiftUI 应用能打开、连接真实 app-server、读取已有 Thread，并从 Keychain 加载凭据完成无工具的 OpenAI 对话；远程连接窗口已完成本机界面检查，GUI 内的工具审批、Keychain 删除、`.pkg` 安装和两台设备的远程使用仍待单独验收。
+该预览安装包尚未签名或公证，也没有自动更新。图形应用的“检查更新”读取项目 [GitHub Releases](https://github.com/ronaldo123321/koda/releases)，只列出版本较新、含当前 Mac 架构对应 `Koda-v<版本>-darwin-<架构>.pkg` 和 `.update.json` 资产的已发布版本；若发现候选版，还会用应用内固定的 Ed25519 公钥验证更新元数据签名。应用只提供 Release 页面入口，不下载或安装。已有本地签名器和包字节校验器，但公开签名密钥尚未配置，发布工作流也只生成命令行资产，因此目前没有可用的图形应用更新。制作 `.pkg` 时应用目录必须命名为 `Koda.app`，以确保安装路径一致；打包脚本会从内置运行时写入应用版本，并可通过第三个参数嵌入更新公钥。已在本机验证 SwiftUI 应用能打开、连接真实 app-server、读取已有 Thread，并从 Keychain 加载凭据完成无工具的 OpenAI 对话；远程连接窗口已完成本机界面检查，GUI 内的工具审批、Keychain 删除、`.pkg` 安装和两台设备的远程使用仍待单独验收。
 
 ## 使用 CLI
 

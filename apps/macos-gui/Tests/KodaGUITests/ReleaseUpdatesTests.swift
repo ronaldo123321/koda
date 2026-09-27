@@ -22,12 +22,28 @@ final class ReleaseUpdatesTests: XCTestCase {
                                                architecture: "arm64"))
     }
 
+    func testRejectsAssetDownloadOutsideTheProjectRelease() throws {
+        var spoofed = release("v9.0.0", assets: [
+            "Koda-v9.0.0-darwin-arm64.pkg", "Koda-v9.0.0-darwin-arm64.update.json",
+        ])
+        var assets = try XCTUnwrap(spoofed["assets"] as? [[String: String]])
+        assets[0]["browser_download_url"] = "https://example.com/Koda-v9.0.0-darwin-arm64.pkg"
+        spoofed["assets"] = assets
+        let data = try JSONSerialization.data(withJSONObject: [spoofed])
+        XCTAssertNil(try ReleaseUpdates.select(from: data, installedVersion: "0.1.0",
+                                               architecture: "arm64"))
+    }
+
     private func release(_ tag: String, draft: Bool = false, assets: [String]) -> [String: Any] {
         [
             "tag_name": tag,
             "html_url": "https://github.com/ronaldo123321/koda/releases/tag/\(tag)",
             "draft": draft,
-            "assets": assets.map { ["name": $0] },
+            "assets": assets.map { [
+                "name": $0,
+                "state": "uploaded",
+                "browser_download_url": "https://github.com/ronaldo123321/koda/releases/download/\(tag)/\($0)",
+            ] },
         ]
     }
 }

@@ -3,6 +3,8 @@ import Foundation
 struct ReleaseUpdate: Equatable {
     let version: String
     let page: URL
+    let packageName: String
+    let metadataURL: URL
 }
 
 enum ReleaseUpdates {
@@ -20,8 +22,16 @@ enum ReleaseUpdates {
               data.count <= 1_000_000 else {
             throw UpdateCheckError.invalidResponse
         }
-        return try select(from: data, installedVersion: installedVersion,
-                          architecture: currentArchitecture)
+        guard let candidate = try select(from: data, installedVersion: installedVersion,
+                                         architecture: currentArchitecture) else { return nil }
+        let publicKey = try loadTrustRoot()
+        let (metadataData, metadataResponse) = try await session.data(from: candidate.metadataURL)
+        guard let http = metadataResponse as? HTTPURLResponse, http.statusCode == 200,
+              metadataData.count <= 8_192 else { throw UpdateMetadataError.invalid }
+        let metadata = try JSONDecoder().decode(UpdateMetadata.self, from: metadataData)
+        _ = try metadata.verify(version: candidate.version, architecture: currentArchitecture,
+                                packageName: candidate.packageName, publicKey: publicKey)
+        return candidate
     }
 
     static func select(from data: Data, installedVersion: String,
@@ -34,13 +44,33 @@ enum ReleaseUpdates {
                   version > installed,
                   let page = URL(string: release.htmlURL),
                   page.scheme == "https", page.host == "github.com",
+                  page.user == nil, page.password == nil,
+                  page.query == nil, page.fragment == nil,
                   page.path == "/ronaldo123321/koda/releases/tag/\(release.tagName)" else { return nil }
             let base = "Koda-\(release.tagName)-darwin-\(architecture)"
-            guard release.assets.contains(where: { $0.name == "\(base).pkg" }),
-                  release.assets.contains(where: { $0.name == "\(base).update.json" })
+            let packageName = "\(base).pkg"
+            let metadataName = "\(base).update.json"
+            let downloadBase = "https://github.com/ronaldo123321/koda/releases/download/\(release.tagName)/"
+            guard release.assets.contains(where: {
+                $0.name == packageName && $0.state == "uploaded" &&
+                    $0.browserDownloadURL == downloadBase + packageName
+            }), let metadataAsset = release.assets.first(where: {
+                $0.name == metadataName && $0.state == "uploaded" &&
+                    $0.browserDownloadURL == downloadBase + metadataName
+            }), let metadataURL = URL(string: metadataAsset.browserDownloadURL)
             else { return nil }
-            return (version, ReleaseUpdate(version: String(release.tagName.dropFirst()), page: page))
+            return (version, ReleaseUpdate(version: String(release.tagName.dropFirst()),
+                                           page: page, packageName: packageName,
+                                           metadataURL: metadataURL))
         }.max(by: { $0.0 < $1.0 })?.1
+    }
+
+    private static func loadTrustRoot() throws -> Data {
+        guard let url = Bundle.main.url(forResource: "update-public-key", withExtension: "base64"),
+              let encoded = try? String(contentsOf: url, encoding: .utf8),
+              let key = Data(base64Encoded: encoded.trimmingCharacters(in: .whitespacesAndNewlines)),
+              key.count == 32 else { throw UpdateMetadataError.missingTrustRoot }
+        return key
     }
 
     private static var currentArchitecture: String {
@@ -67,6 +97,12 @@ private struct Release: Decodable {
 
 private struct Asset: Decodable {
     let name: String
+    let state: String
+    let browserDownloadURL: String
+
+    enum CodingKeys: String, CodingKey {
+        case name, state, browserDownloadURL = "browser_download_url"
+    }
 }
 
 private struct Version: Comparable {

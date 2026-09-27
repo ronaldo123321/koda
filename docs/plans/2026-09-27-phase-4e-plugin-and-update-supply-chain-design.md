@@ -1,6 +1,6 @@
 # Koda Phase 4E: 插件与更新供应链
 
-- 状态：本地签名包验证、受管理安装、手动启停、上一版本回滚、已签名包目录发布、HTTPS 签名目录发现、确切版本下载、手动选择较新稳定版、更新前状态比对及所有者显式信任根轮换已实现。macOS GUI 已有 GitHub Releases 候选版发现；下载、验证、安装、定时自动更新与完整崩溃点验收未完成。
+- 状态：本地签名包验证、受管理安装、手动启停、上一版本回滚、已签名包目录发布、HTTPS 签名目录发现、确切版本下载、手动选择较新稳定版、更新前状态比对及所有者显式信任根轮换已实现。macOS GUI 已有 GitHub Releases 候选版发现及签名元数据验证；本地 `.pkg` 摘要验证已实现。GUI 下载、安装、定时自动更新与完整崩溃点验收未完成。
 - 范围：本轮只处理 macOS；Linux、Windows 发布暂缓。公开发布仍需要 Apple Developer 签名与公证凭据。
 
 ## 信任边界
@@ -17,7 +17,9 @@
 4. **更新与回滚：** 新版本在暂存区验证和初始化，成功后原子切换；失败保持或恢复旧版本。崩溃恢复检查操作日志与激活指针，绝不运行未完成验证的版本。
 5. **macOS 应用更新：** 首版更新源固定为项目的 [GitHub Releases](https://github.com/ronaldo123321/koda/releases)。通过 GitHub Releases API 列出已发布版本，包含项目当前使用的预发布版本；草稿与缺少 macOS 图形应用资产的版本不可作为更新。候选版本必须高于已安装版本，并提供与设备架构匹配的应用包、包摘要、来源提交和经过签名的发布元数据。下载后复核包与运行时完整性，再明确执行安装。公开自动更新必须额外通过代码签名、公证、Gatekeeper 与签名身份连续性检查。无 Apple Developer 凭据时只允许内部预览安装和验证，不宣称公开自动更新可用。
 
-目前的 `macos-public-release.yml` 只发布命令行 ZIP，尚未发布图形应用包；仓库也还没有 GitHub Release。因此现阶段没有可下载的图形应用更新，不能把命令行 ZIP 误认为 GUI 更新。SwiftUI 已提供手动检查：读取 GitHub Releases 列表，过滤草稿、旧版本和缺少当前架构 `.pkg`／`.update.json` 资产的版本，并给出 Release 页面入口；此处只发现候选版，不验证资产、不下载或安装。下一步需发布独立的 GUI 资产、校验签名元数据与包完整性，并让安装包始终安装为 `Koda.app`。本机未签名 `.pkg` 只用于安装验收，不能作为公开自动更新资产。
+目前的 `macos-public-release.yml` 只发布命令行 ZIP，尚未发布图形应用包；仓库也还没有 GitHub Release。因此现阶段没有可下载的图形应用更新，不能把命令行 ZIP 误认为 GUI 更新。SwiftUI 手动检查会读取 GitHub Releases 列表，过滤草稿、旧版本和缺少当前架构 `.pkg`／`.update.json` 资产的版本，并用应用内固定 Ed25519 公钥验证候选元数据后给出 Release 页面入口。`sign-update-metadata.mjs` 对版本、架构、40 位来源提交、包名、包字节数及 SHA-256 生成域分隔签名；Swift 验证器也能分块核验本地包。临时密钥的 Node 签名器／Swift 验证器互通及篡改拒绝已通过，预览打包可嵌入公钥并从运行时写入应用版本。尚未配置正式签名密钥或把签名器接入受保护发布工作流；GUI 也尚未下载、验证下载包或安装。下一步需发布独立的 GUI 资产，完成签名、公证、Gatekeeper、身份连续性及安装回滚验收。本机未签名 `.pkg` 只用于安装验收，不能作为公开自动更新资产。
+
+更新元数据 v1 的 JSON 字段为 `schema_version`、`version`、`architecture`、`source_commit`、`package_name`、`package_size`、`package_sha256` 和 Base64 `signature`。签名输入是 UTF-8 文本 `KODA_GUI_UPDATE_V1\n`，再按上述顺序（不含 `schema_version`、`signature`）追加各字段及换行。发行公钥必须在应用签名之前嵌入 `Contents/Resources/update-public-key.base64`；私钥应单独保存在受保护发布环境中，发布资产不能提供或替换客户端信任根。签名元数据只绑定包字节，不能代替 Apple 安装包签名、公证或安装后代码身份检查。
 
 Phase 4E 验收需要恶意清单、回滚、断电点、信任根轮换和已安装包篡改测试。Phase 4F 再覆盖整条发布及远程运行矩阵。
 
