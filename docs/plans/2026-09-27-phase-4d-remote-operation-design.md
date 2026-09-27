@@ -123,6 +123,13 @@ cancels it according to a documented timeout; ownership transfer is explicit,
 audited, and cannot reuse an earlier approval. Cancellation and command effects
 are never retried merely because a request response was lost.
 
+A real child-process `SIGKILL` test now covers the durable request record after
+reservation and after the request is marked started with a Thread binding.
+Reopening the stores and retrying the same request returns the original IDs
+without starting another Turn. A reservation interrupted before binding stays
+`reserved`; owner-side resolution of that uncertain state and the remaining
+crash points are still open.
+
 ## 4. Storage and process ownership
 
 Local JSONL and SQLite are not a shared multi-node database. The first remote

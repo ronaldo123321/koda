@@ -1,7 +1,11 @@
 import { createHash } from "node:crypto";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createInterface } from "node:readline";
+import { fileURLToPath } from "node:url";
 
 import type { KodaApplication } from "@koda/app";
 import {
@@ -23,6 +27,95 @@ afterEach(async () => {
 });
 
 describe.skipIf(process.platform === "win32")("remote Turn host", () => {
+  it("does not repeat a remote Turn after SIGKILL at reservation or commit", async () => {
+    for (const stage of ["reserved", "started"] as const) {
+      const home = await mkdtemp(join(tmpdir(), "koda-remote-kill-home-"));
+      const workspace = await mkdtemp(
+        join(tmpdir(), "koda-remote-kill-workspace-"),
+      );
+      directories.push(home, workspace);
+      const child = spawn(
+        process.execPath,
+        [
+          fileURLToPath(
+            new URL("../fixtures/remote-turn-host-child.mjs", import.meta.url),
+          ),
+          home,
+          workspace,
+          stage,
+        ],
+        { stdio: ["pipe", "pipe", "pipe"] },
+      );
+      const exited = once(child, "exit");
+      try {
+        const lines = createInterface({ input: child.stdout });
+        const [line] = await once(lines, "line", {
+          signal: AbortSignal.timeout(10_000),
+        });
+        expect(JSON.parse(String(line))).toMatchObject({
+          threadId: "crash-thread",
+          turnId: "crash-turn",
+          status: stage,
+        });
+      } finally {
+        child.kill("SIGKILL");
+        await exited;
+      }
+      const principal = {
+        ownerId: "owner",
+        deviceId: `device-${"1".repeat(32)}`,
+      };
+      const catalog = await RemoteAccessCatalog.create(
+        "owner",
+        [{ id: "project", root: await realpath(workspace) }],
+        [
+          {
+            ...principal,
+            workspaceId: "project",
+            permissions: ["workspace:read", "turn:start"],
+          },
+        ],
+      );
+      const bindings = await RemoteThreadStore.open(home, "owner");
+      const requests = await RemoteTurnRequestStore.open(home, "owner");
+      if (stage === "started") {
+        expect(await bindings.get("crash-thread")).toMatchObject({
+          workspaceId: "project",
+        });
+      } else {
+        expect(await bindings.get("crash-thread")).toBeUndefined();
+      }
+      expect(await requests.get("2".repeat(32))).toMatchObject({
+        status: stage,
+      });
+      let starts = 0;
+      const host = new RemoteTurnHost(
+        {
+          isRemoteRestricted: true,
+          startTurnAfter: async () => {
+            starts += 1;
+            throw new Error("Turn must not restart.");
+          },
+        } as unknown as KodaApplication,
+        bindings,
+        requests,
+      );
+      const result = await host.start(principal, catalog, {
+        requestId: "2".repeat(32),
+        workspaceId: "project",
+        prompt: "Explain the project.",
+      });
+      expect(result).toMatchObject({
+        threadId: "crash-thread",
+        turnId: "crash-turn",
+        status: stage,
+        replayed: true,
+      });
+      expect(starts).toBe(0);
+      await host.close();
+    }
+  });
+
   it("binds before execution, keeps a Turn after the initiating request, and deduplicates retries", async () => {
     const home = await mkdtemp(join(tmpdir(), "koda-remote-turn-host-"));
     const workspace = await mkdtemp(
