@@ -350,6 +350,14 @@ of these items is considered complete when macOS or Linux closes.
 
 ### Phase 4D: authenticated remote operation
 
+Status: In progress — the single-owner, multi-device authorization and device
+credential foundation is implemented locally; no remote listener, remote
+Thread binding, replay, remote MCP/OAuth, or remote acceptance is enabled yet.
+The chosen client direction is a native SwiftUI macOS application.
+
+The current contract and delivery checks are in
+[Phase 4D authenticated remote operation](2026-09-27-phase-4d-remote-operation-design.md).
+
 - Add HTTP/WebSocket app-server transport with authentication, reconnect cursors, event replay, and multi-client subscription ownership.
 - Add remote MCP transport and OAuth lifecycle.
 - Define shared or remote artifact storage, distributed leases, integrity verification, and retention ownership.
