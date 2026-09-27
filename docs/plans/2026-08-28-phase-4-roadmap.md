@@ -373,15 +373,29 @@ The current contract and delivery checks are in
 
 ### Phase 4E: extension and release supply chain
 
-The signed macOS CLI/TUI release subset is pulled forward as Mac Release 1A.
-Plugin registry trust, cross-platform signed releases, and full update lifecycle
-remain in Phase 4E after the macOS preview.
+Status: In progress — local signed plugin packages, managed install/update/
+rollback, signed HTTPS catalog discovery, and explicit publisher-key rotation
+are implemented and locally tested. The SwiftUI app discovers macOS GUI update
+candidates from GitHub Releases and verifies signed update metadata and package
+bytes before offering the system installer. The public release workflow builds
+the GUI packages, but Apple signing credentials, a published GUI Release,
+positive signed-package installation, and the remaining interruption tests are
+still required. See [Phase 4E plugin and update supply chain](2026-09-27-phase-4e-plugin-and-update-supply-chain-design.md).
+
+The signed macOS CLI/TUI release subset was pulled forward as Mac Release 1A.
+Linux/Windows release expansion remains deferred.
 
 - Add plugin discovery, enable/disable, install, update, provenance, signature verification, and bounded lifecycle supervision.
 - Define registry trust roots and safe rollback of failed updates.
 - Produce signed cross-platform Koda and executor releases with reproducible release metadata.
 
 ### Phase 4F: hardening acceptance
+
+Status: In progress — the 2026-09-27 local full-suite baseline passed:
+`pnpm test` completed the build, 89 Rust tests, and 814 Vitest tests
+(35 skipped). This establishes a local regression baseline only; the
+platform, physical-device remote, power-loss, and signed public-release
+scenarios below still require separate evidence.
 
 - Run kill-point and power-loss simulations around every durable boundary.
 - Exercise POSIX, macOS, Linux, and Windows execution ownership and sandbox capability matrices.
