@@ -7,8 +7,12 @@ import { resolve } from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Duplex } from "node:stream";
 
-import { ConfigurationError, type KodaApplication } from "@koda/app";
-import type { AgentEvent } from "@koda/protocol";
+import {
+  ArtifactInspectionError,
+  ConfigurationError,
+  type KodaApplication,
+} from "@koda/app";
+import { threadIdSchema, type AgentEvent } from "@koda/protocol";
 import WebSocket, { WebSocketServer } from "ws";
 import { z, ZodError } from "zod";
 
@@ -33,6 +37,7 @@ const OWNER_ID = "owner";
 const MAX_URL_LENGTH = 2_048;
 const MAX_RESPONSE_BYTES = 64 * 1_024;
 const MAX_UPDATE_RESPONSE_BYTES = 3 * 1_024 * 1_024;
+const MAX_ARTIFACT_RESPONSE_BYTES = 128 * 1_024;
 const MAX_WS_FRAME_BYTES = 512 * 1_024;
 const MAX_WS_BUFFER_BYTES = 2 * 1_024 * 1_024;
 const MAX_SUBSCRIPTIONS = 8;
@@ -343,6 +348,67 @@ async function handleRequest(
       /^\/v1\/threads\/([A-Za-z0-9][A-Za-z0-9_-]{0,127})(\/(?:events|updates))?$/u.exec(
         url.pathname,
       );
+    const artifactsMatch =
+      /^\/v1\/threads\/([A-Za-z0-9][A-Za-z0-9_-]{0,127})\/artifacts(?:\/(sha256:[a-f0-9]{64}))?$/u.exec(
+        url.pathname,
+      );
+    if (artifactsMatch !== null) {
+      const threadIdText = artifactsMatch[1];
+      if (threadIdText === undefined) throw new RemoteInvalidRequestError();
+      const threadId = threadIdSchema.parse(threadIdText);
+      const root = await catalog.authorizeThread(
+        verified.principal,
+        await threads.get(threadId),
+        "thread:read",
+      );
+      const metadata = (await application.getThread(threadId)).value;
+      if (metadata?.workspaceRoot !== root) {
+        send(response, 404, { error: "Unavailable" });
+        return;
+      }
+      const artifactId = artifactsMatch[2];
+      if (artifactId === undefined) {
+        const cursor = parseArtifactListCursor(url);
+        if (cursor === undefined) throw new RemoteInvalidRequestError();
+        const result = await application.listThreadArtifacts({
+          workspace: root,
+          threadId,
+          ...cursor,
+        });
+        send(response, 200, {
+          artifacts: result.artifacts.map(({ sequence, artifact }) => ({
+            sequence,
+            artifact,
+          })),
+          hasEarlier: result.hasEarlier,
+          nextBeforeSequence: result.nextBeforeSequence ?? null,
+        });
+      } else {
+        const cursor = parseArtifactReadCursor(url);
+        if (cursor === undefined) throw new RemoteInvalidRequestError();
+        const result = await application.readArtifact({
+          workspace: root,
+          threadId,
+          artifactId,
+          ...cursor,
+        });
+        send(
+          response,
+          200,
+          {
+            artifact: result.artifact,
+            content: result.content,
+            startByte: result.startByte,
+            endByte: result.endByte,
+            totalBytes: result.totalBytes,
+            hasEarlier: result.hasEarlier,
+            hasLater: result.hasLater,
+          },
+          MAX_ARTIFACT_RESPONSE_BYTES,
+        );
+      }
+      return;
+    }
     if (match !== null) {
       const threadId = match[1];
       if (threadId === undefined) {
@@ -407,6 +473,12 @@ async function handleRequest(
     send(response, 404, { error: "Unavailable" });
   } catch (error) {
     if (error instanceof RemoteAccessDeniedError) {
+      send(response, 404, { error: "Unavailable" });
+    } else if (
+      error instanceof ArtifactInspectionError &&
+      (error.code === "ARTIFACT_NOT_REFERENCED" ||
+        error.code === "THREAD_WORKSPACE_MISMATCH")
+    ) {
       send(response, 404, { error: "Unavailable" });
     } else if (error instanceof RemoteTurnRequestConflictError) {
       send(response, 409, { error: "Request conflict" });
@@ -672,6 +744,92 @@ function parseThreadCursor(
   const limit = Number(limitText);
   if (!Number.isSafeInteger(limit) || limit > 25) return undefined;
   return { ...(after === undefined ? {} : { after }), limit };
+}
+
+function parseArtifactListCursor(
+  url: URL,
+): { beforeSequence?: number; limit: number } | undefined {
+  if (
+    [...url.searchParams.keys()].some(
+      (key) => key !== "before" && key !== "limit",
+    )
+  )
+    return undefined;
+  if (
+    url.searchParams.getAll("before").length > 1 ||
+    url.searchParams.getAll("limit").length > 1
+  )
+    return undefined;
+  const before = url.searchParams.get("before");
+  const limit = parseBoundedInteger(
+    url.searchParams.get("limit") ?? "25",
+    1,
+    25,
+  );
+  const beforeSequence =
+    before === null
+      ? undefined
+      : parseBoundedInteger(before, 0, Number.MAX_SAFE_INTEGER);
+  if (limit === undefined || (before !== null && beforeSequence === undefined))
+    return undefined;
+  return { ...(beforeSequence === undefined ? {} : { beforeSequence }), limit };
+}
+
+function parseArtifactReadCursor(
+  url: URL,
+): { beforeByte?: number; afterByte?: number; maxBytes: number } | undefined {
+  if (
+    [...url.searchParams.keys()].some(
+      (key) =>
+        key !== "beforeByte" && key !== "afterByte" && key !== "maxBytes",
+    )
+  )
+    return undefined;
+  if (
+    ["beforeByte", "afterByte", "maxBytes"].some(
+      (key) => url.searchParams.getAll(key).length > 1,
+    )
+  )
+    return undefined;
+  const before = url.searchParams.get("beforeByte");
+  const after = url.searchParams.get("afterByte");
+  if (before !== null && after !== null) return undefined;
+  const beforeByte =
+    before === null
+      ? undefined
+      : parseBoundedInteger(before, 0, Number.MAX_SAFE_INTEGER);
+  const afterByte =
+    after === null
+      ? undefined
+      : parseBoundedInteger(after, 0, Number.MAX_SAFE_INTEGER);
+  const maxBytes = parseBoundedInteger(
+    url.searchParams.get("maxBytes") ?? "16384",
+    4,
+    16_384,
+  );
+  if (
+    maxBytes === undefined ||
+    (before !== null && beforeByte === undefined) ||
+    (after !== null && afterByte === undefined)
+  )
+    return undefined;
+  return {
+    ...(beforeByte === undefined ? {} : { beforeByte }),
+    ...(afterByte === undefined ? {} : { afterByte }),
+    maxBytes,
+  };
+}
+
+function parseBoundedInteger(
+  text: string,
+  minimum: number,
+  maximum: number,
+): number | undefined {
+  if (!/^(?:0|[1-9]\d*)$/u.test(text)) return undefined;
+  const value = Number(text);
+  return Number.isSafeInteger(value) && value >= minimum && value <= maximum
+    ? value
+    : undefined;
 }
 
 function bearerToken(request: IncomingMessage): string | undefined {

@@ -358,10 +358,12 @@ TLS listener on a private IP now exposes workspace IDs, bound Thread summaries,
 durable payload-free event envelopes and assistant updates with exclusive cursors,
 authenticated WSS subscriptions with replay, and restricted
 remote Turn starts with pre-execution binding and durable request idempotency.
+Thread-scoped artifact listing and verified text-range reads are now exposed
+through the same authorization boundary. The native SwiftUI client preview
+uses pinned TLS and cursor replay.
 Remote effectful operations, complete event projection, remote MCP/OAuth, and remote
 acceptance are not enabled yet. First deployment targets LAN or an
 owner-managed VPN.
-The chosen client direction is a native SwiftUI macOS application.
 
 The current contract and delivery checks are in
 [Phase 4D authenticated remote operation](2026-09-27-phase-4d-remote-operation-design.md).

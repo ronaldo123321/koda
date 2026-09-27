@@ -1,6 +1,13 @@
 import { execFile } from "node:child_process";
 import { X509Certificate } from "node:crypto";
-import { chmod, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
+import {
+  chmod,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { request } from "node:https";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,6 +22,7 @@ import {
 } from "@koda/app-server";
 import { runRemoteServeCommand } from "@koda/cli";
 import { agentEventSchema, threadMetadataSchema } from "@koda/protocol";
+import { ArtifactStore, JsonlEventStore } from "@koda/runtime-node";
 import { afterEach, describe, expect, it } from "vitest";
 import WebSocket from "ws";
 
@@ -141,6 +149,51 @@ describe.skipIf(process.platform === "win32")(
         logFile: join(home, "threads", "thread-other.jsonl"),
         workspaceRoot: await realpath(otherWorkspace),
       });
+      const artifactApplication = new KodaApplication({
+        environment: { KODA_HOME: home },
+        processDirectory: workspace,
+      });
+      const artifactStore = await ArtifactStore.open(join(home, "artifacts"));
+      const materialized = await artifactStore.materializeText(
+        "Remote artifact 中文 content",
+        { inlineBytes: 4 },
+      );
+      if (materialized.artifact === undefined) {
+        throw new Error("Expected a published artifact.");
+      }
+      const artifact = materialized.artifact;
+      const artifactLog = new JsonlEventStore(
+        join(home, "threads", "thread-1.jsonl"),
+      );
+      await artifactLog.append(
+        agentEventSchema.parse({
+          schemaVersion: 1,
+          sequence: 0,
+          timestamp: "2026-09-27T00:00:00.000Z",
+          threadId: "thread-1",
+          turnId: "turn-1",
+          type: "turn.context",
+          payload: {
+            provider: "openai",
+            model: "gpt-test",
+            workspaceRoot: await realpath(workspace),
+            approvalMode: "on-request",
+            instructionsSha256: "0".repeat(64),
+            repositoryInstructions: [],
+          },
+        }),
+      );
+      await artifactLog.append(
+        agentEventSchema.parse({
+          schemaVersion: 1,
+          sequence: 1,
+          timestamp: "2026-09-27T00:00:01.000Z",
+          threadId: "thread-1",
+          turnId: "turn-1",
+          type: "artifact.recorded",
+          payload: { callId: "artifact-call", name: "read_file", artifact },
+        }),
+      );
       const largeAnswer = "x".repeat(70_000);
       const replayEvents = [
         agentEventSchema.parse({
@@ -239,6 +292,10 @@ describe.skipIf(process.platform === "win32")(
             hasLater: matching.length > events.length,
           };
         },
+        listThreadArtifacts:
+          artifactApplication.listThreadArtifacts.bind(artifactApplication),
+        readArtifact:
+          artifactApplication.readArtifact.bind(artifactApplication),
       } as unknown as KodaApplication;
       const server = await startRemoteHttpsServer({
         application,
@@ -323,6 +380,81 @@ describe.skipIf(process.platform === "win32")(
         });
         expect(JSON.stringify(thread.body)).not.toContain(home);
         expect(JSON.stringify(thread.body)).not.toContain("private diagnostic");
+        const listedArtifacts = await get(
+          port,
+          certificate,
+          "/v1/threads/thread-1/artifacts?limit=1",
+          issued.token,
+        );
+        expect(listedArtifacts).toEqual({
+          status: 200,
+          body: {
+            artifacts: [{ sequence: 1, artifact }],
+            hasEarlier: false,
+            nextBeforeSequence: null,
+          },
+        });
+        expect(JSON.stringify(listedArtifacts.body)).not.toContain(workspace);
+        expect(JSON.stringify(listedArtifacts.body)).not.toContain(
+          "artifact-call",
+        );
+        const artifactPath = `/v1/threads/thread-1/artifacts/${artifact.id}`;
+        const firstArtifactRange = await get(
+          port,
+          certificate,
+          `${artifactPath}?afterByte=0&maxBytes=8`,
+          issued.token,
+        );
+        expect(firstArtifactRange).toMatchObject({
+          status: 200,
+          body: { artifact, startByte: 0, hasEarlier: false, hasLater: true },
+        });
+        expect(JSON.stringify(firstArtifactRange.body)).not.toContain(
+          workspace,
+        );
+        expect(
+          (await get(port, certificate, artifactPath, readOnly.token)).status,
+        ).toBe(404);
+        expect(
+          (
+            await get(
+              port,
+              certificate,
+              `/v1/threads/thread-other/artifacts/${artifact.id}`,
+              issued.token,
+            )
+          ).status,
+        ).toBe(404);
+        expect(
+          (
+            await get(
+              port,
+              certificate,
+              `${artifactPath}?afterByte=0&beforeByte=8`,
+              issued.token,
+            )
+          ).status,
+        ).toBe(400);
+        expect(
+          (
+            await get(
+              port,
+              certificate,
+              "/v1/threads/thread-1/artifacts?limit=1&limit=2",
+              issued.token,
+            )
+          ).status,
+        ).toBe(400);
+        expect(
+          (
+            await get(
+              port,
+              certificate,
+              `/v1/threads/thread-1/artifacts/sha256:${"f".repeat(64)}`,
+              issued.token,
+            )
+          ).status,
+        ).toBe(404);
         const firstEvents = await get(
           port,
           certificate,
@@ -524,6 +656,26 @@ describe.skipIf(process.platform === "win32")(
           readOnly.token,
         );
         expect(deniedUpdates.status).toBe(404);
+        await writeFile(
+          join(
+            home,
+            "artifacts",
+            "sha256",
+            artifact.sha256.slice(0, 2),
+            artifact.sha256,
+          ),
+          "x".repeat(artifact.bytes),
+        );
+        const corruptedArtifact = await get(
+          port,
+          certificate,
+          artifactPath,
+          issued.token,
+        );
+        expect(corruptedArtifact).toEqual({
+          status: 500,
+          body: { error: "Internal error" },
+        });
         const missing = await get(
           port,
           certificate,

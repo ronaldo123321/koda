@@ -16,8 +16,12 @@
   delivery to one device after revoking the other. A SwiftUI model test now
   closes and restarts the actual local HTTPS/WSS listener on the same address,
   then confirms automatic cursor replay adds the later assistant update once.
-  Physical two-device
-  acceptance remains open.
+  The remote HTTPS listener also exposes Thread-scoped artifact lists and
+  verified UTF-8 byte ranges to devices with `thread:read`; the list omits host
+  paths and tool names. A real artifact store and durable Thread reference test
+  covers cross-workspace denial, absent references, invalid cursors, and
+  changed artifact bytes. Remote retention ownership and physical-device
+  acceptance remain open.
 - Date: 2026-09-27
 - Depends on: local app-server v18, durable JSONL events, thread leases, artifact integrity, and Phase 4A–4C security evidence
 - Scope: one owner across multiple devices, authenticated HTTP/WebSocket clients, reconnect/replay, remote MCP/OAuth, shared state ownership, and owner/workspace/thread authorization
@@ -50,6 +54,16 @@ Thread before upgrade and during polling, replay by an exclusive durable
 cursor, and close on revocation or bounded-buffer pressure without cancelling
 the Turn. Other remote effectful operations stay disabled until their authorization
 and disconnect tests pass.
+
+Artifact access uses `GET /v1/threads/:threadId/artifacts` with an optional
+`before` sequence and limit of 25, and
+`GET /v1/threads/:threadId/artifacts/sha256:<digest>` with optional exclusive
+`beforeByte` or `afterByte` and a maximum 16 KiB UTF-8 range. Both check the
+device's `thread:read` grant, immutable Thread binding, and authoritative
+workspace root before calling the existing Thread-reference and SHA-256
+verification path. Listing returns only sequence and content-addressed
+artifact metadata; reading returns the verified range and byte cursors.
+Integrity failures return a generic server error without artifact bytes.
 
 ## 2. Identity and authorization
 
