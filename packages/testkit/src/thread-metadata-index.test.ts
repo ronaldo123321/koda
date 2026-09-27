@@ -34,6 +34,51 @@ afterEach(async () => {
 });
 
 describe("ThreadMetadataIndex", () => {
+  it("rebuilds parent-child lineage from the first durable turn", async () => {
+    const kodaHome = await createKodaHome();
+    const parentId = threadIdSchema.parse("lineage-parent");
+    const childId = threadIdSchema.parse("lineage-child");
+    const parentTurn = turnIdSchema.parse("lineage-parent-turn");
+    const childTurn = turnIdSchema.parse("lineage-child-turn");
+    await writeEvents(kodaHome, parentId, [
+      event(parentId, parentTurn, 0, "turn.started", {}, "00:00:00"),
+      contextEvent(parentId, parentTurn, 1, "/workspace/one", "model-a"),
+      event(
+        parentId,
+        parentTurn,
+        2,
+        "turn.completed",
+        { steps: 1 },
+        "00:00:02",
+      ),
+    ]);
+    await writeEvents(kodaHome, childId, [
+      event(
+        childId,
+        childTurn,
+        0,
+        "turn.started",
+        { parentThreadId: parentId },
+        "00:00:03",
+      ),
+      contextEvent(childId, childTurn, 1, "/workspace/one", "model-a"),
+      event(childId, childTurn, 2, "turn.completed", { steps: 1 }, "00:00:05"),
+    ]);
+
+    const index = await ThreadMetadataIndex.open(kodaHome);
+    await index.refresh();
+    expect(index.get(childId)?.parentThreadId).toBe(parentId);
+    expect(
+      index.listChildren(parentId).map((thread) => thread.threadId),
+    ).toEqual([childId]);
+    expect(index.listChildren(childId)).toEqual([]);
+    index.close();
+
+    const reopened = await ThreadMetadataIndex.open(kodaHome);
+    expect(reopened.get(childId)?.parentThreadId).toBe(parentId);
+    reopened.close();
+  });
+
   it("projects multi-turn metadata and aggregate usage without double counting", async () => {
     const kodaHome = await createKodaHome();
     const threadId = threadIdSchema.parse("metadata-multi-turn");

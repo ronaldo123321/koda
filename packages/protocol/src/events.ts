@@ -139,7 +139,11 @@ export const agentEventSchema = z.discriminatedUnion("type", [
   z.object({
     ...metadataShape,
     type: z.literal("turn.started"),
-    payload: z.object({}),
+    payload: z.object({
+      parentThreadId: threadIdSchema
+        .refine((value) => /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u.test(value))
+        .optional(),
+    }),
   }),
   z.object({
     ...metadataShape,

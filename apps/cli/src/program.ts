@@ -32,6 +32,7 @@ import {
 } from "./remote-command.js";
 import { runSetupCommand } from "./setup-command.js";
 import {
+  runThreadChildrenCommand,
   runThreadListCommand,
   runThreadShowCommand,
 } from "./thread-command.js";
@@ -85,6 +86,10 @@ export function createProgram(runtime: ProgramRuntime): Command {
       ]),
     )
     .option("--resume <thread-id>", "resume an existing Koda thread")
+    .option(
+      "--parent <thread-id>",
+      "create a new thread linked to a local parent",
+    )
     .addOption(
       new Option(
         "--approval-mode <mode>",
@@ -98,6 +103,7 @@ export function createProgram(runtime: ProgramRuntime): Command {
           approvalMode?: string;
           cwd?: string;
           model?: string;
+          parent?: string;
           provider?: string;
           resume?: string;
         },
@@ -121,6 +127,9 @@ export function createProgram(runtime: ProgramRuntime): Command {
               : { approvalMode: options.approvalMode }),
             ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
             ...(options.model === undefined ? {} : { model: options.model }),
+            ...(options.parent === undefined
+              ? {}
+              : { parentThreadId: options.parent }),
             ...(options.provider === undefined
               ? {}
               : { provider: options.provider }),
@@ -195,6 +204,22 @@ export function createProgram(runtime: ProgramRuntime): Command {
     .action(async (options: { limit?: string; workspace?: string }) => {
       runtime.setExitCode(
         await runThreadListCommand(options, {
+          environment: runtime.environment,
+          processDirectory: runtime.processDirectory,
+          stdout: runtime.stdout,
+          stderr: runtime.stderr,
+        }),
+      );
+    });
+
+  thread
+    .command("children")
+    .description("List direct child threads")
+    .argument("<thread-id>", "parent thread ID")
+    .option("--limit <count>", "maximum children to show", "50")
+    .action(async (threadId: string, options: { limit?: string }) => {
+      runtime.setExitCode(
+        await runThreadChildrenCommand(threadId, options, {
           environment: runtime.environment,
           processDirectory: runtime.processDirectory,
           stdout: runtime.stdout,

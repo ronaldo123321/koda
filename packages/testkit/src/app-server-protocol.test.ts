@@ -61,6 +61,22 @@ import {
 import { destroyedSecretEvidence } from "./execution-secret-fixtures.js";
 
 describe("app-server protocol", () => {
+  it("accepts a child start and rejects a simultaneous resume", () => {
+    expect(
+      turnStartParamsSchema.parse({
+        prompt: "Check this independently.",
+        parentThreadId: "parent-thread",
+      }),
+    ).toMatchObject({ parentThreadId: "parent-thread" });
+    expect(() =>
+      turnStartParamsSchema.parse({
+        prompt: "Ambiguous start.",
+        parentThreadId: "parent-thread",
+        resumeThreadId: "existing-thread",
+      }),
+    ).toThrow();
+  });
+
   it("accepts strict versioned requests and safe JSON-RPC IDs", () => {
     expect(APP_SERVER_PROTOCOL_VERSION).toBe(18);
     expect(

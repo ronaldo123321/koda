@@ -173,6 +173,7 @@ export interface StartTurnInput {
   prompt: string;
   cwd?: string;
   model?: string;
+  parentThreadId?: string;
   provider?: string;
   resume?: string;
 }
@@ -482,7 +483,13 @@ export class KodaApplication {
     configuration: RunConfiguration;
     prompt: string;
     ids: ReturnType<KodaApplicationDependencies["createIds"]>;
+    parentThreadId?: ThreadId;
   } {
+    if (input.parentThreadId !== undefined && input.resume !== undefined) {
+      throw new ConfigurationError(
+        "A new child thread cannot also resume an existing thread.",
+      );
+    }
     const configuration = resolveRunConfiguration(
       {
         ...(input.approvalMode === undefined
@@ -506,19 +513,32 @@ export class KodaApplication {
       );
     }
     const ids = this.dependencies.createIds(configuration.resumeThreadId);
-    return { configuration, prompt, ids };
+    const parentThreadId =
+      input.parentThreadId === undefined
+        ? undefined
+        : parseLocalThreadId(input.parentThreadId);
+    if (parentThreadId === ids.threadId) {
+      throw new ConfigurationError("A thread cannot be its own parent.");
+    }
+    return {
+      configuration,
+      prompt,
+      ids,
+      ...(parentThreadId === undefined ? {} : { parentThreadId }),
+    };
   }
 
   private launchTurn(
     prepared: ReturnType<KodaApplication["prepareTurn"]>,
     client: TurnClient,
   ): TurnHandle {
-    const { configuration, prompt, ids } = prepared;
+    const { configuration, prompt, ids, parentThreadId } = prepared;
     const controller = new AbortController();
     const completion = this.executeTurn(
       configuration,
       prompt,
       ids,
+      parentThreadId,
       controller,
       client,
     );
@@ -1382,6 +1402,7 @@ export class KodaApplication {
       turnId: TurnId;
       itemIds: ItemIdFactory;
     },
+    parentThreadId: ThreadId | undefined,
     controller: AbortController,
     client: TurnClient,
   ): Promise<TurnCompletion> {
@@ -1394,6 +1415,14 @@ export class KodaApplication {
       const workspace = await this.dependencies.openWorkspace(
         configuration.cwd,
       );
+      if (parentThreadId !== undefined) {
+        const parentEvents = await this.readValidatedThreadLog(parentThreadId);
+        const parent = recoverThread(
+          { events: parentEvents, diagnostics: [] },
+          parentThreadId,
+        );
+        assertResumeWorkspace(parent, workspace.root);
+      }
       const executionPolicy = resolveExecutionPolicy({
         workspaceRoot: workspace.root,
         ...(this.executionPolicyConfig === undefined
@@ -1793,6 +1822,7 @@ export class KodaApplication {
       const result = await loop.runTurn({
         threadId: ids.threadId,
         turnId: ids.turnId,
+        ...(parentThreadId === undefined ? {} : { parentThreadId }),
         userInput: effectivePrompt,
         signal: controller.signal,
         history,

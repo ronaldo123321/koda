@@ -26,6 +26,7 @@ export interface RunCommandInput {
   prompt: string;
   cwd?: string;
   model?: string;
+  parentThreadId?: string;
   provider?: string;
   resume?: string;
   signal: AbortSignal;
@@ -96,6 +97,9 @@ export async function runCommand(
           : { approvalMode: input.approvalMode }),
         ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
         ...(input.model === undefined ? {} : { model: input.model }),
+        ...(input.parentThreadId === undefined
+          ? {}
+          : { parentThreadId: input.parentThreadId }),
         ...(input.provider === undefined ? {} : { provider: input.provider }),
         ...(input.resume === undefined ? {} : { resume: input.resume }),
       },

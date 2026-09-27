@@ -1034,6 +1034,9 @@ export class KodaAppServer {
           prompt: input.prompt,
           ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
           ...(input.model === undefined ? {} : { model: input.model }),
+          ...(input.parentThreadId === undefined
+            ? {}
+            : { parentThreadId: input.parentThreadId }),
           ...(input.provider === undefined ? {} : { provider: input.provider }),
           ...(input.resumeThreadId === undefined
             ? {}

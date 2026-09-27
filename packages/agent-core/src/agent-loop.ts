@@ -88,6 +88,7 @@ export interface ToolCatalogRefresher {
 export interface RunTurnInput {
   threadId: ThreadId;
   turnId: TurnId;
+  parentThreadId?: ThreadId;
   userInput: string;
   signal?: AbortSignal;
   history?: readonly ConversationItem[];
@@ -204,7 +205,14 @@ export class AgentLoop {
     let completedSteps = 0;
     const startedAt = this.monotonicNow();
 
-    await recorder.record({ type: "turn.started", payload: {} });
+    await recorder.record({
+      type: "turn.started",
+      payload: {
+        ...(input.parentThreadId === undefined
+          ? {}
+          : { parentThreadId: input.parentThreadId }),
+      },
+    });
 
     if (input.context !== undefined) {
       await recorder.record({

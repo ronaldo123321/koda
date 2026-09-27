@@ -652,11 +652,14 @@ function groupTurns(events: readonly AgentEvent[]): TurnGroup[] {
     }
     groups.push({ turnId: event.turnId, events: [event] });
   }
-  for (const group of groups) {
+  for (const [index, group] of groups.entries()) {
     if (group.events[0]?.type !== "turn.started") {
       throw invalidLog(
         `Turn '${group.turnId}' does not begin with turn.started.`,
       );
+    }
+    if (index > 0 && group.events[0].payload.parentThreadId !== undefined) {
+      throw invalidLog("Only the first turn may declare a parent thread.");
     }
   }
   return groups;

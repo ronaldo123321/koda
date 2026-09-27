@@ -1345,6 +1345,7 @@ export const threadIndexRecoverySchema = z
 export const threadMetadataSchema = z
   .object({
     threadId: threadIdSchema,
+    parentThreadId: threadIdSchema.optional(),
     logFile: z.string().min(1),
     status: z.enum([
       "running",
@@ -1601,6 +1602,10 @@ export const turnStartParamsSchema = z
     prompt: z.string().min(1),
     cwd: z.string().min(1).optional(),
     model: z.string().min(1).optional(),
+    parentThreadId: z
+      .string()
+      .regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u)
+      .optional(),
     provider: modelProviderIdSchema.optional(),
     resumeThreadId: z
       .string()
@@ -1608,7 +1613,19 @@ export const turnStartParamsSchema = z
       .optional(),
     approvalMode: z.enum(["on-request", "never"]).optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((input, context) => {
+    if (
+      input.parentThreadId !== undefined &&
+      input.resumeThreadId !== undefined
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["parentThreadId"],
+        message: "A child thread cannot resume an existing thread.",
+      });
+    }
+  });
 
 export const turnStartResultSchema = z
   .object({

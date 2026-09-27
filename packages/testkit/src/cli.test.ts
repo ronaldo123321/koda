@@ -1758,6 +1758,73 @@ describe("Phase 1A CLI", () => {
     expect(showStdout.value).toContain("Status: completed");
     expect(showStdout.value).toContain("Model: offline-query-model");
 
+    const childId = threadIdSchema.parse("thread-query-child");
+    const childTurnId = turnIdSchema.parse("thread-query-child-turn");
+    const childStore = new JsonlEventStore(
+      join(kodaHome, "threads", `${childId}.jsonl`),
+    );
+    await childStore.append(
+      agentEventSchema.parse({
+        schemaVersion: 1,
+        sequence: 0,
+        timestamp: "2026-08-26T04:01:00.000Z",
+        threadId: childId,
+        turnId: childTurnId,
+        type: "turn.started",
+        payload: { parentThreadId: threadId },
+      }),
+    );
+    await childStore.append(
+      agentEventSchema.parse({
+        schemaVersion: 1,
+        sequence: 1,
+        timestamp: "2026-08-26T04:01:01.000Z",
+        threadId: childId,
+        turnId: childTurnId,
+        type: "turn.context",
+        payload: {
+          provider: "openai",
+          model: "offline-query-model",
+          workspaceRoot: canonicalWorkspaceRoot,
+          approvalMode: "never",
+          instructionsSha256: "a".repeat(64),
+          repositoryInstructions: [],
+        },
+      }),
+    );
+    await childStore.append(
+      agentEventSchema.parse({
+        schemaVersion: 1,
+        sequence: 2,
+        timestamp: "2026-08-26T04:01:02.000Z",
+        threadId: childId,
+        turnId: childTurnId,
+        type: "turn.completed",
+        payload: { steps: 1 },
+      }),
+    );
+    const childrenStdout = new MemoryWriter();
+    let childrenExitCode = -1;
+    const childrenProgram = createProgram({
+      environment: { KODA_HOME: kodaHome },
+      processDirectory: root,
+      stdout: childrenStdout,
+      stderr: new MemoryWriter(),
+      setExitCode: (code) => {
+        childrenExitCode = code;
+      },
+    });
+    await childrenProgram.parseAsync([
+      "node",
+      "koda",
+      "thread",
+      "children",
+      threadId,
+    ]);
+    expect(childrenExitCode).toBe(0);
+    expect(childrenStdout.value).toContain(`${childId}\tcompleted`);
+    expect(childrenStdout.value).not.toContain(`${threadId}\tcompleted`);
+
     const missingStderr = new MemoryWriter();
     let missingExitCode = -1;
     const missingProgram = createProgram({

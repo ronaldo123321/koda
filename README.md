@@ -38,6 +38,16 @@ node apps/cli/dist/main.js run "继续任务" --cwd . --resume <thread-id>
 pnpm chat --cwd .
 ```
 
+可以从已有 Thread 启动一个独立的子 Thread，并查询其来源与直接子项：
+
+```bash
+node apps/cli/dist/main.js run "独立检查这个问题" --cwd . --parent <thread-id> --approval-mode never
+node apps/cli/dist/main.js thread show <child-thread-id>
+node apps/cli/dist/main.js thread children <thread-id>
+```
+
+`--parent` 要求父 Thread 存在且属于同一工作区；子 Thread 有自己的对话历史，不继承父 Thread 的模型上下文。当前这是手动创建的会话关联，自动委派、邮箱协调与 Git worktree 隔离仍待后续 Phase 5 实现。需要只读任务时，显式使用 `--approval-mode never` 拒绝写入和命令执行。
+
 已安装的预览版使用 `koda setup`、`koda run` 和 `koda-chat`。凭据来自启动进程的环境变量，不写入工作区设置或会话日志。工作区写入、进程执行以及未明确归类为只读的 MCP 工具默认需要审批。
 
 ## macOS 内部预览

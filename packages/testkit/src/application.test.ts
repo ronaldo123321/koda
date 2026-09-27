@@ -50,6 +50,115 @@ afterEach(async () => {
 });
 
 describe("KodaApplication", () => {
+  it("creates a child thread only for a valid parent in the same workspace", async () => {
+    const fixture = await createFixture();
+    const environment = {
+      KODA_HOME: fixture.kodaHome,
+      OPENAI_API_KEY: "offline-test-key",
+    };
+    const client: TurnClient = {
+      events: { append: async () => undefined },
+      approvals: rejectApprovals(),
+    };
+    const reply = () =>
+      new ScriptedModelProvider([
+        {
+          events: [
+            { type: "assistant_delta", text: "Done." },
+            { type: "completed", finishReason: "stop" },
+          ],
+        },
+      ]);
+    const parentApp = new KodaApplication({
+      environment,
+      processDirectory: fixture.root,
+      dependencies: dependencies(reply(), "lineage-parent"),
+    });
+    const parent = parentApp.startTurn(
+      { prompt: "Parent task.", cwd: fixture.workspaceRoot },
+      client,
+    );
+    await expect(parent.completion).resolves.toMatchObject({
+      status: "completed",
+    });
+
+    const childApp = new KodaApplication({
+      environment,
+      processDirectory: fixture.root,
+      dependencies: dependencies(reply(), "lineage-child"),
+    });
+    expect(() =>
+      childApp.startTurn(
+        {
+          prompt: "Invalid.",
+          cwd: fixture.workspaceRoot,
+          parentThreadId: parent.threadId,
+          resume: parent.threadId,
+        },
+        client,
+      ),
+    ).toThrow("cannot also resume");
+    expect(() =>
+      childApp.startTurn(
+        {
+          prompt: "Invalid parent ID.",
+          cwd: fixture.workspaceRoot,
+          parentThreadId: "../other",
+        },
+        client,
+      ),
+    ).toThrow("Thread ID must use");
+    const missing = childApp.startTurn(
+      {
+        prompt: "Missing parent.",
+        cwd: fixture.workspaceRoot,
+        parentThreadId: "missing-parent",
+      },
+      client,
+    );
+    await expect(missing.completion).resolves.toMatchObject({
+      status: "failed",
+    });
+    const otherWorkspace = join(fixture.root, "other");
+    await mkdir(otherWorkspace);
+    const rejected = childApp.startTurn(
+      {
+        prompt: "Wrong workspace.",
+        cwd: otherWorkspace,
+        parentThreadId: parent.threadId,
+      },
+      client,
+    );
+    await expect(rejected.completion).resolves.toMatchObject({
+      status: "failed",
+    });
+    await expect(
+      readFile(join(fixture.kodaHome, "threads", `${rejected.threadId}.jsonl`)),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+
+    const child = childApp.startTurn(
+      {
+        prompt: "Child task.",
+        cwd: fixture.workspaceRoot,
+        parentThreadId: parent.threadId,
+      },
+      client,
+    );
+    await expect(child.completion).resolves.toMatchObject({
+      status: "completed",
+    });
+    const childLog = await new JsonlEventStore(
+      join(fixture.kodaHome, "threads", `${child.threadId}.jsonl`),
+    ).readAll();
+    expect(childLog.events[0]).toMatchObject({
+      type: "turn.started",
+      payload: { parentThreadId: parent.threadId },
+    });
+    await expect(childApp.getThread(child.threadId)).resolves.toMatchObject({
+      value: { parentThreadId: parent.threadId },
+    });
+  });
+
   it("binds a restricted remote Turn before execution and omits effectful tools", async () => {
     const fixture = await createFixture();
     const bindingPath = join(fixture.root, "remote-binding.txt");

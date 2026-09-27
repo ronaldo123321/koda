@@ -105,6 +105,45 @@ export async function runThreadShowCommand(
   });
 }
 
+export async function runThreadChildrenCommand(
+  parentThreadIdInput: string,
+  input: { limit?: string },
+  context: ThreadCommandContext,
+): Promise<number> {
+  let parentThreadId: ThreadId;
+  let limit: number;
+  try {
+    parentThreadId = parseLocalThreadId(parentThreadIdInput);
+    limit = parseLimit(input.limit);
+  } catch (error) {
+    context.stderr.write(`[koda] ${errorMessage(error)}\n`);
+    return 2;
+  }
+  return withIndex(context, async (index) => {
+    const refresh = await index.refresh();
+    writeDiagnostics(context.stderr, refresh.diagnostics);
+    const children = index.listChildren(parentThreadId, limit);
+    if (children.length === 0) {
+      context.stdout.write("No child threads found.\n");
+      return 0;
+    }
+    context.stdout.write("THREAD ID\tSTATUS\tCREATED\tWORKSPACE\n");
+    for (const child of children) {
+      context.stdout.write(
+        [
+          child.threadId,
+          child.status,
+          child.createdAt,
+          child.workspaceRoot ?? "-",
+        ]
+          .map(formatCell)
+          .join("\t") + "\n",
+      );
+    }
+    return 0;
+  });
+}
+
 async function withIndex(
   context: ThreadCommandContext,
   operation: (index: ThreadMetadataIndex) => Promise<number>,
@@ -154,6 +193,7 @@ function writeDiagnostics(
 function writeThreadDetails(writer: TextWriter, thread: ThreadMetadata): void {
   const rows: Array<[string, string | number]> = [
     ["Thread", thread.threadId],
+    ["Parent thread", thread.parentThreadId ?? "-"],
     ["Status", thread.status],
     ["Created", thread.createdAt],
     ["Updated", thread.updatedAt],

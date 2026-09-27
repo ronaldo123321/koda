@@ -45,6 +45,7 @@ export interface ThreadUsageSummary {
 
 export interface ThreadMetadata {
   threadId: ThreadId;
+  parentThreadId?: ThreadId;
   logFile: string;
   status: ThreadMetadataStatus;
   createdAt: string;
@@ -114,6 +115,7 @@ export interface ThreadMetadataIndexOpenOptions {
 
 interface ThreadProjectionRow {
   thread_id: string;
+  parent_thread_id: string | null;
   log_file: string;
   status: ThreadMetadataStatus;
   error_message: string | null;
@@ -184,7 +186,7 @@ interface SearchResultRow {
   turn_count: number;
 }
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 500;
 const MAX_DIAGNOSTIC_LENGTH = 1_000;
@@ -443,6 +445,25 @@ export class ThreadMetadataIndex {
     return row === undefined ? undefined : toThreadMetadata(row);
   }
 
+  public listChildren(
+    parentThreadIdInput: ThreadId | string,
+    limit = DEFAULT_LIMIT,
+  ): ThreadMetadata[] {
+    this.assertOpen();
+    if (!Number.isInteger(limit) || limit < 1 || limit > MAX_LIMIT) {
+      throw new RangeError(
+        `Thread child limit must be between 1 and ${MAX_LIMIT}.`,
+      );
+    }
+    const parentThreadId = threadIdSchema.parse(parentThreadIdInput);
+    const rows = this.database
+      .prepare<[string, number], ThreadProjectionRow>(
+        "SELECT * FROM threads WHERE parent_thread_id = ? ORDER BY created_at ASC, thread_id ASC LIMIT ?",
+      )
+      .all(parentThreadId, limit);
+    return rows.map(toThreadMetadata);
+  }
+
   public search(options: ThreadSearchOptions): ThreadSearchPage {
     this.assertOpen();
     const limit = options.limit ?? THREAD_SEARCH_DEFAULT_LIMIT;
@@ -648,6 +669,10 @@ export class ThreadMetadataIndex {
       return {
         thread: {
           thread_id: descriptor.threadId,
+          parent_thread_id:
+            firstEvent.type === "turn.started"
+              ? (firstEvent.payload.parentThreadId ?? null)
+              : null,
           log_file: descriptor.logFile,
           status,
           error_message: null,
@@ -696,6 +721,7 @@ export class ThreadMetadataIndex {
       return {
         thread: {
           thread_id: descriptor.threadId,
+          parent_thread_id: null,
           log_file: descriptor.logFile,
           status: "invalid",
           error_message: boundedMessage(error),
@@ -786,6 +812,10 @@ function projectActivePrefix(
   const usage = aggregateUsage(readResult.events);
   return {
     thread_id: descriptor.threadId,
+    parent_thread_id:
+      firstEvent.type === "turn.started"
+        ? (firstEvent.payload.parentThreadId ?? null)
+        : null,
     log_file: descriptor.logFile,
     status: "running",
     error_message: null,
@@ -1030,14 +1060,14 @@ function takeUtf8Suffix(text: string, budget: number): string {
 
 const UPSERT_THREAD_SQL = `
   INSERT INTO threads (
-    thread_id, log_file, status, error_message, created_at, updated_at,
+    thread_id, parent_thread_id, log_file, status, error_message, created_at, updated_at,
     last_turn_id, provider, model, workspace_root, approval_mode,
     turn_count, event_count, last_sequence, model_requests,
     reported_requests, input_tokens, cached_input_tokens,
     cache_write_input_tokens, output_tokens, reasoning_output_tokens,
     total_tokens, source_bytes, indexed_bytes, source_mtime_ms
   ) VALUES (
-    @thread_id, @log_file, @status, @error_message, @created_at, @updated_at,
+    @thread_id, @parent_thread_id, @log_file, @status, @error_message, @created_at, @updated_at,
     @last_turn_id, @provider, @model, @workspace_root, @approval_mode,
     @turn_count, @event_count, @last_sequence, @model_requests,
     @reported_requests, @input_tokens, @cached_input_tokens,
@@ -1045,6 +1075,7 @@ const UPSERT_THREAD_SQL = `
     @total_tokens, @source_bytes, @indexed_bytes, @source_mtime_ms
   )
   ON CONFLICT(thread_id) DO UPDATE SET
+    parent_thread_id = excluded.parent_thread_id,
     log_file = excluded.log_file,
     status = excluded.status,
     error_message = excluded.error_message,
@@ -1101,7 +1132,7 @@ function hasCurrentSchema(database: Database.Database): boolean {
     database
       .prepare(
         `SELECT
-          thread_id, log_file, status, error_message, created_at, updated_at,
+          thread_id, parent_thread_id, log_file, status, error_message, created_at, updated_at,
           last_turn_id, provider, model, workspace_root, approval_mode,
           turn_count, event_count, last_sequence, model_requests,
           reported_requests, input_tokens, cached_input_tokens,
@@ -1146,6 +1177,7 @@ function resetSchema(database: Database.Database): void {
         DROP TABLE IF EXISTS threads;
         CREATE TABLE threads (
           thread_id TEXT PRIMARY KEY,
+          parent_thread_id TEXT,
           log_file TEXT NOT NULL UNIQUE,
           status TEXT NOT NULL CHECK (
             status IN ('running', 'completed', 'failed', 'cancelled', 'interrupted', 'invalid')
@@ -1179,6 +1211,8 @@ function resetSchema(database: Database.Database): void {
           ON threads(status, updated_at DESC);
         CREATE INDEX threads_workspace_updated_idx
           ON threads(workspace_root, updated_at DESC);
+        CREATE INDEX threads_parent_created_idx
+          ON threads(parent_thread_id, created_at ASC, thread_id ASC);
         CREATE TABLE thread_search_items (
           thread_id TEXT NOT NULL,
           sequence INTEGER NOT NULL CHECK (sequence >= 0),
@@ -1322,6 +1356,9 @@ function flatUsage(usage: ThreadUsageSummary) {
 function toThreadMetadata(row: ThreadProjectionRow): ThreadMetadata {
   return {
     threadId: threadIdSchema.parse(row.thread_id),
+    ...(row.parent_thread_id === null
+      ? {}
+      : { parentThreadId: threadIdSchema.parse(row.parent_thread_id) }),
     logFile: row.log_file,
     status: row.status,
     createdAt: row.created_at,
