@@ -52,7 +52,20 @@ node apps/cli/dist/main.js thread children <thread-id>
 
 App-server 的 `turn/steer` 可向运行中的指定 Thread/Turn 排队发送消息；TUI 运行中也可直接输入并按回车发送。每个 Turn 最多暂存 16 条，每条最多 4096 UTF-8 字节。消息在下一次模型请求前写入事件日志并进入上下文；末次模型请求开始后或 Turn 结束时拒绝新消息。
 
-模型可调用 `spawn_readonly` 异步启动只读子任务，在其首条事件落盘后取得 Thread ID，再用 `wait_children` 查询／等待、`send_child_message` 发送下一步消息或 `interrupt_child` 中断。每个父 Turn 最多启动两个子任务，每个应用进程最多同时运行八个，只读子任务最长运行两分钟。实时消息和中断只适用于当前应用进程内的子任务；进程重启后，`wait_children` 可从事件日志读取已完成子任务的结果。Git worktree 写入隔离和项目记忆仍待后续 Phase 5 实现。
+模型可调用 `spawn_readonly` 异步启动只读子任务，在其首条事件落盘后取得 Thread ID，再用 `wait_children` 查询／等待、`send_child_message` 发送下一步消息或 `interrupt_child` 中断。每个父 Turn 最多启动两个子任务，每个应用进程最多同时运行八个，只读子任务最长运行两分钟。实时消息和中断只适用于当前应用进程内的子任务；进程重启后，`wait_children` 可从事件日志读取已完成子任务的结果。Git worktree 写入隔离仍待后续 Phase 5 实现。
+
+项目笔记由用户显式维护，按真实工作区路径存放在 `KODA_HOME/memory/project-notes.db`，不会自动从对话中写入：
+
+```bash
+node apps/cli/dist/main.js memory add "发布流程" --file ./release-note.md --workspace .
+node apps/cli/dist/main.js memory list --workspace .
+node apps/cli/dist/main.js memory show <note-id> --workspace .
+node apps/cli/dist/main.js memory edit <note-id> --file ./updated-note.md --workspace .
+node apps/cli/dist/main.js memory search "签名" --workspace .
+node apps/cli/dist/main.js memory delete <note-id> --workspace .
+```
+
+每个工作区最多 64 条笔记，每条正文最多 8192 UTF-8 字节。模型只能调用 `search_project_notes` 和 `read_project_note` 读取当前工作区笔记；笔记内容不会自动加入提示词。检索采用有界词面匹配，固定的八个离线查询用例达到 Recall@3 = 1、MRR = 1；这只是回归基线，不能代表真实项目查询的准确率。
 
 已安装的预览版使用 `koda setup`、`koda run` 和 `koda-chat`。凭据来自启动进程的环境变量，不写入工作区设置或会话日志。工作区写入、进程执行以及未明确归类为只读的 MCP 工具默认需要审批。
 

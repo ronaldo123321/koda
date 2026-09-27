@@ -117,6 +117,7 @@ import {
   type InteractiveProcessService,
   NativeExecutorClient,
   ProjectCommandTemplateError,
+  ProjectNoteStore,
   ProjectSkillError,
   ReadOnlyWorkspace,
   RepositoryInstructionError,
@@ -147,6 +148,7 @@ import {
   registerExecTerminalTool,
   registerPatchSetTool,
   registerProjectSkillTool,
+  registerProjectNoteTools,
   registerReadOnlyChildTools,
   registerReadOnlyDelegationTool,
   registerReadOnlyWorkspaceTools,
@@ -1435,6 +1437,7 @@ export class KodaApplication {
     let lease: ThreadLease | undefined;
     let mcpSession: McpTurnSession | undefined;
     let pluginSession: PluginTurnSession | undefined;
+    let projectNotes: ProjectNoteStore | undefined;
     let refreshMetadata = false;
     try {
       controller.signal.throwIfAborted();
@@ -1738,6 +1741,20 @@ export class KodaApplication {
         registerArtifactTools(tools, artifactStore);
       }
       registerReadOnlyWorkspaceTools(tools, workspace, { artifactStore });
+      if (!this.remoteRestricted) {
+        try {
+          projectNotes = await ProjectNoteStore.open(configuration.kodaHome);
+          registerProjectNoteTools(tools, projectNotes, workspace.root);
+        } catch (error) {
+          projectNotes?.close();
+          projectNotes = undefined;
+          await emitDiagnostic(client, {
+            level: "warning",
+            code: "PROJECT_NOTES_UNAVAILABLE",
+            message: `Project notes are unavailable: ${errorMessage(error)}`,
+          });
+        }
+      }
       if (!this.remoteRestricted) {
         let childCount = 0;
         const launchChild = async (
@@ -2047,6 +2064,7 @@ export class KodaApplication {
       }
       return completion(ids, "failed", 1, applicationError(error));
     } finally {
+      projectNotes?.close();
       if (mcpSession !== undefined) {
         try {
           await mcpSession.close();

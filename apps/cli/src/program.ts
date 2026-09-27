@@ -5,6 +5,15 @@ import { KODA_VERSION } from "@koda/distribution";
 import { runArtifactGarbageCollectionCommand } from "./artifact-command.js";
 import type { TextWriter } from "./console-event-sink.js";
 import {
+  runMemoryAddCommand,
+  runMemoryDeleteCommand,
+  runMemoryEditCommand,
+  runMemoryListCommand,
+  runMemorySearchCommand,
+  runMemoryShowCommand,
+  type MemoryCommandOptions,
+} from "./memory-command.js";
+import {
   runExtensionListCommand,
   runExtensionReadCommand,
 } from "./extension-command.js";
@@ -225,6 +234,78 @@ export function createProgram(runtime: ProgramRuntime): Command {
           stdout: runtime.stdout,
           stderr: runtime.stderr,
         }),
+      );
+    });
+
+  const memory = program
+    .command("memory")
+    .description("Manage explicit project notes for one workspace");
+  const memoryContext = {
+    environment: runtime.environment,
+    processDirectory: runtime.processDirectory,
+    stdout: runtime.stdout,
+    stderr: runtime.stderr,
+  };
+  memory
+    .command("list")
+    .description("List project notes")
+    .option("--workspace <directory>", "workspace directory", ".")
+    .action(async (options: MemoryCommandOptions) => {
+      runtime.setExitCode(await runMemoryListCommand(options, memoryContext));
+    });
+  memory
+    .command("show")
+    .description("Read one project note")
+    .argument("<id>", "project note ID")
+    .option("--workspace <directory>", "workspace directory", ".")
+    .action(async (id: string, options: MemoryCommandOptions) => {
+      runtime.setExitCode(
+        await runMemoryShowCommand(id, options, memoryContext),
+      );
+    });
+  memory
+    .command("add")
+    .description("Create a project note")
+    .argument("<title>", "project note title")
+    .option("--body <text>", "note body")
+    .option("--file <path>", "read note body from a UTF-8 file")
+    .option("--workspace <directory>", "workspace directory", ".")
+    .action(async (title: string, options: MemoryCommandOptions) => {
+      runtime.setExitCode(
+        await runMemoryAddCommand(title, options, memoryContext),
+      );
+    });
+  memory
+    .command("edit")
+    .description("Edit a project note")
+    .argument("<id>", "project note ID")
+    .option("--title <title>", "replace note title")
+    .option("--body <text>", "replace note body")
+    .option("--file <path>", "read replacement body from a UTF-8 file")
+    .option("--workspace <directory>", "workspace directory", ".")
+    .action(async (id: string, options: MemoryCommandOptions) => {
+      runtime.setExitCode(
+        await runMemoryEditCommand(id, options, memoryContext),
+      );
+    });
+  memory
+    .command("delete")
+    .description("Delete a project note")
+    .argument("<id>", "project note ID")
+    .option("--workspace <directory>", "workspace directory", ".")
+    .action(async (id: string, options: MemoryCommandOptions) => {
+      runtime.setExitCode(
+        await runMemoryDeleteCommand(id, options, memoryContext),
+      );
+    });
+  memory
+    .command("search")
+    .description("Search project notes")
+    .argument("<query>", "search phrase")
+    .option("--workspace <directory>", "workspace directory", ".")
+    .action(async (query: string, options: MemoryCommandOptions) => {
+      runtime.setExitCode(
+        await runMemorySearchCommand(query, options, memoryContext),
       );
     });
 

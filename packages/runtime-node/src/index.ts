@@ -15,6 +15,8 @@ export * from "./patch-set-tool.js";
 export * from "./process-tree-controller.js";
 export * from "./project-command-templates.js";
 export * from "./project-skills.js";
+export * from "./project-note-store.js";
+export * from "./project-note-tools.js";
 export * from "./read-only-tools.js";
 export * from "./read-only-delegation-tool.js";
 export * from "./read-only-child-tools.js";
