@@ -150,6 +150,7 @@ export async function installManagedPluginPackage(options: {
           await checkPackage(copied, verified.id, candidate);
         }
         await rename(copied, target);
+        await syncDirectory(dirname(target));
       } finally {
         await rm(staging, { recursive: true, force: true });
       }
@@ -415,18 +416,30 @@ async function readState(root: string): Promise<ManagedState> {
 
 async function writeState(root: string, state: ManagedState): Promise<void> {
   const temporary = join(root, `.state-${randomUUID()}`);
-  const handle = await open(temporary, "wx", 0o600);
+  let handle;
   try {
+    handle = await open(temporary, "wx", 0o600);
     await handle.writeFile(`${JSON.stringify(state)}\n`);
     await handle.sync();
-  } finally {
     await handle.close();
-  }
-  try {
+    handle = undefined;
     await rename(temporary, statePath(root));
-  } catch (error) {
-    await rm(temporary, { force: true });
-    throw error;
+    await syncDirectory(root);
+  } finally {
+    await handle?.close().catch(() => undefined);
+    await rm(temporary, { force: true }).catch(() => undefined);
+  }
+}
+
+async function syncDirectory(path: string): Promise<void> {
+  let handle;
+  try {
+    handle = await open(path, "r");
+    await handle.sync();
+  } catch {
+    // Some filesystems reject directory fsync.
+  } finally {
+    await handle?.close().catch(() => undefined);
   }
 }
 

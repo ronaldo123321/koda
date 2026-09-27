@@ -449,6 +449,56 @@ lines.on('line', (line) => {
     ).rejects.toMatchObject({ code: "PLUGIN_PACKAGE_INVALID" });
   });
 
+  it("keeps the active plugin after an interrupted package and state write", async () => {
+    const fixture = await packageFixture("index.mjs", managedProtocolScript);
+    const home = join(fixture.parent, "home");
+    const first = await installManagedPluginPackage({
+      kodaHome: home,
+      sourceDirectory: fixture.root,
+      trustRoot: fixture.trust,
+      capabilities: ["tools"],
+    });
+    await setManagedPluginEnabled(home, "reviewer", true);
+    await rewriteVersion(fixture, "1.1.0");
+    const next = await verifyLocalPluginPackage(fixture.root, fixture.trust);
+    const store = join(home, "managed-plugins");
+    const orphan = join(store, "packages", "reviewer", next.manifestSha256);
+    await mkdir(join(store, "packages", "reviewer"), { recursive: true });
+    await cp(fixture.root, orphan, { recursive: true });
+    const state = JSON.parse(await readFile(join(store, "state.json"), "utf8"));
+    state.plugins.reviewer.active.version = "1.1.0";
+    state.plugins.reviewer.active.manifest_sha256 = next.manifestSha256;
+    state.plugins.reviewer.enabled = false;
+    await writeFile(join(store, ".state-interrupted"), JSON.stringify(state));
+
+    expect((await listManagedPlugins(home))[0]).toMatchObject({
+      version: "1.0.0",
+      manifestSha256: first.manifestSha256,
+      enabled: true,
+    });
+    expect(
+      (
+        await loadPluginConfiguration({
+          environment: {},
+          kodaHome: home,
+          processDirectory: fixture.parent,
+        })
+      ).plugins[0]?.args[0],
+    ).toContain(first.manifestSha256);
+
+    const updated = await installManagedPluginPackage({
+      kodaHome: home,
+      sourceDirectory: fixture.root,
+      trustRoot: fixture.trust,
+      capabilities: ["tools"],
+    });
+    expect(updated).toMatchObject({
+      version: "1.1.0",
+      previousVersion: "1.0.0",
+      enabled: false,
+    });
+  });
+
   it("rejects a manual configuration that shadows an enabled managed plugin", async () => {
     const fixture = await packageFixture();
     const home = join(fixture.parent, "home");
