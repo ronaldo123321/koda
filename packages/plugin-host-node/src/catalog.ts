@@ -159,6 +159,7 @@ export async function installPluginFromCatalog(options: {
   id: string;
   version: string;
   capabilities: readonly PluginCapability[];
+  rotation?: { previousTrustRoot: PluginPublisherTrustRoot };
   ca?: Buffer;
   nowMs?: number;
 }): Promise<ManagedPluginStatus> {
@@ -176,6 +177,7 @@ async function installCatalogEntry(
     trustRoot: PluginPublisherTrustRoot;
     kodaHome: string;
     capabilities: readonly PluginCapability[];
+    rotation?: { previousTrustRoot: PluginPublisherTrustRoot };
     ca?: Buffer;
   },
   catalog: VerifiedPluginCatalog,
@@ -219,6 +221,7 @@ async function installCatalogEntry(
       sourceDirectory: packageDirectory,
       trustRoot: options.trustRoot,
       capabilities: options.capabilities,
+      ...(options.rotation === undefined ? {} : { rotation: options.rotation }),
       provenance: {
         catalogUrl: base.href,
         catalogSha256: catalog.catalogSha256,

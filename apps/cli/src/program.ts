@@ -14,6 +14,7 @@ import {
   runPluginInstallRemoteCommand,
   runPluginListCommand,
   runPluginPublishCatalogCommand,
+  runPluginRotateKeyCommand,
   runPluginStateCommand,
   runPluginUpdateCommand,
   runPluginVerifyCommand,
@@ -380,6 +381,43 @@ export function createProgram(runtime: ProgramRuntime): Command {
     .action(async (id: string) => {
       runtime.setExitCode(await runPluginUpdateCommand(id, pluginContext));
     });
+  plugin
+    .command("rotate-key")
+    .description(
+      "Explicitly replace a plugin publisher key from a signed catalog",
+    )
+    .argument("<id>", "installed plugin ID")
+    .requiredOption("--version <version>", "exact new plugin version")
+    .requiredOption("--catalog <url>", "new HTTPS catalog URL")
+    .requiredOption("--old-key-id <id>", "expected current key ID")
+    .requiredOption("--old-key <file>", "expected current public key PEM")
+    .requiredOption("--new-key-id <id>", "independently verified new key ID")
+    .requiredOption(
+      "--new-key <file>",
+      "independently verified new public key PEM",
+    )
+    .requiredOption(
+      "--capabilities <list>",
+      "explicitly reviewed plugin capabilities",
+    )
+    .action(
+      async (
+        id: string,
+        options: {
+          version: string;
+          catalog: string;
+          oldKeyId: string;
+          oldKey: string;
+          newKeyId: string;
+          newKey: string;
+          capabilities: string;
+        },
+      ) => {
+        runtime.setExitCode(
+          await runPluginRotateKeyCommand(id, options, pluginContext),
+        );
+      },
+    );
   for (const operation of ["enable", "disable", "rollback"] as const) {
     plugin
       .command(operation)

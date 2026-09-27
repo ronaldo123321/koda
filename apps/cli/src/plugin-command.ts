@@ -175,6 +175,48 @@ export async function runPluginInstallRemoteCommand(
   }
 }
 
+export async function runPluginRotateKeyCommand(
+  id: string,
+  options: {
+    version: string;
+    catalog: string;
+    oldKeyId: string;
+    oldKey: string;
+    newKeyId: string;
+    newKey: string;
+    capabilities: string;
+  },
+  context: PluginCommandContext,
+): Promise<number> {
+  try {
+    const capabilities = parseCapabilities(options.capabilities);
+    const [previousPublicKeyPem, publicKeyPem] = await Promise.all([
+      readPublisherKey(options.oldKey, context.processDirectory),
+      readPublisherKey(options.newKey, context.processDirectory),
+    ]);
+    const installed = await installPluginFromCatalog({
+      catalogUrl: options.catalog,
+      trustRoot: { keyId: options.newKeyId, publicKeyPem },
+      rotation: {
+        previousTrustRoot: {
+          keyId: options.oldKeyId,
+          publicKeyPem: previousPublicKeyPem,
+        },
+      },
+      kodaHome: resolveKodaHome(context.environment),
+      id,
+      version: options.version,
+      capabilities,
+    });
+    context.stdout.write(
+      `Rotated ${installed.id}@${installed.version} to ${installed.keyId}; disabled. Previous publisher key is no longer a rollback target.\n`,
+    );
+    return 0;
+  } catch (error) {
+    return fail(context, error);
+  }
+}
+
 export async function runPluginUpdateCommand(
   id: string,
   context: PluginCommandContext,

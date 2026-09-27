@@ -87,6 +87,7 @@ export async function installManagedPluginPackage(options: {
     catalogSha256: string;
     manifestPath: string;
   };
+  rotation?: { previousTrustRoot: PluginPublisherTrustRoot };
 }): Promise<ManagedPluginStatus> {
   const capabilities = validateCapabilities(options.capabilities);
   const verified = await verifyLocalPluginPackage(
@@ -102,18 +103,32 @@ export async function installManagedPluginPackage(options: {
     if (old === undefined && Object.keys(state.plugins).length >= MAX_PLUGINS) {
       throw invalidState("Managed plugin limit reached.");
     }
-    if (
+    const keyChanged =
       old !== undefined &&
       (old.active.key_id !== options.trustRoot.keyId ||
-        old.active.public_key_pem !== options.trustRoot.publicKeyPem)
-    ) {
+        old.active.public_key_pem !== options.trustRoot.publicKeyPem);
+    if (keyChanged !== (options.rotation !== undefined))
       throw invalidState(
-        "Plugin publisher key changed; explicit trust rotation is required.",
+        "Plugin publisher key change requires an explicit matching rotation.",
+      );
+    if (options.rotation !== undefined) {
+      if (
+        old === undefined ||
+        old.active.key_id !== options.rotation.previousTrustRoot.keyId ||
+        old.active.public_key_pem !==
+          options.rotation.previousTrustRoot.publicKeyPem
+      ) {
+        throw invalidState("Current plugin publisher key does not match.");
+      }
+      await checkPackage(
+        packagePath(root, verified.id, old.active.manifest_sha256),
+        verified.id,
+        old.active,
       );
     }
     const needsPreflight =
       old !== undefined &&
-      old.active.manifest_sha256 !== verified.manifestSha256;
+      (keyChanged || old.active.manifest_sha256 !== verified.manifestSha256);
     const candidate: PackageRecord = {
       version: verified.version,
       manifest_sha256: verified.manifestSha256,
@@ -171,13 +186,16 @@ export async function installManagedPluginPackage(options: {
       old?.active.manifest_sha256 === active.manifest_sha256 &&
       JSON.stringify(old.active.capabilities) ===
         JSON.stringify(active.capabilities);
-    const entry = unchanged
-      ? { ...old, active }
-      : {
-          active,
-          ...(old === undefined ? {} : { previous: old.active }),
-          enabled: false,
-        };
+    const entry =
+      options.rotation !== undefined
+        ? { active, enabled: false }
+        : unchanged
+          ? { ...old, active }
+          : {
+              active,
+              ...(old === undefined ? {} : { previous: old.active }),
+              enabled: false,
+            };
     state.plugins[verified.id] = entry;
     await writeState(root, state);
     return projectStatus(verified.id, entry);

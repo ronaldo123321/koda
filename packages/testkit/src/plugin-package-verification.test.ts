@@ -1,4 +1,9 @@
-import { createHash, generateKeyPairSync, sign } from "node:crypto";
+import {
+  createHash,
+  generateKeyPairSync,
+  sign,
+  type KeyObject,
+} from "node:crypto";
 import {
   chmod,
   cp,
@@ -68,6 +73,57 @@ afterEach(async () => {
 });
 
 describe("signed local plugin packages", () => {
+  it("rotates only with the expected old key and drops old-key rollback", async () => {
+    const old = await packageFixture("index.mjs", managedProtocolScript);
+    const next = await packageFixture(
+      "index.mjs",
+      managedProtocolScript,
+      "new-publisher",
+    );
+    await rewriteVersion(next, "2.0.0");
+    const home = join(old.parent, "home");
+    await installManagedPluginPackage({
+      kodaHome: home,
+      sourceDirectory: old.root,
+      trustRoot: old.trust,
+      capabilities: ["tools"],
+    });
+    await setManagedPluginEnabled(home, "reviewer", true);
+    const rotate = (previousTrustRoot?: typeof old.trust) =>
+      installManagedPluginPackage({
+        kodaHome: home,
+        sourceDirectory: next.root,
+        trustRoot: next.trust,
+        capabilities: ["tools"],
+        ...(previousTrustRoot === undefined
+          ? {}
+          : { rotation: { previousTrustRoot } }),
+      });
+    await expect(rotate()).rejects.toMatchObject({
+      code: "PLUGIN_PACKAGE_INVALID",
+    });
+    await expect(rotate(next.trust)).rejects.toMatchObject({
+      code: "PLUGIN_PACKAGE_INVALID",
+    });
+    expect((await listManagedPlugins(home))[0]).toMatchObject({
+      version: "1.0.0",
+      enabled: true,
+    });
+
+    const rotated = await rotate(old.trust);
+    expect(rotated).toMatchObject({
+      version: "2.0.0",
+      keyId: "new-publisher",
+      enabled: false,
+    });
+    expect(rotated.previousVersion).toBeUndefined();
+    await expect(rollbackManagedPlugin(home, "reviewer")).rejects.toMatchObject(
+      {
+        code: "PLUGIN_PACKAGE_INVALID",
+      },
+    );
+  });
+
   it("publishes only verified packages as a signed catalog", async () => {
     const fixture = await packageFixture();
     const root = join(fixture.parent, "catalog");
@@ -134,19 +190,10 @@ describe("signed local plugin packages", () => {
         },
       ],
     };
-    const catalogSignature = sign(
-      null,
-      Buffer.concat([
-        Buffer.from("KODA_PLUGIN_CATALOG_V1\0"),
-        Buffer.from(sha256CanonicalJson(signed), "hex"),
-      ]),
+    const catalogBytes = signCatalog(
+      signed,
       fixture.privateKey,
-    ).toString("base64");
-    const catalogBytes = Buffer.from(
-      JSON.stringify({
-        ...signed,
-        signature: { key_id: fixture.trust.keyId, ed25519: catalogSignature },
-      }),
+      fixture.trust.keyId,
     );
     expect(
       verifySignedPluginCatalog(catalogBytes, fixture.trust, now).packages,
@@ -263,22 +310,9 @@ describe("signed local plugin packages", () => {
           },
         ],
       };
-      const nextSignature = sign(
-        null,
-        Buffer.concat([
-          Buffer.from("KODA_PLUGIN_CATALOG_V1\0"),
-          Buffer.from(sha256CanonicalJson(nextSigned), "hex"),
-        ]),
-        fixture.privateKey,
-      ).toString("base64");
       files.set(
         "/catalog.json",
-        Buffer.from(
-          JSON.stringify({
-            ...nextSigned,
-            signature: { key_id: fixture.trust.keyId, ed25519: nextSignature },
-          }),
-        ),
+        signCatalog(nextSigned, fixture.privateKey, fixture.trust.keyId),
       );
       files.set("/reviewer/1.10.0/manifest.json", nextManifestBytes);
       files.set(
@@ -317,6 +351,86 @@ describe("signed local plugin packages", () => {
           nowMs: now,
         }),
       ).rejects.toMatchObject({ code: "PLUGIN_PACKAGE_INVALID" });
+
+      const replacement = await packageFixture(
+        "index.mjs",
+        managedProtocolScript,
+        "publisher-v2",
+      );
+      await rewriteVersion(replacement, "2.0.0");
+      const replacementManifest = await readFile(
+        join(replacement.root, "manifest.json"),
+      );
+      const replacementDigest = verifySignedPluginManifest(
+        replacementManifest,
+        replacement.trust,
+      ).manifestSha256;
+      files.set(
+        "/catalog.json",
+        signCatalog(
+          {
+            ...signed,
+            packages: [
+              {
+                id: "reviewer",
+                version: "2.0.0",
+                manifest_path: "reviewer/2.0.0/manifest.json",
+                manifest_sha256: replacementDigest,
+              },
+            ],
+          },
+          replacement.privateKey,
+          replacement.trust.keyId,
+        ),
+      );
+      files.set("/reviewer/2.0.0/manifest.json", replacementManifest);
+      files.set(
+        "/reviewer/2.0.0/index.mjs",
+        await readFile(join(replacement.root, "index.mjs")),
+      );
+      await setManagedPluginEnabled(home, "reviewer", true);
+      await expect(
+        installPluginFromCatalog({
+          catalogUrl,
+          trustRoot: replacement.trust,
+          kodaHome: home,
+          id: "reviewer",
+          version: "2.0.0",
+          capabilities: ["tools"],
+          ca,
+          nowMs: now,
+        }),
+      ).rejects.toMatchObject({ code: "PLUGIN_PACKAGE_INVALID" });
+      expect((await listManagedPlugins(home))[0]).toMatchObject({
+        version: "1.10.0",
+        keyId: "publisher",
+        enabled: true,
+      });
+      const rotated = await installPluginFromCatalog({
+        catalogUrl,
+        trustRoot: replacement.trust,
+        rotation: { previousTrustRoot: fixture.trust },
+        kodaHome: home,
+        id: "reviewer",
+        version: "2.0.0",
+        capabilities: ["tools"],
+        ca,
+        nowMs: now,
+      });
+      expect(rotated).toMatchObject({
+        version: "2.0.0",
+        keyId: "publisher-v2",
+        enabled: false,
+      });
+      expect(rotated.previousVersion).toBeUndefined();
+      expect(
+        await updatePluginFromCatalog({
+          kodaHome: home,
+          id: "reviewer",
+          ca,
+          nowMs: now,
+        }),
+      ).toBeNull();
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
@@ -646,6 +760,7 @@ lines.on('line', (line) => {
 async function packageFixture(
   filePath = "index.mjs",
   content = "export default 1;\n",
+  keyId = "publisher",
 ) {
   const parent = await mkdtemp(join(tmpdir(), "koda-plugin-package-"));
   directories.push(parent);
@@ -677,7 +792,7 @@ async function packageFixture(
     join(root, "manifest.json"),
     JSON.stringify({
       ...signed,
-      signature: { key_id: "publisher", ed25519: signature },
+      signature: { key_id: keyId, ed25519: signature },
     }),
   );
   return {
@@ -685,7 +800,7 @@ async function packageFixture(
     parent,
     privateKey: keys.privateKey,
     trust: {
-      keyId: "publisher",
+      keyId,
       publicKeyPem: keys.publicKey
         .export({ type: "spki", format: "pem" })
         .toString(),
@@ -720,6 +835,27 @@ async function rewriteVersion(
     JSON.stringify({
       ...signed,
       signature: { key_id: fixture.trust.keyId, ed25519: signature },
+    }),
+  );
+}
+
+function signCatalog(
+  signed: object,
+  privateKey: KeyObject,
+  keyId: string,
+): Buffer {
+  const signature = sign(
+    null,
+    Buffer.concat([
+      Buffer.from("KODA_PLUGIN_CATALOG_V1\0"),
+      Buffer.from(sha256CanonicalJson(signed), "hex"),
+    ]),
+    privateKey,
+  ).toString("base64");
+  return Buffer.from(
+    JSON.stringify({
+      ...signed,
+      signature: { key_id: keyId, ed25519: signature },
     }),
   );
 }
