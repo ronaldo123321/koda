@@ -8,7 +8,12 @@ import {
   runExtensionListCommand,
   runExtensionReadCommand,
 } from "./extension-command.js";
-import { runPluginVerifyCommand } from "./plugin-command.js";
+import {
+  runPluginInstallCommand,
+  runPluginListCommand,
+  runPluginStateCommand,
+  runPluginVerifyCommand,
+} from "./plugin-command.js";
 import { runCommand, type RunCommandInput } from "./run-command.js";
 import {
   runRemoteDeviceIssueCommand,
@@ -239,7 +244,13 @@ export function createProgram(runtime: ProgramRuntime): Command {
     );
   const plugin = program
     .command("plugin")
-    .description("Inspect signed plugin packages without executing them");
+    .description("Verify and manage signed local plugin packages");
+  const pluginContext = {
+    environment: runtime.environment,
+    processDirectory: runtime.processDirectory,
+    stdout: runtime.stdout,
+    stderr: runtime.stderr,
+  };
   plugin
     .command("verify")
     .description(
@@ -259,6 +270,47 @@ export function createProgram(runtime: ProgramRuntime): Command {
         );
       },
     );
+  plugin
+    .command("install")
+    .description("Install a verified package in the disabled state")
+    .argument("<directory>", "plugin package directory")
+    .requiredOption("--key-id <id>", "trusted publisher key ID")
+    .requiredOption("--key <file>", "trusted Ed25519 public key PEM")
+    .requiredOption(
+      "--capabilities <list>",
+      "explicitly reviewed plugin capabilities",
+    )
+    .action(
+      async (
+        directory: string,
+        options: {
+          keyId: string;
+          key: string;
+          capabilities: string;
+        },
+      ) => {
+        runtime.setExitCode(
+          await runPluginInstallCommand(directory, options, pluginContext),
+        );
+      },
+    );
+  plugin
+    .command("list")
+    .description("List managed plugin versions and state")
+    .action(async () => {
+      runtime.setExitCode(await runPluginListCommand(pluginContext));
+    });
+  for (const operation of ["enable", "disable", "rollback"] as const) {
+    plugin
+      .command(operation)
+      .description(`${operation} a managed plugin`)
+      .argument("<id>", "plugin ID")
+      .action(async (id: string) => {
+        runtime.setExitCode(
+          await runPluginStateCommand(id, operation, pluginContext),
+        );
+      });
+  }
   thread
     .command("show")
     .description("Show one local Koda thread")

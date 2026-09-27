@@ -12,8 +12,26 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { sha256CanonicalJson } from "@koda/agent-core";
-import { runPluginVerifyCommand } from "@koda/cli";
-import { verifyLocalPluginPackage } from "@koda/plugin-host-node";
+import {
+  runPluginInstallCommand,
+  runPluginListCommand,
+  runPluginStateCommand,
+  runPluginVerifyCommand,
+} from "@koda/cli";
+import {
+  installManagedPluginPackage,
+  listManagedPlugins,
+  loadPluginConfiguration,
+  PluginTurnSession,
+  rollbackManagedPlugin,
+  setManagedPluginEnabled,
+  verifyLocalPluginPackage,
+} from "@koda/plugin-host-node";
+import {
+  ArtifactStore,
+  ProjectCommandTemplateCatalog,
+  ProjectSkillCatalog,
+} from "@koda/runtime-node";
 import { afterEach, describe, expect, it } from "vitest";
 
 const directories: string[] = [];
@@ -28,6 +46,150 @@ afterEach(async () => {
 });
 
 describe("signed local plugin packages", () => {
+  it("launches an enabled signed package through the plugin protocol", async () => {
+    const script = `import { createInterface } from 'node:readline';
+const lines = createInterface({input:process.stdin});
+lines.on('line', (line) => {
+  const request = JSON.parse(line);
+  const result = request.method === 'initialize'
+    ? {protocolVersion:1,plugin:{name:'Reviewer',version:'1.0.0'},contributions:{tools:[]}}
+    : {};
+  process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:request.id,result}) + '\\n');
+  if (request.method === 'shutdown') setImmediate(() => process.exit(0));
+});\n`;
+    const fixture = await packageFixture("index.mjs", script);
+    const home = join(fixture.parent, "home");
+    await installManagedPluginPackage({
+      kodaHome: home,
+      sourceDirectory: fixture.root,
+      trustRoot: fixture.trust,
+      capabilities: ["tools"],
+    });
+    await setManagedPluginEnabled(home, "reviewer", true);
+    const session = await PluginTurnSession.open({
+      environment: {},
+      kodaHome: home,
+      processDirectory: fixture.parent,
+      artifactStore: await ArtifactStore.open(
+        join(fixture.parent, "artifacts"),
+      ),
+      projectSkills: new ProjectSkillCatalog([]),
+      projectCommandTemplates: new ProjectCommandTemplateCatalog([]),
+      signal: new AbortController().signal,
+    });
+    expect(session.snapshots).toMatchObject([
+      { pluginId: "reviewer", version: "1.0.0" },
+    ]);
+    await session.close();
+  });
+
+  it("installs disabled, verifies before launch, and rolls back to the previous signed version", async () => {
+    const fixture = await packageFixture();
+    const home = join(fixture.parent, "home");
+    const install = () =>
+      installManagedPluginPackage({
+        kodaHome: home,
+        sourceDirectory: fixture.root,
+        trustRoot: fixture.trust,
+        capabilities: ["tools"],
+      });
+    const first = await install();
+    expect(first).toMatchObject({
+      id: "reviewer",
+      version: "1.0.0",
+      enabled: false,
+    });
+    expect(
+      (
+        await loadPluginConfiguration({
+          environment: {},
+          kodaHome: home,
+          processDirectory: fixture.parent,
+        })
+      ).plugins,
+    ).toEqual([]);
+    await setManagedPluginEnabled(home, "reviewer", true);
+    const loaded = await loadPluginConfiguration({
+      environment: {},
+      kodaHome: home,
+      processDirectory: fixture.parent,
+    });
+    expect(loaded.plugins).toMatchObject([
+      { id: "reviewer", command: process.execPath },
+    ]);
+    expect(loaded.plugins[0]?.args[0]).toContain(
+      "managed-plugins/packages/reviewer/",
+    );
+
+    const changedReview = await installManagedPluginPackage({
+      kodaHome: home,
+      sourceDirectory: fixture.root,
+      trustRoot: fixture.trust,
+      capabilities: ["skills"],
+    });
+    expect(changedReview.enabled).toBe(false);
+    await setManagedPluginEnabled(home, "reviewer", true);
+
+    await rewriteVersion(fixture, "1.1.0");
+    const second = await install();
+    expect(second).toMatchObject({
+      version: "1.1.0",
+      previousVersion: "1.0.0",
+      enabled: false,
+    });
+    expect((await listManagedPlugins(home))[0]).toMatchObject(second);
+    const restored = await rollbackManagedPlugin(home, "reviewer");
+    expect(restored).toMatchObject({
+      version: "1.0.0",
+      previousVersion: "1.1.0",
+      enabled: false,
+    });
+    await setManagedPluginEnabled(home, "reviewer", true);
+    const installedPayload = join(
+      home,
+      "managed-plugins",
+      "packages",
+      "reviewer",
+      restored.manifestSha256,
+      "index.mjs",
+    );
+    await writeFile(installedPayload, "tampered");
+    await expect(
+      loadPluginConfiguration({
+        environment: {},
+        kodaHome: home,
+        processDirectory: fixture.parent,
+      }),
+    ).rejects.toMatchObject({ code: "PLUGIN_PACKAGE_INVALID" });
+  });
+
+  it("rejects a manual configuration that shadows an enabled managed plugin", async () => {
+    const fixture = await packageFixture();
+    const home = join(fixture.parent, "home");
+    await mkdir(home);
+    await installManagedPluginPackage({
+      kodaHome: home,
+      sourceDirectory: fixture.root,
+      trustRoot: fixture.trust,
+      capabilities: ["tools"],
+    });
+    await setManagedPluginEnabled(home, "reviewer", true);
+    await writeFile(
+      join(home, "plugins.json"),
+      JSON.stringify({
+        version: 1,
+        plugins: { reviewer: { command: "node", capabilities: ["tools"] } },
+      }),
+    );
+    await expect(
+      loadPluginConfiguration({
+        environment: {},
+        kodaHome: home,
+        processDirectory: fixture.parent,
+      }),
+    ).rejects.toMatchObject({ code: "PLUGIN_CONFIGURATION_INVALID" });
+  });
+
   it("exposes verification through the CLI without executing the plugin", async () => {
     const fixture = await packageFixture();
     const keyPath = join(fixture.parent, "publisher.pem");
@@ -48,6 +210,27 @@ describe("signed local plugin packages", () => {
     );
     expect(code).toBe(0);
     expect(output.join("")).toContain("Verified reviewer@1.0.0");
+    expect(errors).toEqual([]);
+    const context = {
+      environment: { KODA_HOME: join(fixture.parent, "home") },
+      processDirectory: fixture.parent,
+      stdout: { write: (text: string) => output.push(text) },
+      stderr: { write: (text: string) => errors.push(text) },
+    };
+    expect(
+      await runPluginInstallCommand(
+        fixture.root,
+        {
+          keyId: fixture.trust.keyId,
+          key: keyPath,
+          capabilities: "tools",
+        },
+        context,
+      ),
+    ).toBe(0);
+    expect(await runPluginStateCommand("reviewer", "enable", context)).toBe(0);
+    expect(await runPluginListCommand(context)).toBe(0);
+    expect(output.join("")).toContain("reviewer\t1.0.0\tenabled");
     expect(errors).toEqual([]);
   });
 
@@ -87,6 +270,14 @@ describe("signed local plugin packages", () => {
           .toString(),
       }),
     ).rejects.toMatchObject({ code: "PLUGIN_PACKAGE_INVALID" });
+    await expect(
+      verifyLocalPluginPackage(fixture.root, {
+        keyId: "publisher",
+        publicKeyPem: other.privateKey
+          .export({ type: "pkcs8", format: "pem" })
+          .toString(),
+      }),
+    ).rejects.toMatchObject({ code: "PLUGIN_PACKAGE_INVALID" });
     const payload = join(fixture.root, "index.mjs");
     const outside = join(fixture.parent, "outside.mjs");
     await writeFile(outside, await readFile(payload));
@@ -116,12 +307,15 @@ describe("signed local plugin packages", () => {
   });
 });
 
-async function packageFixture(filePath = "index.mjs") {
+async function packageFixture(
+  filePath = "index.mjs",
+  content = "export default 1;\n",
+) {
   const parent = await mkdtemp(join(tmpdir(), "koda-plugin-package-"));
   directories.push(parent);
   const root = join(parent, "package");
   await mkdir(root);
-  const payload = Buffer.from("export default 1;\n");
+  const payload = Buffer.from(content);
   if (filePath === "index.mjs") await writeFile(join(root, filePath), payload);
   const keys = generateKeyPairSync("ed25519");
   const signed = {
@@ -153,6 +347,7 @@ async function packageFixture(filePath = "index.mjs") {
   return {
     root,
     parent,
+    privateKey: keys.privateKey,
     trust: {
       keyId: "publisher",
       publicKeyPem: keys.publicKey
@@ -160,4 +355,28 @@ async function packageFixture(filePath = "index.mjs") {
         .toString(),
     },
   };
+}
+
+async function rewriteVersion(
+  fixture: Awaited<ReturnType<typeof packageFixture>>,
+  version: string,
+): Promise<void> {
+  const path = join(fixture.root, "manifest.json");
+  const { signature: _oldSignature, ...signed } = JSON.parse(
+    await readFile(path, "utf8"),
+  );
+  signed.version = version;
+  const digest = Buffer.from(sha256CanonicalJson(signed), "hex");
+  const signature = sign(
+    null,
+    Buffer.concat([domain, digest]),
+    fixture.privateKey,
+  ).toString("base64");
+  await writeFile(
+    path,
+    JSON.stringify({
+      ...signed,
+      signature: { key_id: fixture.trust.keyId, ed25519: signature },
+    }),
+  );
 }

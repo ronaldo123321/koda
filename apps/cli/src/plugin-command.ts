@@ -2,9 +2,24 @@ import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 import { resolve } from "node:path";
 
-import { verifyLocalPluginPackage } from "@koda/plugin-host-node";
+import {
+  installManagedPluginPackage,
+  listManagedPlugins,
+  rollbackManagedPlugin,
+  setManagedPluginEnabled,
+  verifyLocalPluginPackage,
+} from "@koda/plugin-host-node";
+import { pluginCapabilitySchema, type PluginCapability } from "@koda/protocol";
 
+import { resolveKodaHome } from "./config.js";
 import type { TextWriter } from "./console-event-sink.js";
+
+interface PluginCommandContext {
+  environment: NodeJS.ProcessEnv;
+  processDirectory: string;
+  stdout: TextWriter;
+  stderr: TextWriter;
+}
 
 export async function runPluginVerifyCommand(
   directory: string,
@@ -12,19 +27,10 @@ export async function runPluginVerifyCommand(
   context: { processDirectory: string; stdout: TextWriter; stderr: TextWriter },
 ): Promise<number> {
   try {
-    const key = await open(
-      resolve(context.processDirectory, options.key),
-      constants.O_RDONLY | constants.O_NOFOLLOW,
+    const publicKeyPem = await readPublisherKey(
+      options.key,
+      context.processDirectory,
     );
-    let publicKeyPem: string;
-    try {
-      const info = await key.stat();
-      if (!info.isFile() || info.size > 8_192)
-        throw new Error("Invalid publisher key file.");
-      publicKeyPem = await key.readFile({ encoding: "utf8" });
-    } finally {
-      await key.close();
-    }
     const verified = await verifyLocalPluginPackage(
       resolve(context.processDirectory, directory),
       { keyId: options.keyId, publicKeyPem },
@@ -39,4 +45,103 @@ export async function runPluginVerifyCommand(
     );
     return 1;
   }
+}
+
+export async function runPluginInstallCommand(
+  directory: string,
+  options: { keyId: string; key: string; capabilities: string },
+  context: PluginCommandContext,
+): Promise<number> {
+  try {
+    const capabilities = parseCapabilities(options.capabilities);
+    const publicKeyPem = await readPublisherKey(
+      options.key,
+      context.processDirectory,
+    );
+    const installed = await installManagedPluginPackage({
+      kodaHome: resolveKodaHome(context.environment),
+      sourceDirectory: resolve(context.processDirectory, directory),
+      trustRoot: { keyId: options.keyId, publicKeyPem },
+      capabilities,
+    });
+    context.stdout.write(
+      `Installed ${installed.id}@${installed.version}; disabled until explicitly enabled.\n`,
+    );
+    return 0;
+  } catch (error) {
+    return fail(context, error);
+  }
+}
+
+export async function runPluginListCommand(
+  context: PluginCommandContext,
+): Promise<number> {
+  try {
+    const rows = await listManagedPlugins(resolveKodaHome(context.environment));
+    for (const row of rows) {
+      context.stdout.write(
+        `${row.id}\t${row.version}\t${row.enabled ? "enabled" : "disabled"}\t${row.keyId}\n`,
+      );
+    }
+    return 0;
+  } catch (error) {
+    return fail(context, error);
+  }
+}
+
+export async function runPluginStateCommand(
+  id: string,
+  operation: "enable" | "disable" | "rollback",
+  context: PluginCommandContext,
+): Promise<number> {
+  try {
+    const home = resolveKodaHome(context.environment);
+    const result =
+      operation === "rollback"
+        ? await rollbackManagedPlugin(home, id)
+        : await setManagedPluginEnabled(home, id, operation === "enable");
+    context.stdout.write(
+      `${result.id}@${result.version}: ${result.enabled ? "enabled" : "disabled"}\n`,
+    );
+    return 0;
+  } catch (error) {
+    return fail(context, error);
+  }
+}
+
+async function readPublisherKey(
+  path: string,
+  processDirectory: string,
+): Promise<string> {
+  const key = await open(
+    resolve(processDirectory, path),
+    constants.O_RDONLY | constants.O_NOFOLLOW,
+  );
+  try {
+    const info = await key.stat();
+    if (!info.isFile() || info.size > 8_192)
+      throw new Error("Invalid publisher key file.");
+    return await key.readFile({ encoding: "utf8" });
+  } finally {
+    await key.close();
+  }
+}
+
+function parseCapabilities(input: string): PluginCapability[] {
+  const values = input
+    .split(",")
+    .map((value) => pluginCapabilitySchema.parse(value.trim()));
+  if (values.length === 0 || new Set(values).size !== values.length) {
+    throw new Error(
+      "Plugin capabilities must be a unique comma-separated list.",
+    );
+  }
+  return values;
+}
+
+function fail(context: PluginCommandContext, error: unknown): number {
+  context.stderr.write(
+    `Plugin command failed: ${error instanceof Error ? error.message : String(error)}\n`,
+  );
+  return 1;
 }

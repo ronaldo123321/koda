@@ -486,9 +486,20 @@ parameters:
 
 插件 stdout 严格用于 NDJSON JSON-RPC 2.0 协议流量。Koda 协商协议 v1，仅复制并校验所请求的 `tools`、`skills` 和 `command_templates`，为所有贡献的身份加上限定名；必需插件全部正常前不会发布任何能力。可选插件的失败会被隔离并记录，不复制插件 stderr。工具名称变为 `plugin__<plugin-id>__<tool-name>`，默认副作用为 `execute`；清单中可针对准确工具审查并标为 `read`。插件 Skill 和模板必须使用与项目来源相同的完整 Markdown／frontmatter 格式。
 
-插件是使用当前用户操作系统权限运行的普通本地可执行文件。进程隔离和过滤后的环境只是生命周期保护措施，不构成操作系统安全沙箱。Koda 不会从仓库自动发现插件可执行文件、安装软件包、重启崩溃的插件，或让插件跨 Turn 常驻。
+插件是使用当前用户操作系统权限运行的普通本地可执行文件。进程隔离和过滤后的环境只是生命周期保护措施，不构成操作系统安全沙箱。手工 `plugins.json` 不会从仓库自动发现或安装可执行文件；插件不会在崩溃后自动重启，也不会跨 Turn 常驻。
 
-Phase 4E 的签名包验收可先离线执行 `koda plugin verify /absolute/path/to/package --key-id publisher --key /absolute/path/to/publisher.pem`。发布者公钥须由所有者独立取得并核对；该命令验证 Ed25519 清单签名及完整文件清单，拒绝改动、额外文件、链接与穿越路径，不会执行或安装插件。当前 `plugins.json` 中的手工命令仍属于手工配置，不能据此视为已通过签名包验证；受管理安装、启停、更新与回滚见 [Phase 4E 设计](docs/plans/2026-09-27-phase-4e-plugin-and-update-supply-chain-design.md)，尚待实现。
+Phase 4E 的签名包可先离线核验，再安装到受管理目录：
+
+```bash
+koda plugin verify /absolute/path/to/package --key-id publisher --key /absolute/path/to/publisher.pem
+koda plugin install /absolute/path/to/package --key-id publisher --key /absolute/path/to/publisher.pem --capabilities tools
+koda plugin list
+koda plugin enable reviewer
+koda plugin disable reviewer
+koda plugin rollback reviewer
+```
+
+发布者公钥须由所有者独立取得并核对。验证会检查 Ed25519 清单签名及完整文件清单，拒绝改动、额外文件、链接与穿越路径，不执行插件。安装时要求明确审查并填写能力列表，复制后再次验证；新安装及更新默认停用。启用前和每个 Turn 加载前会重新验证，回滚到上一个已安装版本后也保持停用。当前受管理插件不接受环境变量或只读工具豁免；工具仍按 `execute` 审批。手工 `plugins.json` 命令不因此变成已签名包。注册表发现、自动下载、信任根轮换及崩溃点验收仍待实现，见 [Phase 4E 设计](docs/plans/2026-09-27-phase-4e-plugin-and-update-supply-chain-design.md)。
 
 `koda extension list` 和协议 `extension/catalog` 会解析清单，但不会执行配置的命令。活跃贡献的元数据只能在正常事务式 Turn 启动后，从持久化 Thread 快照中获取。
 

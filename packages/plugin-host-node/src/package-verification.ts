@@ -95,6 +95,8 @@ export async function verifyLocalPluginPackage(
     const { signature, ...signed } = manifest;
     const digest = sha256CanonicalJson(signed);
     const signatureBytes = Buffer.from(signature.ed25519, "base64");
+    if (!trustRoot.publicKeyPem.includes("-----BEGIN PUBLIC KEY-----"))
+      throw invalidPackage();
     const key = createPublicKey(trustRoot.publicKeyPem);
     if (
       key.asymmetricKeyType !== "ed25519" ||

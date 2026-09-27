@@ -12,6 +12,7 @@ import {
 import { z } from "zod";
 
 import { PluginHostError, errorMessage } from "./errors.js";
+import { loadManagedPluginConfigurations } from "./managed-packages.js";
 
 const MAX_CONFIG_BYTES = 1_048_576;
 const MAX_ARGUMENTS = 64;
@@ -191,7 +192,9 @@ export async function loadPluginConfiguration(
       isNodeError(error, "ENOENT") &&
       (explicitPath === undefined || explicitPath.length === 0)
     ) {
-      return { plugins: [] };
+      return {
+        plugins: await loadManagedPluginConfigurations(options.kodaHome),
+      };
     }
     if (error instanceof PluginHostError) {
       throw error;
@@ -266,7 +269,19 @@ export async function loadPluginConfiguration(
       manifestSha256: sha256CanonicalJson({ id, ...plugin }),
     });
   }
-  return { sourcePath, plugins };
+  const managed = await loadManagedPluginConfigurations(options.kodaHome);
+  const ids = [...plugins, ...managed].map((plugin) => plugin.id);
+  if (ids.length > MAX_PLUGINS || new Set(ids).size !== ids.length) {
+    throw invalidConfiguration(
+      "Manual and managed plugins exceed the limit or reuse an ID.",
+    );
+  }
+  return {
+    sourcePath,
+    plugins: [...plugins, ...managed].sort((a, b) =>
+      comparePortable(a.id, b.id),
+    ),
+  };
 }
 
 function invalidConfiguration(
