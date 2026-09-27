@@ -3,6 +3,37 @@ import XCTest
 @testable import KodaGUI
 
 final class RemoteClientTests: XCTestCase {
+    @MainActor
+    func testLateFramesFromPreviousThreadDoNotChangeCurrentConversation() {
+        let model = RemoteModel()
+        model.selectThread("first")
+        model.handle(RemoteSubscriptionFrame(
+            kind: "update",
+            event: RemoteUpdate(sequence: 1, turnId: "turn-first",
+                                type: "assistant.delta", text: "first", code: nil),
+            nextAfterSequence: nil
+        ), for: "first")
+        XCTAssertEqual(model.entries.map(\.text), ["first"])
+
+        model.selectThread("second")
+        model.handle(RemoteSubscriptionFrame(
+            kind: "update",
+            event: RemoteUpdate(sequence: 100, turnId: "turn-first",
+                                type: "assistant.delta", text: "late", code: nil),
+            nextAfterSequence: nil
+        ), for: "first")
+        model.handle(RemoteSubscriptionFrame(
+            kind: "cursor", event: nil, nextAfterSequence: 100
+        ), for: "first")
+        model.handle(RemoteSubscriptionFrame(
+            kind: "update",
+            event: RemoteUpdate(sequence: 1, turnId: "turn-second",
+                                type: "assistant.delta", text: "second", code: nil),
+            nextAfterSequence: nil
+        ), for: "second")
+        XCTAssertEqual(model.entries.map(\.text), ["second"])
+    }
+
     func testRealRemoteServerCertificateAuthorizationTurnAndReplay() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("koda-remote-client-\(UUID().uuidString)")

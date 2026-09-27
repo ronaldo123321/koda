@@ -8,8 +8,9 @@
   preview now verifies a pinned certificate, stores its device token in Keychain,
   lists authorized Threads, and replays assistant updates. Full event content
   projection, approvals, automatic pairing, and two-device acceptance remain open.
-  A Swift client integration test now exercises the actual local HTTPS/WSS
-  listener with temporary devices, restricted Turn idempotency, and replay
+  Swift client tests now exercise the actual local HTTPS/WSS listener with
+  temporary devices, restricted Turn idempotency, and replay, and reject late
+  subscription frames after switching Threads.
 - Date: 2026-09-27
 - Depends on: local app-server v18, durable JSONL events, thread leases, artifact integrity, and Phase 4A–4C security evidence
 - Scope: one owner across multiple devices, authenticated HTTP/WebSocket clients, reconnect/replay, remote MCP/OAuth, shared state ownership, and owner/workspace/thread authorization

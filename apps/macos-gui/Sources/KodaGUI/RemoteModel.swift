@@ -218,11 +218,15 @@ final class RemoteModel: ObservableObject {
     private func stream(threadID: String, client: RemoteClient) async {
         var delay: UInt64 = 1_000_000_000
         while !Task.isCancelled && self.client === client && selectedThreadID == threadID {
+            var subscription: URLSessionWebSocketTask?
             do {
                 let socket = try client.subscribe(threadID: threadID, after: cursor)
+                subscription = socket
                 self.socket = socket
                 while !Task.isCancelled {
                     let message = try await socket.receive()
+                    guard !Task.isCancelled, self.client === client,
+                          selectedThreadID == threadID else { break }
                     let data: Data
                     switch message {
                     case .string(let text): data = Data(text.utf8)
@@ -230,23 +234,26 @@ final class RemoteModel: ObservableObject {
                     @unknown default: continue
                     }
                     let frame = try JSONDecoder().decode(RemoteSubscriptionFrame.self, from: data)
-                    handle(frame)
+                    handle(frame, for: threadID)
                     delay = 1_000_000_000
                 }
             } catch {
-                if !Task.isCancelled && self.client === client {
+                if !Task.isCancelled && self.client === client &&
+                    selectedThreadID == threadID {
                     notice = "远程订阅已断开，正在按游标重连。"
                 }
             }
-            socket?.cancel(with: .goingAway, reason: nil)
-            socket = nil
-            if Task.isCancelled { return }
+            subscription?.cancel(with: .goingAway, reason: nil)
+            if let subscription, self.socket === subscription { self.socket = nil }
+            if Task.isCancelled || self.client !== client ||
+                selectedThreadID != threadID { return }
             try? await Task.sleep(nanoseconds: delay)
             delay = min(delay * 2, 10_000_000_000)
         }
     }
 
-    private func handle(_ frame: RemoteSubscriptionFrame) {
+    func handle(_ frame: RemoteSubscriptionFrame, for threadID: String) {
+        guard selectedThreadID == threadID else { return }
         if frame.kind == "cursor", let next = frame.nextAfterSequence {
             cursor = max(cursor, next)
             if notice == "远程订阅已断开，正在按游标重连。" { notice = nil }
