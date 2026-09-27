@@ -80,9 +80,11 @@ jobs:
             uname: x86_64
     env:
       KODA_DEVELOPER_ID_APPLICATION: ${{ vars.KODA_DEVELOPER_ID_APPLICATION }}
+      KODA_DEVELOPER_ID_INSTALLER: ${{ vars.KODA_DEVELOPER_ID_INSTALLER }}
       KODA_APPLE_TEAM_ID: ${{ vars.KODA_APPLE_TEAM_ID }}
       KODA_NOTARY_KEY_ID: ${{ vars.KODA_NOTARY_KEY_ID }}
       KODA_NOTARY_ISSUER_ID: ${{ vars.KODA_NOTARY_ISSUER_ID }}
+      KODA_GUI_UPDATE_PUBLIC_KEY_BASE64: ${{ vars.KODA_GUI_UPDATE_PUBLIC_KEY_BASE64 }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -102,7 +104,10 @@ jobs:
         env:
           KODA_DEVELOPER_ID_P12_BASE64: ${{ secrets.KODA_DEVELOPER_ID_P12_BASE64 }}
           KODA_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.KODA_DEVELOPER_ID_P12_PASSWORD }}
+          KODA_DEVELOPER_ID_INSTALLER_P12_BASE64: ${{ secrets.KODA_DEVELOPER_ID_INSTALLER_P12_BASE64 }}
+          KODA_DEVELOPER_ID_INSTALLER_P12_PASSWORD: ${{ secrets.KODA_DEVELOPER_ID_INSTALLER_P12_PASSWORD }}
           KODA_NOTARY_KEY_BASE64: ${{ secrets.KODA_NOTARY_KEY_BASE64 }}
+          KODA_GUI_UPDATE_PRIVATE_KEY_BASE64: ${{ secrets.KODA_GUI_UPDATE_PRIVATE_KEY_BASE64 }}
         run: |
           if [[ "$(uname -m)" != "${{ matrix.uname }}" ]]; then
             echo "::error title=Unexpected runner architecture::Expected ${{ matrix.uname }}."
@@ -112,10 +117,15 @@ jobs:
             KODA_DEVELOPER_ID_P12_BASE64
             KODA_DEVELOPER_ID_P12_PASSWORD
             KODA_DEVELOPER_ID_APPLICATION
+            KODA_DEVELOPER_ID_INSTALLER_P12_BASE64
+            KODA_DEVELOPER_ID_INSTALLER_P12_PASSWORD
+            KODA_DEVELOPER_ID_INSTALLER
             KODA_APPLE_TEAM_ID
             KODA_NOTARY_KEY_BASE64
             KODA_NOTARY_KEY_ID
             KODA_NOTARY_ISSUER_ID
+            KODA_GUI_UPDATE_PRIVATE_KEY_BASE64
+            KODA_GUI_UPDATE_PUBLIC_KEY_BASE64
           )
           for name in "${required[@]}"; do
             if [[ -z "${!name:-}" ]]; then
@@ -133,24 +143,33 @@ jobs:
         env:
           KODA_DEVELOPER_ID_P12_BASE64: ${{ secrets.KODA_DEVELOPER_ID_P12_BASE64 }}
           KODA_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.KODA_DEVELOPER_ID_P12_PASSWORD }}
+          KODA_DEVELOPER_ID_INSTALLER_P12_BASE64: ${{ secrets.KODA_DEVELOPER_ID_INSTALLER_P12_BASE64 }}
+          KODA_DEVELOPER_ID_INSTALLER_P12_PASSWORD: ${{ secrets.KODA_DEVELOPER_ID_INSTALLER_P12_PASSWORD }}
         run: |
           umask 077
           certificate="$RUNNER_TEMP/koda-developer-id.p12"
+          installer_certificate="$RUNNER_TEMP/koda-developer-id-installer.p12"
           keychain="$RUNNER_TEMP/koda-signing.keychain-db"
           keychain_password="$(openssl rand -hex 32)"
           printf 'KODA_SIGNING_KEYCHAIN=%s\n' "$keychain" >> "$GITHUB_ENV"
           printf 'KODA_SIGNING_CERTIFICATE=%s\n' "$certificate" >> "$GITHUB_ENV"
+          printf 'KODA_INSTALLER_CERTIFICATE=%s\n' "$installer_certificate" >> "$GITHUB_ENV"
           printf '%s' "$KODA_DEVELOPER_ID_P12_BASE64" | base64 --decode > "$certificate"
+          printf '%s' "$KODA_DEVELOPER_ID_INSTALLER_P12_BASE64" | base64 --decode > "$installer_certificate"
           security create-keychain -p "$keychain_password" "$keychain"
           security set-keychain-settings -lut 21600 "$keychain"
           security unlock-keychain -p "$keychain_password" "$keychain"
           security import "$certificate" -k "$keychain" \
             -P "$KODA_DEVELOPER_ID_P12_PASSWORD" -T /usr/bin/codesign
+          security import "$installer_certificate" -k "$keychain" \
+            -P "$KODA_DEVELOPER_ID_INSTALLER_P12_PASSWORD" -T /usr/bin/productsign
           security set-key-partition-list -S apple-tool:,apple: -s \
             -k "$keychain_password" "$keychain"
           security list-keychains -d user -s "$keychain"
           security find-identity -v -p codesigning "$keychain" | \
             grep -F "$KODA_DEVELOPER_ID_APPLICATION"
+          security find-certificate -a -c "$KODA_DEVELOPER_ID_INSTALLER" "$keychain" | \
+            grep -F 'keychain:'
       - name: Assemble and sign the public archive
         shell: bash
         run: |
@@ -209,6 +228,51 @@ jobs:
             --codesign "${codesign_evidence[0]}" \
             --bundle "dist/release/${{ matrix.arch }}/koda" \
             --output "dist/release/${{ matrix.arch }}/koda-v$(node apps/distribution/dist/release-main.js version)-darwin-${{ matrix.arch }}.notarization.json"
+      - name: Build, sign, and notarize the GUI installer
+        shell: bash
+        env:
+          KODA_GUI_UPDATE_PRIVATE_KEY_BASE64: ${{ secrets.KODA_GUI_UPDATE_PRIVATE_KEY_BASE64 }}
+        run: |
+          umask 077
+          version="$(node apps/distribution/dist/release-main.js version)"
+          source_commit="$(git rev-parse HEAD)"
+          arch="${{ matrix.arch }}"
+          output="dist/release/$arch"
+          public_key="$RUNNER_TEMP/koda-gui-update-public-key.base64"
+          private_key="$RUNNER_TEMP/koda-gui-update-private-key.pem"
+          printf 'KODA_GUI_UPDATE_PRIVATE_KEY=%s\n' "$private_key" >> "$GITHUB_ENV"
+          printf '%s\n' "$KODA_GUI_UPDATE_PUBLIC_KEY_BASE64" > "$public_key"
+          printf '%s' "$KODA_GUI_UPDATE_PRIVATE_KEY_BASE64" | base64 --decode > "$private_key"
+          chmod 644 "$public_key"
+          umask 022
+          apps/macos-gui/package-preview.sh "$output/Koda.app" "$output/koda" "$public_key"
+          codesign --force --options runtime --timestamp \
+            --keychain "$KODA_SIGNING_KEYCHAIN" \
+            --sign "$KODA_DEVELOPER_ID_APPLICATION" "$output/Koda.app"
+          codesign --verify --deep --strict --verbose=2 "$output/Koda.app"
+          codesign -dv --verbose=4 "$output/Koda.app" 2>&1 | \
+            grep -Fx "TeamIdentifier=$KODA_APPLE_TEAM_ID"
+          unsigned="$RUNNER_TEMP/Koda-v${version}-darwin-${arch}-unsigned.pkg"
+          package="$output/Koda-v${version}-darwin-${arch}.pkg"
+          metadata="$output/Koda-v${version}-darwin-${arch}.update.json"
+          apps/macos-gui/package-unsigned-pkg.sh "$output/Koda.app" "$unsigned"
+          productsign --sign "$KODA_DEVELOPER_ID_INSTALLER" \
+            --keychain "$KODA_SIGNING_KEYCHAIN" "$unsigned" "$package"
+          pkgutil --check-signature "$package" | grep -F "$KODA_APPLE_TEAM_ID"
+          xcrun notarytool submit "$package" \
+            --key "$KODA_NOTARY_PRIVATE_KEY" \
+            --key-id "$KODA_NOTARY_KEY_ID" \
+            --issuer "$KODA_NOTARY_ISSUER_ID" \
+            --wait --output-format json > "$RUNNER_TEMP/gui-notary-response.json"
+          node -e 'if (JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).status !== "Accepted") process.exit(1)' \
+            "$RUNNER_TEMP/gui-notary-response.json"
+          xcrun stapler staple "$package"
+          xcrun stapler validate "$package"
+          spctl --assess --type install --verbose "$package"
+          node apps/macos-gui/sign-update-metadata.mjs \
+            "$package" "$version" "$arch" "$source_commit" \
+            "$private_key" "$public_key" "$metadata"
+          pkgutil --check-signature "$package" | grep -F "$KODA_APPLE_TEAM_ID"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: koda-macos-signed-${{ matrix.arch }}-${{ github.sha }}
@@ -218,6 +282,8 @@ jobs:
             dist/release/${{ matrix.arch }}/*.release.json
             dist/release/${{ matrix.arch }}/*.codesign.json
             dist/release/${{ matrix.arch }}/*.notarization.json
+            dist/release/${{ matrix.arch }}/*.pkg
+            dist/release/${{ matrix.arch }}/*.update.json
           if-no-files-found: error
           retention-days: 30
       - name: Delete ephemeral signing material
@@ -228,7 +294,9 @@ jobs:
             security delete-keychain "$KODA_SIGNING_KEYCHAIN" || true
           fi
           rm -f "${KODA_SIGNING_CERTIFICATE:-$RUNNER_TEMP/missing-certificate}" \
-            "${KODA_NOTARY_PRIVATE_KEY:-$RUNNER_TEMP/missing-notary-key}"
+            "${KODA_INSTALLER_CERTIFICATE:-$RUNNER_TEMP/missing-installer-certificate}" \
+            "${KODA_NOTARY_PRIVATE_KEY:-$RUNNER_TEMP/missing-notary-key}" \
+            "${KODA_GUI_UPDATE_PRIVATE_KEY:-$RUNNER_TEMP/missing-gui-update-key}"
 
   publish:
     name: github-release-and-homebrew-tap
@@ -239,6 +307,7 @@ jobs:
       contents: write
     env:
       KODA_HOMEBREW_TAP_REPOSITORY: ${{ vars.KODA_HOMEBREW_TAP_REPOSITORY }}
+      KODA_GUI_UPDATE_PUBLIC_KEY_BASE64: ${{ vars.KODA_GUI_UPDATE_PUBLIC_KEY_BASE64 }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -262,6 +331,20 @@ jobs:
           pattern: koda-macos-signed-*-${{ github.sha }}
           path: dist/release/public
           merge-multiple: true
+      - name: Verify both GUI update assets against the release identity
+        shell: bash
+        run: |
+          umask 077
+          public_key="$RUNNER_TEMP/koda-gui-update-public-key.base64"
+          printf '%s\n' "$KODA_GUI_UPDATE_PUBLIC_KEY_BASE64" > "$public_key"
+          version="$(node apps/distribution/dist/release-main.js version)"
+          source_commit="$(git rev-parse HEAD)"
+          node apps/macos-gui/verify-update-assets.mjs \
+            "$public_key" "$version" "$source_commit" \
+            "dist/release/public/Koda-v${version}-darwin-arm64.pkg" \
+            "dist/release/public/Koda-v${version}-darwin-arm64.update.json" \
+            "dist/release/public/Koda-v${version}-darwin-x64.pkg" \
+            "dist/release/public/Koda-v${version}-darwin-x64.update.json"
       - name: Build the final release set, Formula, and provenance
         shell: bash
         run: |
@@ -338,6 +421,8 @@ jobs:
             dist/release/public/*.release.json
             dist/release/public/*.codesign.json
             dist/release/public/*.notarization.json
+            dist/release/public/*.pkg
+            dist/release/public/*.update.json
             dist/release/public/node-v22.20.0.provenance.json
             dist/release/public/macos-release-set.json
             dist/release/public/macos-public-release.provenance.json
@@ -360,6 +445,8 @@ jobs:
             dist/release/public/*.release.json
             dist/release/public/*.codesign.json
             dist/release/public/*.notarization.json
+            dist/release/public/*.pkg
+            dist/release/public/*.update.json
             dist/release/public/node-v22.20.0.provenance.json
             dist/release/public/macos-release-set.json
             dist/release/public/macos-public-release.provenance.json

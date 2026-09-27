@@ -25,25 +25,33 @@ credentials in section 3.
 
 ## 2. Apple prerequisites
 
-Prepare one active **Developer ID Application** certificate and export the
-identity plus private key as a password-protected PKCS#12 file. Prepare one App
-Store Connect API private key authorized to submit software to Apple Notary.
-Record its key ID and issuer ID.
+Prepare one active **Developer ID Application** certificate and one **Developer
+ID Installer** certificate. Export each identity plus private key as a separate
+password-protected PKCS#12 file. Prepare one App Store Connect API private key
+authorized to submit software to Apple Notary. Record its key ID and issuer ID.
+Generate one Ed25519 key pair for GUI update metadata. Keep its private PEM file
+outside the repository; the public key must remain stable across installed GUI
+versions until an explicit trust-root migration is designed and accepted.
 
-The workflow imports the certificate into a random-password ephemeral keychain,
-allows only `/usr/bin/codesign` to use it, and deletes the keychain and private
-files in an unconditional cleanup step. The App Store Connect private key and
-PKCS#12 bytes must never be committed or uploaded as workflow artifacts.
+The workflow imports both certificates into a random-password ephemeral
+keychain, allows `/usr/bin/codesign` and `/usr/bin/productsign` to use their
+respective identities, and deletes the keychain and private files in an
+unconditional cleanup step. The App Store Connect private key, update signing
+key, and PKCS#12 bytes must never be committed or uploaded as workflow
+artifacts.
 
 Before encoding the files, verify locally:
 
 ```bash
 security find-identity -v -p codesigning
-openssl pkcs12 -info -in DeveloperID.p12 -noout
+openssl pkcs12 -info -in DeveloperIDApplication.p12 -noout
+openssl pkcs12 -info -in DeveloperIDInstaller.p12 -noout
 ```
 
-Encode the two private files as single-line base64 values. Keep the original
-files outside the repository.
+Encode the four private files as single-line base64 values. Keep the original
+files outside the repository. Store the update public key as canonical Base64
+of the raw 32-byte Ed25519 public key; the private key must be a PEM supported
+by Node.js `createPrivateKey`.
 
 ## 3. Protected GitHub Environment
 
@@ -78,22 +86,27 @@ Configured on 2026-09-01:
 
 ### Environment secrets
 
-| Name                             | Value                                                             |
-| -------------------------------- | ----------------------------------------------------------------- |
-| `KODA_DEVELOPER_ID_P12_BASE64`   | Single-line base64 PKCS#12 bytes                                  |
-| `KODA_DEVELOPER_ID_P12_PASSWORD` | PKCS#12 export password                                           |
-| `KODA_NOTARY_KEY_BASE64`         | Single-line base64 App Store Connect `.p8` bytes                  |
-| `KODA_HOMEBREW_TAP_TOKEN`        | Fine-grained token with Contents write only on the Tap repository |
+| Name                                       | Value                                                             |
+| ------------------------------------------ | ----------------------------------------------------------------- |
+| `KODA_DEVELOPER_ID_P12_BASE64`             | Single-line base64 PKCS#12 bytes                                  |
+| `KODA_DEVELOPER_ID_P12_PASSWORD`           | PKCS#12 export password                                           |
+| `KODA_DEVELOPER_ID_INSTALLER_P12_BASE64`   | Single-line base64 Installer PKCS#12 bytes                        |
+| `KODA_DEVELOPER_ID_INSTALLER_P12_PASSWORD` | Installer PKCS#12 export password                                 |
+| `KODA_NOTARY_KEY_BASE64`                   | Single-line base64 App Store Connect `.p8` bytes                  |
+| `KODA_GUI_UPDATE_PRIVATE_KEY_BASE64`       | Single-line base64 Ed25519 private PEM bytes                      |
+| `KODA_HOMEBREW_TAP_TOKEN`                  | Fine-grained token with Contents write only on the Tap repository |
 
 ### Environment variables
 
-| Name                            | Example/meaning                                       |
-| ------------------------------- | ----------------------------------------------------- |
-| `KODA_DEVELOPER_ID_APPLICATION` | Exact `Developer ID Application: … (TEAMID)` identity |
-| `KODA_APPLE_TEAM_ID`            | Ten-character Developer team ID                       |
-| `KODA_NOTARY_KEY_ID`            | App Store Connect API key ID                          |
-| `KODA_NOTARY_ISSUER_ID`         | App Store Connect issuer UUID                         |
-| `KODA_HOMEBREW_TAP_REPOSITORY`  | `owner/homebrew-koda` repository                      |
+| Name                                | Example/meaning                                       |
+| ----------------------------------- | ----------------------------------------------------- |
+| `KODA_DEVELOPER_ID_APPLICATION`     | Exact `Developer ID Application: … (TEAMID)` identity |
+| `KODA_DEVELOPER_ID_INSTALLER`       | Exact `Developer ID Installer: … (TEAMID)` identity   |
+| `KODA_APPLE_TEAM_ID`                | Ten-character Developer team ID                       |
+| `KODA_NOTARY_KEY_ID`                | App Store Connect API key ID                          |
+| `KODA_NOTARY_ISSUER_ID`             | App Store Connect issuer UUID                         |
+| `KODA_HOMEBREW_TAP_REPOSITORY`      | `owner/homebrew-koda` repository                      |
+| `KODA_GUI_UPDATE_PUBLIC_KEY_BASE64` | Raw 32-byte Ed25519 public key as Base64              |
 
 Never put private values in GitHub variables. Never reuse a broad personal
 access token when a repository-scoped fine-grained Tap token is available.
@@ -147,9 +160,14 @@ The workflow must prove, in order:
    corruption rejection;
 6. Apple Notary `Accepted`, post-submission signature audit, and Gatekeeper
    assessment for every Mach-O file;
-7. same-commit dual-architecture contract, Formula smoke, transitive provenance,
-   and `SHA256SUMS`;
-8. immutable GitHub prerelease and matching public Tap update.
+7. GUI `.app` built from each signed runtime with the pinned update public key,
+   Developer ID Application signing, and a Developer ID Installer signed `.pkg`;
+8. Apple Notary `Accepted`, stapling, and Gatekeeper install assessment of each
+   GUI package, followed by Ed25519 metadata signing over the final package
+   bytes and independent dual-architecture verification;
+9. same-commit CLI contract, Formula smoke, transitive provenance, and
+   `SHA256SUMS` covering both GUI packages and their metadata;
+10. immutable GitHub prerelease with GUI assets and matching public Tap update.
 
 ## 6. Clean-machine acceptance
 
@@ -169,6 +187,14 @@ For each architecture, record the release URL, archive SHA-256, macOS version,
 hardware architecture, `koda --version`, doctor result, and Gatekeeper result.
 Confirm that `which node`, `which pnpm`, and `which cargo` are irrelevant to
 Koda startup rather than installing/removing user tools solely for the test.
+
+On both architectures, download the matching `Koda-vVERSION-darwin-ARCH.pkg`
+and `.update.json` from that GitHub Release. Verify the published checksums and
+metadata, install the notarized package, launch the SwiftUI app, and exercise
+manual update discovery and download from a later candidate release. Record
+the installed app identity and preservation of Keychain credentials and thread
+history. The public GUI update path is not accepted by local simulated
+downloads alone; installation and rollback still need clean-machine evidence.
 
 Run one real turn with a dedicated low-privilege Provider test key. The turn
 must stream a complete final answer and perform one approval-gated protected
@@ -202,6 +228,7 @@ When the first release passes, update the Mac Release 1A design with:
 
 - tag, source commit, workflow run ID, and run attempt;
 - arm64 and Intel archive SHA-256 values;
+- arm64 and Intel GUI package SHA-256 values and signed metadata verification;
 - Node provenance, code-signature evidence, Notary submission, and public
   provenance document hashes;
 - GitHub Release and Tap commit links;

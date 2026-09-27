@@ -30,16 +30,22 @@ final class UpdateMetadataTests: XCTestCase {
             .deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent()
         let script = repository.appendingPathComponent("apps/macos-gui/sign-update-metadata.mjs")
-        let signer = Process()
-        signer.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        signer.arguments = ["node", script.path, packageURL.path, "0.2.0", "arm64",
-                            String(repeating: "a", count: 40), privateKeyURL.path,
-                            publicKeyURL.path, metadataURL.path]
-        signer.standardOutput = Pipe()
-        signer.standardError = Pipe()
-        try signer.run()
-        signer.waitUntilExit()
-        XCTAssertEqual(signer.terminationStatus, 0)
+        let sourceCommit = String(repeating: "a", count: 40)
+        XCTAssertEqual(try runNode(script, [packageURL.path, "0.2.0", "arm64", sourceCommit,
+                                            privateKeyURL.path, publicKeyURL.path, metadataURL.path]), 0)
+        let x64PackageURL = root.appendingPathComponent("Koda-v0.2.0-darwin-x64.pkg")
+        let x64MetadataURL = root.appendingPathComponent("Koda-v0.2.0-darwin-x64.update.json")
+        try Data("second architecture package".utf8).write(to: x64PackageURL)
+        XCTAssertEqual(try runNode(script, [x64PackageURL.path, "0.2.0", "x64", sourceCommit,
+                                            privateKeyURL.path, publicKeyURL.path, x64MetadataURL.path]), 0)
+        let verifier = repository.appendingPathComponent("apps/macos-gui/verify-update-assets.mjs")
+        let verifyArguments = [publicKeyURL.path, "0.2.0", sourceCommit,
+                               packageURL.path, metadataURL.path,
+                               x64PackageURL.path, x64MetadataURL.path]
+        XCTAssertEqual(try runNode(verifier, verifyArguments), 0)
+        XCTAssertNotEqual(try runNode(verifier, [publicKeyURL.path, "0.2.0",
+                                                 String(repeating: "b", count: 40)] +
+                                            Array(verifyArguments.dropFirst(3))), 0)
 
         let data = try Data(contentsOf: metadataURL)
         let metadata = try JSONDecoder().decode(UpdateMetadata.self, from: data)
@@ -104,6 +110,18 @@ final class UpdateMetadataTests: XCTestCase {
         ))
         try Data(repeating: 0x78, count: verified.packageSize).write(to: packageURL)
         XCTAssertThrowsError(try verified.verifyPackage(at: packageURL))
+        XCTAssertNotEqual(try runNode(verifier, verifyArguments), 0)
+    }
+
+    private func runNode(_ script: URL, _ arguments: [String]) throws -> Int32 {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["node", script.path] + arguments
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+        try process.run()
+        process.waitUntilExit()
+        return process.terminationStatus
     }
 }
 
