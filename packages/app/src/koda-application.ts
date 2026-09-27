@@ -19,6 +19,7 @@ import {
   type ItemIdFactory,
   type ModelProvider,
   type PlanAcceptanceBroker,
+  rejectApprovalsBroker,
 } from "@koda/agent-core";
 import { McpClientError, McpTurnSession } from "@koda/mcp-client-node";
 import {
@@ -142,6 +143,7 @@ import {
   registerExecTerminalTool,
   registerPatchSetTool,
   registerProjectSkillTool,
+  registerReadOnlyDelegationTool,
   registerReadOnlyWorkspaceTools,
   registerStructuredPatchTool,
   registerUpdatePlanTool,
@@ -362,6 +364,7 @@ export interface KodaApplicationOptions {
   executionPolicy?: ExecutionPolicyConfig;
   secretCatalog?: SecretCatalog;
   remoteRestricted?: boolean;
+  readOnlyChild?: boolean;
 }
 
 export interface KodaApplicationDependencies {
@@ -405,6 +408,7 @@ export class KodaApplication {
   private readonly executionProfile: ExecutionProfile | undefined;
   private readonly secretLeaseManager: SecretLeaseManager;
   private readonly remoteRestricted: boolean;
+  private readonly readOnlyChild: boolean;
 
   public get isRemoteRestricted(): boolean {
     return this.remoteRestricted;
@@ -414,7 +418,9 @@ export class KodaApplication {
     this.environment = options.environment;
     this.processDirectory = options.processDirectory;
     this.dependencies = options.dependencies ?? productionDependencies;
-    this.remoteRestricted = options.remoteRestricted === true;
+    this.readOnlyChild = options.readOnlyChild === true;
+    this.remoteRestricted =
+      options.remoteRestricted === true || this.readOnlyChild;
     this.approvalGrantRegistry =
       options.approvalGrantRegistry ?? new ApprovalGrantRegistry();
     this.interactiveProcessService = options.interactiveProcessService;
@@ -1433,100 +1439,104 @@ export class KodaApplication {
           : { environmentProfile: this.executionProfile }),
       });
       controller.signal.throwIfAborted();
-      const mutationJournal = await WorkspaceMutationJournalStore.open(
-        configuration.kodaHome,
-        workspace.root,
-      );
-      try {
-        const recoveryCoordinator = await WorkspaceMutationCoordinator.open(
-          configuration.kodaHome,
-          workspace.root,
-        );
-        const pendingResolutions = await recoveryCoordinator.runExclusive(
-          controller.signal,
-          () => mutationJournal.listPendingResolutionReceipts(),
-        );
-        const deferredResolutionReceipts: WorkspaceMutationResolutionReceipt[] =
-          [];
-        for (const receipt of pendingResolutions) {
-          const reconciliation =
-            await reconcileWorkspaceMutationResolutionAudit(
-              configuration.kodaHome,
-              receipt,
-            );
-          if (reconciliation.status === "deferred") {
-            deferredResolutionReceipts.push(receipt);
-            continue;
-          }
-          await recoveryCoordinator.runExclusive(controller.signal, () =>
-            mutationJournal.acknowledgeResolution(receipt),
-          );
-          await emitDiagnostic(client, {
-            level: "warning",
-            code: "WORKSPACE_MUTATION_CONFLICT_RESOLVED",
-            message: `Reconciled the completed '${receipt.resolution}' workspace conflict resolution with its originating thread audit.`,
-          });
-        }
-        const recoveries = await recoveryCoordinator.runExclusive(
-          controller.signal,
-          () => mutationJournal.recoverPending({ retainRecovered: true }),
-        );
-        for (const recovery of recoveries) {
-          const reconciliation = await reconcileWorkspaceMutationAudit(
+      const mutationJournal = this.readOnlyChild
+        ? undefined
+        : await WorkspaceMutationJournalStore.open(
             configuration.kodaHome,
-            recovery,
+            workspace.root,
           );
-          if (
-            recovery.status !== "conflicted" &&
-            reconciliation.status !== "deferred"
-          ) {
-            await mutationJournal.acknowledgeRecovery(recovery);
-          }
-          await emitDiagnostic(client, {
-            level: "warning",
-            code:
-              recovery.status === "conflicted"
-                ? "WORKSPACE_MUTATION_RECOVERY_CONFLICT"
-                : reconciliation.status === "deferred"
-                  ? "WORKSPACE_MUTATION_AUDIT_DEFERRED"
-                  : "WORKSPACE_MUTATION_RECOVERED",
-            message:
-              recovery.status === "conflicted"
-                ? `Interrupted workspace changes conflict with current files: ${recovery.paths.join(", ")}. Writes remain blocked until the retained recovery journal is explicitly resolved.`
-                : reconciliation.status === "deferred"
-                  ? `Recovered interrupted workspace changes as '${recovery.status}', but audit reconciliation was deferred: ${reconciliation.message ?? "unknown audit state"}`
-                  : `Recovered interrupted workspace changes as '${recovery.status}' and reconciled their originating thread audit.`,
-          });
-        }
-        for (const receipt of deferredResolutionReceipts) {
-          const reconciliation =
-            await reconcileWorkspaceMutationResolutionAudit(
-              configuration.kodaHome,
-              receipt,
-            );
-          if (reconciliation.status !== "deferred") {
+      if (mutationJournal !== undefined) {
+        try {
+          const recoveryCoordinator = await WorkspaceMutationCoordinator.open(
+            configuration.kodaHome,
+            workspace.root,
+          );
+          const pendingResolutions = await recoveryCoordinator.runExclusive(
+            controller.signal,
+            () => mutationJournal.listPendingResolutionReceipts(),
+          );
+          const deferredResolutionReceipts: WorkspaceMutationResolutionReceipt[] =
+            [];
+          for (const receipt of pendingResolutions) {
+            const reconciliation =
+              await reconcileWorkspaceMutationResolutionAudit(
+                configuration.kodaHome,
+                receipt,
+              );
+            if (reconciliation.status === "deferred") {
+              deferredResolutionReceipts.push(receipt);
+              continue;
+            }
             await recoveryCoordinator.runExclusive(controller.signal, () =>
               mutationJournal.acknowledgeResolution(receipt),
             );
+            await emitDiagnostic(client, {
+              level: "warning",
+              code: "WORKSPACE_MUTATION_CONFLICT_RESOLVED",
+              message: `Reconciled the completed '${receipt.resolution}' workspace conflict resolution with its originating thread audit.`,
+            });
           }
+          const recoveries = await recoveryCoordinator.runExclusive(
+            controller.signal,
+            () => mutationJournal.recoverPending({ retainRecovered: true }),
+          );
+          for (const recovery of recoveries) {
+            const reconciliation = await reconcileWorkspaceMutationAudit(
+              configuration.kodaHome,
+              recovery,
+            );
+            if (
+              recovery.status !== "conflicted" &&
+              reconciliation.status !== "deferred"
+            ) {
+              await mutationJournal.acknowledgeRecovery(recovery);
+            }
+            await emitDiagnostic(client, {
+              level: "warning",
+              code:
+                recovery.status === "conflicted"
+                  ? "WORKSPACE_MUTATION_RECOVERY_CONFLICT"
+                  : reconciliation.status === "deferred"
+                    ? "WORKSPACE_MUTATION_AUDIT_DEFERRED"
+                    : "WORKSPACE_MUTATION_RECOVERED",
+              message:
+                recovery.status === "conflicted"
+                  ? `Interrupted workspace changes conflict with current files: ${recovery.paths.join(", ")}. Writes remain blocked until the retained recovery journal is explicitly resolved.`
+                  : reconciliation.status === "deferred"
+                    ? `Recovered interrupted workspace changes as '${recovery.status}', but audit reconciliation was deferred: ${reconciliation.message ?? "unknown audit state"}`
+                    : `Recovered interrupted workspace changes as '${recovery.status}' and reconciled their originating thread audit.`,
+            });
+          }
+          for (const receipt of deferredResolutionReceipts) {
+            const reconciliation =
+              await reconcileWorkspaceMutationResolutionAudit(
+                configuration.kodaHome,
+                receipt,
+              );
+            if (reconciliation.status !== "deferred") {
+              await recoveryCoordinator.runExclusive(controller.signal, () =>
+                mutationJournal.acknowledgeResolution(receipt),
+              );
+            }
+            await emitDiagnostic(client, {
+              level: "warning",
+              code:
+                reconciliation.status === "deferred"
+                  ? "WORKSPACE_MUTATION_RESOLUTION_AUDIT_DEFERRED"
+                  : "WORKSPACE_MUTATION_CONFLICT_RESOLVED",
+              message:
+                reconciliation.status === "deferred"
+                  ? `A completed '${receipt.resolution}' workspace conflict resolution remains write-blocking because audit reconciliation was deferred: ${reconciliation.message ?? "unknown audit state"}`
+                  : `Reconciled the completed '${receipt.resolution}' workspace conflict resolution with its originating thread audit after repairing its uncertain boundary.`,
+            });
+          }
+        } catch (error) {
           await emitDiagnostic(client, {
             level: "warning",
-            code:
-              reconciliation.status === "deferred"
-                ? "WORKSPACE_MUTATION_RESOLUTION_AUDIT_DEFERRED"
-                : "WORKSPACE_MUTATION_CONFLICT_RESOLVED",
-            message:
-              reconciliation.status === "deferred"
-                ? `A completed '${receipt.resolution}' workspace conflict resolution remains write-blocking because audit reconciliation was deferred: ${reconciliation.message ?? "unknown audit state"}`
-                : `Reconciled the completed '${receipt.resolution}' workspace conflict resolution with its originating thread audit after repairing its uncertain boundary.`,
+            code: "WORKSPACE_MUTATION_RECOVERY_FAILED",
+            message: `Workspace mutation recovery could not complete; reads remain available and later writes will fail closed: ${errorMessage(error)}`,
           });
         }
-      } catch (error) {
-        await emitDiagnostic(client, {
-          level: "warning",
-          code: "WORKSPACE_MUTATION_RECOVERY_FAILED",
-          message: `Workspace mutation recovery could not complete; reads remain available and later writes will fail closed: ${errorMessage(error)}`,
-        });
       }
       const repositoryInstructions = await loadRepositoryInstructions(
         workspace.root,
@@ -1709,6 +1719,66 @@ export class KodaApplication {
       }
       registerReadOnlyWorkspaceTools(tools, workspace, { artifactStore });
       if (!this.remoteRestricted) {
+        let childCount = 0;
+        registerReadOnlyDelegationTool(tools, async (context, task) => {
+          context.signal.throwIfAborted();
+          if (childCount >= 2) {
+            return { status: "limit_reached", maxChildren: 2 };
+          }
+          childCount += 1;
+          const childApplication = new KodaApplication({
+            environment: this.environment,
+            processDirectory: this.processDirectory,
+            dependencies: this.dependencies,
+            readOnlyChild: true,
+          });
+          let answer = "";
+          const child = childApplication.startTurn(
+            {
+              prompt: task,
+              cwd: workspace.root,
+              provider: configuration.provider,
+              model: configuration.model,
+              approvalMode: "never",
+              parentThreadId: ids.threadId,
+            },
+            {
+              events: {
+                append: async (event) => {
+                  if (
+                    event.type === "item.recorded" &&
+                    event.payload.item.type === "assistant_message"
+                  ) {
+                    answer = event.payload.item.content;
+                  }
+                },
+              },
+              approvals: rejectApprovalsBroker,
+            },
+          );
+          const cancel = () => child.cancel("Parent turn was cancelled.");
+          context.signal.addEventListener("abort", cancel, { once: true });
+          const timeout = setTimeout(
+            () => child.cancel("Child read-only task timed out."),
+            120_000,
+          );
+          try {
+            const result = await child.completion;
+            return {
+              threadId: child.threadId,
+              status: result.status,
+              answer: answer.slice(0, 4_000),
+              ...(result.error === undefined
+                ? {}
+                : { errorCode: result.error.code }),
+            };
+          } finally {
+            clearTimeout(timeout);
+            context.signal.removeEventListener("abort", cancel);
+          }
+        });
+      }
+      if (!this.remoteRestricted && mutationJournal !== undefined) {
         const mutationCoordinator = await WorkspaceMutationCoordinator.open(
           configuration.kodaHome,
           workspace.root,

@@ -50,6 +50,298 @@ afterEach(async () => {
 });
 
 describe("KodaApplication", () => {
+  it("delegates a bounded read-only task to an independent child thread", async () => {
+    const fixture = await createFixture();
+    await writeFile(
+      join(fixture.workspaceRoot, "note.txt"),
+      "Hello from the workspace.\n",
+    );
+    const parentId = threadIdSchema.parse("delegate-parent-thread");
+    const childId = threadIdSchema.parse("delegate-child-thread");
+    const parentProvider = new ScriptedModelProvider([
+      {
+        assertRequest: (request) => {
+          expect(request.tools.map((tool) => tool.name)).toContain(
+            "delegate_readonly",
+          );
+        },
+        events: [
+          {
+            type: "tool_call",
+            callId: toolCallIdSchema.parse("delegate-call"),
+            name: "delegate_readonly",
+            arguments: { task: "Read note.txt and summarize it." },
+          },
+          { type: "completed", finishReason: "tool_calls" },
+        ],
+      },
+      {
+        assertRequest: (request) => {
+          expect(request.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "tool_result",
+                name: "delegate_readonly",
+                status: "success",
+                output: {
+                  threadId: childId,
+                  status: "completed",
+                  answer: "The note says hello.",
+                },
+              }),
+            ]),
+          );
+        },
+        events: [
+          { type: "assistant_delta", text: "Child result received." },
+          { type: "completed", finishReason: "stop" },
+        ],
+      },
+    ]);
+    const childProvider = new ScriptedModelProvider([
+      {
+        assertRequest: (request) => {
+          const names = request.tools.map((tool) => tool.name);
+          expect(names).toContain("read_file");
+          expect(names).not.toContain("delegate_readonly");
+          expect(names).not.toContain("apply_patch");
+          expect(names).not.toContain("exec_command");
+          expect(names.some((name) => name.startsWith("mcp__"))).toBe(false);
+        },
+        events: [
+          {
+            type: "tool_call",
+            callId: toolCallIdSchema.parse("child-read-call"),
+            name: "read_file",
+            arguments: { path: "note.txt", start_line: 1, line_count: 10 },
+          },
+          { type: "completed", finishReason: "tool_calls" },
+        ],
+      },
+      {
+        events: [
+          { type: "assistant_delta", text: "The note says hello." },
+          { type: "completed", finishReason: "stop" },
+        ],
+      },
+    ]);
+    let providerCount = 0;
+    let idCount = 0;
+    const application = new KodaApplication({
+      environment: {
+        KODA_HOME: fixture.kodaHome,
+        OPENAI_API_KEY: "offline-test-key",
+      },
+      processDirectory: fixture.root,
+      dependencies: {
+        openWorkspace: (root) => ReadOnlyWorkspace.open(root),
+        createProvider: () => {
+          providerCount += 1;
+          return providerCount === 1 ? parentProvider : childProvider;
+        },
+        createIds: () => {
+          idCount += 1;
+          return {
+            threadId: idCount === 1 ? parentId : childId,
+            turnId: turnIdSchema.parse(`delegate-turn-${idCount}`),
+            itemIds: new DeterministicItemIdFactory(`delegate-item-${idCount}`),
+          };
+        },
+      },
+    });
+    const parent = application.startTurn(
+      {
+        prompt: "Ask a child to inspect the note.",
+        cwd: fixture.workspaceRoot,
+      },
+      {
+        events: { append: async () => undefined },
+        approvals: rejectApprovals(),
+      },
+    );
+    const parentResult = await parent.completion;
+    expect(providerCount).toBe(2);
+    const childLog = await new JsonlEventStore(
+      join(fixture.kodaHome, "threads", `${childId}.jsonl`),
+    ).readAll();
+    expect(childLog.events.at(-1)?.type).toBe("turn.completed");
+    const readResult = childLog.events.find(
+      (event) =>
+        event.type === "item.recorded" &&
+        event.payload.item.type === "tool_result" &&
+        event.payload.item.name === "read_file",
+    );
+    expect(readResult).toMatchObject({
+      payload: {
+        item: {
+          status: "success",
+          output: { content: "1: Hello from the workspace." },
+        },
+      },
+    });
+    expect(parentResult.error).toBeUndefined();
+    expect(parentResult).toMatchObject({ status: "completed" });
+    expect(childLog.events[0]).toMatchObject({
+      type: "turn.started",
+      payload: { parentThreadId: parentId },
+    });
+    await expect(application.getThread(childId)).resolves.toMatchObject({
+      value: { parentThreadId: parentId, approvalMode: "never" },
+    });
+  });
+
+  it("limits read-only delegation to two children per parent turn", async () => {
+    const fixture = await createFixture();
+    const parentProvider = new ScriptedModelProvider([
+      {
+        events: [
+          ...[1, 2, 3].map((number) => ({
+            type: "tool_call" as const,
+            callId: toolCallIdSchema.parse(`bounded-child-call-${number}`),
+            name: "delegate_readonly",
+            arguments: { task: `Inspect item ${number}.` },
+          })),
+          { type: "completed", finishReason: "tool_calls" },
+        ],
+      },
+      {
+        assertRequest: (request) => {
+          const outputs = request.items
+            .flatMap((item) =>
+              item.type === "tool_result" && item.name === "delegate_readonly"
+                ? [item.output]
+                : [],
+            );
+          expect(outputs).toHaveLength(3);
+          expect(outputs.at(-1)).toEqual({
+            status: "limit_reached",
+            maxChildren: 2,
+          });
+        },
+        events: [
+          { type: "assistant_delta", text: "Done." },
+          { type: "completed", finishReason: "stop" },
+        ],
+      },
+    ]);
+    let providerCount = 0;
+    let idCount = 0;
+    const application = new KodaApplication({
+      environment: {
+        KODA_HOME: fixture.kodaHome,
+        OPENAI_API_KEY: "offline-test-key",
+      },
+      processDirectory: fixture.root,
+      dependencies: {
+        openWorkspace: (root) => ReadOnlyWorkspace.open(root),
+        createProvider: () => {
+          providerCount += 1;
+          return providerCount === 1
+            ? parentProvider
+            : new ScriptedModelProvider([
+                {
+                  events: [
+                    { type: "assistant_delta", text: "Inspected." },
+                    { type: "completed", finishReason: "stop" },
+                  ],
+                },
+              ]);
+        },
+        createIds: () => {
+          idCount += 1;
+          return {
+            threadId: threadIdSchema.parse(`bounded-thread-${idCount}`),
+            turnId: turnIdSchema.parse(`bounded-turn-${idCount}`),
+            itemIds: new DeterministicItemIdFactory(`bounded-item-${idCount}`),
+          };
+        },
+      },
+    });
+    const parent = application.startTurn(
+      { prompt: "Delegate three tasks.", cwd: fixture.workspaceRoot },
+      {
+        events: { append: async () => undefined },
+        approvals: rejectApprovals(),
+      },
+    );
+    await expect(parent.completion).resolves.toMatchObject({
+      status: "completed",
+    });
+    expect(providerCount).toBe(3);
+  });
+
+  it("cancels an active read-only child when its parent is cancelled", async () => {
+    const fixture = await createFixture();
+    let childStarted: (() => void) | undefined;
+    const childReady = new Promise<void>((resolve) => {
+      childStarted = resolve;
+    });
+    const parentProvider = new ScriptedModelProvider([
+      {
+        events: [
+          {
+            type: "tool_call",
+            callId: toolCallIdSchema.parse("cancel-child-call"),
+            name: "delegate_readonly",
+            arguments: { task: "Inspect the workspace." },
+          },
+          { type: "completed", finishReason: "tool_calls" },
+        ],
+      },
+    ]);
+    const childProvider: ModelProvider = {
+      stream: async function* (_request, signal) {
+        childStarted?.();
+        await waitForAbort(signal);
+        signal.throwIfAborted();
+      },
+    };
+    let idCount = 0;
+    let providerCount = 0;
+    const application = new KodaApplication({
+      environment: {
+        KODA_HOME: fixture.kodaHome,
+        OPENAI_API_KEY: "offline-test-key",
+      },
+      processDirectory: fixture.root,
+      dependencies: {
+        openWorkspace: (root) => ReadOnlyWorkspace.open(root),
+        createProvider: () => {
+          providerCount += 1;
+          return providerCount === 1 ? parentProvider : childProvider;
+        },
+        createIds: () => {
+          idCount += 1;
+          return {
+            threadId: threadIdSchema.parse(
+              idCount === 1 ? "cancel-parent-thread" : "cancel-child-thread",
+            ),
+            turnId: turnIdSchema.parse(`cancel-delegate-turn-${idCount}`),
+            itemIds: new DeterministicItemIdFactory(
+              `cancel-delegate-item-${idCount}`,
+            ),
+          };
+        },
+      },
+    });
+    const parent = application.startTurn(
+      { prompt: "Delegate a read.", cwd: fixture.workspaceRoot },
+      {
+        events: { append: async () => undefined },
+        approvals: rejectApprovals(),
+      },
+    );
+    await childReady;
+    expect(parent.cancel("Stop both tasks.")).toBe(true);
+    await expect(parent.completion).resolves.toMatchObject({
+      status: "cancelled",
+    });
+    const childLog = await new JsonlEventStore(
+      join(fixture.kodaHome, "threads", "cancel-child-thread.jsonl"),
+    ).readAll();
+    expect(childLog.events.at(-1)).toMatchObject({ type: "turn.cancelled" });
+  });
+
   it("creates a child thread only for a valid parent in the same workspace", async () => {
     const fixture = await createFixture();
     const environment = {
