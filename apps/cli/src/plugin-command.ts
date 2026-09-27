@@ -1,8 +1,10 @@
 import { constants } from "node:fs";
-import { open } from "node:fs/promises";
-import { resolve } from "node:path";
+import { randomUUID } from "node:crypto";
+import { open, rename, rm } from "node:fs/promises";
+import { join, resolve } from "node:path";
 
 import {
+  buildSignedPluginCatalog,
   discoverPluginCatalog,
   installManagedPluginPackage,
   installPluginFromCatalog,
@@ -94,6 +96,45 @@ export async function runPluginDiscoverCommand(
         `${entry.id}\t${entry.version}\t${entry.manifestSha256}\n`,
       );
     }
+    return 0;
+  } catch (error) {
+    return fail(context, error);
+  }
+}
+
+export async function runPluginPublishCatalogCommand(
+  directory: string,
+  options: { keyId: string; privateKey: string; expiresAt: string },
+  context: PluginCommandContext,
+): Promise<number> {
+  try {
+    const rootDirectory = resolve(context.processDirectory, directory);
+    const privateKeyPem = await readPublisherPrivateKey(
+      options.privateKey,
+      context.processDirectory,
+    );
+    const { bytes, catalog } = await buildSignedPluginCatalog({
+      rootDirectory,
+      keyId: options.keyId,
+      privateKeyPem,
+      expiresAt: options.expiresAt,
+    });
+    const temporary = join(rootDirectory, `.catalog-${randomUUID()}`);
+    try {
+      const handle = await open(temporary, "wx", 0o600);
+      try {
+        await handle.writeFile(bytes);
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      await rename(temporary, join(rootDirectory, "catalog.json"));
+    } finally {
+      await rm(temporary, { force: true });
+    }
+    context.stdout.write(
+      `Published ${catalog.packages.length} signed plugin package(s) to ${join(rootDirectory, "catalog.json")} (${catalog.catalogSha256}).\n`,
+    );
     return 0;
   } catch (error) {
     return fail(context, error);
@@ -202,6 +243,31 @@ async function readPublisherKey(
     const info = await key.stat();
     if (!info.isFile() || info.size > 8_192)
       throw new Error("Invalid publisher key file.");
+    return await key.readFile({ encoding: "utf8" });
+  } finally {
+    await key.close();
+  }
+}
+
+async function readPublisherPrivateKey(
+  path: string,
+  processDirectory: string,
+): Promise<string> {
+  const key = await open(
+    resolve(processDirectory, path),
+    constants.O_RDONLY | constants.O_NOFOLLOW,
+  );
+  try {
+    const info = await key.stat();
+    if (
+      !info.isFile() ||
+      info.nlink !== 1 ||
+      (process.getuid !== undefined && info.uid !== process.getuid()) ||
+      (info.mode & 0o077) !== 0 ||
+      info.size > 8_192
+    ) {
+      throw new Error("Publisher private key file is unsafe.");
+    }
     return await key.readFile({ encoding: "utf8" });
   } finally {
     await key.close();

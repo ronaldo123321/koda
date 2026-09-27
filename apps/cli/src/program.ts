@@ -13,6 +13,7 @@ import {
   runPluginInstallCommand,
   runPluginInstallRemoteCommand,
   runPluginListCommand,
+  runPluginPublishCatalogCommand,
   runPluginStateCommand,
   runPluginUpdateCommand,
   runPluginVerifyCommand,
@@ -307,6 +308,30 @@ export function createProgram(runtime: ProgramRuntime): Command {
       async (options: { catalog: string; keyId: string; key: string }) => {
         runtime.setExitCode(
           await runPluginDiscoverCommand(options, pluginContext),
+        );
+      },
+    );
+  plugin
+    .command("publish-catalog")
+    .description("Verify local signed packages and write catalog.json")
+    .argument("<directory>", "catalog root containing ID/version packages")
+    .requiredOption("--key-id <id>", "publisher key ID")
+    .requiredOption("--private-key <file>", "publisher Ed25519 private PEM")
+    .requiredOption(
+      "--expires-at <utc>",
+      "catalog expiry as exact UTC ISO time",
+    )
+    .action(
+      async (
+        directory: string,
+        options: { keyId: string; privateKey: string; expiresAt: string },
+      ) => {
+        runtime.setExitCode(
+          await runPluginPublishCatalogCommand(
+            directory,
+            options,
+            pluginContext,
+          ),
         );
       },
     );

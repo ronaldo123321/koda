@@ -1,5 +1,7 @@
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import {
+  chmod,
+  cp,
   link,
   mkdir,
   mkdtemp,
@@ -17,6 +19,7 @@ import { sha256CanonicalJson } from "@koda/agent-core";
 import {
   runPluginInstallCommand,
   runPluginListCommand,
+  runPluginPublishCatalogCommand,
   runPluginStateCommand,
   runPluginVerifyCommand,
 } from "@koda/cli";
@@ -53,6 +56,54 @@ afterEach(async () => {
 });
 
 describe("signed local plugin packages", () => {
+  it("publishes only verified packages as a signed catalog", async () => {
+    const fixture = await packageFixture();
+    const root = join(fixture.parent, "catalog");
+    await mkdir(join(root, "reviewer"), { recursive: true });
+    await cp(fixture.root, join(root, "reviewer", "1.0.0"), {
+      recursive: true,
+    });
+    const keyPath = join(fixture.parent, "publisher-private.pem");
+    await writeFile(
+      keyPath,
+      fixture.privateKey.export({ type: "pkcs8", format: "pem" }),
+      { mode: 0o600 },
+    );
+    const output: string[] = [];
+    const errors: string[] = [];
+    const publish = () =>
+      runPluginPublishCatalogCommand(
+        root,
+        {
+          keyId: fixture.trust.keyId,
+          privateKey: keyPath,
+          expiresAt: new Date(Date.now() + 24 * 60 * 60_000).toISOString(),
+        },
+        {
+          environment: {},
+          processDirectory: fixture.parent,
+          stdout: { write: (text) => output.push(text) },
+          stderr: { write: (text) => errors.push(text) },
+        },
+      );
+    expect(await publish()).toBe(0);
+    const first = await readFile(join(root, "catalog.json"));
+    expect(
+      verifySignedPluginCatalog(first, fixture.trust).packages,
+    ).toMatchObject([{ id: "reviewer", version: "1.0.0" }]);
+    expect(await publish()).toBe(0);
+    const previous = await readFile(join(root, "catalog.json"));
+    await chmod(keyPath, 0o644);
+    expect(await publish()).toBe(1);
+    expect(await readFile(join(root, "catalog.json"))).toEqual(previous);
+    await chmod(keyPath, 0o600);
+    await writeFile(join(root, "reviewer", "1.0.0", "index.mjs"), "changed");
+    expect(await publish()).toBe(1);
+    expect(await readFile(join(root, "catalog.json"))).toEqual(previous);
+    expect(output.join("")).toContain("Published 1 signed plugin package");
+    expect(errors.join("")).toContain("Plugin command failed");
+  });
+
   it("validates a signed catalog and downloads a package through HTTPS", async () => {
     const fixture = await packageFixture();
     const now = Date.parse("2026-09-27T12:00:00.000Z");

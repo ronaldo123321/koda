@@ -25,6 +25,13 @@ const MAX_MANIFEST_BYTES = 64 * 1_024;
 const MAX_FILE_BYTES = 16 * 1_024 * 1_024;
 const MAX_CATALOG_AGE_MS = 30 * 24 * 60 * 60 * 1_000;
 const SIGNING_DOMAIN = Buffer.from("KODA_PLUGIN_CATALOG_V1\0", "utf8");
+
+export function pluginCatalogSigningPayload(signed: object): Buffer {
+  return Buffer.concat([
+    SIGNING_DOMAIN,
+    Buffer.from(sha256CanonicalJson(signed), "hex"),
+  ]);
+}
 const versionSchema = z
   .string()
   .max(64)
@@ -108,18 +115,12 @@ export function verifySignedPluginCatalog(
       throw invalidCatalog();
     }
     const { signature, ...signed } = catalog;
-    const digest = sha256CanonicalJson(signed);
     const signatureBytes = Buffer.from(signature.ed25519, "base64");
     const key = parsePublisherPublicKey(trustRoot.publicKeyPem);
     if (
       signatureBytes.length !== 64 ||
       signatureBytes.toString("base64") !== signature.ed25519 ||
-      !verify(
-        null,
-        Buffer.concat([SIGNING_DOMAIN, Buffer.from(digest, "hex")]),
-        key,
-        signatureBytes,
-      )
+      !verify(null, pluginCatalogSigningPayload(signed), key, signatureBytes)
     ) {
       throw invalidCatalog();
     }
