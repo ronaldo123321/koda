@@ -11,6 +11,8 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
+  rename,
   rm,
   symlink,
   writeFile,
@@ -74,6 +76,69 @@ afterEach(async () => {
 });
 
 describe("signed local plugin packages", () => {
+  it("rejects a managed package parent redirected outside the store", async () => {
+    const fixture = await packageFixture("index.mjs", managedProtocolScript);
+    const outside = join(fixture.parent, "outside");
+    await mkdir(outside);
+    for (const level of ["packages", "plugin-id"]) {
+      const home = join(fixture.parent, `home-${level}`);
+      const store = join(home, "managed-plugins");
+      await mkdir(store, { recursive: true });
+      if (level === "packages") {
+        await symlink(outside, join(store, "packages"));
+      } else {
+        await mkdir(join(store, "packages"));
+        await symlink(outside, join(store, "packages", "reviewer"));
+      }
+      await expect(
+        installManagedPluginPackage({
+          kodaHome: home,
+          sourceDirectory: fixture.root,
+          trustRoot: fixture.trust,
+          capabilities: ["tools"],
+        }),
+      ).rejects.toMatchObject({ code: "PLUGIN_PACKAGE_INVALID" });
+      expect(await readdir(outside)).toEqual([]);
+    }
+
+    const home = join(fixture.parent, "home-installed");
+    await installManagedPluginPackage({
+      kodaHome: home,
+      sourceDirectory: fixture.root,
+      trustRoot: fixture.trust,
+      capabilities: ["tools"],
+    });
+    await rewriteVersion(fixture, "1.1.0");
+    await installManagedPluginPackage({
+      kodaHome: home,
+      sourceDirectory: fixture.root,
+      trustRoot: fixture.trust,
+      capabilities: ["tools"],
+    });
+    await setManagedPluginEnabled(home, "reviewer", true);
+    const parent = join(home, "managed-plugins", "packages", "reviewer");
+    const moved = join(fixture.parent, "moved-installed-packages");
+    await rename(parent, moved);
+    await symlink(moved, parent);
+    await expect(
+      loadPluginConfiguration({
+        environment: {},
+        kodaHome: home,
+        processDirectory: fixture.parent,
+      }),
+    ).rejects.toMatchObject({ code: "PLUGIN_PACKAGE_INVALID" });
+    await expect(
+      setManagedPluginEnabled(home, "reviewer", true),
+    ).rejects.toMatchObject({
+      code: "PLUGIN_PACKAGE_INVALID",
+    });
+    await expect(rollbackManagedPlugin(home, "reviewer")).rejects.toMatchObject(
+      {
+        code: "PLUGIN_PACKAGE_INVALID",
+      },
+    );
+  });
+
   it("rejects a stale update after an owner changes the installed plugin", async () => {
     const fixture = await packageFixture("index.mjs", managedProtocolScript);
     const home = join(fixture.parent, "home");

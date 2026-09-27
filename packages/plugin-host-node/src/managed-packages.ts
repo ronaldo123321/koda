@@ -113,6 +113,7 @@ export async function installManagedPluginPackage(options: {
       throw invalidState("Managed plugin limit reached.");
     }
     if (old !== undefined) {
+      await checkPackageParent(root, verified.id);
       await checkPackage(
         packagePath(root, verified.id, old.active.manifest_sha256),
         verified.id,
@@ -148,7 +149,7 @@ export async function installManagedPluginPackage(options: {
       capabilities,
     };
     const target = packagePath(root, verified.id, verified.manifestSha256);
-    await mkdir(dirname(target), { recursive: true, mode: 0o700 });
+    await ensurePackageParent(root, verified.id);
     if (await exists(target)) {
       await checkPackage(target, verified.id, candidate);
       if (needsPreflight) {
@@ -238,6 +239,7 @@ export async function readManagedPluginUpdateSource(
   if (provenance === undefined)
     throw invalidState("Managed plugin has no signed catalog source.");
   const active = entry.active;
+  await checkPackageParent(root, id);
   await checkPackage(packagePath(root, id, active.manifest_sha256), id, active);
   return {
     catalogUrl: provenance.catalog_url,
@@ -262,12 +264,14 @@ export async function setManagedPluginEnabled(
     const entry = state.plugins[id];
     if (entry === undefined)
       throw invalidState("Managed plugin is not installed.");
-    if (enabled)
+    if (enabled) {
+      await checkPackageParent(root, id);
       await checkPackage(
         packagePath(root, id, entry.active.manifest_sha256),
         id,
         entry.active,
       );
+    }
     state.plugins[id] = { ...entry, enabled };
     await writeState(root, state);
     return projectStatus(id, state.plugins[id]);
@@ -289,6 +293,7 @@ export async function rollbackManagedPlugin(
     const entry = state.plugins[id];
     if (entry?.previous === undefined)
       throw invalidState("No previous plugin version is available.");
+    await checkPackageParent(root, id);
     await checkPackage(
       packagePath(root, id, entry.previous.manifest_sha256),
       id,
@@ -316,6 +321,7 @@ export async function loadManagedPluginConfigurations(
     a < b ? -1 : a > b ? 1 : 0,
   )) {
     if (!entry.enabled) continue;
+    await checkPackageParent(root, id);
     const directory = packagePath(root, id, entry.active.manifest_sha256);
     const verified = await checkPackage(directory, id, entry.active);
     plugins.push({
@@ -349,6 +355,42 @@ function statePath(root: string): string {
 }
 function packagePath(root: string, id: string, digest: string): string {
   return join(root, "packages", id, digest);
+}
+
+async function ensurePackageParent(root: string, id: string): Promise<void> {
+  const packages = join(root, "packages");
+  await createManagedDirectory(packages, root);
+  await createManagedDirectory(join(packages, id), packages);
+}
+
+async function createManagedDirectory(
+  path: string,
+  parent: string,
+): Promise<void> {
+  let created = false;
+  try {
+    await mkdir(path, { mode: 0o700 });
+    created = true;
+  } catch (error) {
+    if (!isNodeError(error, "EEXIST")) throw error;
+  }
+  await checkManagedDirectory(path);
+  if (created) await syncDirectory(parent);
+}
+
+async function checkPackageParent(root: string, id: string): Promise<void> {
+  await checkManagedDirectory(join(root, "packages"));
+  await checkManagedDirectory(join(root, "packages", id));
+}
+
+async function checkManagedDirectory(path: string): Promise<void> {
+  try {
+    if (!(await lstat(path)).isDirectory())
+      throw invalidState("Managed plugin package directory is invalid.");
+  } catch (error) {
+    if (error instanceof PluginHostError) throw error;
+    throw invalidState("Managed plugin package directory is invalid.");
+  }
 }
 
 async function checkPackage(
