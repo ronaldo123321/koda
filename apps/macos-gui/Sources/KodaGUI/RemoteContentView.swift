@@ -58,6 +58,7 @@ struct RemoteContentView: View {
             model.connectSaved()
             if !model.hasSavedConnection { showingConnection = true }
         }
+        .onDisappear { model.close() }
         .onChange(of: model.connected) { _, connected in
             if connected { showingConnection = false }
         }

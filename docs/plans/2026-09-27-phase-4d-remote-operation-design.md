@@ -13,7 +13,10 @@
   subscription frames after switching Threads. A separately authorized
   `turn:control` endpoint and SwiftUI control can cancel an active remote Turn;
   a two-device HTTPS/WSS test confirms concurrent subscriptions and continued
-  delivery to one device after revoking the other. Physical two-device
+  delivery to one device after revoking the other. A SwiftUI model test now
+  closes and restarts the actual local HTTPS/WSS listener on the same address,
+  then confirms automatic cursor replay adds the later assistant update once.
+  Physical two-device
   acceptance remains open.
 - Date: 2026-09-27
 - Depends on: local app-server v18, durable JSONL events, thread leases, artifact integrity, and Phase 4A–4C security evidence

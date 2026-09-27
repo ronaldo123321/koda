@@ -146,6 +146,11 @@ final class RemoteModel: ObservableObject {
         connecting = false
     }
 
+    func close() {
+        cancelPendingConnection()
+        disconnect()
+    }
+
     func selectWorkspace(_ id: String) {
         guard workspaces.contains(id) else { return }
         stopStream()

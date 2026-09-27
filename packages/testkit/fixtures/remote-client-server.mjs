@@ -79,16 +79,34 @@ const application = {
     };
   },
 };
-const server = await startRemoteHttpsServer({
+let server = await startRemoteHttpsServer({
   application, kodaHome: home, host: "127.0.0.1", port: 0,
   certificatePath, privateKeyPath,
 });
+const port = Number(server.address.split(":").at(-1));
 process.stdout.write(JSON.stringify({
   origin: `https://${server.address}`,
   fingerprint: server.certificateSha256,
   token: full.token,
   workspaceOnlyToken: workspaceOnly.token,
 }) + "\n");
+process.stdin.on("data", (chunk) => {
+  if (chunk.toString("utf8").trim() !== "restart") return;
+  void (async () => {
+    await server.close();
+    events.push(
+      { sequence: 4, timestamp: metadata.updatedAt, turnId: "turn-3", type: "turn.started", payload: {} },
+      { sequence: 5, timestamp: metadata.updatedAt, turnId: "turn-3", type: "assistant.delta", payload: { text: "after reconnect" } },
+    );
+    server = await startRemoteHttpsServer({
+      application, kodaHome: home, host: "127.0.0.1", port,
+      certificatePath, privateKeyPath,
+    });
+  })().catch((error) => {
+    process.stderr.write(String(error) + "\n");
+    process.exitCode = 1;
+  });
+});
 process.on("SIGTERM", async () => {
   await server.close();
   process.exit(0);

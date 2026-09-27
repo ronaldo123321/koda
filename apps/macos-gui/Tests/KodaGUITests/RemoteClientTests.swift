@@ -70,11 +70,13 @@ final class RemoteClientTests: XCTestCase {
         let server = Process()
         let output = Pipe()
         let errors = Pipe()
+        let control = Pipe()
         server.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         server.arguments = ["node", fixture.path, root.path, workspace.path,
                             certificate.path, key.path]
         server.standardOutput = output
         server.standardError = errors
+        server.standardInput = control
         try server.run()
         defer { server.terminate(); server.waitUntilExit() }
         var line = ""
@@ -161,6 +163,35 @@ final class RemoteClientTests: XCTestCase {
         noControl.close()
         try await client.cancelTurn(threadID: "thread-1", turnID: "turn-2")
         client.close()
+
+        let reconnectModel = await RemoteModel()
+        await reconnectModel.connect(RemoteSettings(
+            origin: setup.origin, certificateSha256: setup.fingerprint, token: setup.token
+        ), save: false)
+        for _ in 0..<50 {
+            if await reconnectModel.connected { break }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        let connected = await reconnectModel.connected
+        XCTAssertTrue(connected)
+        await reconnectModel.selectThread("thread-1")
+        for _ in 0..<50 {
+            if await reconnectModel.entries.first?.text == "firstsecond" { break }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        let before = await reconnectModel.entries.map(\.text)
+        XCTAssertEqual(before, ["firstsecond"])
+        control.fileHandleForWriting.write(Data("restart\n".utf8))
+        for _ in 0..<100 {
+            if await reconnectModel.entries.contains(where: { $0.text == "after reconnect" }) { break }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        let after = await reconnectModel.entries.map(\.text)
+        XCTAssertEqual(after, ["firstsecond", "after reconnect"])
+        await reconnectModel.close()
+        let closed = await (reconnectModel.connected, reconnectModel.entries.count)
+        XCTAssertFalse(closed.0)
+        XCTAssertEqual(closed.1, 0)
     }
 
     private func receiveFrames(
