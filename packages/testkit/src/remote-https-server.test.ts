@@ -35,7 +35,9 @@ describe.skipIf(process.platform === "win32")(
     it("requires a trusted certificate and a live scoped device token", async () => {
       const home = await mkdtemp(join(tmpdir(), "koda-remote-https-"));
       const workspace = await mkdtemp(join(tmpdir(), "koda-remote-workspace-"));
-      const otherWorkspace = await mkdtemp(join(tmpdir(), "koda-remote-other-"));
+      const otherWorkspace = await mkdtemp(
+        join(tmpdir(), "koda-remote-other-"),
+      );
       directories.push(home, workspace, otherWorkspace);
       const certificatePath = join(home, "cert.pem");
       const privateKeyPath = join(home, "key.pem");
@@ -70,6 +72,12 @@ describe.skipIf(process.platform === "win32")(
       ]);
       const readOnly = await devices.issue("tablet", [
         { workspaceId: "project", permissions: ["workspace:read"] },
+      ]);
+      const observer = await devices.issue("observer", [
+        {
+          workspaceId: "project",
+          permissions: ["workspace:read", "thread:read"],
+        },
       ]);
       const secondWriter = await devices.issue("laptop", [
         {
@@ -278,7 +286,9 @@ describe.skipIf(process.platform === "win32")(
           hasMore: false,
           nextAfterThreadId: "thread-2",
         });
-        expect(JSON.stringify(secondThreadPage.body)).not.toContain("thread-other");
+        expect(JSON.stringify(secondThreadPage.body)).not.toContain(
+          "thread-other",
+        );
         const otherThreadList = await get(
           port,
           certificate,
@@ -450,7 +460,13 @@ describe.skipIf(process.platform === "win32")(
           { kind: "cursor", nextAfterSequence: 3 },
         ]);
         expect(turnCancelled).toBe(false);
+        const secondSubscription = new WebSocket(`${subscriptionUrl}?after=3`, {
+          ca: certificate,
+          headers: { authorization: `Bearer ${observer.token}` },
+        });
+        await openWebSocket(secondSubscription);
         const liveFrames = collectWebSocketFrames(resumedSubscription, 3);
+        const secondLiveFrames = collectWebSocketFrames(secondSubscription, 2);
         replayEvents.push(
           agentEventSchema.parse({
             schemaVersion: 1,
@@ -473,6 +489,10 @@ describe.skipIf(process.platform === "win32")(
         );
         expect(await liveFrames).toMatchObject([
           { kind: "cursor", nextAfterSequence: 4 },
+          { kind: "update", event: { sequence: 5, text: "Live answer." } },
+          { kind: "cursor", nextAfterSequence: 5 },
+        ]);
+        expect(await secondLiveFrames).toMatchObject([
           { kind: "update", event: { sequence: 5, text: "Live answer." } },
           { kind: "cursor", nextAfterSequence: 5 },
         ]);
@@ -624,6 +644,30 @@ describe.skipIf(process.platform === "win32")(
         );
         await devices.revoke(issued.deviceId);
         expect(await revokedSubscription).toBe(1008);
+        const remainingFrames = collectWebSocketFrames(secondSubscription, 2);
+        replayEvents.push(
+          agentEventSchema.parse({
+            schemaVersion: 1,
+            sequence: 6,
+            timestamp: "2026-09-27T00:00:06.000Z",
+            threadId: "thread-1",
+            turnId: "turn-2",
+            type: "assistant.delta",
+            payload: { text: "Other device remains connected." },
+          }),
+        );
+        expect(await remainingFrames).toMatchObject([
+          {
+            kind: "update",
+            event: { sequence: 6, text: "Other device remains connected." },
+          },
+          { kind: "cursor", nextAfterSequence: 6 },
+        ]);
+        const secondClosed = new Promise<void>((resolveClose) =>
+          secondSubscription.once("close", () => resolveClose()),
+        );
+        secondSubscription.close();
+        await secondClosed;
         const revoked = await get(
           port,
           certificate,
@@ -635,12 +679,6 @@ describe.skipIf(process.platform === "win32")(
         await expect(
           get(port, undefined, "/v1/workspaces", issued.token),
         ).rejects.toThrow();
-        const observer = await devices.issue("observer", [
-          {
-            workspaceId: "project",
-            permissions: ["workspace:read", "thread:read"],
-          },
-        ]);
         standingSubscription = new WebSocket(
           `wss://127.0.0.1:${port}/v1/threads/thread-1/subscribe?after=5`,
           {

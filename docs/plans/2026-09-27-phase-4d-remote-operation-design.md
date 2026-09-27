@@ -12,7 +12,9 @@
   temporary devices, restricted Turn idempotency, and replay, and reject late
   subscription frames after switching Threads. A separately authorized
   `turn:control` endpoint and SwiftUI control can cancel an active remote Turn;
-  multi-device acceptance remains open.
+  a two-device HTTPS/WSS test confirms concurrent subscriptions and continued
+  delivery to one device after revoking the other. Physical two-device
+  acceptance remains open.
 - Date: 2026-09-27
 - Depends on: local app-server v18, durable JSONL events, thread leases, artifact integrity, and Phase 4A–4C security evidence
 - Scope: one owner across multiple devices, authenticated HTTP/WebSocket clients, reconnect/replay, remote MCP/OAuth, shared state ownership, and owner/workspace/thread authorization
