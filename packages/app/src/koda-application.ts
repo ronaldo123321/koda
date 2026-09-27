@@ -9,6 +9,7 @@ import {
   FanoutEventSink,
   PlanRuntimeState,
   ToolRegistry,
+  TurnMailbox,
   digestContextItems,
   estimateTextTokens,
   projectActiveContext,
@@ -19,6 +20,7 @@ import {
   type ItemIdFactory,
   type ModelProvider,
   type PlanAcceptanceBroker,
+  type TurnMailboxEnqueueResult,
   rejectApprovalsBroker,
 } from "@koda/agent-core";
 import { McpClientError, McpTurnSession } from "@koda/mcp-client-node";
@@ -209,6 +211,7 @@ export interface TurnHandle {
   turnId: TurnId;
   completion: Promise<TurnCompletion>;
   cancel(reason?: string): boolean;
+  steer(message: string): TurnMailboxEnqueueResult;
 }
 
 export interface ThreadListInput {
@@ -540,13 +543,19 @@ export class KodaApplication {
   ): TurnHandle {
     const { configuration, prompt, ids, parentThreadId } = prepared;
     const controller = new AbortController();
+    const mailbox = new TurnMailbox();
     const completion = this.executeTurn(
       configuration,
       prompt,
       ids,
       parentThreadId,
       controller,
+      mailbox,
       client,
+    );
+    void completion.then(
+      () => mailbox.close(),
+      () => mailbox.close(),
     );
     return {
       threadId: ids.threadId,
@@ -557,8 +566,10 @@ export class KodaApplication {
           return false;
         }
         controller.abort(reason);
+        mailbox.close();
         return true;
       },
+      steer: (message) => mailbox.enqueue(message),
     };
   }
 
@@ -1410,6 +1421,7 @@ export class KodaApplication {
     },
     parentThreadId: ThreadId | undefined,
     controller: AbortController,
+    mailbox: TurnMailbox,
     client: TurnClient,
   ): Promise<TurnCompletion> {
     let lease: ThreadLease | undefined;
@@ -1879,6 +1891,7 @@ export class KodaApplication {
         approvalGrants: this.approvalGrantRegistry.forWorkspace(workspace.root),
         contextEngine,
         planState,
+        mailbox,
         ...(mcpSession === undefined
           ? {}
           : {

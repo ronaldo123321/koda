@@ -59,6 +59,8 @@ import {
   type TurnCancelResult,
   type TurnStartParams,
   type TurnStartResult,
+  type TurnSteerParams,
+  type TurnSteerResult,
   type WorkspaceMutationBackupExportParams,
   type WorkspaceMutationBackupExportResult,
   type WorkspaceMutationConflictGetParams,
@@ -1404,6 +1406,25 @@ describe("TuiController", () => {
     ]);
   });
 
+  it("sends chat input as steering while a turn is active", async () => {
+    const client = new FakeAppServerClient();
+    const controller = createController(client);
+    await controller.startPrompt("Review the code.");
+    controller.setInput("Also review the tests.");
+    await controller.submitInput();
+    expect(client.steerRequests).toEqual([
+      {
+        threadId: "tui-thread",
+        turnId: "tui-turn-1",
+        message: "Also review the tests.",
+      },
+    ]);
+    expect(controller.getSnapshot()).toMatchObject({
+      input: "",
+      notice: "Message queued for the next step.",
+    });
+  });
+
   it("fails closed and clears approval when the child disconnects", async () => {
     const client = new FakeAppServerClient();
     const controller = createController(client);
@@ -2382,6 +2403,7 @@ class FakeAppServerClient implements AppServerClientApi {
         turnStart: true,
         turnResume: true,
         turnCancellation: true,
+        turnSteering: true,
         interactiveApproval: true,
         durableEventNotifications: true,
         threadEvents: true,
@@ -2421,6 +2443,7 @@ class FakeAppServerClient implements AppServerClientApi {
     });
   public readonly startRequests: TurnStartParams[] = [];
   public readonly cancelRequests: TurnCancelParams[] = [];
+  public readonly steerRequests: TurnSteerParams[] = [];
   public readonly approvalRequests: ApprovalResolveParams[] = [];
   public readonly planAcceptanceRequests: PlanAcceptanceResolveParams[] = [];
   public readonly planGetRequests: PlanGetParams[] = [];
@@ -2774,6 +2797,11 @@ class FakeAppServerClient implements AppServerClientApi {
   public cancelTurn(params: TurnCancelParams): Promise<TurnCancelResult> {
     this.cancelRequests.push(params);
     return Promise.resolve({ accepted: true });
+  }
+
+  public steerTurn(params: TurnSteerParams): Promise<TurnSteerResult> {
+    this.steerRequests.push(params);
+    return Promise.resolve({ result: "accepted" });
   }
 
   public resolveApproval(

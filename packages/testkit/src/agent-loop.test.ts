@@ -2,6 +2,7 @@ import {
   AgentLoop,
   ContextEngine,
   ToolRegistry,
+  TurnMailbox,
   digestContextItems,
   type EventSink,
 } from "@koda/agent-core";
@@ -38,6 +39,98 @@ function createTools(): ToolRegistry {
 }
 
 describe("AgentLoop", () => {
+  it("bounds and closes its in-memory steering mailbox", () => {
+    const mailbox = new TurnMailbox();
+    expect(mailbox.enqueue("  ")).toBe("invalid");
+    expect(mailbox.enqueue("中".repeat(1_366))).toBe("invalid");
+    for (let index = 0; index < 16; index += 1) {
+      expect(mailbox.enqueue(`Message ${index}`)).toBe("accepted");
+    }
+    expect(mailbox.enqueue("One more")).toBe("full");
+    expect(mailbox.drain()).toHaveLength(16);
+    expect(mailbox.enqueue("After drain")).toBe("accepted");
+    mailbox.close();
+    expect(mailbox.enqueue("After close")).toBe("closed");
+    expect(mailbox.drain()).toEqual([]);
+  });
+
+  it("records queued steering before the next model request", async () => {
+    const mailbox = new TurnMailbox();
+    const events = new MemoryEventStore();
+    const provider = new ScriptedModelProvider([
+      {
+        assertRequest: () => {
+          expect(mailbox.enqueue("Please also check the tests.")).toBe(
+            "accepted",
+          );
+        },
+        events: [
+          { type: "assistant_delta", text: "Initial answer." },
+          { type: "completed", finishReason: "stop" },
+        ],
+      },
+      {
+        assertRequest: (request) => {
+          expect(request.items.at(-1)).toMatchObject({
+            type: "user_message",
+            content: "Please also check the tests.",
+          });
+        },
+        events: [
+          { type: "assistant_delta", text: "Tests checked." },
+          { type: "completed", finishReason: "stop" },
+        ],
+      },
+    ]);
+    const result = await new AgentLoop({
+      provider,
+      tools: createTools(),
+      events,
+      ids: new DeterministicItemIdFactory(),
+      mailbox,
+    }).runTurn({ threadId, turnId, userInput: "Review the code." });
+    expect(result.status).toBe("completed");
+    expect(
+      events.events
+        .filter(
+          (event) =>
+            event.type === "item.recorded" &&
+            event.payload.item.type === "user_message",
+        )
+        .map((event) =>
+          event.type === "item.recorded" &&
+          event.payload.item.type === "user_message"
+            ? event.payload.item.content
+            : "",
+        ),
+    ).toEqual(["Review the code.", "Please also check the tests."]);
+    expect(mailbox.enqueue("Too late.")).toBe("closed");
+  });
+
+  it("rejects steering during the last allowed model step", async () => {
+    const mailbox = new TurnMailbox();
+    const provider = new ScriptedModelProvider([
+      {
+        assertRequest: () => {
+          expect(mailbox.enqueue("Too late.")).toBe("closed");
+        },
+        events: [
+          { type: "assistant_delta", text: "Done." },
+          { type: "completed", finishReason: "stop" },
+        ],
+      },
+    ]);
+    const result = await new AgentLoop({
+      provider,
+      tools: createTools(),
+      events: new MemoryEventStore(),
+      ids: new DeterministicItemIdFactory(),
+      maxSteps: 1,
+      mailbox,
+    }).runTurn({ threadId, turnId, userInput: "Review the code." });
+    expect(result.status).toBe("completed");
+  });
+
   it("runs a deterministic model -> tool -> model turn", async () => {
     const events = new MemoryEventStore();
     const provider = new ScriptedModelProvider([

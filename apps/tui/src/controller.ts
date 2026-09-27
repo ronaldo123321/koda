@@ -506,7 +506,7 @@ export class TuiController {
   };
 
   public setInput(input: string): void {
-    if (!this.canEditInput()) {
+    if (!this.canTypeInput()) {
       return;
     }
     this.update({ input: input.slice(0, MAXIMUM_INPUT_CHARACTERS) });
@@ -518,10 +518,43 @@ export class TuiController {
       this.update({ input: "" });
       return "handled";
     }
-    if (!this.canEditInput()) {
+    if (!this.canTypeInput()) {
       this.update({
-        notice: "Wait for the active turn to finish or cancel it.",
+        notice: "Wait until the chat input is available.",
       });
+      return "handled";
+    }
+    if (this.state.activeTurn !== undefined) {
+      const active = this.state.activeTurn;
+      if (input.startsWith("/")) {
+        this.update({ notice: "Commands are unavailable during a turn." });
+        return "handled";
+      }
+      if (active.threadId === undefined || active.turnId === undefined) {
+        this.update({ notice: "The active turn is still starting." });
+        return "handled";
+      }
+      try {
+        const response = await this.client.steerTurn({
+          threadId: threadIdSchema.parse(active.threadId),
+          turnId: active.turnId,
+          message: input,
+        });
+        if (response.result === "accepted") {
+          this.update({
+            input: "",
+            notice: "Message queued for the next step.",
+          });
+        } else {
+          this.update({
+            notice: `Message was not queued: ${response.result}.`,
+          });
+        }
+      } catch (error) {
+        this.update({
+          notice: `Message was not queued: ${errorMessage(error)}`,
+        });
+      }
       return "handled";
     }
     const startsTurn =
@@ -5685,6 +5718,15 @@ export class TuiController {
       this.state.connection === "ready" &&
       this.state.mode === "chat" &&
       this.state.activeTurn === undefined &&
+      this.state.approval === undefined &&
+      this.state.planAcceptance === undefined
+    );
+  }
+
+  private canTypeInput(): boolean {
+    return (
+      this.state.connection === "ready" &&
+      this.state.mode === "chat" &&
       this.state.approval === undefined &&
       this.state.planAcceptance === undefined
     );

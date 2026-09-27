@@ -101,6 +101,7 @@ const initialization = initializeResultSchema.parse({
     turnStart: true,
     turnResume: true,
     turnCancellation: true,
+    turnSteering: true,
     interactiveApproval: true,
     durableEventNotifications: true,
     threadEvents: true,
@@ -260,6 +261,7 @@ const client: AppServerClientApi = {
     return { threadId, turnId };
   },
   cancelTurn: async () => ({ accepted: true }),
+  steerTurn: async () => ({ result: "closed" }),
   resolveApproval: async () => ({ accepted: true }),
   resolvePlanAcceptance: async (params) => {
     if (

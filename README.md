@@ -48,7 +48,9 @@ node apps/cli/dist/main.js thread children <thread-id>
 
 `--parent` 要求父 Thread 存在且属于同一工作区；子 Thread 有自己的对话历史，不继承父 Thread 的模型上下文。需要只读任务时，显式使用 `--approval-mode never` 拒绝写入和命令执行。
 
-模型也可调用 `delegate_readonly` 同步派遣只读子任务：每轮最多两个子任务，每个最长两分钟。子任务使用独立 Thread，仅能读取工作区和项目 Skill；不能写文件、执行命令、加载 MCP／插件或再次派遣。完成后，父 Thread 收到子 Thread ID、状态和有界回答。异步注册表、邮箱、等待／中断和 Git worktree 写入隔离仍待后续 Phase 5 实现。
+模型也可调用 `delegate_readonly` 同步派遣只读子任务：每轮最多两个子任务，每个最长两分钟。子任务使用独立 Thread，仅能读取工作区和项目 Skill；不能写文件、执行命令、加载 MCP／插件或再次派遣。完成后，父 Thread 收到子 Thread ID、状态和有界回答。
+
+App-server 的 `turn/steer` 可向运行中的指定 Thread/Turn 排队发送消息；TUI 运行中也可直接输入并按回车发送。每个 Turn 最多暂存 16 条，每条最多 4096 UTF-8 字节。消息在下一次模型请求前写入事件日志并进入上下文；末次模型请求开始后或 Turn 结束时拒绝新消息。异步子任务注册表、跨任务邮箱、等待／中断和 Git worktree 写入隔离仍待后续 Phase 5 实现。
 
 已安装的预览版使用 `koda setup`、`koda run` 和 `koda-chat`。凭据来自启动进程的环境变量，不写入工作区设置或会话日志。工作区写入、进程执行以及未明确归类为只读的 MCP 工具默认需要审批。
 

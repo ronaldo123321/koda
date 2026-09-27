@@ -1567,7 +1567,16 @@ function Prompt({ state }: { state: TuiState }) {
     return null;
   }
   if (state.activeTurn !== undefined) {
-    return <Text dimColor>Esc or Ctrl+C to cancel</Text>;
+    return (
+      <Box>
+        <Text bold color="cyan">
+          {"↳ "}
+        </Text>
+        <Text>{state.input}</Text>
+        <Text inverse> </Text>
+        <Text dimColor> Enter to steer · Esc or Ctrl+C to cancel</Text>
+      </Box>
+    );
   }
   if (state.connection !== "ready") {
     return <Text dimColor>Ctrl+C to exit</Text>;

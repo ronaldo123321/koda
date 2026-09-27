@@ -588,6 +588,7 @@ function fixtureServerScript(options: {
       turnStart: true,
       turnResume: true,
       turnCancellation: true,
+      turnSteering: true,
       interactiveApproval: true,
       durableEventNotifications: true,
       threadEvents: true,

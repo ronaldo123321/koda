@@ -98,6 +98,8 @@ import {
   turnFinishedNotificationParamsSchema,
   turnStartParamsSchema,
   turnStartResultSchema,
+  turnSteerParamsSchema,
+  turnSteerResultSchema,
   type AgentEvent,
   type JsonRpcId,
   type JsonRpcRequest,
@@ -294,6 +296,8 @@ export class KodaAppServer {
         return this.startTurn(request.params);
       case "turn/cancel":
         return this.cancelTurn(request.params);
+      case "turn/steer":
+        return this.steerTurn(request.params);
       case "approval/resolve":
         return this.resolveApproval(request.params);
       case "plan/acceptance/resolve":
@@ -362,6 +366,7 @@ export class KodaAppServer {
           turnStart: true,
           turnResume: true,
           turnCancellation: true,
+          turnSteering: true,
           interactiveApproval: true,
           durableEventNotifications: true,
           threadEvents: true,
@@ -1109,6 +1114,21 @@ export class KodaAppServer {
     this.approvals.rejectTurn(input.turnId, reason);
     this.planAcceptances.rejectTurn(input.turnId, reason);
     return jsonValueSchema.parse(turnCancelResultSchema.parse({ accepted }));
+  }
+
+  private steerTurn(params: JsonValue | undefined): JsonValue {
+    const input = parseParams(turnSteerParamsSchema, params);
+    const handle = this.activeTurns.get(input.turnId);
+    if (handle === undefined || handle.threadId !== input.threadId) {
+      throw rpcError(
+        APP_SERVER_RPC_ERROR_CODE.TURN_NOT_FOUND,
+        `Turn '${input.turnId}' is not active for Thread '${input.threadId}'.`,
+        "TURN_NOT_FOUND",
+      );
+    }
+    return jsonValueSchema.parse(
+      turnSteerResultSchema.parse({ result: handle.steer(input.message) }),
+    );
   }
 
   private resolveApproval(params: JsonValue | undefined): JsonValue {

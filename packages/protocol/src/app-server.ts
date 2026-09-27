@@ -37,7 +37,7 @@ import {
 } from "./execution-policy.js";
 import { secretExecutionEvidenceSchema } from "./execution-secrets.js";
 
-export const APP_SERVER_PROTOCOL_VERSION = 18 as const;
+export const APP_SERVER_PROTOCOL_VERSION = 19 as const;
 
 export const THREAD_EVENTS_DEFAULT_LIMIT = 200;
 export const THREAD_EVENTS_MAXIMUM_LIMIT = 200;
@@ -183,6 +183,7 @@ export const initializeResultSchema = z
         turnStart: z.literal(true),
         turnResume: z.literal(true),
         turnCancellation: z.literal(true),
+        turnSteering: z.literal(true),
         interactiveApproval: z.literal(true),
         durableEventNotifications: z.literal(true),
         threadEvents: z.literal(true),
@@ -1645,6 +1646,18 @@ export const turnCancelResultSchema = z
   .object({ accepted: z.boolean() })
   .strict();
 
+export const turnSteerParamsSchema = z
+  .object({
+    threadId: threadIdSchema,
+    turnId: turnIdSchema,
+    message: z.string().min(1).max(4_096),
+  })
+  .strict();
+
+export const turnSteerResultSchema = z
+  .object({ result: z.enum(["accepted", "closed", "full", "invalid"]) })
+  .strict();
+
 export const approvalResolveParamsSchema = z
   .object({
     turnId: turnIdSchema,
@@ -1987,6 +2000,8 @@ export type TurnStartParams = z.infer<typeof turnStartParamsSchema>;
 export type TurnStartResult = z.infer<typeof turnStartResultSchema>;
 export type TurnCancelParams = z.infer<typeof turnCancelParamsSchema>;
 export type TurnCancelResult = z.infer<typeof turnCancelResultSchema>;
+export type TurnSteerParams = z.infer<typeof turnSteerParamsSchema>;
+export type TurnSteerResult = z.infer<typeof turnSteerResultSchema>;
 export type ApprovalResolveParams = z.infer<typeof approvalResolveParamsSchema>;
 export type ApprovalResolveResult = z.infer<typeof approvalResolveResultSchema>;
 export type ApprovalGrantsListParams = z.infer<

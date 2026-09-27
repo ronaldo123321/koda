@@ -75,6 +75,8 @@ import {
   turnCancelResultSchema,
   turnStartParamsSchema,
   turnStartResultSchema,
+  turnSteerParamsSchema,
+  turnSteerResultSchema,
   type ApprovalResolveParams,
   type ApprovalResolveResult,
   type ApprovalGrantsListParams,
@@ -142,6 +144,8 @@ import {
   type ThreadSearchResult,
   type TurnCancelParams,
   type TurnCancelResult,
+  type TurnSteerParams,
+  type TurnSteerResult,
   type TurnStartParams,
   type TurnStartResult,
 } from "@koda/protocol";
@@ -211,6 +215,7 @@ export interface AppServerClientApi {
   ): Promise<WorkspaceMutationConflictResolveResult>;
   startTurn(params: TurnStartParams): Promise<TurnStartResult>;
   cancelTurn(params: TurnCancelParams): Promise<TurnCancelResult>;
+  steerTurn(params: TurnSteerParams): Promise<TurnSteerResult>;
   resolveApproval(
     params: ApprovalResolveParams,
   ): Promise<ApprovalResolveResult>;
@@ -561,6 +566,14 @@ export class NodeAppServerClient implements AppServerClientApi {
       "turn/cancel",
       jsonValueSchema.parse(turnCancelParamsSchema.parse(params)),
       turnCancelResultSchema,
+    );
+  }
+
+  public steerTurn(params: TurnSteerParams): Promise<TurnSteerResult> {
+    return this.connection.request(
+      "turn/steer",
+      jsonValueSchema.parse(turnSteerParamsSchema.parse(params)),
+      turnSteerResultSchema,
     );
   }
 

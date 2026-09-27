@@ -1504,6 +1504,70 @@ describe("KodaAppServer", () => {
     });
   });
 
+  it("queues steering for the next model step and rejects a different thread", async () => {
+    const fixture = await createFixture();
+    let firstStarted: (() => void) | undefined;
+    let releaseFirst: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      firstStarted = resolve;
+    });
+    const release = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let steps = 0;
+    const provider: ModelProvider = {
+      stream: async function* (request) {
+        steps += 1;
+        if (steps === 1) {
+          firstStarted?.();
+          await release;
+          yield { type: "assistant_delta", text: "Initial answer." };
+        } else {
+          expect(request.items.at(-1)).toMatchObject({
+            type: "user_message",
+            content: "Also review the tests.",
+          });
+          yield { type: "assistant_delta", text: "Tests reviewed." };
+        }
+        yield { type: "completed", finishReason: "stop" };
+      },
+    };
+    const writer = new MemoryProtocolWriter();
+    const server = createServer(fixture, writer, provider, "server-steer");
+    await initialize(server, 1);
+    await request(server, 2, "turn/start", {
+      prompt: "Review the code.",
+      cwd: fixture.workspaceRoot,
+    });
+    await started;
+    const start = responseResult(writer, 2) as {
+      threadId: string;
+      turnId: string;
+    };
+    await request(server, 3, "turn/steer", {
+      threadId: "another-thread",
+      turnId: start.turnId,
+      message: "Wrong recipient.",
+    });
+    expect(errorDataCode(writer, 3)).toBe("TURN_NOT_FOUND");
+    await request(server, 4, "turn/steer", {
+      threadId: start.threadId,
+      turnId: start.turnId,
+      message: "Also review the tests.",
+    });
+    expect(responseResult(writer, 4)).toEqual({ result: "accepted" });
+    releaseFirst?.();
+    await expect(
+      waitForMessage(
+        writer,
+        (message) =>
+          notificationMethod(message) === "turn/finished" &&
+          finishedTurnId(message) === start.turnId,
+      ),
+    ).resolves.toMatchObject({ params: { status: "completed" } });
+    expect(steps).toBe(2);
+  });
+
   it("cancels active turns before acknowledging shutdown", async () => {
     const fixture = await createFixture();
     let started: (() => void) | undefined;

@@ -78,7 +78,7 @@ describe("app-server protocol", () => {
   });
 
   it("accepts strict versioned requests and safe JSON-RPC IDs", () => {
-    expect(APP_SERVER_PROTOCOL_VERSION).toBe(18);
+    expect(APP_SERVER_PROTOCOL_VERSION).toBe(19);
     expect(
       jsonRpcRequestSchema.parse({
         jsonrpc: "2.0",
@@ -123,6 +123,7 @@ describe("app-server protocol", () => {
           turnStart: true,
           turnResume: true,
           turnCancellation: true,
+          turnSteering: true,
           interactiveApproval: true,
           durableEventNotifications: true,
           threadEvents: true,

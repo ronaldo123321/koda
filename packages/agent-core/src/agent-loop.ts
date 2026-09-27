@@ -55,6 +55,7 @@ import {
   type ToolExecutionResult,
 } from "./tools.js";
 import type { PlanRuntimeState } from "./plan-state.js";
+import type { TurnMailbox } from "./turn-mailbox.js";
 
 export interface ItemIdFactory {
   next(): ItemId;
@@ -76,6 +77,7 @@ export interface AgentLoopOptions {
   maxTurnDurationMs?: number;
   monotonicNow?: () => number;
   toolCatalogRefresher?: ToolCatalogRefresher;
+  mailbox?: TurnMailbox;
 }
 
 export interface ToolCatalogRefresher {
@@ -148,6 +150,7 @@ export class AgentLoop {
   private readonly maxTurnDurationMs: number;
   private readonly monotonicNow: () => number;
   private readonly toolCatalogRefresher: ToolCatalogRefresher | undefined;
+  private readonly mailbox: TurnMailbox | undefined;
 
   public constructor(options: AgentLoopOptions) {
     this.provider = options.provider;
@@ -167,6 +170,7 @@ export class AgentLoop {
       options.maxTurnDurationMs ?? DEFAULT_MAX_TURN_DURATION_MS;
     this.monotonicNow = options.monotonicNow ?? Date.now;
     this.toolCatalogRefresher = options.toolCatalogRefresher;
+    this.mailbox = options.mailbox;
 
     if (!Number.isInteger(this.maxSteps) || this.maxSteps < 1) {
       throw new Error("maxSteps must be a positive integer.");
@@ -299,6 +303,20 @@ export class AgentLoop {
           error instanceof Error ? error.message : String(error),
           usage,
         );
+      }
+      const steering = this.mailbox?.drain() ?? [];
+      if (step === this.maxSteps) this.mailbox?.close();
+      for (const content of steering) {
+        const item = userMessageItemSchema.parse({
+          type: "user_message",
+          id: this.ids.next(),
+          content,
+        });
+        items.push(item);
+        await recorder.record({
+          type: "item.recorded",
+          payload: { item },
+        });
       }
       const toolDefinitions = this.tools.definitions();
       const checkpointRecommended =
@@ -833,6 +851,8 @@ export class AgentLoop {
       }
 
       if (toolCalls.length === 0) {
+        if (this.mailbox?.hasPending()) continue;
+        this.mailbox?.close();
         await this.recordPlanCheckpoint(
           recorder,
           "turn_completion",
