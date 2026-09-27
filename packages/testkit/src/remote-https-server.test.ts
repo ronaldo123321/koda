@@ -15,6 +15,7 @@ import {
 import { runRemoteServeCommand } from "@koda/cli";
 import { agentEventSchema, threadMetadataSchema } from "@koda/protocol";
 import { afterEach, describe, expect, it } from "vitest";
+import WebSocket from "ws";
 
 const execFileAsync = promisify(execFile);
 const directories: string[] = [];
@@ -201,6 +202,8 @@ describe.skipIf(process.platform === "win32")(
         privateKeyPath,
       });
       const port = Number(server.address.split(":").at(-1));
+      let standingSubscription: WebSocket | undefined;
+      let standingClosed: Promise<number> | undefined;
       try {
         const unauthorized = await get(port, certificate, "/v1/workspaces");
         expect(unauthorized.status).toBe(401);
@@ -304,6 +307,91 @@ describe.skipIf(process.platform === "win32")(
           nextAfterSequence: 3,
         });
         expect(JSON.stringify(failed.body)).not.toContain(home);
+        const subscriptionUrl = `wss://127.0.0.1:${port}/v1/threads/thread-1/subscribe`;
+        const unauthenticatedSubscription = new WebSocket(
+          `${subscriptionUrl}?after=-1`,
+          { ca: certificate },
+        );
+        await expect(
+          openWebSocket(unauthenticatedSubscription),
+        ).rejects.toThrow("Unexpected server response: 401");
+        const deniedSubscription = new WebSocket(
+          `${subscriptionUrl}?after=-1`,
+          {
+            ca: certificate,
+            headers: { authorization: `Bearer ${readOnly.token}` },
+          },
+        );
+        await expect(openWebSocket(deniedSubscription)).rejects.toThrow(
+          "Unexpected server response: 404",
+        );
+        const firstSubscription = new WebSocket(
+          `${subscriptionUrl}?after=0&limit=1`,
+          {
+            ca: certificate,
+            headers: { authorization: `Bearer ${issued.token}` },
+          },
+        );
+        const firstFrames = collectWebSocketFrames(firstSubscription, 6);
+        await openWebSocket(firstSubscription);
+        expect(await firstFrames).toMatchObject([
+          {
+            kind: "update",
+            event: { sequence: 1, text: `private path ${workspace}` },
+          },
+          { kind: "cursor", nextAfterSequence: 1 },
+          { kind: "update", event: { sequence: 2, text: largeAnswer } },
+          { kind: "cursor", nextAfterSequence: 2 },
+          { kind: "update", event: { sequence: 3, code: "TEST_FAILURE" } },
+          { kind: "cursor", nextAfterSequence: 3 },
+        ]);
+        const firstClosed = new Promise<void>((resolveClose) =>
+          firstSubscription.once("close", () => resolveClose()),
+        );
+        firstSubscription.close();
+        await firstClosed;
+        const resumedSubscription = new WebSocket(
+          `${subscriptionUrl}?after=1&limit=1`,
+          {
+            ca: certificate,
+            headers: { authorization: `Bearer ${issued.token}` },
+          },
+        );
+        const resumedFrames = collectWebSocketFrames(resumedSubscription, 4);
+        await openWebSocket(resumedSubscription);
+        expect(await resumedFrames).toMatchObject([
+          { kind: "update", event: { sequence: 2, text: largeAnswer } },
+          { kind: "cursor", nextAfterSequence: 2 },
+          { kind: "update", event: { sequence: 3, code: "TEST_FAILURE" } },
+          { kind: "cursor", nextAfterSequence: 3 },
+        ]);
+        expect(turnCancelled).toBe(false);
+        const liveFrames = collectWebSocketFrames(resumedSubscription, 3);
+        replayEvents.push(
+          agentEventSchema.parse({
+            schemaVersion: 1,
+            sequence: 4,
+            timestamp: "2026-09-27T00:00:04.000Z",
+            threadId: "thread-1",
+            turnId: "turn-2",
+            type: "turn.started",
+            payload: {},
+          }),
+          agentEventSchema.parse({
+            schemaVersion: 1,
+            sequence: 5,
+            timestamp: "2026-09-27T00:00:05.000Z",
+            threadId: "thread-1",
+            turnId: "turn-2",
+            type: "assistant.delta",
+            payload: { text: "Live answer." },
+          }),
+        );
+        expect(await liveFrames).toMatchObject([
+          { kind: "cursor", nextAfterSequence: 4 },
+          { kind: "update", event: { sequence: 5, text: "Live answer." } },
+          { kind: "cursor", nextAfterSequence: 5 },
+        ]);
         const badCursor = await get(
           port,
           certificate,
@@ -407,7 +495,11 @@ describe.skipIf(process.platform === "win32")(
         );
         expect(invalid.status).toBe(400);
         expect(starts).toBe(1);
+        const revokedSubscription = new Promise<number>((resolveClose) =>
+          resumedSubscription.once("close", (code) => resolveClose(code)),
+        );
         await devices.revoke(issued.deviceId);
+        expect(await revokedSubscription).toBe(1008);
         const revoked = await get(
           port,
           certificate,
@@ -419,9 +511,48 @@ describe.skipIf(process.platform === "win32")(
         await expect(
           get(port, undefined, "/v1/workspaces", issued.token),
         ).rejects.toThrow();
+        const observer = await devices.issue("observer", [
+          {
+            workspaceId: "project",
+            permissions: ["workspace:read", "thread:read"],
+          },
+        ]);
+        standingSubscription = new WebSocket(
+          `wss://127.0.0.1:${port}/v1/threads/thread-1/subscribe?after=5`,
+          {
+            ca: certificate,
+            headers: { authorization: `Bearer ${observer.token}` },
+          },
+        );
+        await openWebSocket(standingSubscription);
+        standingClosed = new Promise<number>((resolveClose) =>
+          standingSubscription?.once("close", (code) => resolveClose(code)),
+        );
+        for (let index = 0; index < 7; index += 1) {
+          const extra = new WebSocket(
+            `wss://127.0.0.1:${port}/v1/threads/thread-1/subscribe?after=5`,
+            {
+              ca: certificate,
+              headers: { authorization: `Bearer ${observer.token}` },
+            },
+          );
+          await openWebSocket(extra);
+        }
+        const overCapacity = new WebSocket(
+          `wss://127.0.0.1:${port}/v1/threads/thread-1/subscribe?after=5`,
+          {
+            ca: certificate,
+            headers: { authorization: `Bearer ${observer.token}` },
+          },
+        );
+        await expect(openWebSocket(overCapacity)).rejects.toThrow(
+          "Unexpected server response: 503",
+        );
       } finally {
         await server.close();
       }
+      await standingClosed;
+      expect(standingSubscription?.readyState).toBe(WebSocket.CLOSED);
       expect(turnCancelled).toBe(true);
       const controller = new AbortController();
       let serveOutput = "";
@@ -542,5 +673,33 @@ async function requestJson(
     );
     outgoing.on("error", rejectRequest);
     outgoing.end(content);
+  });
+}
+
+async function openWebSocket(socket: WebSocket): Promise<void> {
+  await new Promise<void>((resolveOpen, rejectOpen) => {
+    socket.once("open", resolveOpen);
+    socket.once("error", rejectOpen);
+  });
+}
+
+function collectWebSocketFrames(
+  socket: WebSocket,
+  count: number,
+): Promise<unknown[]> {
+  return new Promise((resolveFrames, rejectFrames) => {
+    const frames: unknown[] = [];
+    const timeout = setTimeout(
+      () => rejectFrames(new Error("WebSocket timed out.")),
+      5_000,
+    );
+    socket.on("message", (data) => {
+      frames.push(JSON.parse(data.toString()));
+      if (frames.length === count) {
+        clearTimeout(timeout);
+        resolveFrames(frames);
+      }
+    });
+    socket.once("error", rejectFrames);
   });
 }

@@ -4,9 +4,11 @@ import { createServer, type Server } from "node:https";
 import { isIP } from "node:net";
 import { resolve } from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import type { Duplex } from "node:stream";
 
 import { ConfigurationError, type KodaApplication } from "@koda/app";
 import type { AgentEvent } from "@koda/protocol";
+import WebSocket, { WebSocketServer } from "ws";
 import { z, ZodError } from "zod";
 
 import {
@@ -30,6 +32,9 @@ const OWNER_ID = "owner";
 const MAX_URL_LENGTH = 2_048;
 const MAX_RESPONSE_BYTES = 64 * 1_024;
 const MAX_UPDATE_RESPONSE_BYTES = 3 * 1_024 * 1_024;
+const MAX_WS_FRAME_BYTES = 512 * 1_024;
+const MAX_WS_BUFFER_BYTES = 2 * 1_024 * 1_024;
+const MAX_SUBSCRIPTIONS = 8;
 const MAX_REQUEST_BYTES = 16 * 1_024;
 const turnStartSchema = z
   .object({
@@ -82,6 +87,13 @@ export async function startRemoteHttpsServer(
     RemoteTurnRequestStore.open(options.kodaHome, OWNER_ID),
   ]);
   const turnHost = new RemoteTurnHost(options.application, threads, requests);
+  const subscriptions = new WebSocketServer({
+    noServer: true,
+    perMessageDeflate: false,
+    maxPayload: 1_024,
+  });
+  let pendingSubscriptions = 0;
+  let closingSubscriptions = false;
   const server = createServer(
     {
       cert: certificate,
@@ -106,7 +118,32 @@ export async function startRemoteHttpsServer(
   server.keepAliveTimeout = 5_000;
   server.maxRequestsPerSocket = 100;
   server.maxConnections = 32;
-  server.on("upgrade", (_request, socket) => socket.destroy());
+  server.on("upgrade", (request, socket, head) => {
+    if (closingSubscriptions) {
+      rejectUpgrade(socket, 503);
+      return;
+    }
+    if (
+      subscriptions.clients.size + pendingSubscriptions >=
+      MAX_SUBSCRIPTIONS
+    ) {
+      rejectUpgrade(socket, 503);
+      return;
+    }
+    pendingSubscriptions += 1;
+    void acceptSubscription(
+      request,
+      socket,
+      head,
+      subscriptions,
+      options.application,
+      devices,
+      workspaces,
+      threads,
+    ).finally(() => {
+      pendingSubscriptions -= 1;
+    });
+  });
 
   try {
     await listen(server, options.host, options.port);
@@ -122,6 +159,11 @@ export async function startRemoteHttpsServer(
   return {
     address: `${address.family === "IPv6" ? `[${address.address}]` : address.address}:${address.port}`,
     close: async () => {
+      closingSubscriptions = true;
+      for (const client of subscriptions.clients) client.terminate();
+      await new Promise<void>((resolveClose) =>
+        subscriptions.close(() => resolveClose()),
+      );
       const closing = new Promise<void>((resolveClose, rejectClose) => {
         server.close((error) =>
           error === undefined ? resolveClose() : rejectClose(error),
@@ -162,7 +204,11 @@ async function handleRequest(
       return;
     }
     const url = new URL(request.url, "https://localhost");
-    if (!request.url.startsWith("/") || url.hash !== "") {
+    if (
+      !request.url.startsWith("/") ||
+      request.url.startsWith("//") ||
+      url.hash !== ""
+    ) {
       send(response, 404, { error: "Unavailable" });
       return;
     }
@@ -297,6 +343,180 @@ async function handleRequest(
       send(response, 500, { error: "Internal error" });
     }
   }
+}
+
+async function acceptSubscription(
+  request: IncomingMessage,
+  socket: Duplex,
+  head: Buffer,
+  subscriptions: WebSocketServer,
+  application: KodaApplication,
+  devices: RemoteDeviceStore,
+  workspaces: RemoteWorkspaceStore,
+  threads: RemoteThreadStore,
+): Promise<void> {
+  try {
+    const token = bearerToken(request);
+    if (token === undefined) {
+      rejectUpgrade(socket, 401);
+      return;
+    }
+    if (
+      request.method !== "GET" ||
+      request.url === undefined ||
+      request.url.length > MAX_URL_LENGTH ||
+      !request.url.startsWith("/") ||
+      request.url.startsWith("//") ||
+      request.headers["content-length"] !== undefined ||
+      request.headers["transfer-encoding"] !== undefined
+    ) {
+      rejectUpgrade(socket, 400);
+      return;
+    }
+    const url = new URL(request.url, "https://localhost");
+    const match =
+      /^\/v1\/threads\/([A-Za-z0-9][A-Za-z0-9_-]{0,127})\/subscribe$/u.exec(
+        url.pathname,
+      );
+    const cursor = parseEventCursor(url);
+    if (match === null || cursor === undefined || url.hash !== "") {
+      rejectUpgrade(socket, 404);
+      return;
+    }
+    const threadId = match[1];
+    if (threadId === undefined) throw new RemoteInvalidRequestError();
+    const verified = await devices.verify(token);
+    const catalog = await RemoteAccessCatalog.create(
+      OWNER_ID,
+      await workspaces.list(),
+      verified.grants,
+    );
+    const root = await catalog.authorizeThread(
+      verified.principal,
+      await threads.get(threadId),
+      "thread:read",
+    );
+    const metadata = (await application.getThread(threadId)).value;
+    if (metadata?.workspaceRoot !== root) throw new RemoteAccessDeniedError();
+    subscriptions.handleUpgrade(request, socket, head, (client) => {
+      client.on("error", () => client.terminate());
+      client.on("message", () => client.close(1008));
+      void streamSubscription(
+        client,
+        token,
+        threadId,
+        cursor.after,
+        cursor.limit,
+        application,
+        devices,
+        workspaces,
+        threads,
+      );
+    });
+  } catch (error) {
+    rejectUpgrade(socket, error instanceof RemoteAccessDeniedError ? 404 : 500);
+  }
+}
+
+async function streamSubscription(
+  client: WebSocket,
+  token: string,
+  threadId: string,
+  initialAfter: number,
+  limit: number,
+  application: KodaApplication,
+  devices: RemoteDeviceStore,
+  workspaces: RemoteWorkspaceStore,
+  threads: RemoteThreadStore,
+): Promise<void> {
+  let after = initialAfter;
+  try {
+    while (client.readyState === WebSocket.OPEN) {
+      const verified = await devices.verify(token);
+      const catalog = await RemoteAccessCatalog.create(
+        OWNER_ID,
+        await workspaces.list(),
+        verified.grants,
+      );
+      const root = await catalog.authorizeThread(
+        verified.principal,
+        await threads.get(threadId),
+        "thread:read",
+      );
+      const metadata = (await application.getThread(threadId)).value;
+      if (metadata?.workspaceRoot !== root) throw new RemoteAccessDeniedError();
+      const page = await application.readThreadEvents({
+        threadId,
+        afterSequence: after,
+        limit,
+      });
+      for (const event of page.events) {
+        for (const update of projectRemoteUpdate(event)) {
+          if (!sendWebSocket(client, { kind: "update", event: update })) return;
+        }
+      }
+      const last = page.events.at(-1);
+      if (last !== undefined) {
+        after = last.sequence;
+        if (
+          !sendWebSocket(client, { kind: "cursor", nextAfterSequence: after })
+        )
+          return;
+      }
+      if (!page.hasLater) await waitForSubscription(client);
+    }
+  } catch (error) {
+    if (client.readyState === WebSocket.OPEN) {
+      client.close(error instanceof RemoteAccessDeniedError ? 1008 : 1011);
+    }
+  }
+}
+
+function sendWebSocket(client: WebSocket, body: object): boolean {
+  if (client.readyState !== WebSocket.OPEN) return false;
+  const content = JSON.stringify(body);
+  const bytes = Buffer.byteLength(content);
+  if (bytes > MAX_WS_FRAME_BYTES) {
+    client.close(1009);
+    return false;
+  }
+  if (client.bufferedAmount + bytes > MAX_WS_BUFFER_BYTES) {
+    client.close(1013);
+    return false;
+  }
+  client.send(content);
+  return true;
+}
+
+async function waitForSubscription(client: WebSocket): Promise<void> {
+  await new Promise<void>((resolveWait) => {
+    const onClose = () => {
+      clearTimeout(timer);
+      resolveWait();
+    };
+    const timer = setTimeout(() => {
+      client.off("close", onClose);
+      resolveWait();
+    }, 500);
+    client.once("close", onClose);
+  });
+}
+
+function rejectUpgrade(socket: Duplex, status: number): void {
+  if (socket.destroyed) return;
+  const reason =
+    status === 401
+      ? "Unauthorized"
+      : status === 404
+        ? "Not Found"
+        : status === 503
+          ? "Service Unavailable"
+          : status === 500
+            ? "Internal Server Error"
+            : "Bad Request";
+  socket.end(
+    `HTTP/1.1 ${status} ${reason}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`,
+  );
 }
 
 class RemoteInvalidRequestError extends Error {}

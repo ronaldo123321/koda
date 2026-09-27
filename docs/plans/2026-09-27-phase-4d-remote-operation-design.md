@@ -4,7 +4,7 @@
   registration, credential lifecycle, immutable remote Thread bindings, safe
   Thread summary projection, opt-in TLS transport, durable event-envelope
   and assistant-update cursor polling, and restricted remote Turn start with durable request
-  idempotency implemented; WebSocket replay, full event content projection,
+  idempotency and authenticated WSS replay implemented; full event content projection,
   approvals, and client pairing are not yet enabled
 - Date: 2026-09-27
 - Depends on: local app-server v18, durable JSONL events, thread leases, artifact integrity, and Phase 4A–4C security evidence
@@ -31,8 +31,11 @@ workspace content, so devices need `thread:read` and must be trusted by the owne
 The enabled Turn start mode uses read-only tools. It binds a new Thread before execution, uses a durable request ID
 to prevent duplicate starts, and does not cancel on an HTTP client disconnect.
 Plugin, MCP, write, execute, approval, and plan-control tools are unavailable
-in this mode. WebSocket subscriptions and remote effectful operations stay
-disabled until their own authorization, replay, and disconnect tests pass.
+in this mode. WSS subscriptions are read-only, authenticate the device and
+Thread before upgrade and during polling, replay by an exclusive durable
+cursor, and close on revocation or bounded-buffer pressure without cancelling
+the Turn. Remote effectful operations stay disabled until their authorization
+and disconnect tests pass.
 
 ## 2. Identity and authorization
 
@@ -143,5 +146,5 @@ listener authenticates each request and projects only opaque workspace IDs,
 bound Thread summaries, payload-free event envelopes, or assistant updates.
 It does not yet transfer a verified server certificate to a client,
 authorize the full app-server method set, project complete event content, support
-remote approvals or effects, or implement WebSocket subscriptions. These are
+remote approvals or effects, or provide a finished client. These are
 required before 4D1/4D2 close.
