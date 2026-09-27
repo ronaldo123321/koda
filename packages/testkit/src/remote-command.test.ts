@@ -2,8 +2,10 @@ import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { RemoteDeviceStore } from "@koda/app-server";
+import { RemoteDeviceStore, RemoteThreadStore } from "@koda/app-server";
 import { createProgram, type TextWriter } from "@koda/cli";
+import { agentEventSchema } from "@koda/protocol";
+import { JsonlEventStore } from "@koda/runtime-node";
 import { afterEach, describe, expect, it } from "vitest";
 
 const directories: string[] = [];
@@ -25,6 +27,88 @@ class MemoryWriter implements TextWriter {
 }
 
 describe.skipIf(process.platform === "win32")("remote owner commands", () => {
+  it("exposes only an existing Thread from its registered workspace", async () => {
+    const home = await mkdtemp(join(tmpdir(), "koda-remote-cli-home-"));
+    const workspace = await mkdtemp(join(tmpdir(), "koda-remote-cli-project-"));
+    const other = await mkdtemp(join(tmpdir(), "koda-remote-cli-other-"));
+    directories.push(home, workspace, other);
+    await invoke(home, [
+      "remote",
+      "workspace",
+      "add",
+      "project",
+      "--path",
+      workspace,
+    ]);
+    await invoke(home, [
+      "remote",
+      "workspace",
+      "add",
+      "other",
+      "--path",
+      other,
+    ]);
+    const threadId = "remote-expose-thread";
+    const store = new JsonlEventStore(
+      join(home, "threads", `${threadId}.jsonl`),
+    );
+    await store.append(
+      agentEventSchema.parse({
+        schemaVersion: 1,
+        sequence: 0,
+        timestamp: "2026-09-27T00:00:00.000Z",
+        threadId,
+        turnId: "remote-expose-turn",
+        type: "turn.started",
+        payload: {},
+      }),
+    );
+    await store.append(
+      agentEventSchema.parse({
+        schemaVersion: 1,
+        sequence: 1,
+        timestamp: "2026-09-27T00:00:01.000Z",
+        threadId,
+        turnId: "remote-expose-turn",
+        type: "turn.context",
+        payload: {
+          provider: "openai",
+          model: "gpt-4o",
+          workspaceRoot: await realpath(workspace),
+          approvalMode: "on-request",
+          instructionsSha256: "0".repeat(64),
+          repositoryInstructions: [],
+        },
+      }),
+    );
+
+    const wrong = await invoke(home, [
+      "remote",
+      "thread",
+      "expose",
+      threadId,
+      "--workspace",
+      "other",
+    ]);
+    expect(wrong.exitCode).toBe(1);
+    const bindings = await RemoteThreadStore.open(home, "owner");
+    await expect(bindings.get(threadId)).resolves.toBeUndefined();
+    const exposed = await invoke(home, [
+      "remote",
+      "thread",
+      "expose",
+      threadId,
+      "--workspace",
+      "project",
+    ]);
+    expect(exposed.exitCode).toBe(0);
+    await expect(bindings.get(threadId)).resolves.toEqual({
+      ownerId: "owner",
+      workspaceId: "project",
+      threadId,
+    });
+  });
+
   it("refuses a public remote listener before reading certificate files", async () => {
     const home = await mkdtemp(join(tmpdir(), "koda-remote-cli-home-"));
     directories.push(home);

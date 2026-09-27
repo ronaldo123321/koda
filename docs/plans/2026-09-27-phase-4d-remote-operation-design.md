@@ -128,12 +128,13 @@ handshake alone is not completion evidence.
 
 Current 4D1 code provides `RemoteAccessCatalog`, `RemoteWorkspaceStore`,
 `RemoteDeviceStore`, and `RemoteThreadStore`; the read-only listener uses these
-for each request, but turn creation does not yet bind a Thread. The owner-host
-CLI can register workspaces, issue scoped device credentials, revoke devices,
+for each request, but remote turn creation does not yet bind a Thread. The
+owner-host CLI can register workspaces, explicitly expose an existing Thread
+after verifying its workspace, issue scoped device credentials, revoke devices,
 and start a read-only HTTPS listener on an
 explicit private address. The listener authenticates each request and projects
 only opaque workspace IDs, bound Thread summaries, or payload-free event
-envelopes. It does not yet create
-remote Thread bindings, transfer a verified server certificate to a client,
+envelopes. It does not yet bind newly created remote Turns automatically,
+transfer a verified server certificate to a client,
 authorize the existing app-server method set, or implement durable remote
 turns and event replay. These are required before 4D1/4D2 close.

@@ -199,6 +199,7 @@ koda chat --cwd .
 koda remote workspace add project --path /absolute/path/to/project
 koda remote workspace list
 koda remote device issue macbook --workspace project
+koda remote thread expose <thread-id> --workspace project
 koda remote device revoke <device-id>
 ```
 
@@ -210,7 +211,7 @@ koda remote device revoke <device-id>
 koda remote serve --host 192.168.1.10 --port 8443 --cert /absolute/path/server.pem --key /absolute/path/server-key.pem
 ```
 
-服务端拒绝公网和通配监听地址。客户端必须验证证书；自签名证书需预先信任或固定其指纹。`GET /v1/workspaces`、`GET /v1/threads/<thread-id>` 和 `GET /v1/threads/<thread-id>/events?after=-1&limit=100` 要求 `Authorization: Bearer <device-token>`，返回结果不含主机路径。事件接口以排他游标分页：首次用 `after=-1`，此后使用响应中的 `nextAfterSequence`；当前只返回序号、时间、Turn ID 与事件类型，不返回原始事件内容。当前没有自动登记既有本地 Thread 的命令，也没有 WebSocket 事件流，因此只读接口不能视为远程操作验收通过。
+服务端拒绝公网和通配监听地址。客户端必须验证证书；自签名证书需预先信任或固定其指纹。既有本地 Thread 必须由主机所有者显式执行 `remote thread expose`，命令会核对其权威工作区。`GET /v1/workspaces`、`GET /v1/threads/<thread-id>` 和 `GET /v1/threads/<thread-id>/events?after=-1&limit=100` 要求 `Authorization: Bearer <device-token>`，返回结果不含主机路径。事件接口以排他游标分页：首次用 `after=-1`，此后使用响应中的 `nextAfterSequence`；当前只返回序号、时间、Turn ID 与事件类型，不返回原始事件内容。还没有远程 Turn 自动绑定或 WebSocket 事件流，因此只读接口不能视为远程操作验收通过。
 
 ## 使用 CLI
 

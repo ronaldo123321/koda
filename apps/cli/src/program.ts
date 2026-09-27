@@ -13,6 +13,7 @@ import {
   runRemoteDeviceIssueCommand,
   runRemoteDeviceRevokeCommand,
   runRemoteServeCommand,
+  runRemoteThreadExposeCommand,
   runRemoteWorkspaceAddCommand,
   runRemoteWorkspaceListCommand,
 } from "./remote-command.js";
@@ -337,6 +338,21 @@ export function createProgram(runtime: ProgramRuntime): Command {
     .action(async (deviceId: string) => {
       runtime.setExitCode(
         await runRemoteDeviceRevokeCommand(deviceId, runtime),
+      );
+    });
+  remote
+    .command("thread")
+    .description("Expose verified local Thread metadata to paired devices")
+    .command("expose")
+    .argument("<thread-id>", "existing local Thread ID")
+    .requiredOption("--workspace <id>", "registered workspace ID")
+    .action(async (threadId: string, options: { workspace: string }) => {
+      runtime.setExitCode(
+        await runRemoteThreadExposeCommand(
+          threadId,
+          options.workspace,
+          runtime,
+        ),
       );
     });
 

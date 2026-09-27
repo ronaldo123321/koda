@@ -1,5 +1,6 @@
 import {
   RemoteDeviceStore,
+  RemoteThreadStore,
   RemoteWorkspaceStore,
   remotePermissionSchema,
   startRemoteHttpsServer,
@@ -94,6 +95,37 @@ export async function runRemoteDeviceRevokeCommand(
     );
     await devices.revoke(deviceId);
     context.stdout.write(`Revoked device ${deviceId}\n`);
+    return 0;
+  } catch (error) {
+    return fail(context, error);
+  }
+}
+
+export async function runRemoteThreadExposeCommand(
+  threadId: string,
+  workspaceId: string,
+  context: RemoteCommandContext & { processDirectory: string },
+): Promise<number> {
+  try {
+    const home = resolveKodaHome(context.environment);
+    const workspaces = await RemoteWorkspaceStore.open(home, OWNER_ID);
+    const workspace = await workspaces.get(workspaceId);
+    if (workspace === undefined) {
+      throw new Error("Remote workspace is unavailable.");
+    }
+    const application = new KodaApplication({
+      environment: context.environment,
+      processDirectory: context.processDirectory,
+    });
+    const metadata = (await application.getThread(threadId)).value;
+    if (metadata === undefined || metadata.workspaceRoot !== workspace.root) {
+      throw new Error("Thread is unavailable in the selected workspace.");
+    }
+    const threads = await RemoteThreadStore.open(home, OWNER_ID);
+    await threads.bind({ ownerId: OWNER_ID, workspaceId, threadId });
+    context.stdout.write(
+      `Exposed Thread ${threadId} in workspace ${workspaceId}\n`,
+    );
     return 0;
   } catch (error) {
     return fail(context, error);

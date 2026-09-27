@@ -351,8 +351,9 @@ of these items is considered complete when macOS or Linux closes.
 ### Phase 4D: authenticated remote operation
 
 Status: In progress — the single-owner, multi-device authorization, local
-workspace registration, owner-host device credential commands, and immutable
-remote Thread-binding foundation is implemented locally. An opt-in authenticated
+workspace registration, owner-host device credential and explicit existing
+Thread exposure commands, and immutable remote Thread-binding foundation are
+implemented locally. An opt-in authenticated
 TLS listener on a private IP now exposes workspace IDs, bound Thread summaries,
 and durable payload-free event envelopes with exclusive cursors; no
 turn-binding integration, WebSocket replay, remote MCP/OAuth, or remote
