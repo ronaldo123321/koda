@@ -67,6 +67,10 @@ final class UpdateMetadataTests: XCTestCase {
         let staged = try await ReleaseUpdates.download(candidate, session: session)
         defer { try? FileManager.default.removeItem(at: staged.deletingLastPathComponent()) }
         XCTAssertEqual(try Data(contentsOf: staged), UpdatePackageURLProtocol.bytes)
+        XCTAssertNoThrow(try ReleaseUpdates.reverifyDownloadedPackage(candidate, at: staged))
+        XCTAssertThrowsError(try ReleaseUpdates.assessInstaller(at: staged))
+        try Data("changed after download".utf8).write(to: staged)
+        XCTAssertThrowsError(try ReleaseUpdates.reverifyDownloadedPackage(candidate, at: staged))
         UpdatePackageURLProtocol.bytes = Data(repeating: 0x78, count: verified.packageSize)
         do {
             _ = try await ReleaseUpdates.download(candidate, session: session)
@@ -111,6 +115,20 @@ final class UpdateMetadataTests: XCTestCase {
         try Data(repeating: 0x78, count: verified.packageSize).write(to: packageURL)
         XCTAssertThrowsError(try verified.verifyPackage(at: packageURL))
         XCTAssertNotEqual(try runNode(verifier, verifyArguments), 0)
+    }
+
+    func testInstallerIdentityParserRequiresDeveloperIDInstaller() {
+        let signature = """
+        Package "Koda.pkg":
+           Status: signed by a certificate trusted by Mac OS X
+           Certificate Chain:
+            1. Developer ID Installer: Example (ABCDEFGHIJ)
+            2. Developer ID Certification Authority
+        """
+        XCTAssertEqual(ReleaseUpdates.installerTeam(from: signature), "ABCDEFGHIJ")
+        XCTAssertNil(ReleaseUpdates.installerTeam(from: signature.replacingOccurrences(
+            of: "Developer ID Installer", with: "Developer ID Application")))
+        XCTAssertNil(ReleaseUpdates.installerTeam(from: "Status: no signature"))
     }
 
     private func runNode(_ script: URL, _ arguments: [String]) throws -> Int32 {

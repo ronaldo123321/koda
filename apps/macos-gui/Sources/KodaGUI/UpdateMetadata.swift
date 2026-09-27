@@ -39,7 +39,7 @@ struct UpdateMetadata: Decodable {
     }
 }
 
-struct VerifiedUpdateMetadata {
+struct VerifiedUpdateMetadata: Sendable {
     let packageSize: Int
     let packageSha256: String
 
@@ -69,6 +69,8 @@ enum UpdateMetadataError: LocalizedError {
     case missingTrustRoot
     case downloadFailed
     case packageMismatch
+    case untrustedInstaller
+    case installerUnavailable
 
     var errorDescription: String? {
         switch self {
@@ -76,6 +78,8 @@ enum UpdateMetadataError: LocalizedError {
         case .missingTrustRoot: "此版本尚未配置应用更新信任密钥。"
         case .downloadFailed: "更新包下载失败。"
         case .packageMismatch: "更新包大小或摘要不匹配。"
+        case .untrustedInstaller: "更新包未通过 Apple 签名、团队身份或 Gatekeeper 检查。"
+        case .installerUnavailable: "macOS 安装器未能打开更新包。"
         }
     }
 }

@@ -191,7 +191,8 @@ Koda startup rather than installing/removing user tools solely for the test.
 On both architectures, download the matching `Koda-vVERSION-darwin-ARCH.pkg`
 and `.update.json` from that GitHub Release. Verify the published checksums and
 metadata, install the notarized package, launch the SwiftUI app, and exercise
-manual update discovery and download from a later candidate release. Record
+automatic discovery, verified download, and the explicit Open in Installer
+handoff from a later candidate release. Record
 the installed app identity and preservation of Keychain credentials and thread
 history. The public GUI update path is not accepted by local simulated
 downloads alone; installation and rollback still need clean-machine evidence.

@@ -1,6 +1,7 @@
 import Foundation
+import Security
 
-struct ReleaseUpdate {
+struct ReleaseUpdate: Sendable {
     let version: String
     let page: URL
     let packageName: String
@@ -20,6 +21,8 @@ enum ReleaseUpdates {
     private static let endpoint = URL(string:
         "https://api.github.com/repos/ronaldo123321/koda/releases?per_page=30"
     )!
+
+    static var hasTrustRoot: Bool { (try? loadTrustRoot()) != nil }
 
     static func check(installedVersion: String, session: URLSession = .shared) async throws -> ReleaseUpdate? {
         var request = URLRequest(url: endpoint)
@@ -79,6 +82,60 @@ enum ReleaseUpdates {
         } catch {
             try? FileManager.default.removeItem(at: directory)
             throw error
+        }
+    }
+
+    static func reverifyDownloadedPackage(_ update: ReleaseUpdate, at packageURL: URL) throws {
+        guard packageURL.isFileURL, packageURL.lastPathComponent == update.packageName else {
+            throw UpdateMetadataError.packageMismatch
+        }
+        try update.verifiedMetadata.verifyPackage(at: packageURL)
+    }
+
+    static func assessInstaller(at packageURL: URL) throws {
+        var code: SecCode?
+        var staticCode: SecStaticCode?
+        var signingInfo: CFDictionary?
+        guard SecCodeCopySelf([], &code) == errSecSuccess, let code,
+              SecCodeCheckValidity(code, [], nil) == errSecSuccess,
+              SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess, let staticCode,
+              SecCodeCopySigningInformation(staticCode, SecCSFlags(rawValue: kSecCSSigningInformation),
+                                            &signingInfo) == errSecSuccess,
+              let info = signingInfo as? [String: Any],
+              let team = info[kSecCodeInfoTeamIdentifier as String] as? String,
+              team.range(of: "^[A-Z0-9]{10}$", options: .regularExpression) != nil
+        else { throw UpdateMetadataError.untrustedInstaller }
+        let signature = try runAssessment("/usr/sbin/pkgutil", ["--check-signature", packageURL.path])
+        guard installerTeam(from: signature) == team else {
+            throw UpdateMetadataError.untrustedInstaller
+        }
+        _ = try runAssessment("/usr/sbin/spctl", ["--assess", "--type", "install", packageURL.path])
+    }
+
+    static func installerTeam(from signature: String) -> String? {
+        guard let signer = signature.split(separator: "\n").first(where: {
+            $0.trimmingCharacters(in: .whitespaces).hasPrefix("1. Developer ID Installer: ")
+        }), let range = signer.range(of: "\\([A-Z0-9]{10}\\)$", options: .regularExpression)
+        else { return nil }
+        return String(signer[range].dropFirst().dropLast())
+    }
+
+    private static func runAssessment(_ executable: String, _ arguments: [String]) throws -> String {
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        process.standardOutput = output
+        process.standardError = output
+        do {
+            try process.run()
+            output.fileHandleForWriting.closeFile()
+            let text = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            process.waitUntilExit()
+            guard process.terminationStatus == 0 else { throw UpdateMetadataError.untrustedInstaller }
+            return text
+        } catch {
+            throw UpdateMetadataError.untrustedInstaller
         }
     }
 

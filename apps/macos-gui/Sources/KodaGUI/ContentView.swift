@@ -7,6 +7,7 @@ struct ContentView: View {
     @State private var credentialProvider: ProviderOption?
     @State private var checkingUpdates = false
     @State private var downloadingUpdate = false
+    @State private var openingInstaller = false
     @State private var updateNotice: String?
     @State private var updateCandidate: ReleaseUpdate?
     @State private var downloadedUpdateURL: URL?
@@ -59,6 +60,13 @@ struct ContentView: View {
             .navigationTitle("Koda")
         }
         .onAppear { model.connect() }
+        .task {
+            guard ReleaseUpdates.hasTrustRoot else { return }
+            while !Task.isCancelled {
+                if downloadedUpdateURL == nil { await checkForUpdates(silent: true) }
+                try? await Task.sleep(for: .seconds(24 * 60 * 60))
+            }
+        }
         .onChange(of: model.selectedThreadID) { _, id in model.selectThread(id) }
         .sheet(item: $model.approval) { request in
             ApprovalView(request: request) { approved in
@@ -76,29 +84,33 @@ struct ContentView: View {
         }
     }
 
-    private func checkForUpdates() {
+    private func checkForUpdates(silent: Bool = false) async {
+        guard !checkingUpdates && !downloadingUpdate else { return }
         guard let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString")
                 as? String else {
-            updateNotice = "无法读取当前应用版本。"
+            if !silent { updateNotice = "无法读取当前应用版本。" }
             return
         }
         checkingUpdates = true
-        updateNotice = nil
-        updateCandidate = nil
-        downloadedUpdateURL = nil
-        Task {
-            do {
-                if let candidate = try await ReleaseUpdates.check(installedVersion: version) {
-                    updateNotice = "发现 macOS 应用候选版本 v\(candidate.version)。"
-                    updateCandidate = candidate
-                } else {
-                    updateNotice = "GitHub Releases 暂无适用于此 Mac 的较新应用版本。"
-                }
-            } catch {
-                updateNotice = "检查更新失败：\(error.localizedDescription)"
-            }
-            checkingUpdates = false
+        if !silent {
+            updateNotice = nil
+            updateCandidate = nil
+            downloadedUpdateURL = nil
         }
+        do {
+            if let candidate = try await ReleaseUpdates.check(installedVersion: version) {
+                updateNotice = "发现 macOS 应用候选版本 v\(candidate.version)。"
+                updateCandidate = candidate
+            } else if !silent {
+                updateNotice = "GitHub Releases 暂无适用于此 Mac 的较新应用版本。"
+            } else {
+                updateNotice = nil
+                updateCandidate = nil
+            }
+        } catch {
+            if !silent { updateNotice = "检查更新失败：\(error.localizedDescription)" }
+        }
+        checkingUpdates = false
     }
 
     private func downloadUpdate() {
@@ -108,11 +120,32 @@ struct ContentView: View {
         Task {
             do {
                 downloadedUpdateURL = try await ReleaseUpdates.download(candidate)
-                updateNotice = "更新包已通过摘要验证；应用内安装尚未开放。"
+                updateNotice = "更新包已通过摘要验证，可在 macOS 安装器中打开。"
             } catch {
                 updateNotice = "更新包下载或验证失败：\(error.localizedDescription)"
             }
             downloadingUpdate = false
+        }
+    }
+
+    private func openDownloadedInstaller() {
+        guard let candidate = updateCandidate, let packageURL = downloadedUpdateURL else { return }
+        openingInstaller = true
+        updateNotice = "正在复核更新包和 Apple 签名…"
+        Task {
+            do {
+                try await Task.detached(priority: .userInitiated) {
+                    try ReleaseUpdates.reverifyDownloadedPackage(candidate, at: packageURL)
+                    try ReleaseUpdates.assessInstaller(at: packageURL)
+                }.value
+                guard NSWorkspace.shared.open(packageURL) else {
+                    throw UpdateMetadataError.installerUnavailable
+                }
+                updateNotice = "已在 macOS 安装器中打开；请确认安装步骤。"
+            } catch {
+                updateNotice = "无法打开更新包：\(error.localizedDescription)"
+            }
+            openingInstaller = false
         }
     }
 
@@ -141,8 +174,10 @@ struct ContentView: View {
                     Button("重连") { model.reconnect() }
                 }
                 Button("远程…") { openWindow(id: "remote") }
-                Button(checkingUpdates ? "检查中…" : "检查更新") { checkForUpdates() }
-                    .disabled(checkingUpdates || downloadingUpdate)
+                Button(checkingUpdates ? "检查中…" : "检查更新") {
+                    Task { await checkForUpdates() }
+                }
+                    .disabled(checkingUpdates || downloadingUpdate || openingInstaller)
             }
             if let updateNotice {
                 HStack {
@@ -153,7 +188,12 @@ struct ContentView: View {
                             Button(downloadingUpdate ? "下载中…" : "下载并验证") {
                                 downloadUpdate()
                             }
-                            .disabled(downloadingUpdate)
+                            .disabled(downloadingUpdate || checkingUpdates)
+                        } else {
+                            Button(openingInstaller ? "检查中…" : "在安装器中打开") {
+                                openDownloadedInstaller()
+                            }
+                            .disabled(openingInstaller)
                         }
                     }
                 }
