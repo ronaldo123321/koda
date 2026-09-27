@@ -2,6 +2,7 @@ export * from "./artifact-command.js";
 export * from "./config.js";
 export * from "./console-event-sink.js";
 export * from "./extension-command.js";
+export * from "./plugin-command.js";
 export * from "./program.js";
 export * from "./remote-command.js";
 export * from "./run-command.js";

@@ -69,6 +69,9 @@ importers:
       '@koda/distribution':
         specifier: workspace:*
         version: link:../../packages/distribution
+      '@koda/plugin-host-node':
+        specifier: workspace:*
+        version: link:../../packages/plugin-host-node
       '@koda/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol

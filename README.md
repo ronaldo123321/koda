@@ -488,6 +488,8 @@ parameters:
 
 插件是使用当前用户操作系统权限运行的普通本地可执行文件。进程隔离和过滤后的环境只是生命周期保护措施，不构成操作系统安全沙箱。Koda 不会从仓库自动发现插件可执行文件、安装软件包、重启崩溃的插件，或让插件跨 Turn 常驻。
 
+Phase 4E 的签名包验收可先离线执行 `koda plugin verify /absolute/path/to/package --key-id publisher --key /absolute/path/to/publisher.pem`。发布者公钥须由所有者独立取得并核对；该命令验证 Ed25519 清单签名及完整文件清单，拒绝改动、额外文件、链接与穿越路径，不会执行或安装插件。当前 `plugins.json` 中的手工命令仍属于手工配置，不能据此视为已通过签名包验证；受管理安装、启停、更新与回滚见 [Phase 4E 设计](docs/plans/2026-09-27-phase-4e-plugin-and-update-supply-chain-design.md)，尚待实现。
+
 `koda extension list` 和协议 `extension/catalog` 会解析清单，但不会执行配置的命令。活跃贡献的元数据只能在正常事务式 Turn 启动后，从持久化 Thread 快照中获取。
 
 无需服务提供商凭据即可预览未引用的旧工件；审阅报告后再决定是否删除：

@@ -8,6 +8,7 @@ import {
   runExtensionListCommand,
   runExtensionReadCommand,
 } from "./extension-command.js";
+import { runPluginVerifyCommand } from "./plugin-command.js";
 import { runCommand, type RunCommandInput } from "./run-command.js";
 import {
   runRemoteDeviceIssueCommand,
@@ -229,6 +230,28 @@ export function createProgram(runtime: ProgramRuntime): Command {
         runtime.setExitCode(
           await runExtensionReadCommand(kind, sourceId, options, {
             environment: runtime.environment,
+            processDirectory: runtime.processDirectory,
+            stdout: runtime.stdout,
+            stderr: runtime.stderr,
+          }),
+        );
+      },
+    );
+  const plugin = program
+    .command("plugin")
+    .description("Inspect signed plugin packages without executing them");
+  plugin
+    .command("verify")
+    .description(
+      "Verify a local plugin package against an explicit publisher key",
+    )
+    .argument("<directory>", "plugin package directory")
+    .requiredOption("--key-id <id>", "trusted publisher key ID")
+    .requiredOption("--key <file>", "trusted Ed25519 public key PEM")
+    .action(
+      async (directory: string, options: { keyId: string; key: string }) => {
+        runtime.setExitCode(
+          await runPluginVerifyCommand(directory, options, {
             processDirectory: runtime.processDirectory,
             stdout: runtime.stdout,
             stderr: runtime.stderr,
