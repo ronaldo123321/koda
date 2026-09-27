@@ -206,12 +206,11 @@ describe("KodaApplication", () => {
       },
       {
         assertRequest: (request) => {
-          const outputs = request.items
-            .flatMap((item) =>
-              item.type === "tool_result" && item.name === "delegate_readonly"
-                ? [item.output]
-                : [],
-            );
+          const outputs = request.items.flatMap((item) =>
+            item.type === "tool_result" && item.name === "delegate_readonly"
+              ? [item.output]
+              : [],
+          );
           expect(outputs).toHaveLength(3);
           expect(outputs.at(-1)).toEqual({
             status: "limit_reached",
@@ -268,6 +267,426 @@ describe("KodaApplication", () => {
       status: "completed",
     });
     expect(providerCount).toBe(3);
+  });
+
+  it("spawns a read-only child, steers it, and waits for its result", async () => {
+    const fixture = await createFixture();
+    await writeFile(join(fixture.workspaceRoot, "note.txt"), "Hello.\n");
+    const childId = threadIdSchema.parse("async-child-thread");
+    let releaseChild: (() => void) | undefined;
+    const childRelease = new Promise<void>((resolve) => {
+      releaseChild = resolve;
+    });
+    const parentProvider = new ScriptedModelProvider([
+      {
+        events: [
+          {
+            type: "tool_call",
+            callId: toolCallIdSchema.parse("spawn-child-call"),
+            name: "spawn_readonly",
+            arguments: { task: "Read note.txt." },
+          },
+          { type: "completed", finishReason: "tool_calls" },
+        ],
+      },
+      {
+        assertRequest: (request) => {
+          expect(request.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "tool_result",
+                name: "spawn_readonly",
+                output: { threadId: childId, status: "running" },
+              }),
+            ]),
+          );
+        },
+        events: [
+          {
+            type: "tool_call",
+            callId: toolCallIdSchema.parse("message-child-call"),
+            name: "send_child_message",
+            arguments: {
+              childThreadId: childId,
+              message: "Also check the file name.",
+            },
+          },
+          { type: "completed", finishReason: "tool_calls" },
+        ],
+      },
+      {
+        assertRequest: (request) => {
+          expect(request.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "tool_result",
+                name: "send_child_message",
+                output: { status: "accepted" },
+              }),
+            ]),
+          );
+          releaseChild?.();
+        },
+        events: [
+          {
+            type: "tool_call",
+            callId: toolCallIdSchema.parse("wait-child-call"),
+            name: "wait_children",
+            arguments: { childThreadIds: [childId], timeoutMs: 2_000 },
+          },
+          { type: "completed", finishReason: "tool_calls" },
+        ],
+      },
+      {
+        assertRequest: (request) => {
+          expect(request.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "tool_result",
+                name: "wait_children",
+                output: {
+                  children: [
+                    {
+                      threadId: childId,
+                      status: "completed",
+                      answer: "The file is note.txt and says hello.",
+                    },
+                  ],
+                },
+              }),
+            ]),
+          );
+        },
+        events: [
+          { type: "assistant_delta", text: "Child work complete." },
+          { type: "completed", finishReason: "stop" },
+        ],
+      },
+    ]);
+    let childSteps = 0;
+    const childProvider: ModelProvider = {
+      stream: async function* (request) {
+        childSteps += 1;
+        if (childSteps === 1) {
+          expect(request.tools.map((tool) => tool.name)).not.toContain(
+            "spawn_readonly",
+          );
+          await childRelease;
+          yield {
+            type: "tool_call",
+            callId: toolCallIdSchema.parse("async-child-read"),
+            name: "read_file",
+            arguments: { path: "note.txt", start_line: 1, line_count: 10 },
+          };
+          yield { type: "completed", finishReason: "tool_calls" };
+          return;
+        }
+        expect(request.items).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: "user_message",
+              content: "Also check the file name.",
+            }),
+          ]),
+        );
+        yield {
+          type: "assistant_delta",
+          text: "The file is note.txt and says hello.",
+        };
+        yield { type: "completed", finishReason: "stop" };
+      },
+    };
+    let idCount = 0;
+    let providerCount = 0;
+    const application = new KodaApplication({
+      environment: {
+        KODA_HOME: fixture.kodaHome,
+        OPENAI_API_KEY: "offline-test-key",
+      },
+      processDirectory: fixture.root,
+      dependencies: {
+        openWorkspace: (root) => ReadOnlyWorkspace.open(root),
+        createProvider: () => {
+          providerCount += 1;
+          return providerCount === 1 ? parentProvider : childProvider;
+        },
+        createIds: () => {
+          idCount += 1;
+          return {
+            threadId: threadIdSchema.parse(
+              idCount === 1 ? "async-parent-thread" : childId,
+            ),
+            turnId: turnIdSchema.parse(`async-turn-${idCount}`),
+            itemIds: new DeterministicItemIdFactory(`async-item-${idCount}`),
+          };
+        },
+      },
+    });
+    const parent = application.startTurn(
+      { prompt: "Delegate and coordinate a read.", cwd: fixture.workspaceRoot },
+      {
+        events: { append: async () => undefined },
+        approvals: rejectApprovals(),
+      },
+    );
+    await expect(parent.completion).resolves.toMatchObject({
+      status: "completed",
+    });
+    expect(childSteps).toBe(2);
+    await expect(application.getThread(childId)).resolves.toMatchObject({
+      value: { parentThreadId: parent.threadId, status: "completed" },
+    });
+
+    const resumedProvider = new ScriptedModelProvider([
+      {
+        events: [
+          {
+            type: "tool_call",
+            callId: toolCallIdSchema.parse("resumed-wait-child"),
+            name: "wait_children",
+            arguments: { childThreadIds: [childId], timeoutMs: 0 },
+          },
+          { type: "completed", finishReason: "tool_calls" },
+        ],
+      },
+      {
+        assertRequest: (request) => {
+          expect(request.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "tool_result",
+                name: "wait_children",
+                output: {
+                  children: [
+                    expect.objectContaining({
+                      threadId: childId,
+                      status: "completed",
+                      answer: "The file is note.txt and says hello.",
+                    }),
+                  ],
+                },
+              }),
+            ]),
+          );
+        },
+        events: [
+          { type: "assistant_delta", text: "Recovered child result." },
+          { type: "completed", finishReason: "stop" },
+        ],
+      },
+    ]);
+    const resumedApplication = new KodaApplication({
+      environment: {
+        KODA_HOME: fixture.kodaHome,
+        OPENAI_API_KEY: "offline-test-key",
+      },
+      processDirectory: fixture.root,
+      dependencies: {
+        openWorkspace: (root) => ReadOnlyWorkspace.open(root),
+        createProvider: () => resumedProvider,
+        createIds: (resumeThreadId) => ({
+          threadId: resumeThreadId ?? threadIdSchema.parse("unused-thread"),
+          turnId: turnIdSchema.parse("resumed-async-parent-turn"),
+          itemIds: new DeterministicItemIdFactory("resumed-async-item"),
+        }),
+      },
+    });
+    const resumed = resumedApplication.startTurn(
+      {
+        prompt: "Check the completed child.",
+        cwd: fixture.workspaceRoot,
+        resume: parent.threadId,
+      },
+      {
+        events: { append: async () => undefined },
+        approvals: rejectApprovals(),
+      },
+    );
+    await expect(resumed.completion).resolves.toMatchObject({
+      status: "completed",
+    });
+
+    const unrelatedProvider = new ScriptedModelProvider([
+      {
+        events: [
+          {
+            type: "tool_call",
+            callId: toolCallIdSchema.parse("unrelated-wait-child"),
+            name: "wait_children",
+            arguments: { childThreadIds: [childId], timeoutMs: 0 },
+          },
+          { type: "completed", finishReason: "tool_calls" },
+        ],
+      },
+      {
+        assertRequest: (request) => {
+          expect(request.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "tool_result",
+                name: "wait_children",
+                output: { status: "not_found" },
+              }),
+            ]),
+          );
+        },
+        events: [
+          { type: "assistant_delta", text: "No child access." },
+          { type: "completed", finishReason: "stop" },
+        ],
+      },
+    ]);
+    const unrelatedApplication = new KodaApplication({
+      environment: {
+        KODA_HOME: fixture.kodaHome,
+        OPENAI_API_KEY: "offline-test-key",
+      },
+      processDirectory: fixture.root,
+      dependencies: {
+        openWorkspace: (root) => ReadOnlyWorkspace.open(root),
+        createProvider: () => unrelatedProvider,
+        createIds: () => ({
+          threadId: threadIdSchema.parse("unrelated-parent-thread"),
+          turnId: turnIdSchema.parse("unrelated-parent-turn"),
+          itemIds: new DeterministicItemIdFactory("unrelated-parent-item"),
+        }),
+      },
+    });
+    const unrelated = unrelatedApplication.startTurn(
+      {
+        prompt: "Try to read another parent's child.",
+        cwd: fixture.workspaceRoot,
+      },
+      {
+        events: { append: async () => undefined },
+        approvals: rejectApprovals(),
+      },
+    );
+    await expect(unrelated.completion).resolves.toMatchObject({
+      status: "completed",
+    });
+  });
+
+  it("interrupts a running asynchronous child and reports cancellation", async () => {
+    const fixture = await createFixture();
+    const childId = threadIdSchema.parse("interrupt-async-child");
+    const parentProvider = new ScriptedModelProvider([
+      {
+        events: [
+          {
+            type: "tool_call",
+            callId: toolCallIdSchema.parse("interrupt-spawn-call"),
+            name: "spawn_readonly",
+            arguments: { task: "Inspect the workspace." },
+          },
+          { type: "completed", finishReason: "tool_calls" },
+        ],
+      },
+      {
+        events: [
+          {
+            type: "tool_call",
+            callId: toolCallIdSchema.parse("interrupt-child-call"),
+            name: "interrupt_child",
+            arguments: { childThreadId: childId },
+          },
+          { type: "completed", finishReason: "tool_calls" },
+        ],
+      },
+      {
+        assertRequest: (request) => {
+          expect(request.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "tool_result",
+                name: "interrupt_child",
+                output: { status: "accepted" },
+              }),
+            ]),
+          );
+        },
+        events: [
+          {
+            type: "tool_call",
+            callId: toolCallIdSchema.parse("interrupt-wait-call"),
+            name: "wait_children",
+            arguments: { childThreadIds: [childId], timeoutMs: 2_000 },
+          },
+          { type: "completed", finishReason: "tool_calls" },
+        ],
+      },
+      {
+        assertRequest: (request) => {
+          expect(request.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "tool_result",
+                name: "wait_children",
+                output: {
+                  children: [
+                    expect.objectContaining({
+                      threadId: childId,
+                      status: "cancelled",
+                    }),
+                  ],
+                },
+              }),
+            ]),
+          );
+        },
+        events: [
+          { type: "assistant_delta", text: "Child interrupted." },
+          { type: "completed", finishReason: "stop" },
+        ],
+      },
+    ]);
+    const childProvider: ModelProvider = {
+      stream: async function* (_request, signal) {
+        await waitForAbort(signal);
+        signal.throwIfAborted();
+      },
+    };
+    let providerCount = 0;
+    let idCount = 0;
+    const application = new KodaApplication({
+      environment: {
+        KODA_HOME: fixture.kodaHome,
+        OPENAI_API_KEY: "offline-test-key",
+      },
+      processDirectory: fixture.root,
+      dependencies: {
+        openWorkspace: (root) => ReadOnlyWorkspace.open(root),
+        createProvider: () => {
+          providerCount += 1;
+          return providerCount === 1 ? parentProvider : childProvider;
+        },
+        createIds: () => {
+          idCount += 1;
+          return {
+            threadId: threadIdSchema.parse(
+              idCount === 1 ? "interrupt-async-parent" : childId,
+            ),
+            turnId: turnIdSchema.parse(`interrupt-async-turn-${idCount}`),
+            itemIds: new DeterministicItemIdFactory(
+              `interrupt-async-item-${idCount}`,
+            ),
+          };
+        },
+      },
+    });
+    const parent = application.startTurn(
+      { prompt: "Start then interrupt a child.", cwd: fixture.workspaceRoot },
+      {
+        events: { append: async () => undefined },
+        approvals: rejectApprovals(),
+      },
+    );
+    await expect(parent.completion).resolves.toMatchObject({
+      status: "completed",
+    });
+    await expect(application.getThread(childId)).resolves.toMatchObject({
+      value: { parentThreadId: parent.threadId, status: "cancelled" },
+    });
   });
 
   it("cancels an active read-only child when its parent is cancelled", async () => {

@@ -42,6 +42,7 @@ import {
   extensionReadParamsSchema,
   executionPolicyConfigSchema,
   executionProfileSchema,
+  jsonValueSchema,
   itemIdSchema,
   recoveryItemSchema,
   THREAD_EVENTS_DEFAULT_LIMIT,
@@ -79,6 +80,7 @@ import {
   type ArtifactReadParams,
   type ArtifactReadResult,
   type ItemId,
+  type JsonValue,
   type ModelProviderId,
   type PlanGetParams,
   type PlanGetResult,
@@ -145,6 +147,7 @@ import {
   registerExecTerminalTool,
   registerPatchSetTool,
   registerProjectSkillTool,
+  registerReadOnlyChildTools,
   registerReadOnlyDelegationTool,
   registerReadOnlyWorkspaceTools,
   registerStructuredPatchTool,
@@ -163,6 +166,10 @@ import {
 } from "@koda/runtime-node";
 
 import { ApprovalGrantRegistry } from "./approval-grant-registry.js";
+import {
+  ReadOnlyChildRegistry,
+  type ReadOnlyChildSnapshot,
+} from "./read-only-child-registry.js";
 
 import {
   ConfigurationError,
@@ -412,6 +419,7 @@ export class KodaApplication {
   private readonly secretLeaseManager: SecretLeaseManager;
   private readonly remoteRestricted: boolean;
   private readonly readOnlyChild: boolean;
+  private readonly readOnlyChildren = new ReadOnlyChildRegistry();
 
   public get isRemoteRestricted(): boolean {
     return this.remoteRestricted;
@@ -1732,12 +1740,17 @@ export class KodaApplication {
       registerReadOnlyWorkspaceTools(tools, workspace, { artifactStore });
       if (!this.remoteRestricted) {
         let childCount = 0;
-        registerReadOnlyDelegationTool(tools, async (context, task) => {
+        const launchChild = async (
+          context: { signal: AbortSignal },
+          task: string,
+        ): Promise<{ handle: TurnHandle } | { error: JsonValue }> => {
           context.signal.throwIfAborted();
           if (childCount >= 2) {
-            return { status: "limit_reached", maxChildren: 2 };
+            return { error: { status: "limit_reached", maxChildren: 2 } };
           }
-          childCount += 1;
+          if (!this.readOnlyChildren.canStart()) {
+            return { error: { status: "busy", maxActiveChildren: 8 } };
+          }
           const childApplication = new KodaApplication({
             environment: this.environment,
             processDirectory: this.processDirectory,
@@ -1745,6 +1758,10 @@ export class KodaApplication {
             readOnlyChild: true,
           });
           let answer = "";
+          let markStarted: (() => void) | undefined;
+          const started = new Promise<void>((resolve) => {
+            markStarted = resolve;
+          });
           const child = childApplication.startTurn(
             {
               prompt: task,
@@ -1757,6 +1774,7 @@ export class KodaApplication {
             {
               events: {
                 append: async (event) => {
+                  if (event.type === "turn.started") markStarted?.();
                   if (
                     event.type === "item.recorded" &&
                     event.payload.item.type === "assistant_message"
@@ -1768,26 +1786,102 @@ export class KodaApplication {
               approvals: rejectApprovalsBroker,
             },
           );
-          const cancel = () => child.cancel("Parent turn was cancelled.");
-          context.signal.addEventListener("abort", cancel, { once: true });
-          const timeout = setTimeout(
-            () => child.cancel("Child read-only task timed out."),
-            120_000,
-          );
           try {
-            const result = await child.completion;
-            return {
-              threadId: child.threadId,
-              status: result.status,
-              answer: answer.slice(0, 4_000),
-              ...(result.error === undefined
-                ? {}
-                : { errorCode: result.error.code }),
-            };
-          } finally {
-            clearTimeout(timeout);
-            context.signal.removeEventListener("abort", cancel);
+            this.readOnlyChildren.register({
+              parentThreadId: ids.threadId,
+              workspaceRoot: workspace.root,
+              handle: child,
+              answer: () => answer,
+              parentSignal: context.signal,
+            });
+          } catch (error) {
+            child.cancel("Child registration failed.");
+            throw error;
           }
+          childCount += 1;
+          const durableStart = await Promise.race([
+            started.then(() => true),
+            child.completion.then(() => false),
+          ]);
+          if (!durableStart) {
+            return {
+              error: { status: "failed", errorCode: "CHILD_NOT_STARTED" },
+            };
+          }
+          context.signal.throwIfAborted();
+          return { handle: child };
+        };
+        registerReadOnlyDelegationTool(tools, async (context, task) => {
+          const launched = await launchChild(context, task);
+          if ("error" in launched) return launched.error;
+          await launched.handle.completion;
+          return jsonValueSchema.parse(
+            this.readOnlyChildren.get(
+              ids.threadId,
+              workspace.root,
+              launched.handle.threadId,
+            ) ?? { status: "unavailable" },
+          );
+        });
+        registerReadOnlyChildTools(tools, {
+          spawn: async (context, task) => {
+            const launched = await launchChild(context, task);
+            return "error" in launched
+              ? launched.error
+              : { threadId: launched.handle.threadId, status: "running" };
+          },
+          wait: async (context, childThreadIds, timeoutMs) => {
+            const initial = await Promise.all(
+              childThreadIds.map(
+                async (childThreadId) =>
+                  this.readOnlyChildren.get(
+                    ids.threadId,
+                    workspace.root,
+                    childThreadId,
+                  ) ??
+                  this.durableReadOnlyChildSnapshot(
+                    ids.threadId,
+                    workspace.root,
+                    childThreadId,
+                  ),
+              ),
+            );
+            if (initial.some((child) => child === undefined)) {
+              return { status: "not_found" };
+            }
+            const children = initial as ReadOnlyChildSnapshot[];
+            if (
+              timeoutMs > 0 &&
+              children.every((child) => child.status === "running")
+            ) {
+              const waited = await this.readOnlyChildren.wait(
+                ids.threadId,
+                workspace.root,
+                childThreadIds,
+                timeoutMs,
+                context.signal,
+              );
+              if (waited !== undefined) {
+                return jsonValueSchema.parse({ children: waited });
+              }
+            }
+            return jsonValueSchema.parse({ children });
+          },
+          send: async (_context, childThreadId, message) => ({
+            status: this.readOnlyChildren.send(
+              ids.threadId,
+              workspace.root,
+              childThreadId,
+              message,
+            ),
+          }),
+          interrupt: async (_context, childThreadId) => ({
+            status: this.readOnlyChildren.interrupt(
+              ids.threadId,
+              workspace.root,
+              childThreadId,
+            ),
+          }),
         });
       }
       if (!this.remoteRestricted && mutationJournal !== undefined) {
@@ -2106,6 +2200,44 @@ export class KodaApplication {
       );
     }
     return readResult.events;
+  }
+
+  private async durableReadOnlyChildSnapshot(
+    parentThreadId: ThreadId,
+    workspaceRoot: string,
+    childThreadId: ThreadId,
+  ): Promise<ReadOnlyChildSnapshot | undefined> {
+    let events: AgentEvent[];
+    try {
+      events = await this.readValidatedThreadLog(childThreadId);
+    } catch (error) {
+      if (
+        error instanceof ThreadHistoryError &&
+        error.code === "THREAD_EVENT_LOG_NOT_FOUND"
+      ) {
+        return undefined;
+      }
+      throw error;
+    }
+    if (
+      events[0]?.type !== "turn.started" ||
+      events[0].payload.parentThreadId !== parentThreadId
+    ) {
+      return undefined;
+    }
+    const recovered = recoverThread({ events, diagnostics: [] }, childThreadId);
+    if (recovered.context.workspaceRoot !== workspaceRoot) return undefined;
+    const answer = [...recovered.history]
+      .reverse()
+      .find((item) => item.type === "assistant_message");
+    return {
+      threadId: childThreadId,
+      status: recovered.previousStatus,
+      ...(answer?.type === "assistant_message" &&
+      recovered.previousStatus !== "interrupted"
+        ? { answer: answer.content.slice(0, 4_000) }
+        : {}),
+    };
   }
 
   private async authorizedThreadArtifacts(
