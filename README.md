@@ -191,9 +191,9 @@ koda chat --cwd .
 
 ## 远程访问准备
 
-首版远程访问面向同一使用者的多台设备，计划在局域网或自有 VPN 内使用 TLS 连接。当前只有主机本地的工作区登记、设备凭据签发与撤销；远程监听器和客户端尚未启用。
+首版远程访问面向同一使用者的多台设备，使用局域网或自有 VPN。当前已提供按需启动的只读 HTTPS 入口；设备可以查询获授权的工作区 ID，以及已绑定 Thread 的脱敏概要。远程客户端、任务控制、事件重连和自动配对仍在开发中。
 
-在将来作为服务端的 Mac 上执行：
+在作为服务端的 Mac 上登记工作区和设备：
 
 ```bash
 koda remote workspace add project --path /absolute/path/to/project
@@ -202,7 +202,15 @@ koda remote device issue macbook --workspace project
 koda remote device revoke <device-id>
 ```
 
-签发命令默认只授予 `workspace:read,thread:read`；如需其他权限，可在签发时用 `--permissions` 指定逗号分隔的权限。令牌只在签发时显示一次，主机仅保存其摘要；请将令牌交给目标设备并妥善保存。每台设备单独签发，丢失时按设备 ID 撤销并重新签发。这些准备命令目前不会让设备连上主机。
+签发命令默认只授予 `workspace:read,thread:read`；如需其他权限，可在签发时用 `--permissions` 指定逗号分隔的权限。令牌只在签发时显示一次，主机仅保存其摘要；请将令牌交给目标设备并妥善保存。每台设备单独签发，丢失时按设备 ID 撤销并重新签发。
+
+准备带有服务端 IP 地址 SAN 的 TLS 证书及仅所有者可读的私钥，然后显式启动监听。例如主机的内网地址是 `192.168.1.10` 时：
+
+```bash
+koda remote serve --host 192.168.1.10 --port 8443 --cert /absolute/path/server.pem --key /absolute/path/server-key.pem
+```
+
+服务端拒绝公网和通配监听地址。客户端必须验证证书；自签名证书需预先信任或固定其指纹。`GET /v1/workspaces` 和 `GET /v1/threads/<thread-id>` 要求 `Authorization: Bearer <device-token>`，返回结果不含主机路径。当前没有自动登记既有本地 Thread 的命令，也没有 WebSocket 事件流，因此这两个只读接口不能视为远程操作验收通过。
 
 ## 使用 CLI
 

@@ -1,9 +1,9 @@
 # Koda Phase 4D: Authenticated Remote Operation
 
-- Status: 4D1 in progress — local owner/device grants, workspace registration,
-  credential issuance, verification, revocation, immutable remote Thread
-  bindings, and safe Thread summary projection implemented; no remote listener
-  is enabled
+- Status: 4D1 and 4D2 in progress — local owner/device grants, workspace
+  registration, credential lifecycle, immutable remote Thread bindings, safe
+  Thread summary projection, and an opt-in read-only TLS listener implemented;
+  remote turns, WebSocket replay, and client pairing are not yet enabled
 - Date: 2026-09-27
 - Depends on: local app-server v18, durable JSONL events, thread leases, artifact integrity, and Phase 4A–4C security evidence
 - Scope: one owner across multiple devices, authenticated HTTP/WebSocket clients, reconnect/replay, remote MCP/OAuth, shared state ownership, and owner/workspace/thread authorization
@@ -18,8 +18,11 @@ not expose them unchanged.
 
 Remote operation uses a separate versioned API and server-side workspace IDs.
 The local stdio protocol and its installed CLI/TUI behavior remain intact.
-The HTTP/WebSocket listener stays disabled until authentication, authorization,
-TLS, bounded framing, and negative security tests pass together.
+The opt-in HTTPS listener serves only authenticated workspace IDs and bound
+Thread summaries. It has TLS, bounded headers and responses, no request body,
+per-request authorization, and negative security tests. The HTTP turn API and
+WebSocket listener stay disabled until their own authorization, replay, and
+disconnect tests pass together.
 
 ## 2. Identity and authorization
 
@@ -50,7 +53,8 @@ must verify the host certificate, with a pinned fingerprint or a trusted local
 CA established during owner-local pairing. A bearer credential alone does not
 justify skipping certificate verification. Credential rotation and revocation
 take effect before a new request or WebSocket subscription; neither device
-credentials nor OAuth secrets enter JSONL, responses, URLs, or routine logs.
+credentials nor OAuth secrets enter JSONL, remote API responses, URLs, or
+routine logs.
 
 ## 3. Durable sessions and replay
 
@@ -119,8 +123,12 @@ security, and recovery checks. A reachable HTTP endpoint or a successful
 handshake alone is not completion evidence.
 
 Current 4D1 code provides `RemoteAccessCatalog`, `RemoteWorkspaceStore`,
-`RemoteDeviceStore`, and `RemoteThreadStore` without wiring them into a listener
-or turn creation. The owner-host CLI can register workspaces, issue scoped
-device credentials, and revoke devices. It does not yet transfer a verified
-server certificate to a client or authorize the existing app-server method set.
-These are required before 4D1 closes.
+`RemoteDeviceStore`, and `RemoteThreadStore`; the read-only listener uses these
+for each request, but turn creation does not yet bind a Thread. The owner-host
+CLI can register workspaces, issue scoped device credentials, revoke devices,
+and start a read-only HTTPS listener on an
+explicit private address. The listener authenticates each request and projects
+only opaque workspace IDs or bound Thread summaries. It does not yet create
+remote Thread bindings, transfer a verified server certificate to a client,
+authorize the existing app-server method set, or implement durable remote
+turns and event replay. These are required before 4D1/4D2 close.

@@ -25,6 +25,24 @@ class MemoryWriter implements TextWriter {
 }
 
 describe.skipIf(process.platform === "win32")("remote owner commands", () => {
+  it("refuses a public remote listener before reading certificate files", async () => {
+    const home = await mkdtemp(join(tmpdir(), "koda-remote-cli-home-"));
+    directories.push(home);
+    const result = await invoke(home, [
+      "remote",
+      "serve",
+      "--host",
+      "0.0.0.0",
+      "--cert",
+      "missing-cert.pem",
+      "--key",
+      "missing-key.pem",
+    ]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr.value).toContain("private, VPN, or loopback");
+    expect(result.stdout.value).toBe("");
+  });
+
   it("registers a workspace and issues a revocable scoped token", async () => {
     const home = await mkdtemp(join(tmpdir(), "koda-remote-cli-home-"));
     const workspace = await mkdtemp(join(tmpdir(), "koda-remote-cli-project-"));

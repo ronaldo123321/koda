@@ -1,7 +1,10 @@
 import { realpath, stat } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 
-import type { ThreadMetadataMessage } from "@koda/protocol";
+import {
+  modelProviderIdSchema,
+  type ThreadMetadataMessage,
+} from "@koda/protocol";
 import { z } from "zod";
 
 const idSchema = z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u);
@@ -54,6 +57,10 @@ export interface RemoteThreadSummary {
   lastSequence?: number;
   usage: ThreadMetadataMessage["usage"];
 }
+
+type RemoteThreadMetadataInput = Omit<ThreadMetadataMessage, "provider"> & {
+  provider?: string | undefined;
+};
 
 export class RemoteAccessDeniedError extends Error {
   public constructor() {
@@ -165,7 +172,7 @@ export class RemoteAccessCatalog {
   public async projectThread(
     principal: RemotePrincipal,
     binding: RemoteThreadBinding | undefined,
-    metadata: ThreadMetadataMessage,
+    metadata: RemoteThreadMetadataInput,
   ): Promise<RemoteThreadSummary> {
     const root = await this.authorizeThread(principal, binding, "thread:read");
     if (
@@ -175,15 +182,14 @@ export class RemoteAccessCatalog {
     ) {
       throw new RemoteAccessDeniedError();
     }
+    const provider = modelProviderIdSchema.safeParse(metadata.provider);
     return {
       threadId: metadata.threadId,
       workspaceId: binding.workspaceId,
       status: metadata.status,
       createdAt: metadata.createdAt,
       updatedAt: metadata.updatedAt,
-      ...(metadata.provider === undefined
-        ? {}
-        : { provider: metadata.provider }),
+      ...(provider.success ? { provider: provider.data } : {}),
       ...(metadata.model === undefined ? {} : { model: metadata.model }),
       turnCount: metadata.turnCount,
       eventCount: metadata.eventCount,

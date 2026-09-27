@@ -12,6 +12,7 @@ import { runCommand, type RunCommandInput } from "./run-command.js";
 import {
   runRemoteDeviceIssueCommand,
   runRemoteDeviceRevokeCommand,
+  runRemoteServeCommand,
   runRemoteWorkspaceAddCommand,
   runRemoteWorkspaceListCommand,
 } from "./remote-command.js";
@@ -252,6 +253,43 @@ export function createProgram(runtime: ProgramRuntime): Command {
   const remote = program
     .command("remote")
     .description("Manage remote access on the owner host");
+  remote
+    .command("serve")
+    .description("Serve authenticated read-only HTTPS on a private interface")
+    .requiredOption("--host <ip>", "private, VPN, or loopback IP address")
+    .option("--port <port>", "TLS port", "8443")
+    .requiredOption("--cert <file>", "TLS certificate PEM")
+    .requiredOption("--key <file>", "TLS private key PEM")
+    .action(
+      async (options: {
+        host: string;
+        port: string;
+        cert: string;
+        key: string;
+      }) => {
+        const controller = new AbortController();
+        const stop = () => controller.abort();
+        process.once("SIGINT", stop);
+        process.once("SIGTERM", stop);
+        try {
+          runtime.setExitCode(
+            await runRemoteServeCommand(
+              {
+                host: options.host,
+                port: options.port,
+                certificatePath: options.cert,
+                privateKeyPath: options.key,
+              },
+              runtime,
+              controller.signal,
+            ),
+          );
+        } finally {
+          process.removeListener("SIGINT", stop);
+          process.removeListener("SIGTERM", stop);
+        }
+      },
+    );
   const remoteWorkspace = remote
     .command("workspace")
     .description("Manage allowed workspaces");

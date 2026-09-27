@@ -2,8 +2,10 @@ import {
   RemoteDeviceStore,
   RemoteWorkspaceStore,
   remotePermissionSchema,
+  startRemoteHttpsServer,
   type RemotePermission,
 } from "@koda/app-server";
+import { KodaApplication } from "@koda/app";
 
 import { resolveKodaHome } from "./config.js";
 import type { TextWriter } from "./console-event-sink.js";
@@ -92,6 +94,50 @@ export async function runRemoteDeviceRevokeCommand(
     );
     await devices.revoke(deviceId);
     context.stdout.write(`Revoked device ${deviceId}\n`);
+    return 0;
+  } catch (error) {
+    return fail(context, error);
+  }
+}
+
+export async function runRemoteServeCommand(
+  options: {
+    host: string;
+    port: string;
+    certificatePath: string;
+    privateKeyPath: string;
+  },
+  context: RemoteCommandContext & { processDirectory: string },
+  signal: AbortSignal,
+): Promise<number> {
+  try {
+    if (!/^\d+$/u.test(options.port)) {
+      throw new Error("Remote port must be a whole number.");
+    }
+    const application = new KodaApplication({
+      environment: context.environment,
+      processDirectory: context.processDirectory,
+    });
+    const server = await startRemoteHttpsServer({
+      application,
+      kodaHome: resolveKodaHome(context.environment),
+      host: options.host,
+      port: Number(options.port),
+      certificatePath: options.certificatePath,
+      privateKeyPath: options.privateKeyPath,
+    });
+    try {
+      context.stdout.write(`Remote HTTPS listening at ${server.address}\n`);
+      if (!signal.aborted) {
+        await new Promise<void>((resolveAbort) =>
+          signal.addEventListener("abort", () => resolveAbort(), {
+            once: true,
+          }),
+        );
+      }
+    } finally {
+      await server.close();
+    }
     return 0;
   } catch (error) {
     return fail(context, error);
