@@ -14,13 +14,15 @@ import {
   readdir,
   rename,
   rm,
+  stat,
   symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:https";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
+import { pathToFileURL } from "node:url";
 
 import { sha256CanonicalJson } from "@koda/agent-core";
 import {
@@ -781,6 +783,92 @@ lines.on('line', (line) => {
       ).plugins[0]?.args[0],
     ).toContain(first.manifestSha256);
 
+    const updated = await installManagedPluginPackage({
+      kodaHome: home,
+      sourceDirectory: fixture.root,
+      trustRoot: fixture.trust,
+      capabilities: ["tools"],
+    });
+    expect(updated).toMatchObject({
+      version: "1.1.0",
+      previousVersion: "1.0.0",
+      enabled: false,
+    });
+  });
+
+  it("keeps the active plugin when an update process dies during preflight", async () => {
+    const fixture = await packageFixture("index.mjs", managedProtocolScript);
+    const home = join(fixture.parent, "home");
+    const first = await installManagedPluginPackage({
+      kodaHome: home,
+      sourceDirectory: fixture.root,
+      trustRoot: fixture.trust,
+      capabilities: ["tools"],
+    });
+    await setManagedPluginEnabled(home, "reviewer", true);
+    const ready = join(fixture.parent, "preflight-ready");
+    await rewriteVersion(
+      fixture,
+      "1.1.0",
+      `import { writeFileSync } from 'node:fs';
+import { createInterface } from 'node:readline';
+const lines = createInterface({ input: process.stdin });
+lines.on('line', (line) => {
+  if (JSON.parse(line).method === 'initialize') {
+    writeFileSync(${JSON.stringify(ready)}, 'ready');
+    setTimeout(() => process.exit(0), 5000);
+  }
+});
+lines.on('close', () => process.exit(0));\n`,
+    );
+    const moduleURL = pathToFileURL(
+      join(process.cwd(), "packages/plugin-host-node/dist/index.js"),
+    ).href;
+    const runner = join(fixture.parent, "interrupted-install.mjs");
+    await writeFile(
+      runner,
+      `import { installManagedPluginPackage } from ${JSON.stringify(moduleURL)};
+await installManagedPluginPackage(${JSON.stringify({
+        kodaHome: home,
+        sourceDirectory: fixture.root,
+        trustRoot: fixture.trust,
+        capabilities: ["tools"],
+      })});\n`,
+    );
+    const child = spawn(process.execPath, [runner], { stdio: "ignore" });
+    const exit = new Promise<void>((resolve) =>
+      child.once("exit", () => resolve()),
+    );
+    try {
+      let enteredPreflight = false;
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        enteredPreflight = await stat(ready).then(
+          () => true,
+          () => false,
+        );
+        if (enteredPreflight || child.exitCode !== null) break;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      expect(enteredPreflight).toBe(true);
+    } finally {
+      child.kill("SIGKILL");
+      await exit;
+    }
+    expect(child.signalCode).toBe("SIGKILL");
+    expect((await listManagedPlugins(home))[0]).toMatchObject({
+      version: "1.0.0",
+      enabled: true,
+    });
+    expect(
+      (
+        await loadPluginConfiguration({
+          environment: {},
+          kodaHome: home,
+          processDirectory: fixture.parent,
+        })
+      ).plugins[0]?.args[0],
+    ).toContain(first.manifestSha256);
+    await rewriteVersion(fixture, "1.1.0", managedProtocolScript);
     const updated = await installManagedPluginPackage({
       kodaHome: home,
       sourceDirectory: fixture.root,
