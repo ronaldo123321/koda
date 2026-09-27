@@ -12,6 +12,7 @@ import {
   RemoteWorkspaceStore,
   startRemoteHttpsServer,
 } from "@koda/app-server";
+import { runRemoteServeCommand } from "@koda/cli";
 import { agentEventSchema, threadMetadataSchema } from "@koda/protocol";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -60,11 +61,17 @@ describe.skipIf(process.platform === "win32")(
       const issued = await devices.issue("phone", [
         {
           workspaceId: "project",
-          permissions: ["workspace:read", "thread:read"],
+          permissions: ["workspace:read", "thread:read", "turn:start"],
         },
       ]);
       const readOnly = await devices.issue("tablet", [
         { workspaceId: "project", permissions: ["workspace:read"] },
+      ]);
+      const secondWriter = await devices.issue("laptop", [
+        {
+          workspaceId: "project",
+          permissions: ["workspace:read", "turn:start"],
+        },
       ]);
       const bindings = await RemoteThreadStore.open(home, "owner");
       await bindings.bind({
@@ -118,7 +125,38 @@ describe.skipIf(process.platform === "win32")(
           payload: { text: `private path ${workspace}` },
         }),
       ];
+      let starts = 0;
+      let turnCancelled = false;
+      let finishTurn: () => void = () => undefined;
       const application = {
+        isRemoteRestricted: true,
+        startTurnAfter: async (
+          _input: unknown,
+          _client: unknown,
+          beforeStart: (ids: {
+            threadId: string;
+            turnId: string;
+          }) => Promise<void>,
+        ) => {
+          starts += 1;
+          const ids = {
+            threadId: `thread-new-${starts}`,
+            turnId: `turn-new-${starts}`,
+          };
+          await beforeStart(ids);
+          const completion = new Promise<void>((resolve) => {
+            finishTurn = resolve;
+          });
+          return {
+            ...ids,
+            completion,
+            cancel: () => {
+              turnCancelled = true;
+              finishTurn();
+              return true;
+            },
+          };
+        },
         getThread: async () => ({ value: metadata, diagnostics: [] }),
         readThreadEvents: async (input: {
           afterSequence?: number;
@@ -223,6 +261,74 @@ describe.skipIf(process.platform === "win32")(
           issued.token,
         );
         expect(missing.status).toBe(404);
+        const turnBody = {
+          requestId: "a".repeat(32),
+          prompt: "Explain this workspace.",
+        };
+        const deniedStart = await post(
+          port,
+          certificate,
+          "/v1/workspaces/project/turns",
+          readOnly.token,
+          turnBody,
+        );
+        expect(deniedStart.status).toBe(404);
+        const started = await post(
+          port,
+          certificate,
+          "/v1/workspaces/project/turns",
+          issued.token,
+          turnBody,
+        );
+        expect(started.status).toBe(202);
+        expect(started.body).toMatchObject({
+          threadId: "thread-new-1",
+          turnId: "turn-new-1",
+          replayed: false,
+        });
+        expect(await bindings.get("thread-new-1")).toMatchObject({
+          workspaceId: "project",
+        });
+        expect(turnCancelled).toBe(false);
+        const retried = await post(
+          port,
+          certificate,
+          "/v1/workspaces/project/turns",
+          issued.token,
+          turnBody,
+        );
+        expect(retried.status).toBe(202);
+        expect(retried.body).toMatchObject({
+          threadId: "thread-new-1",
+          replayed: true,
+        });
+        expect(starts).toBe(1);
+        const conflict = await post(
+          port,
+          certificate,
+          "/v1/workspaces/project/turns",
+          issued.token,
+          { ...turnBody, prompt: "Different prompt." },
+        );
+        expect(conflict.status).toBe(409);
+        const crossDevice = await post(
+          port,
+          certificate,
+          "/v1/workspaces/project/turns",
+          secondWriter.token,
+          turnBody,
+        );
+        expect(crossDevice.status).toBe(409);
+        expect(JSON.stringify(crossDevice.body)).not.toContain("thread-new-1");
+        const invalid = await post(
+          port,
+          certificate,
+          "/v1/workspaces/project/turns",
+          issued.token,
+          { requestId: "b".repeat(32), prompt: "x".repeat(8_193) },
+        );
+        expect(invalid.status).toBe(400);
+        expect(starts).toBe(1);
         await devices.revoke(issued.deviceId);
         const revoked = await get(
           port,
@@ -231,12 +337,38 @@ describe.skipIf(process.platform === "win32")(
           issued.token,
         );
         expect(revoked.status).toBe(401);
+        expect(turnCancelled).toBe(false);
         await expect(
           get(port, undefined, "/v1/workspaces", issued.token),
         ).rejects.toThrow();
       } finally {
         await server.close();
       }
+      expect(turnCancelled).toBe(true);
+      const controller = new AbortController();
+      let serveOutput = "";
+      const serveExit = await runRemoteServeCommand(
+        {
+          host: "127.0.0.1",
+          port: "0",
+          certificatePath,
+          privateKeyPath,
+        },
+        {
+          environment: { KODA_HOME: home },
+          processDirectory: workspace,
+          stdout: {
+            write: (value) => {
+              serveOutput += value;
+              controller.abort();
+            },
+          },
+          stderr: { write: () => undefined },
+        },
+        controller.signal,
+      );
+      expect(serveExit).toBe(0);
+      expect(serveOutput).toContain("Remote HTTPS listening");
       await chmod(privateKeyPath, 0o644);
       await expect(
         startRemoteHttpsServer({
@@ -277,16 +409,42 @@ async function get(
   path: string,
   token?: string,
 ): Promise<{ status: number | undefined; body: unknown }> {
+  return requestJson(port, ca, path, "GET", token);
+}
+
+async function post(
+  port: number,
+  ca: Buffer,
+  path: string,
+  token: string,
+  body: object,
+): Promise<{ status: number | undefined; body: unknown }> {
+  return requestJson(port, ca, path, "POST", token, body);
+}
+
+async function requestJson(
+  port: number,
+  ca: Buffer | undefined,
+  path: string,
+  method: "GET" | "POST",
+  token?: string,
+  body?: object,
+): Promise<{ status: number | undefined; body: unknown }> {
   return new Promise((resolveRequest, rejectRequest) => {
+    const content = body === undefined ? undefined : JSON.stringify(body);
     const outgoing = request(
       {
         hostname: "127.0.0.1",
         port,
         path,
-        method: "GET",
+        method,
         ...(ca === undefined ? {} : { ca }),
-        headers:
-          token === undefined ? {} : { authorization: `Bearer ${token}` },
+        headers: {
+          ...(token === undefined ? {} : { authorization: `Bearer ${token}` }),
+          ...(content === undefined
+            ? {}
+            : { "content-type": "application/json" }),
+        },
       },
       (incoming) => {
         const chunks: Buffer[] = [];
@@ -305,6 +463,6 @@ async function get(
       },
     );
     outgoing.on("error", rejectRequest);
-    outgoing.end();
+    outgoing.end(content);
   });
 }

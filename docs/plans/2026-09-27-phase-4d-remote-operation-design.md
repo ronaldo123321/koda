@@ -2,9 +2,10 @@
 
 - Status: 4D1 and 4D2 in progress — local owner/device grants, workspace
   registration, credential lifecycle, immutable remote Thread bindings, safe
-  Thread summary projection, and an opt-in read-only TLS listener with durable
-  event-envelope cursor polling implemented; remote turns, WebSocket replay,
-  event content projection, and client pairing are not yet enabled
+  Thread summary projection, opt-in TLS transport, durable event-envelope
+  cursor polling, and restricted remote Turn start with durable request
+  idempotency implemented; WebSocket replay, event content projection,
+  approvals, and client pairing are not yet enabled
 - Date: 2026-09-27
 - Depends on: local app-server v18, durable JSONL events, thread leases, artifact integrity, and Phase 4A–4C security evidence
 - Scope: one owner across multiple devices, authenticated HTTP/WebSocket clients, reconnect/replay, remote MCP/OAuth, shared state ownership, and owner/workspace/thread authorization
@@ -19,14 +20,17 @@ not expose them unchanged.
 
 Remote operation uses a separate versioned API and server-side workspace IDs.
 The local stdio protocol and its installed CLI/TUI behavior remain intact.
-The opt-in HTTPS listener serves only authenticated workspace IDs, bound
-Thread summaries, and bounded event envelopes. It has TLS, bounded headers
-and responses, no request body, per-request authorization, and negative
-security tests. The event-envelope endpoint uses exclusive `after` cursors;
-`-1` starts at sequence zero. It omits raw event payloads, which may contain
-host paths or sensitive diagnostics. The HTTP turn API and WebSocket listener
-stay disabled until their own authorization, replay, and disconnect tests pass
-together.
+The opt-in HTTPS listener serves authenticated workspace IDs, bound Thread
+summaries, bounded event envelopes, and restricted Turn starts. It has TLS,
+bounded headers, request bodies, and responses, per-request authorization,
+and negative security tests. The event-envelope endpoint uses exclusive
+`after` cursors; `-1` starts at sequence zero. It omits raw event payloads, which may contain
+host paths or sensitive diagnostics. Only the read-only-tool Turn start endpoint
+is enabled. It binds a new Thread before execution, uses a durable request ID
+to prevent duplicate starts, and does not cancel on an HTTP client disconnect.
+Plugin, MCP, write, execute, approval, and plan-control tools are unavailable
+in this mode. WebSocket subscriptions and remote effectful operations stay
+disabled until their own authorization, replay, and disconnect tests pass.
 
 ## 2. Identity and authorization
 
@@ -127,14 +131,15 @@ security, and recovery checks. A reachable HTTP endpoint or a successful
 handshake alone is not completion evidence.
 
 Current 4D1 code provides `RemoteAccessCatalog`, `RemoteWorkspaceStore`,
-`RemoteDeviceStore`, and `RemoteThreadStore`; the read-only listener uses these
-for each request, but remote turn creation does not yet bind a Thread. The
-owner-host CLI can register workspaces, explicitly expose an existing Thread
+`RemoteDeviceStore`, `RemoteThreadStore`, and `RemoteTurnRequestStore`; the
+listener uses these for each request. Restricted remote Turn creation now binds
+a Thread and journals the request ID before execution. The owner-host CLI can
+register workspaces, explicitly expose an existing Thread
 after verifying its workspace, issue scoped device credentials, revoke devices,
-and start a read-only HTTPS listener on an
-explicit private address. The listener authenticates each request and projects
-only opaque workspace IDs, bound Thread summaries, or payload-free event
-envelopes. It does not yet bind newly created remote Turns automatically,
-transfer a verified server certificate to a client,
-authorize the existing app-server method set, or implement durable remote
-turns and event replay. These are required before 4D1/4D2 close.
+and start a restricted HTTPS listener on an explicit private address. The
+listener authenticates each request and projects only opaque workspace IDs,
+bound Thread summaries, or payload-free event
+envelopes. It does not yet transfer a verified server certificate to a client,
+authorize the full app-server method set, project event content, support
+remote approvals or effects, or implement WebSocket subscriptions. These are
+required before 4D1/4D2 close.

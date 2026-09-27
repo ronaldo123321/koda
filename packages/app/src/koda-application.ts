@@ -360,6 +360,7 @@ export interface KodaApplicationOptions {
   interactiveProcessService?: InteractiveProcessService;
   executionPolicy?: ExecutionPolicyConfig;
   secretCatalog?: SecretCatalog;
+  remoteRestricted?: boolean;
 }
 
 export interface KodaApplicationDependencies {
@@ -402,11 +403,17 @@ export class KodaApplication {
   private readonly executionPolicyConfig: ExecutionPolicyConfig | undefined;
   private readonly executionProfile: ExecutionProfile | undefined;
   private readonly secretLeaseManager: SecretLeaseManager;
+  private readonly remoteRestricted: boolean;
+
+  public get isRemoteRestricted(): boolean {
+    return this.remoteRestricted;
+  }
 
   public constructor(options: KodaApplicationOptions) {
     this.environment = options.environment;
     this.processDirectory = options.processDirectory;
     this.dependencies = options.dependencies ?? productionDependencies;
+    this.remoteRestricted = options.remoteRestricted === true;
     this.approvalGrantRegistry =
       options.approvalGrantRegistry ?? new ApprovalGrantRegistry();
     this.interactiveProcessService = options.interactiveProcessService;
@@ -455,6 +462,27 @@ export class KodaApplication {
   }
 
   public startTurn(input: StartTurnInput, client: TurnClient): TurnHandle {
+    return this.launchTurn(this.prepareTurn(input), client);
+  }
+
+  public async startTurnAfter(
+    input: StartTurnInput,
+    client: TurnClient,
+    beforeStart: (ids: { threadId: ThreadId; turnId: TurnId }) => Promise<void>,
+  ): Promise<TurnHandle> {
+    const prepared = this.prepareTurn(input);
+    await beforeStart({
+      threadId: prepared.ids.threadId,
+      turnId: prepared.ids.turnId,
+    });
+    return this.launchTurn(prepared, client);
+  }
+
+  private prepareTurn(input: StartTurnInput): {
+    configuration: RunConfiguration;
+    prompt: string;
+    ids: ReturnType<KodaApplicationDependencies["createIds"]>;
+  } {
     const configuration = resolveRunConfiguration(
       {
         ...(input.approvalMode === undefined
@@ -472,7 +500,20 @@ export class KodaApplication {
     if (prompt.length === 0) {
       throw new ConfigurationError("Prompt must not be empty.");
     }
+    if (this.remoteRestricted && configuration.approvalMode !== "never") {
+      throw new ConfigurationError(
+        "Remote restricted turns require approval mode 'never'.",
+      );
+    }
     const ids = this.dependencies.createIds(configuration.resumeThreadId);
+    return { configuration, prompt, ids };
+  }
+
+  private launchTurn(
+    prepared: ReturnType<KodaApplication["prepareTurn"]>,
+    client: TurnClient,
+  ): TurnHandle {
+    const { configuration, prompt, ids } = prepared;
     const controller = new AbortController();
     const completion = this.executeTurn(
       configuration,
@@ -1489,20 +1530,22 @@ export class KodaApplication {
           configuration.provider,
         );
       }
-      pluginSession = await PluginTurnSession.open({
-        environment: this.environment,
-        kodaHome: configuration.kodaHome,
-        processDirectory: this.processDirectory,
-        artifactStore,
-        projectSkills,
-        projectCommandTemplates,
-        signal: controller.signal,
-      });
-      for (const diagnostic of pluginSession.diagnostics) {
-        await emitDiagnostic(client, diagnostic);
+      if (!this.remoteRestricted) {
+        pluginSession = await PluginTurnSession.open({
+          environment: this.environment,
+          kodaHome: configuration.kodaHome,
+          processDirectory: this.processDirectory,
+          artifactStore,
+          projectSkills,
+          projectCommandTemplates,
+          signal: controller.signal,
+        });
+        for (const diagnostic of pluginSession.diagnostics) {
+          await emitDiagnostic(client, diagnostic);
+        }
+        projectSkills = pluginSession.skills;
+        projectCommandTemplates = pluginSession.commandTemplates;
       }
-      projectSkills = pluginSession.skills;
-      projectCommandTemplates = pluginSession.commandTemplates;
       const expandedCommandTemplate = expandProjectCommandTemplatePrompt(
         prompt,
         projectCommandTemplates,
@@ -1523,7 +1566,7 @@ export class KodaApplication {
       );
       const skillSnapshots = projectSkills.snapshots();
       const commandTemplateSnapshots = projectCommandTemplates.snapshots();
-      const pluginSnapshots = [...pluginSession.snapshots];
+      const pluginSnapshots = [...(pluginSession?.snapshots ?? [])];
       let history: ConversationItem[] = [];
       let prefaceItems: ConversationItem[] = [];
       let initialSequence = 0;
@@ -1624,71 +1667,80 @@ export class KodaApplication {
         needsRevalidation: planNeedsRevalidation,
       });
       const tools = new ToolRegistry();
-      registerUpdatePlanTool(tools, planState, {
-        ...(client.planAcceptances === undefined
-          ? {}
-          : { acceptances: client.planAcceptances }),
-      });
+      if (!this.remoteRestricted) {
+        registerUpdatePlanTool(tools, planState, {
+          ...(client.planAcceptances === undefined
+            ? {}
+            : { acceptances: client.planAcceptances }),
+        });
+      }
       registerProjectSkillTool(tools, projectSkills);
-      registerArtifactTools(tools, artifactStore);
+      if (!this.remoteRestricted) {
+        registerArtifactTools(tools, artifactStore);
+      }
       registerReadOnlyWorkspaceTools(tools, workspace, { artifactStore });
-      const mutationCoordinator = await WorkspaceMutationCoordinator.open(
-        configuration.kodaHome,
-        workspace.root,
-        {
-          beforeAction: async () => {
-            await mutationJournal.recoverBeforeWrite({
-              retainRecovered: true,
-            });
+      if (!this.remoteRestricted) {
+        const mutationCoordinator = await WorkspaceMutationCoordinator.open(
+          configuration.kodaHome,
+          workspace.root,
+          {
+            beforeAction: async () => {
+              await mutationJournal.recoverBeforeWrite({
+                retainRecovered: true,
+              });
+            },
           },
-        },
-      );
-      registerStructuredPatchTool(tools, workspace, mutationCoordinator);
-      registerChangeSetTool(
-        tools,
-        workspace,
-        mutationCoordinator,
-        mutationJournal,
-      );
-      registerPatchSetTool(
-        tools,
-        workspace,
-        mutationCoordinator,
-        mutationJournal,
-      );
-      const nativeExecutorPath = this.environment.KODA_EXEC_PATH?.trim();
-      const nativeExecutor =
-        this.interactiveProcessService?.nativeExecutor ??
-        (nativeExecutorPath === undefined || nativeExecutorPath.length === 0
-          ? undefined
-          : await NativeExecutorClient.open({
-              binaryPath: nativeExecutorPath,
-              stateDirectory: join(configuration.kodaHome, "executor"),
-            }));
-      const commandRunner = await WorkspaceCommandRunner.open(workspace.root, {
-        environment: this.environment,
-        artifactStore,
-        executionPolicy,
-        ...(nativeExecutor === undefined ? {} : { nativeExecutor }),
-        ...(this.interactiveProcessService === undefined
-          ? {}
-          : { interactiveProcessService: this.interactiveProcessService }),
-      });
-      registerExecCommandTool(tools, commandRunner, {
-        secretLeaseManager: this.secretLeaseManager,
-      });
-      registerExecTerminalTool(tools, commandRunner, {
-        secretLeaseManager: this.secretLeaseManager,
-      });
-      pluginSession.registerTools(tools);
-      mcpSession = await McpTurnSession.open({
-        environment: this.environment,
-        kodaHome: configuration.kodaHome,
-        processDirectory: this.processDirectory,
-        artifactStore,
-        signal: controller.signal,
-      });
-      mcpSession.registerTools(tools);
+        );
+        registerStructuredPatchTool(tools, workspace, mutationCoordinator);
+        registerChangeSetTool(
+          tools,
+          workspace,
+          mutationCoordinator,
+          mutationJournal,
+        );
+        registerPatchSetTool(
+          tools,
+          workspace,
+          mutationCoordinator,
+          mutationJournal,
+        );
+        const nativeExecutorPath = this.environment.KODA_EXEC_PATH?.trim();
+        const nativeExecutor =
+          this.interactiveProcessService?.nativeExecutor ??
+          (nativeExecutorPath === undefined || nativeExecutorPath.length === 0
+            ? undefined
+            : await NativeExecutorClient.open({
+                binaryPath: nativeExecutorPath,
+                stateDirectory: join(configuration.kodaHome, "executor"),
+              }));
+        const commandRunner = await WorkspaceCommandRunner.open(
+          workspace.root,
+          {
+            environment: this.environment,
+            artifactStore,
+            executionPolicy,
+            ...(nativeExecutor === undefined ? {} : { nativeExecutor }),
+            ...(this.interactiveProcessService === undefined
+              ? {}
+              : { interactiveProcessService: this.interactiveProcessService }),
+          },
+        );
+        registerExecCommandTool(tools, commandRunner, {
+          secretLeaseManager: this.secretLeaseManager,
+        });
+        registerExecTerminalTool(tools, commandRunner, {
+          secretLeaseManager: this.secretLeaseManager,
+        });
+        pluginSession?.registerTools(tools);
+        mcpSession = await McpTurnSession.open({
+          environment: this.environment,
+          kodaHome: configuration.kodaHome,
+          processDirectory: this.processDirectory,
+          artifactStore,
+          signal: controller.signal,
+        });
+        mcpSession.registerTools(tools);
+      }
       const toolCatalogGeneration = tools.catalogGeneration();
       if (
         previousToolCatalogGeneration !== undefined &&
@@ -1728,10 +1780,14 @@ export class KodaApplication {
         approvalGrants: this.approvalGrantRegistry.forWorkspace(workspace.root),
         contextEngine,
         planState,
-        toolCatalogRefresher: {
-          refreshBeforeModelStep: (step, signal) =>
-            mcpSession!.refreshTools(step, signal),
-        },
+        ...(mcpSession === undefined
+          ? {}
+          : {
+              toolCatalogRefresher: {
+                refreshBeforeModelStep: (step: number, signal: AbortSignal) =>
+                  mcpSession!.refreshTools(step, signal),
+              },
+            }),
       });
 
       const result = await loop.runTurn({

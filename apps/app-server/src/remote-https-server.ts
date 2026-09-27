@@ -5,7 +5,8 @@ import { isIP } from "node:net";
 import { resolve } from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
-import type { KodaApplication } from "@koda/app";
+import { ConfigurationError, type KodaApplication } from "@koda/app";
+import { z, ZodError } from "zod";
 
 import {
   RemoteAccessCatalog,
@@ -14,11 +15,30 @@ import {
 } from "./remote-access.js";
 import { RemoteDeviceStore } from "./remote-device-store.js";
 import { RemoteThreadStore } from "./remote-thread-store.js";
+import {
+  RemoteTurnHost,
+  RemoteTurnHostCapacityError,
+} from "./remote-turn-host.js";
+import {
+  RemoteTurnRequestConflictError,
+  RemoteTurnRequestStore,
+} from "./remote-turn-request-store.js";
 import { RemoteWorkspaceStore } from "./remote-workspace-store.js";
 
 const OWNER_ID = "owner";
 const MAX_URL_LENGTH = 2_048;
 const MAX_RESPONSE_BYTES = 64 * 1_024;
+const MAX_REQUEST_BYTES = 16 * 1_024;
+const turnStartSchema = z
+  .object({
+    requestId: z.string().regex(/^[a-f0-9]{32}$/u),
+    prompt: z.string().trim().min(1).max(8_192),
+    resumeThreadId: z
+      .string()
+      .regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u)
+      .optional(),
+  })
+  .strict();
 
 export interface RemoteHttpsServerOptions {
   application: KodaApplication;
@@ -53,11 +73,13 @@ export async function startRemoteHttpsServer(
     readFile(resolve(options.certificatePath)),
     readPrivateKey(options.privateKeyPath),
   ]);
-  const [devices, workspaces, threads] = await Promise.all([
+  const [devices, workspaces, threads, requests] = await Promise.all([
     RemoteDeviceStore.open(options.kodaHome, OWNER_ID),
     RemoteWorkspaceStore.open(options.kodaHome, OWNER_ID),
     RemoteThreadStore.open(options.kodaHome, OWNER_ID),
+    RemoteTurnRequestStore.open(options.kodaHome, OWNER_ID),
   ]);
+  const turnHost = new RemoteTurnHost(options.application, threads, requests);
   const server = createServer(
     {
       cert: certificate,
@@ -73,6 +95,7 @@ export async function startRemoteHttpsServer(
         devices,
         workspaces,
         threads,
+        turnHost,
       );
     },
   );
@@ -104,6 +127,7 @@ export async function startRemoteHttpsServer(
       });
       server.closeAllConnections();
       await closing;
+      await turnHost.close();
     },
   };
 }
@@ -115,6 +139,7 @@ async function handleRequest(
   devices: RemoteDeviceStore,
   workspaces: RemoteWorkspaceStore,
   threads: RemoteThreadStore,
+  turnHost: RemoteTurnHost,
 ): Promise<void> {
   try {
     const authorization = bearerToken(request);
@@ -130,13 +155,7 @@ async function handleRequest(
       send(response, 401, { error: "Unauthorized" });
       return;
     }
-    if (
-      request.method !== "GET" ||
-      request.url === undefined ||
-      request.url.length > MAX_URL_LENGTH ||
-      request.headers["content-length"] !== undefined ||
-      request.headers["transfer-encoding"] !== undefined
-    ) {
+    if (request.url === undefined || request.url.length > MAX_URL_LENGTH) {
       send(response, 400, { error: "Invalid request" });
       return;
     }
@@ -151,6 +170,31 @@ async function handleRequest(
       definitions,
       verified.grants,
     );
+    const startMatch =
+      /^\/v1\/workspaces\/([a-z][a-z0-9-]{0,63})\/turns$/u.exec(url.pathname);
+    if (request.method === "POST" && startMatch !== null && url.search === "") {
+      const workspaceId = startMatch[1];
+      if (workspaceId === undefined) throw new RemoteInvalidRequestError();
+      const body = turnStartSchema.parse(await readJsonBody(request));
+      const result = await turnHost.start(verified.principal, catalog, {
+        workspaceId,
+        requestId: body.requestId,
+        prompt: body.prompt,
+        ...(body.resumeThreadId === undefined
+          ? {}
+          : { resumeThreadId: body.resumeThreadId }),
+      });
+      send(response, result.status === "reserved" ? 409 : 202, result);
+      return;
+    }
+    if (
+      request.method !== "GET" ||
+      request.headers["content-length"] !== undefined ||
+      request.headers["transfer-encoding"] !== undefined
+    ) {
+      send(response, 400, { error: "Invalid request" });
+      return;
+    }
     if (url.pathname === "/v1/workspaces" && url.search === "") {
       const ids: string[] = [];
       for (const grant of verified.grants) {
@@ -227,12 +271,49 @@ async function handleRequest(
     }
     send(response, 404, { error: "Unavailable" });
   } catch (error) {
-    send(response, error instanceof RemoteAccessDeniedError ? 404 : 500, {
-      error:
-        error instanceof RemoteAccessDeniedError
-          ? "Unavailable"
-          : "Internal error",
-    });
+    if (error instanceof RemoteAccessDeniedError) {
+      send(response, 404, { error: "Unavailable" });
+    } else if (error instanceof RemoteTurnRequestConflictError) {
+      send(response, 409, { error: "Request conflict" });
+    } else if (error instanceof RemoteTurnHostCapacityError) {
+      send(response, 429, { error: "Turn capacity reached" });
+    } else if (
+      error instanceof RemoteInvalidRequestError ||
+      error instanceof ZodError ||
+      error instanceof ConfigurationError
+    ) {
+      send(response, 400, { error: "Invalid request" });
+    } else {
+      send(response, 500, { error: "Internal error" });
+    }
+  }
+}
+
+class RemoteInvalidRequestError extends Error {}
+
+async function readJsonBody(request: IncomingMessage): Promise<unknown> {
+  if (request.headers["content-type"] !== "application/json") {
+    throw new RemoteInvalidRequestError();
+  }
+  const length = request.headers["content-length"];
+  if (
+    length !== undefined &&
+    (!/^\d+$/u.test(length) || Number(length) > MAX_REQUEST_BYTES)
+  ) {
+    throw new RemoteInvalidRequestError();
+  }
+  const chunks: Buffer[] = [];
+  let bytes = 0;
+  for await (const chunk of request) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    bytes += buffer.byteLength;
+    if (bytes > MAX_REQUEST_BYTES) throw new RemoteInvalidRequestError();
+    chunks.push(buffer);
+  }
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  } catch {
+    throw new RemoteInvalidRequestError();
   }
 }
 

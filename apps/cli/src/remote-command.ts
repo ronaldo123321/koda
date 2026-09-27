@@ -149,6 +149,7 @@ export async function runRemoteServeCommand(
     const application = new KodaApplication({
       environment: context.environment,
       processDirectory: context.processDirectory,
+      remoteRestricted: true,
     });
     const server = await startRemoteHttpsServer({
       application,

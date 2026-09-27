@@ -191,7 +191,7 @@ koda chat --cwd .
 
 ## 远程访问准备
 
-首版远程访问面向同一使用者的多台设备，使用局域网或自有 VPN。当前已提供按需启动的只读 HTTPS 入口；设备可以查询获授权的工作区 ID、已绑定 Thread 的脱敏概要，以及事件序号摘要。远程客户端、任务控制、完整事件内容、WebSocket 实时订阅和自动配对仍在开发中。
+首版远程访问面向同一使用者的多台设备，使用局域网或自有 VPN。当前按需启动的 HTTPS 入口可查询获授权的工作区 ID、已绑定 Thread 的脱敏概要和事件序号摘要；持有显式 `turn:start` 权限的设备还可以启动仅含工作区读取工具的 Turn。远程客户端、任务控制、完整事件内容、WebSocket 实时订阅和自动配对仍在开发中。
 
 在作为服务端的 Mac 上登记工作区和设备：
 
@@ -203,7 +203,7 @@ koda remote thread expose <thread-id> --workspace project
 koda remote device revoke <device-id>
 ```
 
-签发命令默认只授予 `workspace:read,thread:read`；如需其他权限，可在签发时用 `--permissions` 指定逗号分隔的权限。令牌只在签发时显示一次，主机仅保存其摘要；请将令牌交给目标设备并妥善保存。每台设备单独签发，丢失时按设备 ID 撤销并重新签发。
+签发命令默认只授予 `workspace:read,thread:read`；如需启动受限 Turn，需显式签发 `--permissions workspace:read,thread:read,turn:start`。远程 Turn 不加载写入、命令执行、插件或 MCP 工具，审批模式固定为 `never`；启动仍会使用主机上的 Provider 凭据并可能消耗配额。令牌只在签发时显示一次，主机仅保存其摘要；请将令牌交给目标设备并妥善保存。每台设备单独签发，丢失时按设备 ID 撤销并重新签发。
 
 准备带有服务端 IP 地址 SAN 的 TLS 证书及仅所有者可读的私钥，然后显式启动监听。例如主机的内网地址是 `192.168.1.10` 时：
 
@@ -211,7 +211,9 @@ koda remote device revoke <device-id>
 koda remote serve --host 192.168.1.10 --port 8443 --cert /absolute/path/server.pem --key /absolute/path/server-key.pem
 ```
 
-服务端拒绝公网和通配监听地址。客户端必须验证证书；自签名证书需预先信任或固定其指纹。既有本地 Thread 必须由主机所有者显式执行 `remote thread expose`，命令会核对其权威工作区。`GET /v1/workspaces`、`GET /v1/threads/<thread-id>` 和 `GET /v1/threads/<thread-id>/events?after=-1&limit=100` 要求 `Authorization: Bearer <device-token>`，返回结果不含主机路径。事件接口以排他游标分页：首次用 `after=-1`，此后使用响应中的 `nextAfterSequence`；当前只返回序号、时间、Turn ID 与事件类型，不返回原始事件内容。还没有远程 Turn 自动绑定或 WebSocket 事件流，因此只读接口不能视为远程操作验收通过。
+服务端拒绝公网和通配监听地址。客户端必须验证证书；自签名证书需预先信任或固定其指纹。既有本地 Thread 必须由主机所有者显式执行 `remote thread expose`，命令会核对其权威工作区。`GET /v1/workspaces`、`GET /v1/threads/<thread-id>` 和 `GET /v1/threads/<thread-id>/events?after=-1&limit=100` 要求 `Authorization: Bearer <device-token>`，返回结果不含主机路径。事件接口以排他游标分页：首次用 `after=-1`，此后使用响应中的 `nextAfterSequence`；当前只返回序号、时间、Turn ID 与事件类型，不返回原始事件内容。
+
+启动受限 Turn 使用 `POST /v1/workspaces/<workspace-id>/turns`，JSON 请求包含 32 位小写十六进制 `requestId`、`prompt`，续接时另带 `resumeThreadId`。主机会先持久化请求身份与 Thread 绑定，再执行 Turn；同一设备用相同 `requestId` 和相同请求重试会得到原 Thread／Turn ID，不会再次启动。若记录仍处于 `reserved`，返回 409 和原 ID，表示启动结果尚不确定，客户端不得自动换新 ID 重试。客户端连接结束不会取消进行中的 Turn；显式停止主机服务会取消当前活跃 Turn。远程审批、写入与命令执行、完整回答内容、WebSocket 事件流和端到端客户端验收尚未完成。
 
 ## 使用 CLI
 

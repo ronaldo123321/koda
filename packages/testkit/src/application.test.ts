@@ -50,6 +50,92 @@ afterEach(async () => {
 });
 
 describe("KodaApplication", () => {
+  it("binds a restricted remote Turn before execution and omits effectful tools", async () => {
+    const fixture = await createFixture();
+    const bindingPath = join(fixture.root, "remote-binding.txt");
+    let bound = false;
+    const provider = new ScriptedModelProvider([
+      {
+        assertRequest: (request) => {
+          expect(bound).toBe(true);
+          const names = request.tools.map((tool) => tool.name);
+          expect(names).toContain("read_file");
+          expect(names).not.toContain("exec_command");
+          expect(names).not.toContain("apply_patch");
+          expect(names).not.toContain("read_artifact");
+          expect(names).not.toContain("update_plan");
+        },
+        events: [
+          { type: "assistant_delta", text: "Restricted remote reply." },
+          { type: "completed", finishReason: "stop" },
+        ],
+      },
+    ]);
+    const application = new KodaApplication({
+      environment: {
+        KODA_HOME: fixture.kodaHome,
+        OPENAI_API_KEY: "offline-test-key",
+      },
+      processDirectory: fixture.root,
+      remoteRestricted: true,
+      dependencies: dependencies(provider, "remote-restricted"),
+    });
+    const client: TurnClient = {
+      events: { append: async () => undefined },
+      approvals: rejectApprovals(),
+    };
+    await expect(
+      application.startTurnAfter(
+        {
+          prompt: "Read this workspace.",
+          cwd: fixture.workspaceRoot,
+          approvalMode: "on-request",
+        },
+        client,
+        async () => {
+          throw new Error("Preflight should not run.");
+        },
+      ),
+    ).rejects.toThrow("approval mode 'never'");
+    await expect(
+      application.startTurnAfter(
+        {
+          prompt: "Read this workspace.",
+          cwd: fixture.workspaceRoot,
+          approvalMode: "never",
+        },
+        client,
+        async () => {
+          throw new Error("Binding failed.");
+        },
+      ),
+    ).rejects.toThrow("Binding failed.");
+    await expect(
+      readFile(
+        join(fixture.kodaHome, "threads", "remote-restricted-thread.jsonl"),
+        "utf8",
+      ),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    const handle = await application.startTurnAfter(
+      {
+        prompt: "Read this workspace.",
+        cwd: fixture.workspaceRoot,
+        approvalMode: "never",
+      },
+      client,
+      async (ids) => {
+        await writeFile(bindingPath, `${ids.threadId}:${ids.turnId}`);
+        bound = true;
+      },
+    );
+    await expect(handle.completion).resolves.toMatchObject({
+      status: "completed",
+    });
+    await expect(readFile(bindingPath, "utf8")).resolves.toBe(
+      `${handle.threadId}:${handle.turnId}`,
+    );
+  });
+
   it("persists canonical workspace runtime settings and reports credential availability", async () => {
     const fixture = await createFixture();
     const application = new KodaApplication({

@@ -355,9 +355,10 @@ workspace registration, owner-host device credential and explicit existing
 Thread exposure commands, and immutable remote Thread-binding foundation are
 implemented locally. An opt-in authenticated
 TLS listener on a private IP now exposes workspace IDs, bound Thread summaries,
-and durable payload-free event envelopes with exclusive cursors; no
-turn-binding integration, WebSocket replay, remote MCP/OAuth, or remote
-acceptance is enabled yet. First deployment targets LAN or an
+durable payload-free event envelopes with exclusive cursors, and restricted
+remote Turn starts with pre-execution binding and durable request idempotency.
+Remote effectful operations, WebSocket replay, remote MCP/OAuth, and remote
+acceptance are not enabled yet. First deployment targets LAN or an
 owner-managed VPN.
 The chosen client direction is a native SwiftUI macOS application.
 

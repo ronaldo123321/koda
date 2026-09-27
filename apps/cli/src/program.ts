@@ -256,7 +256,7 @@ export function createProgram(runtime: ProgramRuntime): Command {
     .description("Manage remote access on the owner host");
   remote
     .command("serve")
-    .description("Serve authenticated read-only HTTPS on a private interface")
+    .description("Serve authenticated restricted HTTPS on a private interface")
     .requiredOption("--host <ip>", "private, VPN, or loopback IP address")
     .option("--port <port>", "TLS port", "8443")
     .requiredOption("--cert <file>", "TLS certificate PEM")
