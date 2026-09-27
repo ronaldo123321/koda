@@ -1,6 +1,6 @@
 # Koda
 
-Koda 是一个仍在开发中的本地优先编程智能体运行时，提供命令行工具（CLI）和交互式终端界面（TUI）。目前尚无 macOS 图形桌面应用。
+Koda 是一个仍在开发中的本地优先编程智能体运行时，提供命令行工具（CLI）、交互式终端界面（TUI），以及实验性的原生 SwiftUI macOS 图形界面。图形界面目前仅供本机内部预览，尚未提供签名安装包。
 
 项目围绕编程模型构建控制层：类型化的会话状态、确定性的模型与工具循环、运行时校验的工具、只追加事件、取消与恢复机制，以及明确的安全边界。
 
@@ -218,6 +218,26 @@ koda remote serve --host 192.168.1.10 --port 8443 --cert /absolute/path/server.p
 实时订阅使用 `wss://<host>:<port>/v1/threads/<thread-id>/subscribe?after=-1&limit=100`，握手同样携带 `Authorization: Bearer <device-token>` 并验证服务端证书。服务端先从持久化事件日志补读，再持续推送 `{ "kind": "update", "event": ... }` 和 `{ "kind": "cursor", "nextAfterSequence": ... }`。客户端在处理完之前的更新后保存游标；断线时用该游标重新订阅，并按事件 `sequence` 去重。每个连接只读，最多同时保持 8 个订阅；积压超过限制会关闭连接，客户端仍可按游标补读。设备令牌被撤销后，已有订阅也会关闭。关闭订阅不会取消 Turn。
 
 启动受限 Turn 使用 `POST /v1/workspaces/<workspace-id>/turns`，JSON 请求包含 32 位小写十六进制 `requestId`、`prompt`，续接时另带 `resumeThreadId`。主机会先持久化请求身份与 Thread 绑定，再执行 Turn；同一设备用相同 `requestId` 和相同请求重试会得到原 Thread／Turn ID，不会再次启动。若记录仍处于 `reserved`，返回 409 和原 ID，表示启动结果尚不确定，客户端不得自动换新 ID 重试。客户端连接结束不会取消进行中的 Turn；显式停止主机服务会取消当前活跃 Turn。远程审批、写入与命令执行、完整事件内容和端到端客户端验收尚未完成。
+
+## macOS 图形界面内部预览
+
+原生 SwiftUI 界面位于 `apps/macos-gui`。它启动随应用打包的 `koda app-server`，可选择工作区、查看现有 Thread 与对话、发起本地 Turn、取消 Turn，并在工具调用前显示审批详情。当前 Provider 凭据只从启动进程的环境继承；界面不会保存密钥。缺少凭据时仍能阅读历史，但发送按钮不可用。
+
+在 Apple Silicon Mac 上构建自包含的未签名 `.app`：
+
+```bash
+pnpm bundle:macos
+apps/macos-gui/package-preview.sh dist/Koda.app dist/release/arm64/koda
+open -a ./dist/Koda.app
+```
+
+Intel Mac 将 `arm64` 换成 `x64`。打包脚本会验证复制后的运行时；输出路径必须尚不存在。如需内部安装测试，可再生成未签名的 `.pkg`：
+
+```bash
+apps/macos-gui/package-unsigned-pkg.sh dist/Koda.app dist/Koda-unsigned.pkg
+```
+
+该预览安装包尚未签名或公证，也没有 Keychain 凭据设置、远程设备连接和自动更新。已在本机验证 SwiftUI 应用能打开、连接真实 app-server，并读取已有 Thread；GUI 内的真实 Provider 对话、审批及 `.pkg` 安装仍待单独验收。
 
 ## 使用 CLI
 
