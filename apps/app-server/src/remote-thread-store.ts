@@ -1,5 +1,5 @@
 import { constants } from "node:fs";
-import { chmod, lstat, mkdir, open } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 import { z } from "zod";
@@ -114,6 +114,24 @@ export class RemoteThreadStore {
     } finally {
       await handle.close();
     }
+  }
+
+  public async list(workspaceId: string): Promise<RemoteThreadBinding[]> {
+    idSchema.parse(workspaceId);
+    const names = (await readdir(this.root))
+      .filter((name) => name.endsWith(".json"))
+      .map((name) => name.slice(0, -5))
+      .filter((name) => threadIdSchema.safeParse(name).success)
+      .sort();
+    if (names.length > 10_000) {
+      throw new Error("Remote Thread binding directory is too large.");
+    }
+    const bindings: RemoteThreadBinding[] = [];
+    for (const threadId of names) {
+      const binding = await this.get(threadId);
+      if (binding?.workspaceId === workspaceId) bindings.push(binding);
+    }
+    return bindings;
   }
 
   private pathFor(threadId: string): string {

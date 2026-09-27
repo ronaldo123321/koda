@@ -211,7 +211,7 @@ koda remote device revoke <device-id>
 koda remote serve --host 192.168.1.10 --port 8443 --cert /absolute/path/server.pem --key /absolute/path/server-key.pem
 ```
 
-服务端拒绝公网和通配监听地址。客户端必须验证证书；自签名证书需预先信任或固定其指纹。既有本地 Thread 必须由主机所有者显式执行 `remote thread expose`，命令会核对其权威工作区。`GET /v1/workspaces`、`GET /v1/threads/<thread-id>` 和 `GET /v1/threads/<thread-id>/events?after=-1&limit=100` 要求 `Authorization: Bearer <device-token>`，返回结果不含主机路径。事件接口以排他游标分页：首次用 `after=-1`，此后使用响应中的 `nextAfterSequence`；当前只返回序号、时间、Turn ID 与事件类型，不返回原始事件内容。
+服务端拒绝公网和通配监听地址。启动时会输出正在使用的证书 SHA-256 指纹；客户端必须在服务端本机核对该指纹并验证证书，不能关闭 TLS 验证。既有本地 Thread 必须由主机所有者显式执行 `remote thread expose`，命令会核对其权威工作区。`GET /v1/workspaces`、`GET /v1/workspaces/<workspace-id>/threads?limit=25`、`GET /v1/threads/<thread-id>` 和 `GET /v1/threads/<thread-id>/events?after=-1&limit=100` 要求 `Authorization: Bearer <device-token>`，返回结果不含主机路径。Thread 列表只包含获授 `thread:read` 权限且已绑定的 Thread，按 ID 排序；用 `nextAfterThreadId` 作为下一页 `after` 参数。事件接口以排他游标分页：首次用 `after=-1`，此后使用响应中的 `nextAfterSequence`；当前只返回序号、时间、Turn ID 与事件类型，不返回原始事件内容。
 
 获授 `thread:read` 权限的设备还可调用 `GET /v1/threads/<thread-id>/updates?after=-1&limit=100` 读取助手文本与 Turn 结束状态。该接口只投射 `assistant.delta` 文本、完成／取消事件，以及失败代码；工具输入输出、错误详情和其他原始事件不会传输。游标按所有原始事件前进，因此一页可以没有可见更新，客户端仍须保存 `nextAfterSequence` 并在 `hasMore` 为 true 时继续读取。助手文本可能包含它从工作区读到的内容或路径，应只向信任的个人设备签发 `thread:read` 权限。
 

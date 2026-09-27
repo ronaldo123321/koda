@@ -1,3 +1,4 @@
+import { X509Certificate } from "node:crypto";
 import { constants } from "node:fs";
 import { open, readFile } from "node:fs/promises";
 import { createServer, type Server } from "node:https";
@@ -58,6 +59,7 @@ export interface RemoteHttpsServerOptions {
 
 export interface RunningRemoteHttpsServer {
   address: string;
+  certificateSha256: string;
   close(): Promise<void>;
 }
 
@@ -80,6 +82,9 @@ export async function startRemoteHttpsServer(
     readFile(resolve(options.certificatePath)),
     readPrivateKey(options.privateKeyPath),
   ]);
+  const certificateSha256 = new X509Certificate(certificate)
+    .fingerprint256.replaceAll(":", "")
+    .toLowerCase();
   const [devices, workspaces, threads, requests] = await Promise.all([
     RemoteDeviceStore.open(options.kodaHome, OWNER_ID),
     RemoteWorkspaceStore.open(options.kodaHome, OWNER_ID),
@@ -158,6 +163,7 @@ export async function startRemoteHttpsServer(
   }
   return {
     address: `${address.family === "IPv6" ? `[${address.address}]` : address.address}:${address.port}`,
+    certificateSha256,
     close: async () => {
       closingSubscriptions = true;
       for (const client of subscriptions.clients) client.terminate();
@@ -258,6 +264,45 @@ async function handleRequest(
         }
       }
       send(response, 200, { workspaces: ids.sort() });
+      return;
+    }
+    const listMatch =
+      /^\/v1\/workspaces\/([a-z][a-z0-9-]{0,63})\/threads$/u.exec(url.pathname);
+    if (listMatch !== null) {
+      const workspaceId = listMatch[1];
+      if (workspaceId === undefined) throw new RemoteInvalidRequestError();
+      await catalog.authorizeWorkspace(
+        verified.principal,
+        workspaceId,
+        "thread:read",
+      );
+      const cursor = parseThreadCursor(url);
+      if (cursor === undefined) {
+        send(response, 400, { error: "Invalid thread cursor" });
+        return;
+      }
+      const visible: RemoteThreadSummary[] = [];
+      for (const binding of await threads.list(workspaceId)) {
+        if (cursor.after !== undefined && binding.threadId <= cursor.after) continue;
+        const metadata = (await application.getThread(binding.threadId)).value;
+        if (metadata === undefined) continue;
+        try {
+          visible.push(
+            await catalog.projectThread(verified.principal, binding, metadata),
+          );
+        } catch (error) {
+          if (!(error instanceof RemoteAccessDeniedError)) throw error;
+          continue;
+        }
+        if (visible.length > cursor.limit) break;
+      }
+      const hasMore = visible.length > cursor.limit;
+      const page = visible.slice(0, cursor.limit);
+      send(response, 200, {
+        threads: page,
+        hasMore,
+        nextAfterThreadId: page.at(-1)?.threadId ?? cursor.after ?? null,
+      });
       return;
     }
     const match =
@@ -571,6 +616,27 @@ function parseEventCursor(
   )
     return undefined;
   return { after, limit };
+}
+
+function parseThreadCursor(
+  url: URL,
+): { after?: string; limit: number } | undefined {
+  for (const key of url.searchParams.keys()) {
+    if (key !== "after" && key !== "limit") return undefined;
+  }
+  if (
+    url.searchParams.getAll("after").length > 1 ||
+    url.searchParams.getAll("limit").length > 1
+  ) return undefined;
+  const after = url.searchParams.get("after") ?? undefined;
+  const limitText = url.searchParams.get("limit") ?? "25";
+  if (
+    (after !== undefined && !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u.test(after)) ||
+    !/^[1-9]\d*$/u.test(limitText)
+  ) return undefined;
+  const limit = Number(limitText);
+  if (!Number.isSafeInteger(limit) || limit > 25) return undefined;
+  return { ...(after === undefined ? {} : { after }), limit };
 }
 
 function bearerToken(request: IncomingMessage): string | undefined {

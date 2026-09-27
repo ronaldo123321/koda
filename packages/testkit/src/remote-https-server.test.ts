@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { X509Certificate } from "node:crypto";
 import { chmod, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { request } from "node:https";
 import { tmpdir } from "node:os";
@@ -34,7 +35,8 @@ describe.skipIf(process.platform === "win32")(
     it("requires a trusted certificate and a live scoped device token", async () => {
       const home = await mkdtemp(join(tmpdir(), "koda-remote-https-"));
       const workspace = await mkdtemp(join(tmpdir(), "koda-remote-workspace-"));
-      directories.push(home, workspace);
+      const otherWorkspace = await mkdtemp(join(tmpdir(), "koda-remote-other-"));
+      directories.push(home, workspace, otherWorkspace);
       const certificatePath = join(home, "cert.pem");
       const privateKeyPath = join(home, "key.pem");
       await execFileAsync("openssl", [
@@ -58,6 +60,7 @@ describe.skipIf(process.platform === "win32")(
       const certificate = await readFile(certificatePath);
       const workspaces = await RemoteWorkspaceStore.open(home, "owner");
       await workspaces.register("project", workspace);
+      await workspaces.register("other", otherWorkspace);
       const devices = await RemoteDeviceStore.open(home, "owner");
       const issued = await devices.issue("phone", [
         {
@@ -79,6 +82,16 @@ describe.skipIf(process.platform === "win32")(
         ownerId: "owner",
         workspaceId: "project",
         threadId: "thread-1",
+      });
+      await bindings.bind({
+        ownerId: "owner",
+        workspaceId: "project",
+        threadId: "thread-2",
+      });
+      await bindings.bind({
+        ownerId: "owner",
+        workspaceId: "other",
+        threadId: "thread-other",
       });
       const metadata = threadMetadataSchema.parse({
         threadId: "thread-1",
@@ -105,6 +118,17 @@ describe.skipIf(process.platform === "win32")(
         indexedBytes: 1,
         sourceMtimeMs: 1,
         errorMessage: "private diagnostic",
+      });
+      const secondMetadata = threadMetadataSchema.parse({
+        ...metadata,
+        threadId: "thread-2",
+        logFile: join(home, "threads", "thread-2.jsonl"),
+      });
+      const otherMetadata = threadMetadataSchema.parse({
+        ...metadata,
+        threadId: "thread-other",
+        logFile: join(home, "threads", "thread-other.jsonl"),
+        workspaceRoot: await realpath(otherWorkspace),
       });
       const largeAnswer = "x".repeat(70_000);
       const replayEvents = [
@@ -177,7 +201,12 @@ describe.skipIf(process.platform === "win32")(
             },
           };
         },
-        getThread: async () => ({ value: metadata, diagnostics: [] }),
+        getThread: async (threadId: string) => ({
+          value: threadId === "thread-1" ? metadata :
+            threadId === "thread-2" ? secondMetadata :
+              threadId === "thread-other" ? otherMetadata : undefined,
+          diagnostics: [],
+        }),
         readThreadEvents: async (input: {
           afterSequence?: number;
           limit?: number;
@@ -216,6 +245,51 @@ describe.skipIf(process.platform === "win32")(
         expect(allowed.status).toBe(200);
         expect(allowed.body).toEqual({ workspaces: ["project"] });
         expect(JSON.stringify(allowed.body)).not.toContain(workspace);
+        const firstThreadPage = await get(
+          port,
+          certificate,
+          "/v1/workspaces/project/threads?limit=1",
+          issued.token,
+        );
+        expect(firstThreadPage.body).toMatchObject({
+          threads: [{ threadId: "thread-1", workspaceId: "project" }],
+          hasMore: true,
+          nextAfterThreadId: "thread-1",
+        });
+        expect(JSON.stringify(firstThreadPage.body)).not.toContain(home);
+        const secondThreadPage = await get(
+          port,
+          certificate,
+          "/v1/workspaces/project/threads?after=thread-1&limit=1",
+          issued.token,
+        );
+        expect(secondThreadPage.body).toMatchObject({
+          threads: [{ threadId: "thread-2" }],
+          hasMore: false,
+          nextAfterThreadId: "thread-2",
+        });
+        expect(JSON.stringify(secondThreadPage.body)).not.toContain("thread-other");
+        const otherThreadList = await get(
+          port,
+          certificate,
+          "/v1/workspaces/other/threads",
+          issued.token,
+        );
+        expect(otherThreadList.status).toBe(404);
+        const deniedThreadList = await get(
+          port,
+          certificate,
+          "/v1/workspaces/project/threads",
+          readOnly.token,
+        );
+        expect(deniedThreadList.status).toBe(404);
+        const invalidThreadCursor = await get(
+          port,
+          certificate,
+          "/v1/workspaces/project/threads?limit=1&limit=2",
+          issued.token,
+        );
+        expect(invalidThreadCursor.status).toBe(400);
         const thread = await get(
           port,
           certificate,
@@ -578,6 +652,9 @@ describe.skipIf(process.platform === "win32")(
       );
       expect(serveExit).toBe(0);
       expect(serveOutput).toContain("Remote HTTPS listening");
+      expect(serveOutput).toContain(
+        `Certificate SHA-256: ${new X509Certificate(certificate).fingerprint256.replaceAll(":", "").toLowerCase()}`,
+      );
       await chmod(privateKeyPath, 0o644);
       await expect(
         startRemoteHttpsServer({

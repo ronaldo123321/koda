@@ -2,7 +2,7 @@
 
 - Status: 4D1 and 4D2 in progress — local owner/device grants, workspace
   registration, credential lifecycle, immutable remote Thread bindings, safe
-  Thread summary projection, opt-in TLS transport, durable event-envelope
+  Thread summary and authorized list projection, opt-in TLS transport, durable event-envelope
   and assistant-update cursor polling, and restricted remote Turn start with durable request
   idempotency and authenticated WSS replay implemented; full event content projection,
   approvals, and client pairing are not yet enabled
@@ -21,7 +21,7 @@ not expose them unchanged.
 Remote operation uses a separate versioned API and server-side workspace IDs.
 The local stdio protocol and its installed CLI/TUI behavior remain intact.
 The opt-in HTTPS listener serves authenticated workspace IDs, bound Thread
-summaries, bounded event envelopes, assistant updates, and restricted Turn starts. It has TLS,
+summaries and paginated lists, bounded event envelopes, assistant updates, and restricted Turn starts. It has TLS,
 bounded headers, request bodies, and responses, per-request authorization,
 and negative security tests. The event-envelope endpoint uses exclusive
 `after` cursors; `-1` starts at sequence zero. It omits raw event payloads, which may contain
@@ -68,6 +68,9 @@ justify skipping certificate verification. Credential rotation and revocation
 take effect before a new request or WebSocket subscription; neither device
 credentials nor OAuth secrets enter JSONL, remote API responses, URLs, or
 routine logs.
+The owner-host `remote serve` command prints the SHA-256 fingerprint of the
+certificate actually loaded by the listener. A client must obtain and compare
+it over an owner-controlled channel before saving a device token.
 
 ## 3. Durable sessions and replay
 
