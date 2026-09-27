@@ -221,7 +221,7 @@ koda remote serve --host 192.168.1.10 --port 8443 --cert /absolute/path/server.p
 
 ## macOS 图形界面内部预览
 
-原生 SwiftUI 界面位于 `apps/macos-gui`。它启动随应用打包的 `koda app-server`，可选择工作区、查看现有 Thread 与对话、发起本地 Turn、取消 Turn，并在工具调用前显示审批详情。当前 Provider 凭据只从启动进程的环境继承；界面不会保存密钥。缺少凭据时仍能阅读历史，但发送按钮不可用。
+原生 SwiftUI 界面位于 `apps/macos-gui`。它启动随应用打包的 `koda app-server`，可选择工作区、查看现有 Thread 与对话、发起本地 Turn、取消 Turn，并在工具调用前显示审批详情。可在界面中将 Provider 密钥保存至本机 Keychain；密钥仅传给本机 app-server 子进程，不进入 JSON-RPC 请求或对话记录。缺少凭据时仍能阅读历史，但发送按钮不可用。
 
 在 Apple Silicon Mac 上构建自包含的未签名 `.app`：
 
@@ -237,7 +237,7 @@ Intel Mac 将 `arm64` 换成 `x64`。打包脚本会验证复制后的运行时�
 apps/macos-gui/package-unsigned-pkg.sh dist/Koda.app dist/Koda-unsigned.pkg
 ```
 
-该预览安装包尚未签名或公证，也没有 Keychain 凭据设置、远程设备连接和自动更新。已在本机验证 SwiftUI 应用能打开、连接真实 app-server，并读取已有 Thread；GUI 内的真实 Provider 对话、审批及 `.pkg` 安装仍待单独验收。
+该预览安装包尚未签名或公证，也没有远程设备连接和自动更新。已在本机验证 SwiftUI 应用能打开、连接真实 app-server，并读取已有 Thread；Keychain 凭据操作、GUI 内的真实 Provider 对话、审批及 `.pkg` 安装仍待单独验收。
 
 ## 使用 CLI
 

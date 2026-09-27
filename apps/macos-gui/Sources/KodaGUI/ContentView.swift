@@ -3,6 +3,7 @@ import SwiftUI
 
 struct ContentView: View {
     @StateObject private var model = KodaModel()
+    @State private var credentialProvider: ProviderOption?
 
     var body: some View {
         NavigationSplitView {
@@ -59,6 +60,14 @@ struct ContentView: View {
             }
             .interactiveDismissDisabled(true)
         }
+        .sheet(item: $credentialProvider) { provider in
+            CredentialView(
+                provider: provider,
+                stored: model.storedCredentialNames.contains(provider.credentialName),
+                save: { value in model.saveCredential(value, for: provider) },
+                delete: { model.deleteCredential(for: provider) }
+            )
+        }
     }
 
     private var header: some View {
@@ -99,6 +108,8 @@ struct ContentView: View {
                 TextField("模型", text: $model.modelName)
                     .textFieldStyle(.roundedBorder)
                     .frame(maxWidth: 260)
+                Button("凭据…") { credentialProvider = model.selectedProvider }
+                    .disabled(model.selectedProvider == nil || model.activeTurnID != nil)
                 Spacer()
                 if let turnID = model.activeTurnID {
                     Button("停止", systemImage: "stop.fill") { model.cancelTurn() }
@@ -106,7 +117,7 @@ struct ContentView: View {
                 }
             }
             if let provider = model.selectedProvider, !provider.configured {
-                Text("缺少 \(provider.credentialName)。请在启动 Koda 的环境中配置凭据。")
+                Text("缺少 \(provider.credentialName)。请配置凭据。")
                     .font(.caption)
                     .foregroundStyle(.orange)
             }
@@ -170,6 +181,41 @@ struct ContentView: View {
                 .keyboardShortcut(.return, modifiers: [.command])
         }
         .padding()
+    }
+}
+
+private struct CredentialView: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var key = ""
+    let provider: ProviderOption
+    let stored: Bool
+    let save: (String) -> Bool
+    let delete: () -> Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("\(provider.name) 凭据").font(.title2.weight(.semibold))
+            Text("密钥保存在本机 Keychain，只传给本机 app-server 进程。")
+                .foregroundStyle(.secondary)
+            SecureField(provider.credentialName, text: $key)
+                .textFieldStyle(.roundedBorder)
+            HStack {
+                if stored {
+                    Button("删除已存凭据", role: .destructive) {
+                        if delete() { dismiss() }
+                    }
+                }
+                Spacer()
+                Button("取消") { dismiss() }
+                Button("保存") {
+                    if save(key) { key = ""; dismiss() }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(24)
+        .frame(minWidth: 460)
     }
 }
 

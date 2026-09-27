@@ -1,6 +1,6 @@
 # Koda macOS SwiftUI application
 
-- Status: local GUI preview implemented; installed Provider and approval acceptance pending
+- Status: local GUI preview and Keychain credential controls implemented; live Provider and approval acceptance pending
 - Date: 2026-09-27
 - Scope: native macOS client over the existing local app-server contract
 - Deployment: unsigned internal `.app` with the existing self-contained Koda runtime
@@ -15,10 +15,12 @@ navigation visible. The conversation pane shows user and assistant messages,
 while the approval sheet presents the server's title, summary, reason, and
 details before the user chooses Approve or Reject.
 
-The client does not store Provider secrets. It reads only the initialization
-metadata's `configured` boolean and the credential variable name; sending is
-disabled when the selected Provider is unavailable. The host process must
-already have the credential in its environment. The app's current history
+The client can store Provider credentials in this Mac's Keychain. It loads
+them after reading provider metadata, then restarts its local app-server child
+with those credentials in the child environment. Secret values do not enter
+JSON-RPC requests, settings, diagnostics, or the Thread log. The UI reads
+the initialization metadata's `configured` boolean; sending is disabled when
+the selected Provider is unavailable. The app's current history
 view shows the newest 200 events of one Thread and does not yet render tools,
 plans, artifacts, process panes, or rich Markdown.
 
@@ -33,9 +35,8 @@ its actual install and rollback acceptance remain pending.
 
 1. Exercise a real Provider turn and an approval in the `.app`, including
    interruption/relaunch recovery and preservation of prompt input on error.
-2. Add user-controlled macOS Keychain credential setup without putting secret
-   values in app-server JSON-RPC, thread logs, settings, diagnostics, or build
-   artifacts. Gate any live Provider request behind an explicit user action.
+2. Accept Keychain save/load/delete in an installed app and verify a live
+   Provider request only after an explicit user action.
 3. Complete local GUI coverage for tool results, plans, artifacts, processes,
    search, settings, and workspace mutation recovery before claiming feature
    parity with the TUI.

@@ -45,9 +45,12 @@ final class KodaModel: ObservableObject {
     @Published var activeTurnID: String?
     @Published var approval: ApprovalRequest?
     @Published var notice: String?
+    @Published var storedCredentialNames = Set<String>()
 
     private var connection: AppServerConnection?
     private var finishedTurns = Set<String>()
+    private var credentialsLoaded = false
+    private var credentialEnvironment: [String: String] = [:]
 
     var selectedProvider: ProviderOption? {
         providers.first { $0.id == selectedProviderID }
@@ -76,7 +79,9 @@ final class KodaModel: ObservableObject {
             }
         }
         do {
-            let client = try AppServerConnection(kodaPath: path)
+            let client = try AppServerConnection(
+                kodaPath: path, credentials: credentialEnvironment
+            )
             connection = client
             client.onNotification = { [weak self] method, params in
                 self?.handleNotification(method, params)
@@ -96,6 +101,7 @@ final class KodaModel: ObservableObject {
                 switch response {
                 case .failure(let error): self.notice = error.localizedDescription
                 case .success(let result):
+                    self.notice = nil
                     guard result["protocolVersion"] as? Int == 18 else {
                         self.notice = "app-server 协议版本不兼容。"
                         return
@@ -114,11 +120,27 @@ final class KodaModel: ObservableObject {
                             credentialName: credential, configured: configured
                         )
                     }
+                    if !self.credentialsLoaded {
+                        self.credentialsLoaded = true
+                        for provider in self.providers {
+                            do {
+                                if let key = try KeychainCredentials.load(provider.credentialName) {
+                                    self.credentialEnvironment[provider.credentialName] = key
+                                    self.storedCredentialNames.insert(provider.credentialName)
+                                }
+                            } catch {
+                                self.notice = error.localizedDescription
+                            }
+                        }
+                        if !self.credentialEnvironment.isEmpty {
+                            self.reconnect()
+                            return
+                        }
+                    }
                     let preferred = self.providers.first { $0.configured } ?? self.providers.first
                     self.selectedProviderID = preferred?.id ?? ""
                     self.modelName = preferred?.defaultModel ?? ""
                     self.connected = true
-                    self.notice = nil
                 }
             }
         } catch {
@@ -143,6 +165,36 @@ final class KodaModel: ObservableObject {
     func chooseProvider(_ id: String) {
         selectedProviderID = id
         modelName = selectedProvider?.defaultModel ?? ""
+    }
+
+    func saveCredential(_ value: String, for provider: ProviderOption) -> Bool {
+        guard providers.contains(where: { $0.id == provider.id }) else { return false }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        do {
+            try KeychainCredentials.save(trimmed, name: provider.credentialName)
+            credentialEnvironment[provider.credentialName] = trimmed
+            storedCredentialNames.insert(provider.credentialName)
+            reconnect()
+            return true
+        } catch {
+            notice = error.localizedDescription
+            return false
+        }
+    }
+
+    func deleteCredential(for provider: ProviderOption) -> Bool {
+        guard providers.contains(where: { $0.id == provider.id }) else { return false }
+        do {
+            try KeychainCredentials.delete(provider.credentialName)
+            credentialEnvironment.removeValue(forKey: provider.credentialName)
+            storedCredentialNames.remove(provider.credentialName)
+            reconnect()
+            return true
+        } catch {
+            notice = error.localizedDescription
+            return false
+        }
     }
 
     func refreshThreads() {

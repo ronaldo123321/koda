@@ -17,7 +17,7 @@ final class AppServerConnection {
     private var stopped = false
     private let maximumLineBytes = 2_359_296
 
-    init(kodaPath: String?) throws {
+    init(kodaPath: String?, credentials: [String: String]) throws {
         if let kodaPath {
             process.executableURL = URL(fileURLWithPath: kodaPath)
             process.arguments = ["app-server"]
@@ -28,6 +28,7 @@ final class AppServerConnection {
         process.standardInput = input
         process.standardOutput = output
         process.standardError = errors
+        process.environment = ProcessInfo.processInfo.environment.merging(credentials) { _, stored in stored }
         try process.run()
         output.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
