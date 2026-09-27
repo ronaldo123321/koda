@@ -2,18 +2,20 @@ import type { ThreadId } from "@koda/protocol";
 
 import type { TurnCompletion, TurnHandle } from "./koda-application.js";
 
-export interface ReadOnlyChildSnapshot {
+export interface ChildSnapshot {
   threadId: ThreadId;
   status: "running" | "interrupted" | TurnCompletion["status"];
   answer?: string;
   errorCode?: string;
+  worktreePath?: string;
 }
 
 interface ChildRecord {
   parentThreadId: ThreadId;
   workspaceRoot: string;
   handle: TurnHandle;
-  settled?: ReadOnlyChildSnapshot;
+  worktreePath?: string;
+  settled?: ChildSnapshot;
   completed: Promise<void>;
 }
 
@@ -21,7 +23,7 @@ const MAX_ACTIVE_CHILDREN = 8;
 const MAX_RETAINED_CHILDREN = 64;
 const CHILD_TIMEOUT_MS = 120_000;
 
-export class ReadOnlyChildRegistry {
+export class ChildRegistry {
   private readonly records = new Map<ThreadId, ChildRecord>();
 
   public canStart(): boolean {
@@ -37,9 +39,10 @@ export class ReadOnlyChildRegistry {
     handle: TurnHandle;
     answer: () => string;
     parentSignal: AbortSignal;
-  }): ReadOnlyChildSnapshot {
+    worktreePath?: string;
+  }): ChildSnapshot {
     if (!this.canStart() || this.records.has(input.handle.threadId)) {
-      throw new Error("Read-only child registry is full or duplicated.");
+      throw new Error("Child registry is full or duplicated.");
     }
     this.evictCompleted();
     const cancelWithParent = () =>
@@ -48,13 +51,16 @@ export class ReadOnlyChildRegistry {
       once: true,
     });
     const timeout = setTimeout(
-      () => input.handle.cancel("Child read-only task timed out."),
+      () => input.handle.cancel("Child task timed out."),
       CHILD_TIMEOUT_MS,
     );
     const record: ChildRecord = {
       parentThreadId: input.parentThreadId,
       workspaceRoot: input.workspaceRoot,
       handle: input.handle,
+      ...(input.worktreePath === undefined
+        ? {}
+        : { worktreePath: input.worktreePath }),
       completed: Promise.resolve(),
     };
     record.completed = input.handle.completion
@@ -63,6 +69,9 @@ export class ReadOnlyChildRegistry {
           threadId: input.handle.threadId,
           status: result.status,
           answer: input.answer().slice(0, 4_000),
+          ...(input.worktreePath === undefined
+            ? {}
+            : { worktreePath: input.worktreePath }),
           ...(result.error === undefined
             ? {}
             : { errorCode: result.error.code }),
@@ -73,6 +82,9 @@ export class ReadOnlyChildRegistry {
           threadId: input.handle.threadId,
           status: "failed",
           errorCode: "CHILD_RUNTIME_ERROR",
+          ...(input.worktreePath === undefined
+            ? {}
+            : { worktreePath: input.worktreePath }),
         };
       })
       .finally(() => {
@@ -80,17 +92,31 @@ export class ReadOnlyChildRegistry {
         input.parentSignal.removeEventListener("abort", cancelWithParent);
       });
     this.records.set(input.handle.threadId, record);
-    return { threadId: input.handle.threadId, status: "running" };
+    return {
+      threadId: input.handle.threadId,
+      status: "running",
+      ...(input.worktreePath === undefined
+        ? {}
+        : { worktreePath: input.worktreePath }),
+    };
   }
 
   public get(
     parentThreadId: ThreadId,
     workspaceRoot: string,
     childThreadId: ThreadId,
-  ): ReadOnlyChildSnapshot | undefined {
+  ): ChildSnapshot | undefined {
     const record = this.owned(parentThreadId, workspaceRoot, childThreadId);
     if (record === undefined) return undefined;
-    return record.settled ?? { threadId: childThreadId, status: "running" };
+    return (
+      record.settled ?? {
+        threadId: childThreadId,
+        status: "running",
+        ...(record.worktreePath === undefined
+          ? {}
+          : { worktreePath: record.worktreePath }),
+      }
+    );
   }
 
   public async wait(
@@ -99,7 +125,7 @@ export class ReadOnlyChildRegistry {
     childThreadIds: readonly ThreadId[],
     timeoutMs: number,
     signal: AbortSignal,
-  ): Promise<ReadOnlyChildSnapshot[] | undefined> {
+  ): Promise<ChildSnapshot[] | undefined> {
     signal.throwIfAborted();
     const records = childThreadIds.map((id) =>
       this.owned(parentThreadId, workspaceRoot, id),
@@ -131,6 +157,9 @@ export class ReadOnlyChildRegistry {
         record.settled ?? {
           threadId: record.handle.threadId,
           status: "running",
+          ...(record.worktreePath === undefined
+            ? {}
+            : { worktreePath: record.worktreePath }),
         },
     );
   }

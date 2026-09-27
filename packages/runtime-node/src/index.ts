@@ -32,3 +32,4 @@ export * from "./workspace-mutation-coordinator.js";
 export * from "./workspace-mutation-audit-reconciler.js";
 export * from "./workspace-mutation-journal.js";
 export * from "./workspace-preference-store.js";
+export * from "./worktree-child-tool.js";

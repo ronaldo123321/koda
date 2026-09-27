@@ -61,7 +61,7 @@ export function registerReadOnlyChildTools(
     spec: {
       name: "wait_children",
       description:
-        "Wait up to 30 seconds for one of your read-only child threads, or inspect their current status with timeoutMs 0. Returns bounded answers for completed children.",
+        "Wait up to 30 seconds for a read-only or worktree child, or inspect its status with timeoutMs 0. Returns bounded answers and any retained worktree path.",
       inputJsonSchema: {
         type: "object",
         properties: {
@@ -87,7 +87,7 @@ export function registerReadOnlyChildTools(
     spec: {
       name: "send_child_message",
       description:
-        "Queue a message for the next model step of one of your active read-only child threads. The child may reject it if its final step has begun.",
+        "Queue a message for the next model step of one of your active child threads. The child may reject it if its final step has begun.",
       inputJsonSchema: {
         type: "object",
         properties: {
@@ -107,7 +107,7 @@ export function registerReadOnlyChildTools(
   registry.register({
     spec: {
       name: "interrupt_child",
-      description: "Cancel one of your active read-only child threads.",
+      description: "Cancel one of your active child threads.",
       inputJsonSchema: {
         type: "object",
         properties: { childThreadId: { type: "string" } },

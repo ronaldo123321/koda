@@ -91,6 +91,7 @@ export interface RunTurnInput {
   threadId: ThreadId;
   turnId: TurnId;
   parentThreadId?: ThreadId;
+  worktree?: { sourceRoot: string; path: string; commit: string };
   userInput: string;
   signal?: AbortSignal;
   history?: readonly ConversationItem[];
@@ -215,6 +216,7 @@ export class AgentLoop {
         ...(input.parentThreadId === undefined
           ? {}
           : { parentThreadId: input.parentThreadId }),
+        ...(input.worktree === undefined ? {} : { worktree: input.worktree }),
       },
     });
 

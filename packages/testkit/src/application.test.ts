@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import {
   appendFile,
   mkdir,
@@ -31,6 +32,7 @@ import { ScriptedModelProvider } from "@koda/providers";
 import {
   ArtifactStore,
   JsonlEventStore,
+  ProjectNoteStore,
   ReadOnlyWorkspace,
   WorkspaceMutationJournalStore,
   loadProjectSkills,
@@ -50,6 +52,399 @@ afterEach(async () => {
 });
 
 describe("KodaApplication", () => {
+  it("runs an approved write child only inside a detached Git worktree", async () => {
+    const fixture = await createFixture();
+    await writeFile(join(fixture.workspaceRoot, "note.txt"), "before\n");
+    git(fixture.workspaceRoot, "init", "-q");
+    git(fixture.workspaceRoot, "add", "note.txt");
+    git(
+      fixture.workspaceRoot,
+      "-c",
+      "user.name=Koda Test",
+      "-c",
+      "user.email=koda@example.test",
+      "commit",
+      "-m",
+      "initial",
+    );
+    const notes = await ProjectNoteStore.open(fixture.kodaHome, {
+      id: () => "shared-note",
+    });
+    notes.create({
+      workspaceRoot: await realpath(fixture.workspaceRoot),
+      title: "Shared review note",
+      body: "Check the isolated edit before merging.",
+    });
+    notes.close();
+    const parentId = threadIdSchema.parse("worktree-parent");
+    const childId = threadIdSchema.parse("worktree-child");
+    let worktreePath = "";
+    let approvals = 0;
+    const parentProvider = new ScriptedModelProvider([
+      {
+        assertRequest: (request) => {
+          expect(request.tools.map((tool) => tool.name)).toContain(
+            "spawn_worktree",
+          );
+        },
+        events: [
+          {
+            type: "tool_call",
+            callId: toolCallIdSchema.parse("spawn-worktree-call"),
+            name: "spawn_worktree",
+            arguments: { task: "Change note.txt to after." },
+          },
+          { type: "completed", finishReason: "tool_calls" },
+        ],
+      },
+      {
+        assertRequest: (request) => {
+          const result = request.items.find(
+            (item) =>
+              item.type === "tool_result" && item.name === "spawn_worktree",
+          );
+          expect(result).toMatchObject({
+            status: "success",
+            output: { threadId: childId, status: "running" },
+          });
+          if (
+            result?.type === "tool_result" &&
+            result.output &&
+            typeof result.output === "object" &&
+            !Array.isArray(result.output)
+          ) {
+            worktreePath = String(result.output.worktreePath);
+          }
+        },
+        events: [
+          {
+            type: "tool_call",
+            callId: toolCallIdSchema.parse("wait-worktree-call"),
+            name: "wait_children",
+            arguments: { childThreadIds: [childId], timeoutMs: 5_000 },
+          },
+          { type: "completed", finishReason: "tool_calls" },
+        ],
+      },
+      {
+        assertRequest: (request) => {
+          expect(request.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "tool_result",
+                name: "wait_children",
+                status: "success",
+                output: {
+                  children: [
+                    expect.objectContaining({
+                      threadId: childId,
+                      status: "completed",
+                      worktreePath,
+                    }),
+                  ],
+                },
+              }),
+            ]),
+          );
+        },
+        events: [{ type: "completed", finishReason: "stop" }],
+      },
+    ]);
+    const childProvider = new ScriptedModelProvider([
+      {
+        assertRequest: (request) => {
+          const names = request.tools.map((tool) => tool.name);
+          expect(names).toContain("apply_patch");
+          expect(names).toContain("search_project_notes");
+          expect(names).not.toContain("exec_command");
+          expect(names).not.toContain("spawn_worktree");
+          expect(names).not.toContain("spawn_readonly");
+        },
+        events: [
+          {
+            type: "tool_call",
+            callId: toolCallIdSchema.parse("worktree-memory-call"),
+            name: "search_project_notes",
+            arguments: { query: "isolated edit" },
+          },
+          { type: "completed", finishReason: "tool_calls" },
+        ],
+      },
+      {
+        assertRequest: (request) => {
+          expect(request.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "tool_result",
+                name: "search_project_notes",
+                status: "success",
+                output: {
+                  matches: [expect.objectContaining({ id: "shared-note" })],
+                },
+              }),
+            ]),
+          );
+        },
+        events: [
+          {
+            type: "tool_call",
+            callId: toolCallIdSchema.parse("worktree-patch-call"),
+            name: "apply_patch",
+            arguments: {
+              path: "note.txt",
+              operation: "update",
+              old_text: "before\n",
+              new_text: "after\n",
+            },
+          },
+          { type: "completed", finishReason: "tool_calls" },
+        ],
+      },
+      {
+        events: [
+          {
+            type: "assistant_delta",
+            text: "Updated in the isolated worktree.",
+          },
+          { type: "completed", finishReason: "stop" },
+        ],
+      },
+    ]);
+    let providerCount = 0;
+    let idCount = 0;
+    const application = new KodaApplication({
+      environment: {
+        KODA_HOME: fixture.kodaHome,
+        OPENAI_API_KEY: "offline-test-key",
+      },
+      processDirectory: fixture.root,
+      dependencies: {
+        openWorkspace: (root) => ReadOnlyWorkspace.open(root),
+        createProvider: () =>
+          providerCount++ === 0 ? parentProvider : childProvider,
+        createIds: () => {
+          const child = idCount++ > 0;
+          return {
+            threadId: child ? childId : parentId,
+            turnId: turnIdSchema.parse(
+              child ? "worktree-child-turn" : "worktree-parent-turn",
+            ),
+            itemIds: new DeterministicItemIdFactory(
+              child ? "worktree-child-item" : "worktree-parent-item",
+            ),
+          };
+        },
+      },
+    });
+    const parent = application.startTurn(
+      { prompt: "Delegate the edit.", cwd: fixture.workspaceRoot },
+      {
+        events: { append: async () => undefined },
+        approvals: {
+          request: async (request) => {
+            approvals += 1;
+            expect(request.name).toBe("spawn_worktree");
+            expect(request.details).toContain(
+              "without separate patch approvals",
+            );
+            return { decision: "approved" as const };
+          },
+        },
+      },
+    );
+    await expect(parent.completion).resolves.toMatchObject({
+      status: "completed",
+    });
+    expect(approvals).toBe(1);
+    expect(
+      await readFile(join(fixture.workspaceRoot, "note.txt"), "utf8"),
+    ).toBe("before\n");
+    expect(await readFile(join(worktreePath, "note.txt"), "utf8")).toBe(
+      "after\n",
+    );
+    expect(git(fixture.workspaceRoot, "status", "--porcelain")).toBe("");
+    expect(git(worktreePath, "status", "--porcelain")).toContain("M note.txt");
+    const events = await new JsonlEventStore(
+      join(fixture.kodaHome, "threads", `${childId}.jsonl`),
+    ).readAll();
+    expect(events.events[0]).toMatchObject({
+      type: "turn.started",
+      payload: {
+        parentThreadId: parentId,
+        worktree: {
+          sourceRoot: await realpath(fixture.workspaceRoot),
+          path: worktreePath,
+        },
+      },
+    });
+    const newApplication = new KodaApplication({
+      environment: {
+        KODA_HOME: fixture.kodaHome,
+        OPENAI_API_KEY: "offline-test-key",
+      },
+      processDirectory: fixture.root,
+    });
+    expect((await newApplication.getThread(childId)).value).toMatchObject({
+      threadId: childId,
+      parentThreadId: parentId,
+    });
+  });
+
+  it("does not create a worktree when child delegation is rejected", async () => {
+    const fixture = await createFixture();
+    await writeFile(join(fixture.workspaceRoot, "note.txt"), "before\n");
+    git(fixture.workspaceRoot, "init", "-q");
+    git(fixture.workspaceRoot, "add", "note.txt");
+    git(
+      fixture.workspaceRoot,
+      "-c",
+      "user.name=Koda Test",
+      "-c",
+      "user.email=koda@example.test",
+      "commit",
+      "-q",
+      "-m",
+      "initial",
+    );
+    const provider = new ScriptedModelProvider([
+      {
+        events: [
+          {
+            type: "tool_call",
+            callId: toolCallIdSchema.parse("rejected-worktree-call"),
+            name: "spawn_worktree",
+            arguments: { task: "Edit note.txt." },
+          },
+          { type: "completed", finishReason: "tool_calls" },
+        ],
+      },
+      {
+        assertRequest: (request) => {
+          expect(request.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "tool_result",
+                name: "spawn_worktree",
+                status: "error",
+              }),
+            ]),
+          );
+        },
+        events: [{ type: "completed", finishReason: "stop" }],
+      },
+    ]);
+    const application = new KodaApplication({
+      environment: {
+        KODA_HOME: fixture.kodaHome,
+        OPENAI_API_KEY: "offline-test-key",
+      },
+      processDirectory: fixture.root,
+      dependencies: dependencies(provider, "rejected-worktree"),
+    });
+    const turn = application.startTurn(
+      { prompt: "Try delegating.", cwd: fixture.workspaceRoot },
+      {
+        events: { append: async () => undefined },
+        approvals: rejectApprovals(),
+      },
+    );
+    await expect(turn.completion).resolves.toMatchObject({
+      status: "completed",
+    });
+    expect(
+      await readFile(join(fixture.workspaceRoot, "note.txt"), "utf8"),
+    ).toBe("before\n");
+    expect(
+      git(fixture.workspaceRoot, "worktree", "list", "--porcelain"),
+    ).not.toContain("/worktrees/");
+  });
+
+  it("refuses an approved worktree when source HEAD changes during approval", async () => {
+    const fixture = await createFixture();
+    await writeFile(join(fixture.workspaceRoot, "note.txt"), "before\n");
+    git(fixture.workspaceRoot, "init", "-q");
+    git(fixture.workspaceRoot, "add", "note.txt");
+    git(
+      fixture.workspaceRoot,
+      "-c",
+      "user.name=Koda Test",
+      "-c",
+      "user.email=koda@example.test",
+      "commit",
+      "-q",
+      "-m",
+      "initial",
+    );
+    const provider = new ScriptedModelProvider([
+      {
+        events: [
+          {
+            type: "tool_call",
+            callId: toolCallIdSchema.parse("changed-head-call"),
+            name: "spawn_worktree",
+            arguments: { task: "Edit note.txt." },
+          },
+          { type: "completed", finishReason: "tool_calls" },
+        ],
+      },
+      {
+        assertRequest: (request) => {
+          expect(request.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "tool_result",
+                name: "spawn_worktree",
+                status: "error",
+              }),
+            ]),
+          );
+        },
+        events: [{ type: "completed", finishReason: "stop" }],
+      },
+    ]);
+    const application = new KodaApplication({
+      environment: {
+        KODA_HOME: fixture.kodaHome,
+        OPENAI_API_KEY: "offline-test-key",
+      },
+      processDirectory: fixture.root,
+      dependencies: dependencies(provider, "changed-head"),
+    });
+    const turn = application.startTurn(
+      { prompt: "Try delegating.", cwd: fixture.workspaceRoot },
+      {
+        events: { append: async () => undefined },
+        approvals: {
+          request: async () => {
+            await writeFile(
+              join(fixture.workspaceRoot, "second.txt"),
+              "new commit\n",
+            );
+            git(fixture.workspaceRoot, "add", "second.txt");
+            git(
+              fixture.workspaceRoot,
+              "-c",
+              "user.name=Koda Test",
+              "-c",
+              "user.email=koda@example.test",
+              "commit",
+              "-q",
+              "-m",
+              "changed head",
+            );
+            return { decision: "approved" as const };
+          },
+        },
+      },
+    );
+    await expect(turn.completion).resolves.toMatchObject({
+      status: "completed",
+    });
+    expect(
+      git(fixture.workspaceRoot, "worktree", "list", "--porcelain"),
+    ).not.toContain("/worktrees/");
+  });
+
   it("delegates a bounded read-only task to an independent child thread", async () => {
     const fixture = await createFixture();
     await writeFile(
@@ -2899,6 +3294,10 @@ function rejectApprovals() {
   return {
     request: async () => ({ decision: "rejected" as const }),
   };
+}
+
+function git(cwd: string, ...args: string[]): string {
+  return execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" }).trim();
 }
 
 function sha256(value: Buffer | string): string {

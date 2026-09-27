@@ -20,6 +20,7 @@ import {
   type ItemIdFactory,
   type ModelProvider,
   type PlanAcceptanceBroker,
+  type ToolPolicy,
   type TurnMailboxEnqueueResult,
   rejectApprovalsBroker,
 } from "@koda/agent-core";
@@ -153,6 +154,7 @@ import {
   registerReadOnlyDelegationTool,
   registerReadOnlyWorkspaceTools,
   registerStructuredPatchTool,
+  registerWorktreeChildTool,
   registerUpdatePlanTool,
   resolveExecutionPolicy,
   SecretLeaseManager,
@@ -168,10 +170,13 @@ import {
 } from "@koda/runtime-node";
 
 import { ApprovalGrantRegistry } from "./approval-grant-registry.js";
+import { ChildRegistry, type ChildSnapshot } from "./child-registry.js";
 import {
-  ReadOnlyChildRegistry,
-  type ReadOnlyChildSnapshot,
-} from "./read-only-child-registry.js";
+  createGitWorktree,
+  inspectGitSource,
+  verifyGitWorktree,
+  type GitSource,
+} from "./git-worktree.js";
 
 import {
   ConfigurationError,
@@ -377,6 +382,7 @@ export interface KodaApplicationOptions {
   secretCatalog?: SecretCatalog;
   remoteRestricted?: boolean;
   readOnlyChild?: boolean;
+  worktreeChild?: { source: GitSource; path: string; parentThreadId: ThreadId };
 }
 
 export interface KodaApplicationDependencies {
@@ -421,7 +427,8 @@ export class KodaApplication {
   private readonly secretLeaseManager: SecretLeaseManager;
   private readonly remoteRestricted: boolean;
   private readonly readOnlyChild: boolean;
-  private readonly readOnlyChildren = new ReadOnlyChildRegistry();
+  private readonly worktreeChild: KodaApplicationOptions["worktreeChild"];
+  private readonly children = new ChildRegistry();
 
   public get isRemoteRestricted(): boolean {
     return this.remoteRestricted;
@@ -432,6 +439,12 @@ export class KodaApplication {
     this.processDirectory = options.processDirectory;
     this.dependencies = options.dependencies ?? productionDependencies;
     this.readOnlyChild = options.readOnlyChild === true;
+    this.worktreeChild = options.worktreeChild;
+    if (this.readOnlyChild && this.worktreeChild !== undefined) {
+      throw new ConfigurationError(
+        "A child cannot be both read-only and worktree-write capable.",
+      );
+    }
     this.remoteRestricted =
       options.remoteRestricted === true || this.readOnlyChild;
     this.approvalGrantRegistry =
@@ -1450,7 +1463,29 @@ export class KodaApplication {
           { events: parentEvents, diagnostics: [] },
           parentThreadId,
         );
-        assertResumeWorkspace(parent, workspace.root);
+        if (this.worktreeChild === undefined) {
+          assertResumeWorkspace(parent, workspace.root);
+        } else {
+          if (
+            parentThreadId !== this.worktreeChild.parentThreadId ||
+            parent.context.workspaceRoot !== this.worktreeChild.source.root ||
+            workspace.root !== this.worktreeChild.path
+          ) {
+            throw new ConfigurationError(
+              "Worktree child parent or workspace does not match its approved source.",
+            );
+          }
+          await verifyGitWorktree(
+            workspace.root,
+            this.worktreeChild.source,
+            configuration.kodaHome,
+            controller.signal,
+          );
+        }
+      } else if (this.worktreeChild !== undefined) {
+        throw new ConfigurationError(
+          "A worktree child requires a parent thread.",
+        );
       }
       const executionPolicy = resolveExecutionPolicy({
         workspaceRoot: workspace.root,
@@ -1592,7 +1627,7 @@ export class KodaApplication {
           configuration.provider,
         );
       }
-      if (!this.remoteRestricted) {
+      if (!this.remoteRestricted && this.worktreeChild === undefined) {
         pluginSession = await PluginTurnSession.open({
           environment: this.environment,
           kodaHome: configuration.kodaHome,
@@ -1613,11 +1648,15 @@ export class KodaApplication {
         projectCommandTemplates,
       );
       const effectivePrompt = expandedCommandTemplate?.prompt ?? prompt;
-      const instructions = buildInstructions(
-        workspace.root,
-        repositoryInstructions,
-        projectSkills,
-      );
+      const instructions =
+        buildInstructions(
+          workspace.root,
+          repositoryInstructions,
+          projectSkills,
+        ) +
+        (this.worktreeChild === undefined
+          ? ""
+          : "\nThis is an approved isolated Git worktree child. You may edit only this worktree using apply_patch, apply_changes, or apply_patchset. Process execution, plugins, MCP, further delegation, and edits to the source checkout are unavailable. Leave changes in this worktree for parent review; do not claim they were merged.");
       const instructionSnapshots = repositoryInstructions.sources.map(
         (source) => ({
           path: source.path,
@@ -1729,7 +1768,7 @@ export class KodaApplication {
         needsRevalidation: planNeedsRevalidation,
       });
       const tools = new ToolRegistry();
-      if (!this.remoteRestricted) {
+      if (!this.remoteRestricted && this.worktreeChild === undefined) {
         registerUpdatePlanTool(tools, planState, {
           ...(client.planAcceptances === undefined
             ? {}
@@ -1741,10 +1780,14 @@ export class KodaApplication {
         registerArtifactTools(tools, artifactStore);
       }
       registerReadOnlyWorkspaceTools(tools, workspace, { artifactStore });
-      if (!this.remoteRestricted) {
+      if (!this.remoteRestricted || this.readOnlyChild) {
         try {
           projectNotes = await ProjectNoteStore.open(configuration.kodaHome);
-          registerProjectNoteTools(tools, projectNotes, workspace.root);
+          registerProjectNoteTools(
+            tools,
+            projectNotes,
+            this.worktreeChild?.source.root ?? workspace.root,
+          );
         } catch (error) {
           projectNotes?.close();
           projectNotes = undefined;
@@ -1755,24 +1798,29 @@ export class KodaApplication {
           });
         }
       }
-      if (!this.remoteRestricted) {
+      if (!this.remoteRestricted && this.worktreeChild === undefined) {
         let childCount = 0;
         const launchChild = async (
           context: { signal: AbortSignal },
           task: string,
+          worktree?: { source: GitSource; path: string },
         ): Promise<{ handle: TurnHandle } | { error: JsonValue }> => {
           context.signal.throwIfAborted();
           if (childCount >= 2) {
             return { error: { status: "limit_reached", maxChildren: 2 } };
           }
-          if (!this.readOnlyChildren.canStart()) {
+          if (!this.children.canStart()) {
             return { error: { status: "busy", maxActiveChildren: 8 } };
           }
           const childApplication = new KodaApplication({
             environment: this.environment,
             processDirectory: this.processDirectory,
             dependencies: this.dependencies,
-            readOnlyChild: true,
+            ...(worktree === undefined
+              ? { readOnlyChild: true }
+              : {
+                  worktreeChild: { ...worktree, parentThreadId: ids.threadId },
+                }),
           });
           let answer = "";
           let markStarted: (() => void) | undefined;
@@ -1782,7 +1830,7 @@ export class KodaApplication {
           const child = childApplication.startTurn(
             {
               prompt: task,
-              cwd: workspace.root,
+              cwd: worktree?.path ?? workspace.root,
               provider: configuration.provider,
               model: configuration.model,
               approvalMode: "never",
@@ -1804,12 +1852,15 @@ export class KodaApplication {
             },
           );
           try {
-            this.readOnlyChildren.register({
+            this.children.register({
               parentThreadId: ids.threadId,
               workspaceRoot: workspace.root,
               handle: child,
               answer: () => answer,
               parentSignal: context.signal,
+              ...(worktree === undefined
+                ? {}
+                : { worktreePath: worktree.path }),
             });
           } catch (error) {
             child.cancel("Child registration failed.");
@@ -1833,7 +1884,7 @@ export class KodaApplication {
           if ("error" in launched) return launched.error;
           await launched.handle.completion;
           return jsonValueSchema.parse(
-            this.readOnlyChildren.get(
+            this.children.get(
               ids.threadId,
               workspace.root,
               launched.handle.threadId,
@@ -1851,12 +1902,12 @@ export class KodaApplication {
             const initial = await Promise.all(
               childThreadIds.map(
                 async (childThreadId) =>
-                  this.readOnlyChildren.get(
+                  this.children.get(
                     ids.threadId,
                     workspace.root,
                     childThreadId,
                   ) ??
-                  this.durableReadOnlyChildSnapshot(
+                  this.durableChildSnapshot(
                     ids.threadId,
                     workspace.root,
                     childThreadId,
@@ -1866,12 +1917,12 @@ export class KodaApplication {
             if (initial.some((child) => child === undefined)) {
               return { status: "not_found" };
             }
-            const children = initial as ReadOnlyChildSnapshot[];
+            const children = initial as ChildSnapshot[];
             if (
               timeoutMs > 0 &&
               children.every((child) => child.status === "running")
             ) {
-              const waited = await this.readOnlyChildren.wait(
+              const waited = await this.children.wait(
                 ids.threadId,
                 workspace.root,
                 childThreadIds,
@@ -1885,7 +1936,7 @@ export class KodaApplication {
             return jsonValueSchema.parse({ children });
           },
           send: async (_context, childThreadId, message) => ({
-            status: this.readOnlyChildren.send(
+            status: this.children.send(
               ids.threadId,
               workspace.root,
               childThreadId,
@@ -1893,12 +1944,57 @@ export class KodaApplication {
             ),
           }),
           interrupt: async (_context, childThreadId) => ({
-            status: this.readOnlyChildren.interrupt(
+            status: this.children.interrupt(
               ids.threadId,
               workspace.root,
               childThreadId,
             ),
           }),
+        });
+        registerWorktreeChildTool(tools, async (context, task) => {
+          context.signal.throwIfAborted();
+          if (childCount >= 2 || !this.children.canStart()) {
+            throw new Error("The parent turn has no available child slot.");
+          }
+          const source = await inspectGitSource(
+            workspace.root,
+            configuration.kodaHome,
+            context.signal,
+          );
+          return {
+            approval: {
+              title: "Start write-capable child in Git worktree",
+              summary: `Create a detached worktree from ${source.commit.slice(0, 12)} and delegate one task.`,
+              details: `Task: ${task}\nSource: ${source.root}\nCommit: ${source.commit}\nWorktree base: ${configuration.kodaHome}/worktrees\nThe child may modify text files inside its isolated worktree without separate patch approvals. It cannot run commands, use plugins or MCP, or edit the source checkout. Uncommitted source changes are not copied. The worktree is retained for review and is not merged automatically. Git checkout may invoke configured filters.`,
+            },
+            freshApprovalRequired: true,
+            execute: async (): Promise<JsonValue> => {
+              context.signal.throwIfAborted();
+              if (childCount >= 2 || !this.children.canStart()) {
+                return { status: "limit_reached", maxChildren: 2 };
+              }
+              const path = await createGitWorktree(
+                source,
+                configuration.kodaHome,
+                context.signal,
+              );
+              const launched = await launchChild(context, task, {
+                source,
+                path,
+              });
+              return "error" in launched
+                ? {
+                    status: "failed",
+                    error: launched.error,
+                    worktreePath: path,
+                  }
+                : {
+                    threadId: launched.handle.threadId,
+                    status: "running",
+                    worktreePath: path,
+                  };
+            },
+          };
         });
       }
       if (!this.remoteRestricted && mutationJournal !== undefined) {
@@ -1926,42 +2022,46 @@ export class KodaApplication {
           mutationCoordinator,
           mutationJournal,
         );
-        const nativeExecutorPath = this.environment.KODA_EXEC_PATH?.trim();
-        const nativeExecutor =
-          this.interactiveProcessService?.nativeExecutor ??
-          (nativeExecutorPath === undefined || nativeExecutorPath.length === 0
-            ? undefined
-            : await NativeExecutorClient.open({
-                binaryPath: nativeExecutorPath,
-                stateDirectory: join(configuration.kodaHome, "executor"),
-              }));
-        const commandRunner = await WorkspaceCommandRunner.open(
-          workspace.root,
-          {
+        if (this.worktreeChild === undefined) {
+          const nativeExecutorPath = this.environment.KODA_EXEC_PATH?.trim();
+          const nativeExecutor =
+            this.interactiveProcessService?.nativeExecutor ??
+            (nativeExecutorPath === undefined || nativeExecutorPath.length === 0
+              ? undefined
+              : await NativeExecutorClient.open({
+                  binaryPath: nativeExecutorPath,
+                  stateDirectory: join(configuration.kodaHome, "executor"),
+                }));
+          const commandRunner = await WorkspaceCommandRunner.open(
+            workspace.root,
+            {
+              environment: this.environment,
+              artifactStore,
+              executionPolicy,
+              ...(nativeExecutor === undefined ? {} : { nativeExecutor }),
+              ...(this.interactiveProcessService === undefined
+                ? {}
+                : {
+                    interactiveProcessService: this.interactiveProcessService,
+                  }),
+            },
+          );
+          registerExecCommandTool(tools, commandRunner, {
+            secretLeaseManager: this.secretLeaseManager,
+          });
+          registerExecTerminalTool(tools, commandRunner, {
+            secretLeaseManager: this.secretLeaseManager,
+          });
+          pluginSession?.registerTools(tools);
+          mcpSession = await McpTurnSession.open({
             environment: this.environment,
+            kodaHome: configuration.kodaHome,
+            processDirectory: this.processDirectory,
             artifactStore,
-            executionPolicy,
-            ...(nativeExecutor === undefined ? {} : { nativeExecutor }),
-            ...(this.interactiveProcessService === undefined
-              ? {}
-              : { interactiveProcessService: this.interactiveProcessService }),
-          },
-        );
-        registerExecCommandTool(tools, commandRunner, {
-          secretLeaseManager: this.secretLeaseManager,
-        });
-        registerExecTerminalTool(tools, commandRunner, {
-          secretLeaseManager: this.secretLeaseManager,
-        });
-        pluginSession?.registerTools(tools);
-        mcpSession = await McpTurnSession.open({
-          environment: this.environment,
-          kodaHome: configuration.kodaHome,
-          processDirectory: this.processDirectory,
-          artifactStore,
-          signal: controller.signal,
-        });
-        mcpSession.registerTools(tools);
+            signal: controller.signal,
+          });
+          mcpSession.registerTools(tools);
+        }
       }
       const toolCatalogGeneration = tools.catalogGeneration();
       if (
@@ -1992,12 +2092,29 @@ export class KodaApplication {
         configuration,
         instructions,
       );
+      const worktreePolicy: ToolPolicy = {
+        evaluate: (input) =>
+          input.effect === "read" ||
+          (input.effect === "write" &&
+            ["apply_patch", "apply_changes", "apply_patchset"].includes(
+              input.name,
+            ))
+            ? { decision: "allow" }
+            : {
+                decision: "deny",
+                reason:
+                  "Only read tools and isolated text-file patches are available to worktree children.",
+              },
+      };
       const loop = new AgentLoop({
         provider,
         tools,
         events: new FanoutEventSink([eventStore, client.events]),
         ids: ids.itemIds,
-        policy: new EffectToolPolicy(configuration.approvalMode),
+        policy:
+          this.worktreeChild === undefined
+            ? new EffectToolPolicy(configuration.approvalMode)
+            : worktreePolicy,
         approvals: client.approvals,
         approvalGrants: this.approvalGrantRegistry.forWorkspace(workspace.root),
         contextEngine,
@@ -2017,6 +2134,15 @@ export class KodaApplication {
         threadId: ids.threadId,
         turnId: ids.turnId,
         ...(parentThreadId === undefined ? {} : { parentThreadId }),
+        ...(this.worktreeChild === undefined
+          ? {}
+          : {
+              worktree: {
+                sourceRoot: this.worktreeChild.source.root,
+                path: this.worktreeChild.path,
+                commit: this.worktreeChild.source.commit,
+              },
+            }),
         userInput: effectivePrompt,
         signal: controller.signal,
         history,
@@ -2220,11 +2346,11 @@ export class KodaApplication {
     return readResult.events;
   }
 
-  private async durableReadOnlyChildSnapshot(
+  private async durableChildSnapshot(
     parentThreadId: ThreadId,
     workspaceRoot: string,
     childThreadId: ThreadId,
-  ): Promise<ReadOnlyChildSnapshot | undefined> {
+  ): Promise<ChildSnapshot | undefined> {
     let events: AgentEvent[];
     try {
       events = await this.readValidatedThreadLog(childThreadId);
@@ -2244,13 +2370,28 @@ export class KodaApplication {
       return undefined;
     }
     const recovered = recoverThread({ events, diagnostics: [] }, childThreadId);
-    if (recovered.context.workspaceRoot !== workspaceRoot) return undefined;
+    const worktree =
+      events[0].type === "turn.started"
+        ? events[0].payload.worktree
+        : undefined;
+    if (
+      worktree === undefined &&
+      recovered.context.workspaceRoot !== workspaceRoot
+    )
+      return undefined;
+    if (
+      worktree !== undefined &&
+      (worktree.sourceRoot !== workspaceRoot ||
+        worktree.path !== recovered.context.workspaceRoot)
+    )
+      return undefined;
     const answer = [...recovered.history]
       .reverse()
       .find((item) => item.type === "assistant_message");
     return {
       threadId: childThreadId,
       status: recovered.previousStatus,
+      ...(worktree === undefined ? {} : { worktreePath: worktree.path }),
       ...(answer?.type === "assistant_message" &&
       recovered.previousStatus !== "interrupted"
         ? { answer: answer.content.slice(0, 4_000) }
@@ -2781,6 +2922,7 @@ async function inspectCurrentInstructions(input: {
       },
     });
   }
+
   const historicalSkillsById = new Map(
     input.turnContext.skills.map((source) => [source.skillId, source]),
   );

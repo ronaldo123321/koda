@@ -52,7 +52,9 @@ node apps/cli/dist/main.js thread children <thread-id>
 
 App-server 的 `turn/steer` 可向运行中的指定 Thread/Turn 排队发送消息；TUI 运行中也可直接输入并按回车发送。每个 Turn 最多暂存 16 条，每条最多 4096 UTF-8 字节。消息在下一次模型请求前写入事件日志并进入上下文；末次模型请求开始后或 Turn 结束时拒绝新消息。
 
-模型可调用 `spawn_readonly` 异步启动只读子任务，在其首条事件落盘后取得 Thread ID，再用 `wait_children` 查询／等待、`send_child_message` 发送下一步消息或 `interrupt_child` 中断。每个父 Turn 最多启动两个子任务，每个应用进程最多同时运行八个，只读子任务最长运行两分钟。实时消息和中断只适用于当前应用进程内的子任务；进程重启后，`wait_children` 可从事件日志读取已完成子任务的结果。Git worktree 写入隔离仍待后续 Phase 5 实现。
+模型可调用 `spawn_readonly` 异步启动只读子任务，或调用 `spawn_worktree` 请求创建可写子任务。后者必须先获得一次明确审批：Koda 从当前 Git HEAD 在 `KODA_HOME/worktrees` 创建独立工作区，子任务只能使用文件修改工具，不能执行命令、加载 MCP／插件或再次派遣；原工作区的未提交改动不会复制，完成后也不会自动合并。审批预览会列出任务、源提交及隔离范围。父任务可用 `wait_children` 查询／等待、`send_child_message` 发送下一步消息或 `interrupt_child` 中断，并从结果中取得 worktree 路径供检查。每个父 Turn 最多启动两个子任务，每个应用进程最多同时运行八个，子任务最长运行两分钟。实时消息和中断只适用于当前应用进程内；进程重启后，`wait_children` 可从事件日志读取已完成子任务的结果。
+
+多子任务与项目笔记的离线验收范围见 [Phase 5 场景矩阵](docs/plans/2026-09-27-phase-5-scenario-matrix.md)。
 
 项目笔记由用户显式维护，按真实工作区路径存放在 `KODA_HOME/memory/project-notes.db`，不会自动从对话中写入：
 
@@ -65,7 +67,7 @@ node apps/cli/dist/main.js memory search "签名" --workspace .
 node apps/cli/dist/main.js memory delete <note-id> --workspace .
 ```
 
-每个工作区最多 64 条笔记，每条正文最多 8192 UTF-8 字节。模型只能调用 `search_project_notes` 和 `read_project_note` 读取当前工作区笔记；笔记内容不会自动加入提示词。检索采用有界词面匹配，固定的八个离线查询用例达到 Recall@3 = 1、MRR = 1；这只是回归基线，不能代表真实项目查询的准确率。
+每个工作区最多 64 条笔记，每条正文最多 8192 UTF-8 字节。模型只能调用 `search_project_notes` 和 `read_project_note` 读取当前工作区笔记；内部子任务也只读共享父工作区的笔记，worktree 子任务按源工作区检索。笔记内容不会自动加入提示词。检索采用有界词面匹配，固定的八个离线查询用例达到 Recall@3 = 1、MRR = 1；这只是回归基线，不能代表真实项目查询的准确率。
 
 已安装的预览版使用 `koda setup`、`koda run` 和 `koda-chat`。凭据来自启动进程的环境变量，不写入工作区设置或会话日志。工作区写入、进程执行以及未明确归类为只读的 MCP 工具默认需要审批。
 

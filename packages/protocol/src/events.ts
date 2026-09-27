@@ -143,6 +143,13 @@ export const agentEventSchema = z.discriminatedUnion("type", [
       parentThreadId: threadIdSchema
         .refine((value) => /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u.test(value))
         .optional(),
+      worktree: z
+        .object({
+          sourceRoot: z.string().min(1),
+          path: z.string().min(1),
+          commit: z.string().regex(/^[0-9a-f]{40,64}$/u),
+        })
+        .optional(),
     }),
   }),
   z.object({
