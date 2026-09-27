@@ -9,9 +9,12 @@ import {
   runExtensionReadCommand,
 } from "./extension-command.js";
 import {
+  runPluginDiscoverCommand,
   runPluginInstallCommand,
+  runPluginInstallRemoteCommand,
   runPluginListCommand,
   runPluginStateCommand,
+  runPluginUpdateCommand,
   runPluginVerifyCommand,
 } from "./plugin-command.js";
 import { runCommand, type RunCommandInput } from "./run-command.js";
@@ -295,10 +298,62 @@ export function createProgram(runtime: ProgramRuntime): Command {
       },
     );
   plugin
+    .command("discover")
+    .description("List a signed HTTPS plugin catalog without executing code")
+    .requiredOption("--catalog <url>", "HTTPS catalog URL")
+    .requiredOption("--key-id <id>", "trusted publisher key ID")
+    .requiredOption("--key <file>", "trusted Ed25519 public key PEM")
+    .action(
+      async (options: { catalog: string; keyId: string; key: string }) => {
+        runtime.setExitCode(
+          await runPluginDiscoverCommand(options, pluginContext),
+        );
+      },
+    );
+  plugin
+    .command("install-remote")
+    .description(
+      "Install one exact signed catalog version in the disabled state",
+    )
+    .argument("<id>", "plugin ID")
+    .requiredOption("--version <version>", "exact plugin version")
+    .requiredOption("--catalog <url>", "HTTPS catalog URL")
+    .requiredOption("--key-id <id>", "trusted publisher key ID")
+    .requiredOption("--key <file>", "trusted Ed25519 public key PEM")
+    .requiredOption(
+      "--capabilities <list>",
+      "explicitly reviewed plugin capabilities",
+    )
+    .action(
+      async (
+        id: string,
+        options: {
+          version: string;
+          catalog: string;
+          keyId: string;
+          key: string;
+          capabilities: string;
+        },
+      ) => {
+        runtime.setExitCode(
+          await runPluginInstallRemoteCommand(id, options, pluginContext),
+        );
+      },
+    );
+  plugin
     .command("list")
     .description("List managed plugin versions and state")
     .action(async () => {
       runtime.setExitCode(await runPluginListCommand(pluginContext));
+    });
+  plugin
+    .command("update")
+    .description(
+      "Install a newer stable version from the stored signed catalog",
+    )
+    .argument("<id>", "plugin ID")
+    .action(async (id: string) => {
+      runtime.setExitCode(await runPluginUpdateCommand(id, pluginContext));
     });
   for (const operation of ["enable", "disable", "rollback"] as const) {
     plugin

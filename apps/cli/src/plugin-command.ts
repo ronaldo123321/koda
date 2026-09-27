@@ -3,10 +3,13 @@ import { open } from "node:fs/promises";
 import { resolve } from "node:path";
 
 import {
+  discoverPluginCatalog,
   installManagedPluginPackage,
+  installPluginFromCatalog,
   listManagedPlugins,
   rollbackManagedPlugin,
   setManagedPluginEnabled,
+  updatePluginFromCatalog,
   verifyLocalPluginPackage,
 } from "@koda/plugin-host-node";
 import { pluginCapabilitySchema, type PluginCapability } from "@koda/protocol";
@@ -73,6 +76,84 @@ export async function runPluginInstallCommand(
   }
 }
 
+export async function runPluginDiscoverCommand(
+  options: { catalog: string; keyId: string; key: string },
+  context: PluginCommandContext,
+): Promise<number> {
+  try {
+    const publicKeyPem = await readPublisherKey(
+      options.key,
+      context.processDirectory,
+    );
+    const catalog = await discoverPluginCatalog({
+      catalogUrl: options.catalog,
+      trustRoot: { keyId: options.keyId, publicKeyPem },
+    });
+    for (const entry of catalog.packages) {
+      context.stdout.write(
+        `${entry.id}\t${entry.version}\t${entry.manifestSha256}\n`,
+      );
+    }
+    return 0;
+  } catch (error) {
+    return fail(context, error);
+  }
+}
+
+export async function runPluginInstallRemoteCommand(
+  id: string,
+  options: {
+    version: string;
+    catalog: string;
+    keyId: string;
+    key: string;
+    capabilities: string;
+  },
+  context: PluginCommandContext,
+): Promise<number> {
+  try {
+    const capabilities = parseCapabilities(options.capabilities);
+    const publicKeyPem = await readPublisherKey(
+      options.key,
+      context.processDirectory,
+    );
+    const installed = await installPluginFromCatalog({
+      catalogUrl: options.catalog,
+      trustRoot: { keyId: options.keyId, publicKeyPem },
+      kodaHome: resolveKodaHome(context.environment),
+      id,
+      version: options.version,
+      capabilities,
+    });
+    context.stdout.write(
+      `Installed ${installed.id}@${installed.version} from signed catalog; ${installed.enabled ? "enabled" : "disabled until explicitly enabled"}.\n`,
+    );
+    return 0;
+  } catch (error) {
+    return fail(context, error);
+  }
+}
+
+export async function runPluginUpdateCommand(
+  id: string,
+  context: PluginCommandContext,
+): Promise<number> {
+  try {
+    const installed = await updatePluginFromCatalog({
+      kodaHome: resolveKodaHome(context.environment),
+      id,
+    });
+    context.stdout.write(
+      installed === null
+        ? `${id}: already at the latest stable catalog version.\n`
+        : `Installed ${installed.id}@${installed.version} from signed catalog; disabled until explicitly enabled.\n`,
+    );
+    return 0;
+  } catch (error) {
+    return fail(context, error);
+  }
+}
+
 export async function runPluginListCommand(
   context: PluginCommandContext,
 ): Promise<number> {
@@ -80,7 +161,7 @@ export async function runPluginListCommand(
     const rows = await listManagedPlugins(resolveKodaHome(context.environment));
     for (const row of rows) {
       context.stdout.write(
-        `${row.id}\t${row.version}\t${row.enabled ? "enabled" : "disabled"}\t${row.keyId}\n`,
+        `${row.id}\t${row.version}\t${row.enabled ? "enabled" : "disabled"}\t${row.keyId}\t${row.catalogSha256 ?? "local"}\n`,
       );
     }
     return 0;

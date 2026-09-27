@@ -1,4 +1,9 @@
-import { createHash, createPublicKey, verify } from "node:crypto";
+import {
+  createHash,
+  createPublicKey,
+  verify,
+  type KeyObject,
+} from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, open, readdir } from "node:fs/promises";
 import { join } from "node:path";
@@ -65,16 +70,30 @@ export interface VerifiedPluginPackage {
   readonly totalBytes: number;
 }
 
-export async function verifyLocalPluginPackage(
-  directory: string,
-  trustRoot: PluginPublisherTrustRoot,
-): Promise<VerifiedPluginPackage> {
-  try {
-    if (!(await lstat(directory)).isDirectory()) throw invalidPackage();
-    const manifestBytes = await readRegularFile(
-      join(directory, "manifest.json"),
-      MAX_MANIFEST_BYTES,
+export interface VerifiedPluginManifest extends VerifiedPluginPackage {
+  readonly files: readonly { path: string; bytes: number; sha256: string }[];
+}
+
+export function parsePublisherPublicKey(pem: string): KeyObject {
+  const key = createPublicKey(pem);
+  const canonical = key.export({ type: "spki", format: "pem" }).toString();
+  if (
+    key.asymmetricKeyType !== "ed25519" ||
+    pem.replaceAll("\r\n", "\n").trimEnd() + "\n" !== canonical
+  ) {
+    throw new Error(
+      "Publisher key must contain exactly one Ed25519 public key.",
     );
+  }
+  return key;
+}
+
+export function verifySignedPluginManifest(
+  manifestBytes: Buffer,
+  trustRoot: PluginPublisherTrustRoot,
+): VerifiedPluginManifest {
+  try {
+    if (manifestBytes.length > MAX_MANIFEST_BYTES) throw invalidPackage();
     const manifest = packageManifestSchema.parse(
       JSON.parse(manifestBytes.toString("utf8")) as unknown,
     );
@@ -95,11 +114,8 @@ export async function verifyLocalPluginPackage(
     const { signature, ...signed } = manifest;
     const digest = sha256CanonicalJson(signed);
     const signatureBytes = Buffer.from(signature.ed25519, "base64");
-    if (!trustRoot.publicKeyPem.includes("-----BEGIN PUBLIC KEY-----"))
-      throw invalidPackage();
-    const key = createPublicKey(trustRoot.publicKeyPem);
+    const key = parsePublisherPublicKey(trustRoot.publicKeyPem);
     if (
-      key.asymmetricKeyType !== "ed25519" ||
       signatureBytes.length !== 64 ||
       signatureBytes.toString("base64") !== signature.ed25519 ||
       !verify(
@@ -111,6 +127,33 @@ export async function verifyLocalPluginPackage(
     ) {
       throw invalidPackage();
     }
+    return {
+      id: manifest.id,
+      version: manifest.version,
+      entrypoint: manifest.entrypoint,
+      keyId: trustRoot.keyId,
+      manifestSha256: sha256CanonicalJson(manifest),
+      totalBytes,
+      files: manifest.files,
+    };
+  } catch (error) {
+    if (error instanceof PluginHostError) throw error;
+    throw invalidPackage();
+  }
+}
+
+export async function verifyLocalPluginPackage(
+  directory: string,
+  trustRoot: PluginPublisherTrustRoot,
+): Promise<VerifiedPluginPackage> {
+  try {
+    if (!(await lstat(directory)).isDirectory()) throw invalidPackage();
+    const manifestBytes = await readRegularFile(
+      join(directory, "manifest.json"),
+      MAX_MANIFEST_BYTES,
+    );
+    const manifest = verifySignedPluginManifest(manifestBytes, trustRoot);
+    const paths = manifest.files.map((file) => file.path);
     const actual = await listPackageFiles(directory);
     if (
       actual.length !== paths.length + 1 ||
@@ -136,9 +179,9 @@ export async function verifyLocalPluginPackage(
       id: manifest.id,
       version: manifest.version,
       entrypoint: manifest.entrypoint,
-      keyId: trustRoot.keyId,
-      manifestSha256: sha256CanonicalJson(manifest),
-      totalBytes,
+      keyId: manifest.keyId,
+      manifestSha256: manifest.manifestSha256,
+      totalBytes: manifest.totalBytes,
     };
   } catch (error) {
     if (error instanceof PluginHostError) throw error;

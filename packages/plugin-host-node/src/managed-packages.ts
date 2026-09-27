@@ -28,6 +28,14 @@ const packageRecordSchema = z
     key_id: z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/u),
     public_key_pem: z.string().min(1).max(8_192),
     capabilities: z.array(pluginCapabilitySchema).min(1).max(3),
+    provenance: z
+      .object({
+        catalog_url: z.string().url().max(2_048),
+        catalog_sha256: digestSchema,
+        manifest_path: z.string().min(1).max(300),
+      })
+      .strict()
+      .optional(),
   })
   .strict()
   .refine(
@@ -57,6 +65,14 @@ export interface ManagedPluginStatus {
   manifestSha256: string;
   keyId: string;
   previousVersion?: string;
+  catalogSha256?: string;
+}
+
+export interface ManagedPluginUpdateSource {
+  readonly catalogUrl: string;
+  readonly trustRoot: PluginPublisherTrustRoot;
+  readonly capabilities: readonly PluginCapability[];
+  readonly currentVersion: string;
 }
 
 export async function installManagedPluginPackage(options: {
@@ -64,6 +80,11 @@ export async function installManagedPluginPackage(options: {
   sourceDirectory: string;
   trustRoot: PluginPublisherTrustRoot;
   capabilities: readonly PluginCapability[];
+  provenance?: {
+    catalogUrl: string;
+    catalogSha256: string;
+    manifestPath: string;
+  };
 }): Promise<ManagedPluginStatus> {
   const capabilities = validateCapabilities(options.capabilities);
   const verified = await verifyLocalPluginPackage(
@@ -124,6 +145,15 @@ export async function installManagedPluginPackage(options: {
       key_id: options.trustRoot.keyId,
       public_key_pem: options.trustRoot.publicKeyPem,
       capabilities,
+      ...(options.provenance === undefined
+        ? {}
+        : {
+            provenance: {
+              catalog_url: options.provenance.catalogUrl,
+              catalog_sha256: options.provenance.catalogSha256,
+              manifest_path: options.provenance.manifestPath,
+            },
+          }),
     };
     const unchanged =
       old?.active.manifest_sha256 === active.manifest_sha256 &&
@@ -151,6 +181,25 @@ export async function listManagedPlugins(
   return Object.entries(state.plugins)
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
     .map(([id, entry]) => projectStatus(id, entry));
+}
+
+export async function readManagedPluginUpdateSource(
+  kodaHome: string,
+  id: string,
+): Promise<ManagedPluginUpdateSource> {
+  pluginIdSchema.parse(id);
+  const root = storeRoot(kodaHome);
+  const state = await readState(root);
+  const active = state.plugins[id]?.active;
+  if (active?.provenance === undefined)
+    throw invalidState("Managed plugin has no signed catalog source.");
+  await checkPackage(packagePath(root, id, active.manifest_sha256), id, active);
+  return {
+    catalogUrl: active.provenance.catalog_url,
+    trustRoot: { keyId: active.key_id, publicKeyPem: active.public_key_pem },
+    capabilities: active.capabilities,
+    currentVersion: active.version,
+  };
 }
 
 export async function setManagedPluginEnabled(
@@ -350,6 +399,11 @@ function projectStatus(
     ...(entry.previous === undefined
       ? {}
       : { previousVersion: entry.previous.version }),
+    ...(entry.active.provenance === undefined
+      ? {}
+      : {
+          catalogSha256: entry.active.provenance.catalog_sha256,
+        }),
   };
 }
 
