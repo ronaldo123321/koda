@@ -237,7 +237,7 @@ Intel Mac 将 `arm64` 换成 `x64`。打包脚本会验证复制后的运行时�
 apps/macos-gui/package-unsigned-pkg.sh dist/Koda.app dist/Koda-unsigned.pkg
 ```
 
-该预览安装包尚未签名或公证，也没有远程设备连接和自动更新。已在本机验证 SwiftUI 应用能打开、连接真实 app-server，并读取已有 Thread；Keychain 凭据操作、GUI 内的真实 Provider 对话、审批及 `.pkg` 安装仍待单独验收。
+该预览安装包尚未签名或公证，也没有远程设备连接和自动更新。已在本机验证 SwiftUI 应用能打开、连接真实 app-server、读取已有 Thread，并从 Keychain 加载凭据完成无工具的 OpenAI 对话；GUI 内的工具审批、Keychain 删除及 `.pkg` 安装仍待单独验收。
 
 ## 使用 CLI
 

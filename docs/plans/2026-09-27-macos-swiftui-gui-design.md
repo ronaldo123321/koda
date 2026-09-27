@@ -1,6 +1,6 @@
 # Koda macOS SwiftUI application
 
-- Status: local GUI preview and Keychain credential controls implemented; live Provider and approval acceptance pending
+- Status: local GUI preview, Keychain load, and live OpenAI text turn accepted; tool approval acceptance pending
 - Date: 2026-09-27
 - Scope: native macOS client over the existing local app-server contract
 - Deployment: unsigned internal `.app` with the existing self-contained Koda runtime
@@ -33,10 +33,12 @@ its actual install and rollback acceptance remain pending.
 
 ## Next acceptance and release work
 
-1. Exercise a real Provider turn and an approval in the `.app`, including
-   interruption/relaunch recovery and preservation of prompt input on error.
-2. Accept Keychain save/load/delete in an installed app and verify a live
-   Provider request only after an explicit user action.
+1. Exercise a real tool approval in the `.app`, including interruption/relaunch
+   recovery and preservation of prompt input on error. Two no-tool OpenAI
+   turns completed in the GUI; the second confirmed that new Thread creation
+   does not leave a premature event-log error visible.
+2. Accept Keychain deletion and credential rotation in an installed app.
+   User-entered credential loading and an explicit live Provider request passed.
 3. Complete local GUI coverage for tool results, plans, artifacts, processes,
    search, settings, and workspace mutation recovery before claiming feature
    parity with the TUI.

@@ -49,6 +49,7 @@ final class KodaModel: ObservableObject {
 
     private var connection: AppServerConnection?
     private var finishedTurns = Set<String>()
+    private var pendingNewThreadID: String?
     private var credentialsLoaded = false
     private var credentialEnvironment: [String: String] = [:]
 
@@ -222,12 +223,14 @@ final class KodaModel: ObservableObject {
         entries = []
         streamingText = ""
         guard let id, let connection else { return }
+        if id == pendingNewThreadID && activeTurnID != nil { return }
         connection.request("thread/events", params: ["threadId": id, "limit": 200]) {
             [weak self] response in
             guard let self, self.selectedThreadID == id else { return }
             switch response {
             case .failure(let error): self.notice = error.localizedDescription
             case .success(let result):
+                self.notice = nil
                 let events = result["events"] as? [[String: Any]] ?? []
                 let historical = events.compactMap(Self.entry)
                 self.entries = historical + self.entries.filter { current in
@@ -240,6 +243,7 @@ final class KodaModel: ObservableObject {
     func startTurn() {
         guard canSend, let workspace, let connection else { return }
         let submitted = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        let newThread = selectedThreadID == nil
         var params: [String: Any] = [
             "prompt": submitted,
             "cwd": workspace.path,
@@ -262,6 +266,7 @@ final class KodaModel: ObservableObject {
                 }
                 self.prompt = ""
                 self.activeTurnID = self.finishedTurns.remove(turnID) == nil ? turnID : nil
+                self.pendingNewThreadID = newThread && self.activeTurnID != nil ? threadID : nil
                 self.selectThread(threadID)
                 self.refreshThreads()
             }
@@ -298,6 +303,7 @@ final class KodaModel: ObservableObject {
             if finished == activeTurnID {
                 if let finished { finishedTurns.remove(finished) }
                 activeTurnID = nil
+                pendingNewThreadID = nil
                 streamingText = ""
                 approval = nil
                 selectThread(selectedThreadID)
