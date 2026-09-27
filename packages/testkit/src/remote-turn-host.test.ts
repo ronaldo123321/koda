@@ -78,6 +78,9 @@ describe.skipIf(process.platform === "win32")("remote Turn host", () => {
           },
         };
       },
+      getThread: async () => ({
+        value: { workspaceRoot: await realpath(workspace) },
+      }),
     } as unknown as KodaApplication;
     const host = new RemoteTurnHost(application, bindings, requests);
     const input = {
@@ -137,8 +140,28 @@ describe.skipIf(process.platform === "win32")("remote Turn host", () => {
     });
     expect(reserved).toMatchObject({ status: "reserved", replayed: true });
     expect(starts).toBe(1);
-    await host.close();
+    await expect(
+      host.cancel(principal, catalog, "thread-1", "turn-1"),
+    ).rejects.toThrow("Remote resource is unavailable");
+    const controller = await RemoteAccessCatalog.create(
+      "owner",
+      [{ id: "project", root: await realpath(workspace) }],
+      [
+        {
+          ...principal,
+          workspaceId: "project",
+          permissions: ["turn:control"],
+        },
+      ],
+    );
+    expect(
+      await host.cancel(principal, controller, "thread-1", "wrong-turn"),
+    ).toBe(false);
+    expect(await host.cancel(principal, controller, "thread-1", "turn-1")).toBe(
+      true,
+    );
     expect(cancelled).toBe(true);
+    await host.close();
     const reopened = new RemoteTurnHost(
       application,
       bindings,

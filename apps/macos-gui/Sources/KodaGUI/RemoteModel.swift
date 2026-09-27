@@ -30,6 +30,8 @@ final class RemoteModel: ObservableObject {
     @Published var notice: String?
     @Published var hasPendingStart = false
     @Published var startRetrying = false
+    @Published var activeTurns: [String: String] = [:]
+    @Published var stopPendingTurns = Set<String>()
 
     private var client: RemoteClient?
     private var streamTask: Task<Void, Never>?
@@ -41,6 +43,12 @@ final class RemoteModel: ObservableObject {
     var canSend: Bool {
         connected && selectedWorkspaceID != nil && !hasPendingStart &&
             !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var canCancel: Bool {
+        guard connected, let selectedThreadID,
+              let turnID = activeTurns[selectedThreadID] else { return false }
+        return !stopPendingTurns.contains(turnID)
     }
 
     func connectSaved() {
@@ -194,11 +202,34 @@ final class RemoteModel: ObservableObject {
                 hasPendingStart = false
                 prompt = ""
                 notice = nil
+                if let previous = activeTurns.updateValue(result.turnId, forKey: result.threadId) {
+                    stopPendingTurns.remove(previous)
+                }
+                stopPendingTurns.remove(result.turnId)
                 selectThread(result.threadId)
                 refreshThreads()
             } catch {
                 guard self.client === client else { return }
                 notice = "请求结果未确认，请重试同一请求：\(error.localizedDescription)"
+            }
+        }
+    }
+
+    func cancelTurn() {
+        guard canCancel, let client, let threadID = selectedThreadID,
+              let turnID = activeTurns[threadID] else { return }
+        stopPendingTurns.insert(turnID)
+        Task {
+            do {
+                try await client.cancelTurn(threadID: threadID, turnID: turnID)
+                guard self.client === client,
+                      activeTurns[threadID] == turnID else { return }
+                notice = "已请求停止，等待主机确认。"
+            } catch {
+                guard self.client === client,
+                      activeTurns[threadID] == turnID else { return }
+                stopPendingTurns.remove(turnID)
+                notice = "停止结果未确认，请查看 Thread 更新：\(error.localizedDescription)"
             }
         }
     }
@@ -270,11 +301,19 @@ final class RemoteModel: ObservableObject {
                 entries.append(RemoteChatEntry(id: update.turnId, text: update.text ?? ""))
             }
         case "turn.failed":
+            if activeTurns[threadID] == update.turnId {
+                activeTurns.removeValue(forKey: threadID)
+                stopPendingTurns.remove(update.turnId)
+            }
             entries.append(RemoteChatEntry(
                 id: "failure-\(update.sequence)", text: "Turn 失败：\(update.code ?? "未知错误")"
             ))
             refreshThreads()
         case "turn.completed", "turn.cancelled":
+            if activeTurns[threadID] == update.turnId {
+                activeTurns.removeValue(forKey: threadID)
+                stopPendingTurns.remove(update.turnId)
+            }
             refreshThreads()
         default: break
         }
@@ -297,5 +336,7 @@ final class RemoteModel: ObservableObject {
         threads = []
         selectedThreadID = nil
         entries = []
+        activeTurns = [:]
+        stopPendingTurns = []
     }
 }

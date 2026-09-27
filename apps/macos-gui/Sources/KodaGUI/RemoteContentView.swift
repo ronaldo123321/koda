@@ -154,6 +154,9 @@ struct RemoteContentView: View {
                     Button("放弃重试") { model.abandonPendingStart() }
                         .disabled(model.startRetrying)
                 }
+                if model.canCancel {
+                    Button("停止", systemImage: "stop.fill") { model.cancelTurn() }
+                }
                 Spacer()
                 Button("发送", systemImage: "arrow.up") { model.startTurn() }
                     .buttonStyle(.borderedProminent)

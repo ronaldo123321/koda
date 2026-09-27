@@ -191,7 +191,7 @@ koda chat --cwd .
 
 ## 远程访问准备
 
-首版远程访问面向同一使用者的多台设备，使用局域网或自有 VPN。当前按需启动的 HTTPS 入口可查询获授权的工作区 ID、已绑定 Thread 的脱敏概要、事件序号摘要及助手回答更新；持有显式 `turn:start` 权限的设备还可以启动仅含工作区读取工具的 Turn。已绑定 Thread 另可通过 WSS 订阅助手更新。macOS 图形界面已有远程连接预览；任务控制、完整事件内容和自动配对仍在开发中。
+首版远程访问面向同一使用者的多台设备，使用局域网或自有 VPN。当前按需启动的 HTTPS 入口可查询获授权的工作区 ID、已绑定 Thread 的脱敏概要、事件序号摘要及助手回答更新；持有显式 `turn:start` 权限的设备还可以启动仅含工作区读取工具的 Turn，持有 `turn:control` 权限的设备可取消当前活跃的远程 Turn。已绑定 Thread 另可通过 WSS 订阅助手更新。macOS 图形界面已有远程连接与停止预览；完整事件内容和自动配对仍在开发中。
 
 在作为服务端的 Mac 上登记工作区和设备：
 
@@ -203,7 +203,7 @@ koda remote thread expose <thread-id> --workspace project
 koda remote device revoke <device-id>
 ```
 
-签发命令默认只授予 `workspace:read,thread:read`；如需启动受限 Turn，需显式签发 `--permissions workspace:read,thread:read,turn:start`。远程 Turn 不加载写入、命令执行、插件或 MCP 工具，审批模式固定为 `never`；启动仍会使用主机上的 Provider 凭据并可能消耗配额。令牌只在签发时显示一次，主机仅保存其摘要；请将令牌交给目标设备并妥善保存。每台设备单独签发，丢失时按设备 ID 撤销并重新签发。
+签发命令默认只授予 `workspace:read,thread:read`；如需启动受限 Turn，需显式签发 `--permissions workspace:read,thread:read,turn:start`；如需停止远程 Turn，再显式加入 `turn:control`。远程 Turn 不加载写入、命令执行、插件或 MCP 工具，审批模式固定为 `never`；启动仍会使用主机上的 Provider 凭据并可能消耗配额。令牌只在签发时显示一次，主机仅保存其摘要；请将令牌交给目标设备并妥善保存。每台设备单独签发，丢失时按设备 ID 撤销并重新签发。
 
 准备带有服务端 IP 地址 SAN 的 TLS 证书及仅所有者可读的私钥，然后显式启动监听。例如主机的内网地址是 `192.168.1.10` 时：
 
@@ -219,7 +219,9 @@ koda remote serve --host 192.168.1.10 --port 8443 --cert /absolute/path/server.p
 
 启动受限 Turn 使用 `POST /v1/workspaces/<workspace-id>/turns`，JSON 请求包含 32 位小写十六进制 `requestId`、`prompt`，续接时另带 `resumeThreadId`。主机会先持久化请求身份与 Thread 绑定，再执行 Turn；同一设备用相同 `requestId` 和相同请求重试会得到原 Thread／Turn ID，不会再次启动。若记录仍处于 `reserved`，返回 409 和原 ID，表示启动结果尚不确定，客户端不得自动换新 ID 重试。客户端连接结束不会取消进行中的 Turn；显式停止主机服务会取消当前活跃 Turn。远程审批、写入与命令执行、完整事件内容和端到端客户端验收尚未完成。
 
-在另一台 Mac 的 Koda 图形界面点“远程…”，填入主机的 `https://<内网 IP>:<端口>`、主机启动时显示的证书 SHA-256 指纹和该设备单独签发的令牌，再点“验证并保存”。证书须包含所填地址对应的 IP/DNS SAN；首次验证成功后，这台 Mac 才会将连接配置保存到 Keychain。列表只显示获授权且已绑定的 Thread；“发送”还要求该令牌有 `turn:start` 权限。远程窗口只展示助手文本和 Turn 结束状态，不显示工具或审批详情。网络中断后订阅会按事件游标重连；启动请求结果不明时，界面保留相同请求 ID，供手动重试或放弃。Swift 客户端已与本机启动的真实 Koda 远程入口完成证书、授权、Turn 重试和 WSS 游标回放联调；两台真实设备的网络、断线和实际对话验收仍未完成。
+取消当前活跃 Turn 使用不带请求体的 `POST /v1/threads/<thread-id>/turns/<turn-id>/cancel`。设备必须有该 Thread 工作区的 `turn:control` 权限，且主机验证 Thread 绑定和权威工作区后才会向对应 Turn 发出取消信号；成功返回 202，权限不足、Thread 不可见或 Turn 已不活跃返回 404。网络中断后应先按事件游标查询结果，不要自动重复控制请求。
+
+在另一台 Mac 的 Koda 图形界面点“远程…”，填入主机的 `https://<内网 IP>:<端口>`、主机启动时显示的证书 SHA-256 指纹和该设备单独签发的令牌，再点“验证并保存”。证书须包含所填地址对应的 IP/DNS SAN；首次验证成功后，这台 Mac 才会将连接配置保存到 Keychain。列表只显示获授权且已绑定的 Thread；“发送”还要求该令牌有 `turn:start` 权限，“停止”要求 `turn:control` 权限。远程窗口只展示助手文本和 Turn 结束状态，不显示工具或审批详情。网络中断后订阅会按事件游标重连；启动请求结果不明时，界面保留相同请求 ID，供手动重试或放弃。Swift 客户端已与本机启动的真实 Koda 远程入口完成证书、授权、Turn 重试、取消和 WSS 游标回放联调；两台真实设备的网络、断线和实际对话验收仍未完成。
 
 ## macOS 图形界面内部预览
 

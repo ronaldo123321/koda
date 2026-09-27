@@ -77,6 +77,9 @@ describe.skipIf(process.platform === "win32")(
           permissions: ["workspace:read", "turn:start"],
         },
       ]);
+      const controlDevice = await devices.issue("controller", [
+        { workspaceId: "project", permissions: ["turn:control"] },
+      ]);
       const bindings = await RemoteThreadStore.open(home, "owner");
       await bindings.bind({
         ownerId: "owner",
@@ -202,9 +205,16 @@ describe.skipIf(process.platform === "win32")(
           };
         },
         getThread: async (threadId: string) => ({
-          value: threadId === "thread-1" ? metadata :
-            threadId === "thread-2" ? secondMetadata :
-              threadId === "thread-other" ? otherMetadata : undefined,
+          value:
+            threadId === "thread-1"
+              ? metadata
+              : threadId === "thread-2"
+                ? secondMetadata
+                : threadId === "thread-other"
+                  ? otherMetadata
+                  : threadId.startsWith("thread-new-")
+                    ? { ...metadata, threadId }
+                    : undefined,
           diagnostics: [],
         }),
         readThreadEvents: async (input: {
@@ -569,6 +579,46 @@ describe.skipIf(process.platform === "win32")(
         );
         expect(invalid.status).toBe(400);
         expect(starts).toBe(1);
+        const cancelPath = "/v1/threads/thread-new-1/turns/turn-new-1/cancel";
+        expect(
+          (await post(port, certificate, cancelPath, issued.token)).status,
+        ).toBe(404);
+        expect(
+          (await post(port, certificate, cancelPath, controlDevice.token, {}))
+            .status,
+        ).toBe(400);
+        expect(
+          (
+            await post(
+              port,
+              certificate,
+              "/v1/threads/thread-2/turns/turn-new-1/cancel",
+              controlDevice.token,
+            )
+          ).status,
+        ).toBe(404);
+        expect(
+          (
+            await post(
+              port,
+              certificate,
+              "/v1/threads/thread-other/turns/turn-new-1/cancel",
+              controlDevice.token,
+            )
+          ).status,
+        ).toBe(404);
+        expect(turnCancelled).toBe(false);
+        const cancelled = await post(
+          port,
+          certificate,
+          cancelPath,
+          controlDevice.token,
+        );
+        expect(cancelled).toEqual({
+          status: 202,
+          body: { status: "cancel_requested" },
+        });
+        expect(turnCancelled).toBe(true);
         const revokedSubscription = new Promise<number>((resolveClose) =>
           resumedSubscription.once("close", (code) => resolveClose(code)),
         );
@@ -581,7 +631,7 @@ describe.skipIf(process.platform === "win32")(
           issued.token,
         );
         expect(revoked.status).toBe(401);
-        expect(turnCancelled).toBe(false);
+        expect(turnCancelled).toBe(true);
         await expect(
           get(port, undefined, "/v1/workspaces", issued.token),
         ).rejects.toThrow();
@@ -703,7 +753,7 @@ async function post(
   ca: Buffer,
   path: string,
   token: string,
-  body: object,
+  body?: object,
 ): Promise<{ status: number | undefined; body: unknown }> {
   return requestJson(port, ca, path, "POST", token, body);
 }

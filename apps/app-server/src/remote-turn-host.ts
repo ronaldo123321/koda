@@ -178,6 +178,24 @@ export class RemoteTurnHost {
     };
   }
 
+  public async cancel(
+    principal: RemotePrincipal,
+    catalog: RemoteAccessCatalog,
+    threadId: string,
+    turnId: string,
+  ): Promise<boolean> {
+    const root = await catalog.authorizeThread(
+      principal,
+      await this.threads.get(threadId),
+      "turn:control",
+    );
+    const metadata = (await this.application.getThread(threadId)).value;
+    if (metadata?.workspaceRoot !== root) throw new RemoteAccessDeniedError();
+    const handle = this.active.get(turnId);
+    if (handle?.threadId !== threadId) return false;
+    return handle.cancel("Cancelled by an authorized remote device.");
+  }
+
   public async close(): Promise<void> {
     this.closed = true;
     const handles = [...this.active.values()];

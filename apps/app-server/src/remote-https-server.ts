@@ -241,6 +241,40 @@ async function handleRequest(
       send(response, result.status === "reserved" ? 409 : 202, result);
       return;
     }
+    const cancelMatch =
+      /^\/v1\/threads\/([A-Za-z0-9][A-Za-z0-9_-]{0,127})\/turns\/([A-Za-z0-9][A-Za-z0-9_-]{0,127})\/cancel$/u.exec(
+        url.pathname,
+      );
+    if (
+      request.method === "POST" &&
+      cancelMatch !== null &&
+      url.search === ""
+    ) {
+      if (
+        request.headers["transfer-encoding"] !== undefined ||
+        (request.headers["content-length"] !== undefined &&
+          request.headers["content-length"] !== "0")
+      ) {
+        send(response, 400, { error: "Invalid request" });
+        return;
+      }
+      const threadId = cancelMatch[1];
+      const turnId = cancelMatch[2];
+      if (threadId === undefined || turnId === undefined)
+        throw new RemoteInvalidRequestError();
+      const cancelled = await turnHost.cancel(
+        verified.principal,
+        catalog,
+        threadId,
+        turnId,
+      );
+      send(
+        response,
+        cancelled ? 202 : 404,
+        cancelled ? { status: "cancel_requested" } : { error: "Unavailable" },
+      );
+      return;
+    }
     if (
       request.method !== "GET" ||
       request.headers["content-length"] !== undefined ||
@@ -549,6 +583,7 @@ async function waitForSubscription(client: WebSocket): Promise<void> {
 
 function rejectUpgrade(socket: Duplex, status: number): void {
   if (socket.destroyed) return;
+  socket.once("error", () => socket.destroy());
   const reason =
     status === 401
       ? "Unauthorized"
@@ -601,8 +636,7 @@ function parseEventCursor(
   if (
     url.searchParams.getAll("after").length > 1 ||
     url.searchParams.getAll("limit").length > 1
-  )
-    return undefined;
+  ) return undefined;
   const afterText = url.searchParams.get("after") ?? "-1";
   const limitText = url.searchParams.get("limit") ?? "100";
   if (!/^(?:-1|0|[1-9]\d*)$/u.test(afterText) || !/^[1-9]\d*$/u.test(limitText))
@@ -627,7 +661,8 @@ function parseThreadCursor(
   if (
     url.searchParams.getAll("after").length > 1 ||
     url.searchParams.getAll("limit").length > 1
-  ) return undefined;
+  )
+    return undefined;
   const after = url.searchParams.get("after") ?? undefined;
   const limitText = url.searchParams.get("limit") ?? "25";
   if (

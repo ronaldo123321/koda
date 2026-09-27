@@ -36,6 +36,10 @@ struct RemoteTurnStart: Decodable {
     let status: String
 }
 
+private struct RemoteTurnCancel: Decodable {
+    let status: String
+}
+
 struct RemoteError: LocalizedError {
     let message: String
     var errorDescription: String? { message }
@@ -120,6 +124,20 @@ final class RemoteClient: NSObject, URLSessionDelegate, URLSessionTaskDelegate {
             "/v1/workspaces/\(workspaceID)/turns", method: "POST", body: body,
             acceptedStatuses: [202, 409]
         )
+    }
+
+    func cancelTurn(threadID: String, turnID: String) async throws {
+        guard [threadID, turnID].allSatisfy({
+            $0.range(of: "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+                     options: .regularExpression) != nil
+        }) else { throw RemoteError(message: "远程 Turn 标识无效。") }
+        let result: RemoteTurnCancel = try await perform(
+            "/v1/threads/\(threadID)/turns/\(turnID)/cancel",
+            method: "POST", acceptedStatuses: [202]
+        )
+        guard result.status == "cancel_requested" else {
+            throw RemoteError(message: "远程停止响应无效。")
+        }
     }
 
     func subscribe(threadID: String, after: Int) throws -> URLSessionWebSocketTask {

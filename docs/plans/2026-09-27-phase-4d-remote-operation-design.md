@@ -10,7 +10,9 @@
   projection, approvals, automatic pairing, and two-device acceptance remain open.
   Swift client tests now exercise the actual local HTTPS/WSS listener with
   temporary devices, restricted Turn idempotency, and replay, and reject late
-  subscription frames after switching Threads.
+  subscription frames after switching Threads. A separately authorized
+  `turn:control` endpoint and SwiftUI control can cancel an active remote Turn;
+  multi-device acceptance remains open.
 - Date: 2026-09-27
 - Depends on: local app-server v18, durable JSONL events, thread leases, artifact integrity, and Phase 4A–4C security evidence
 - Scope: one owner across multiple devices, authenticated HTTP/WebSocket clients, reconnect/replay, remote MCP/OAuth, shared state ownership, and owner/workspace/thread authorization
@@ -36,10 +38,12 @@ workspace content, so devices need `thread:read` and must be trusted by the owne
 The enabled Turn start mode uses read-only tools. It binds a new Thread before execution, uses a durable request ID
 to prevent duplicate starts, and does not cancel on an HTTP client disconnect.
 Plugin, MCP, write, execute, approval, and plan-control tools are unavailable
-in this mode. WSS subscriptions are read-only, authenticate the device and
+in this mode. A separate no-body cancellation request checks the Thread binding,
+authoritative workspace root, and `turn:control` grant before signaling an active
+Turn; it never retries automatically after an uncertain response. WSS subscriptions are read-only, authenticate the device and
 Thread before upgrade and during polling, replay by an exclusive durable
 cursor, and close on revocation or bounded-buffer pressure without cancelling
-the Turn. Remote effectful operations stay disabled until their authorization
+the Turn. Other remote effectful operations stay disabled until their authorization
 and disconnect tests pass.
 
 ## 2. Identity and authorization

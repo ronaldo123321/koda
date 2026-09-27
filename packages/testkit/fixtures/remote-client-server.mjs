@@ -14,7 +14,7 @@ await workspaces.register("project", workspaceRoot);
 const devices = await RemoteDeviceStore.open(home, "owner");
 const full = await devices.issue("macbook", [{
   workspaceId: "project",
-  permissions: ["workspace:read", "thread:read", "turn:start"],
+  permissions: ["workspace:read", "thread:read", "turn:start", "turn:control"],
 }]);
 const workspaceOnly = await devices.issue("tablet", [{
   workspaceId: "project",
@@ -67,7 +67,16 @@ const application = {
   startTurnAfter: async (_input, _client, beforeStart) => {
     const ids = { threadId: "thread-1", turnId: "turn-2" };
     await beforeStart(ids);
-    return { ...ids, completion: Promise.resolve(), cancel: () => true };
+    let finish;
+    const completion = new Promise((resolve) => { finish = resolve; });
+    return {
+      ...ids,
+      completion,
+      cancel: () => {
+        finish({ ...ids, status: "cancelled", exitCode: 130 });
+        return true;
+      },
+    };
   },
 };
 const server = await startRemoteHttpsServer({

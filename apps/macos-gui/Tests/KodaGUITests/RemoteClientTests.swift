@@ -32,6 +32,14 @@ final class RemoteClientTests: XCTestCase {
             nextAfterSequence: nil
         ), for: "second")
         XCTAssertEqual(model.entries.map(\.text), ["second"])
+        model.activeTurns["second"] = "turn-second"
+        model.handle(RemoteSubscriptionFrame(
+            kind: "update",
+            event: RemoteUpdate(sequence: 2, turnId: "turn-second",
+                                type: "turn.cancelled", text: nil, code: nil),
+            nextAfterSequence: nil
+        ), for: "second")
+        XCTAssertNil(model.activeTurns["second"])
     }
 
     func testRealRemoteServerCertificateAuthorizationTurnAndReplay() async throws {
@@ -132,6 +140,16 @@ final class RemoteClientTests: XCTestCase {
         XCTAssertEqual(remaining[1].event?.type, "turn.completed")
         XCTAssertEqual(remaining.last?.nextAfterSequence, 3)
         resumed.cancel(with: .goingAway, reason: nil)
+        let noControl = try RemoteClient(settings: RemoteSettings(
+            origin: setup.origin, certificateSha256: setup.fingerprint,
+            token: setup.workspaceOnlyToken
+        ))
+        do {
+            try await noControl.cancelTurn(threadID: "thread-1", turnID: "turn-2")
+            XCTFail("A device without turn:control must not cancel a Turn")
+        } catch { }
+        noControl.close()
+        try await client.cancelTurn(threadID: "thread-1", turnID: "turn-2")
         client.close()
     }
 
