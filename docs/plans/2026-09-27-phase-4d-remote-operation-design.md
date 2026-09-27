@@ -2,8 +2,9 @@
 
 - Status: 4D1 and 4D2 in progress — local owner/device grants, workspace
   registration, credential lifecycle, immutable remote Thread bindings, safe
-  Thread summary projection, and an opt-in read-only TLS listener implemented;
-  remote turns, WebSocket replay, and client pairing are not yet enabled
+  Thread summary projection, and an opt-in read-only TLS listener with durable
+  event-envelope cursor polling implemented; remote turns, WebSocket replay,
+  event content projection, and client pairing are not yet enabled
 - Date: 2026-09-27
 - Depends on: local app-server v18, durable JSONL events, thread leases, artifact integrity, and Phase 4A–4C security evidence
 - Scope: one owner across multiple devices, authenticated HTTP/WebSocket clients, reconnect/replay, remote MCP/OAuth, shared state ownership, and owner/workspace/thread authorization
@@ -18,11 +19,14 @@ not expose them unchanged.
 
 Remote operation uses a separate versioned API and server-side workspace IDs.
 The local stdio protocol and its installed CLI/TUI behavior remain intact.
-The opt-in HTTPS listener serves only authenticated workspace IDs and bound
-Thread summaries. It has TLS, bounded headers and responses, no request body,
-per-request authorization, and negative security tests. The HTTP turn API and
-WebSocket listener stay disabled until their own authorization, replay, and
-disconnect tests pass together.
+The opt-in HTTPS listener serves only authenticated workspace IDs, bound
+Thread summaries, and bounded event envelopes. It has TLS, bounded headers
+and responses, no request body, per-request authorization, and negative
+security tests. The event-envelope endpoint uses exclusive `after` cursors;
+`-1` starts at sequence zero. It omits raw event payloads, which may contain
+host paths or sensitive diagnostics. The HTTP turn API and WebSocket listener
+stay disabled until their own authorization, replay, and disconnect tests pass
+together.
 
 ## 2. Identity and authorization
 
@@ -128,7 +132,8 @@ for each request, but turn creation does not yet bind a Thread. The owner-host
 CLI can register workspaces, issue scoped device credentials, revoke devices,
 and start a read-only HTTPS listener on an
 explicit private address. The listener authenticates each request and projects
-only opaque workspace IDs or bound Thread summaries. It does not yet create
+only opaque workspace IDs, bound Thread summaries, or payload-free event
+envelopes. It does not yet create
 remote Thread bindings, transfer a verified server certificate to a client,
 authorize the existing app-server method set, or implement durable remote
 turns and event replay. These are required before 4D1/4D2 close.

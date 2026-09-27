@@ -868,11 +868,11 @@ export class KodaApplication {
     }
     if (
       afterSequence !== undefined &&
-      (!Number.isSafeInteger(afterSequence) || afterSequence < 0)
+      (!Number.isSafeInteger(afterSequence) || afterSequence < -1)
     ) {
       throw new ThreadHistoryError(
         "INVALID_THREAD_EVENT_CURSOR",
-        "Thread event cursor must be a non-negative safe integer.",
+        "Thread event cursor must be -1 or a non-negative safe integer.",
       );
     }
     const limit = input.limit ?? THREAD_EVENTS_DEFAULT_LIMIT;

@@ -141,7 +141,7 @@ async function handleRequest(
       return;
     }
     const url = new URL(request.url, "https://localhost");
-    if (!request.url.startsWith("/") || url.search !== "" || url.hash !== "") {
+    if (!request.url.startsWith("/") || url.hash !== "") {
       send(response, 404, { error: "Unavailable" });
       return;
     }
@@ -151,7 +151,7 @@ async function handleRequest(
       definitions,
       verified.grants,
     );
-    if (url.pathname === "/v1/workspaces") {
+    if (url.pathname === "/v1/workspaces" && url.search === "") {
       const ids: string[] = [];
       for (const grant of verified.grants) {
         try {
@@ -168,9 +168,10 @@ async function handleRequest(
       send(response, 200, { workspaces: ids.sort() });
       return;
     }
-    const match = /^\/v1\/threads\/([A-Za-z0-9][A-Za-z0-9_-]{0,127})$/u.exec(
-      url.pathname,
-    );
+    const match =
+      /^\/v1\/threads\/([A-Za-z0-9][A-Za-z0-9_-]{0,127})(\/events)?$/u.exec(
+        url.pathname,
+      );
     if (match !== null) {
       const threadId = match[1];
       if (threadId === undefined) {
@@ -185,6 +186,34 @@ async function handleRequest(
       );
       const metadata = (await application.getThread(threadId)).value;
       if (metadata === undefined || metadata.workspaceRoot !== root) {
+        send(response, 404, { error: "Unavailable" });
+        return;
+      }
+      if (match[2] === "/events") {
+        const cursor = parseEventCursor(url);
+        if (cursor === undefined) {
+          send(response, 400, { error: "Invalid event cursor" });
+          return;
+        }
+        const page = await application.readThreadEvents({
+          threadId,
+          afterSequence: cursor.after,
+          limit: cursor.limit,
+        });
+        const events = page.events.map((event) => ({
+          sequence: event.sequence,
+          timestamp: event.timestamp,
+          turnId: event.turnId,
+          type: event.type,
+        }));
+        send(response, 200, {
+          events,
+          hasMore: page.hasLater,
+          nextAfterSequence: events.at(-1)?.sequence ?? cursor.after,
+        });
+        return;
+      }
+      if (url.search !== "") {
         send(response, 404, { error: "Unavailable" });
         return;
       }
@@ -205,6 +234,32 @@ async function handleRequest(
           : "Internal error",
     });
   }
+}
+
+function parseEventCursor(
+  url: URL,
+): { after: number; limit: number } | undefined {
+  for (const key of url.searchParams.keys()) {
+    if (key !== "after" && key !== "limit") return undefined;
+  }
+  if (
+    url.searchParams.getAll("after").length > 1 ||
+    url.searchParams.getAll("limit").length > 1
+  )
+    return undefined;
+  const afterText = url.searchParams.get("after") ?? "-1";
+  const limitText = url.searchParams.get("limit") ?? "100";
+  if (!/^(?:-1|0|[1-9]\d*)$/u.test(afterText) || !/^[1-9]\d*$/u.test(limitText))
+    return undefined;
+  const after = Number(afterText);
+  const limit = Number(limitText);
+  if (
+    !Number.isSafeInteger(after) ||
+    !Number.isSafeInteger(limit) ||
+    limit > 100
+  )
+    return undefined;
+  return { after, limit };
 }
 
 function bearerToken(request: IncomingMessage): string | undefined {

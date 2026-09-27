@@ -191,7 +191,7 @@ koda chat --cwd .
 
 ## 远程访问准备
 
-首版远程访问面向同一使用者的多台设备，使用局域网或自有 VPN。当前已提供按需启动的只读 HTTPS 入口；设备可以查询获授权的工作区 ID，以及已绑定 Thread 的脱敏概要。远程客户端、任务控制、事件重连和自动配对仍在开发中。
+首版远程访问面向同一使用者的多台设备，使用局域网或自有 VPN。当前已提供按需启动的只读 HTTPS 入口；设备可以查询获授权的工作区 ID、已绑定 Thread 的脱敏概要，以及事件序号摘要。远程客户端、任务控制、完整事件内容、WebSocket 实时订阅和自动配对仍在开发中。
 
 在作为服务端的 Mac 上登记工作区和设备：
 
@@ -210,7 +210,7 @@ koda remote device revoke <device-id>
 koda remote serve --host 192.168.1.10 --port 8443 --cert /absolute/path/server.pem --key /absolute/path/server-key.pem
 ```
 
-服务端拒绝公网和通配监听地址。客户端必须验证证书；自签名证书需预先信任或固定其指纹。`GET /v1/workspaces` 和 `GET /v1/threads/<thread-id>` 要求 `Authorization: Bearer <device-token>`，返回结果不含主机路径。当前没有自动登记既有本地 Thread 的命令，也没有 WebSocket 事件流，因此这两个只读接口不能视为远程操作验收通过。
+服务端拒绝公网和通配监听地址。客户端必须验证证书；自签名证书需预先信任或固定其指纹。`GET /v1/workspaces`、`GET /v1/threads/<thread-id>` 和 `GET /v1/threads/<thread-id>/events?after=-1&limit=100` 要求 `Authorization: Bearer <device-token>`，返回结果不含主机路径。事件接口以排他游标分页：首次用 `after=-1`，此后使用响应中的 `nextAfterSequence`；当前只返回序号、时间、Turn ID 与事件类型，不返回原始事件内容。当前没有自动登记既有本地 Thread 的命令，也没有 WebSocket 事件流，因此只读接口不能视为远程操作验收通过。
 
 ## 使用 CLI
 

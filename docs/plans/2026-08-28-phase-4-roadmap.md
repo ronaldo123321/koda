@@ -353,9 +353,10 @@ of these items is considered complete when macOS or Linux closes.
 Status: In progress — the single-owner, multi-device authorization, local
 workspace registration, owner-host device credential commands, and immutable
 remote Thread-binding foundation is implemented locally. An opt-in authenticated
-TLS listener on a private IP now exposes only workspace IDs and bound Thread
-summaries; no turn-binding integration, WebSocket replay, remote MCP/OAuth, or
-remote acceptance is enabled yet. First deployment targets LAN or an
+TLS listener on a private IP now exposes workspace IDs, bound Thread summaries,
+and durable payload-free event envelopes with exclusive cursors; no
+turn-binding integration, WebSocket replay, remote MCP/OAuth, or remote
+acceptance is enabled yet. First deployment targets LAN or an
 owner-managed VPN.
 The chosen client direction is a native SwiftUI macOS application.
 

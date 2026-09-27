@@ -12,7 +12,7 @@ import {
   RemoteWorkspaceStore,
   startRemoteHttpsServer,
 } from "@koda/app-server";
-import { threadMetadataSchema } from "@koda/protocol";
+import { agentEventSchema, threadMetadataSchema } from "@koda/protocol";
 import { afterEach, describe, expect, it } from "vitest";
 
 const execFileAsync = promisify(execFile);
@@ -98,8 +98,42 @@ describe.skipIf(process.platform === "win32")(
         sourceMtimeMs: 1,
         errorMessage: "private diagnostic",
       });
+      const replayEvents = [
+        agentEventSchema.parse({
+          schemaVersion: 1,
+          sequence: 0,
+          timestamp: "2026-09-27T00:00:00.000Z",
+          threadId: "thread-1",
+          turnId: "turn-1",
+          type: "turn.started",
+          payload: {},
+        }),
+        agentEventSchema.parse({
+          schemaVersion: 1,
+          sequence: 1,
+          timestamp: "2026-09-27T00:00:01.000Z",
+          threadId: "thread-1",
+          turnId: "turn-1",
+          type: "assistant.delta",
+          payload: { text: `private path ${workspace}` },
+        }),
+      ];
       const application = {
         getThread: async () => ({ value: metadata, diagnostics: [] }),
+        readThreadEvents: async (input: {
+          afterSequence?: number;
+          limit?: number;
+        }) => {
+          const matching = replayEvents.filter(
+            (event) => event.sequence > (input.afterSequence ?? -1),
+          );
+          const events = matching.slice(0, input.limit ?? 100);
+          return {
+            events,
+            hasEarlier: false,
+            hasLater: matching.length > events.length,
+          };
+        },
       } as unknown as KodaApplication;
       const server = await startRemoteHttpsServer({
         application,
@@ -135,6 +169,39 @@ describe.skipIf(process.platform === "win32")(
         });
         expect(JSON.stringify(thread.body)).not.toContain(home);
         expect(JSON.stringify(thread.body)).not.toContain("private diagnostic");
+        const firstEvents = await get(
+          port,
+          certificate,
+          "/v1/threads/thread-1/events?after=-1&limit=1",
+          issued.token,
+        );
+        expect(firstEvents.body).toMatchObject({
+          events: [{ sequence: 0, type: "turn.started" }],
+          hasMore: true,
+          nextAfterSequence: 0,
+        });
+        const resumedEvents = await get(
+          port,
+          certificate,
+          "/v1/threads/thread-1/events?after=0",
+          issued.token,
+        );
+        expect(resumedEvents.body).toMatchObject({
+          events: [{ sequence: 1, type: "assistant.delta" }],
+          hasMore: false,
+          nextAfterSequence: 1,
+        });
+        expect(JSON.stringify(resumedEvents.body)).not.toContain(workspace);
+        expect(JSON.stringify(resumedEvents.body)).not.toContain(
+          "private path",
+        );
+        const badCursor = await get(
+          port,
+          certificate,
+          "/v1/threads/thread-1/events?after=0&after=1",
+          issued.token,
+        );
+        expect(badCursor.status).toBe(400);
         const deniedThread = await get(
           port,
           certificate,
@@ -142,6 +209,13 @@ describe.skipIf(process.platform === "win32")(
           readOnly.token,
         );
         expect(deniedThread.status).toBe(404);
+        const deniedEvents = await get(
+          port,
+          certificate,
+          "/v1/threads/thread-1/events?after=-1",
+          readOnly.token,
+        );
+        expect(deniedEvents.status).toBe(404);
         const missing = await get(
           port,
           certificate,

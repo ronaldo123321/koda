@@ -1156,6 +1156,12 @@ describe("KodaApplication", () => {
       afterSequence: 2,
       limit: 2,
     });
+    const fromStart = await application.readThreadEvents({
+      threadId,
+      afterSequence: -1,
+      limit: 2,
+    });
+    expect(fromStart.events.map((event) => event.sequence)).toEqual([0, 1]);
     expect(forward.events.map((event) => event.sequence)).toEqual([3, 4]);
     expect(forward).toMatchObject({
       hasEarlier: true,
