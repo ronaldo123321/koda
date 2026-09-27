@@ -9,6 +9,12 @@ import {
   runExtensionReadCommand,
 } from "./extension-command.js";
 import { runCommand, type RunCommandInput } from "./run-command.js";
+import {
+  runRemoteDeviceIssueCommand,
+  runRemoteDeviceRevokeCommand,
+  runRemoteWorkspaceAddCommand,
+  runRemoteWorkspaceListCommand,
+} from "./remote-command.js";
 import { runSetupCommand } from "./setup-command.js";
 import {
   runThreadListCommand,
@@ -240,6 +246,59 @@ export function createProgram(runtime: ProgramRuntime): Command {
           stdout: runtime.stdout,
           stderr: runtime.stderr,
         }),
+      );
+    });
+
+  const remote = program
+    .command("remote")
+    .description("Manage remote access on the owner host");
+  const remoteWorkspace = remote
+    .command("workspace")
+    .description("Manage allowed workspaces");
+  remoteWorkspace
+    .command("add")
+    .argument("<id>", "opaque workspace ID")
+    .requiredOption("--path <directory>", "absolute host directory")
+    .action(async (id: string, options: { path: string }) => {
+      runtime.setExitCode(
+        await runRemoteWorkspaceAddCommand(id, options.path, runtime),
+      );
+    });
+  remoteWorkspace.command("list").action(async () => {
+    runtime.setExitCode(await runRemoteWorkspaceListCommand(runtime));
+  });
+  const remoteDevice = remote
+    .command("device")
+    .description("Manage paired devices");
+  remoteDevice
+    .command("issue")
+    .argument("<label>", "local device label")
+    .requiredOption("--workspace <id>", "registered workspace ID")
+    .option(
+      "--permissions <list>",
+      "comma-separated permissions; defaults to read-only",
+    )
+    .action(
+      async (
+        label: string,
+        options: { workspace: string; permissions?: string },
+      ) => {
+        runtime.setExitCode(
+          await runRemoteDeviceIssueCommand(
+            label,
+            options.workspace,
+            options.permissions,
+            runtime,
+          ),
+        );
+      },
+    );
+  remoteDevice
+    .command("revoke")
+    .argument("<device-id>", "device ID from pairing")
+    .action(async (deviceId: string) => {
+      runtime.setExitCode(
+        await runRemoteDeviceRevokeCommand(deviceId, runtime),
       );
     });
 

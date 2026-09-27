@@ -350,10 +350,11 @@ of these items is considered complete when macOS or Linux closes.
 
 ### Phase 4D: authenticated remote operation
 
-Status: In progress — the single-owner, multi-device authorization, device
-credential, and immutable remote Thread-binding foundation is implemented
-locally; no remote listener, turn-binding integration, replay, remote MCP/OAuth,
-or remote acceptance is enabled yet.
+Status: In progress — the single-owner, multi-device authorization, local
+workspace registration, owner-host device credential commands, and immutable
+remote Thread-binding foundation is implemented locally; no remote listener,
+turn-binding integration, replay, remote MCP/OAuth, or remote acceptance is
+enabled yet. First deployment targets LAN or an owner-managed VPN with TLS.
 The chosen client direction is a native SwiftUI macOS application.
 
 The current contract and delivery checks are in

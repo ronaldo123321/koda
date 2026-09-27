@@ -23,6 +23,7 @@
   },
   "dependencies": {
     "@koda/app": "workspace:*",
+    "@koda/app-server": "workspace:*",
     "@koda/agent-core": "workspace:*",
     "@koda/app-server-client-node": "workspace:*",
     "@koda/distribution": "workspace:*",

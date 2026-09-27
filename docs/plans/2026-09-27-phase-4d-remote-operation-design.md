@@ -1,8 +1,9 @@
 # Koda Phase 4D: Authenticated Remote Operation
 
-- Status: 4D1 in progress — local owner/device grants, credential issuance,
-  verification, revocation, immutable remote Thread bindings, and safe Thread
-  summary projection implemented; no remote listener is enabled
+- Status: 4D1 in progress — local owner/device grants, workspace registration,
+  credential issuance, verification, revocation, immutable remote Thread
+  bindings, and safe Thread summary projection implemented; no remote listener
+  is enabled
 - Date: 2026-09-27
 - Depends on: local app-server v18, durable JSONL events, thread leases, artifact integrity, and Phase 4A–4C security evidence
 - Scope: one owner across multiple devices, authenticated HTTP/WebSocket clients, reconnect/replay, remote MCP/OAuth, shared state ownership, and owner/workspace/thread authorization
@@ -43,9 +44,13 @@ host paths, secret names not needed by the client, and raw diagnostics.
 Each device has a distinct server-issued, revocable, short-lived credential
 whose stored representation is a digest. Pairing and revocation require
 owner-local authorization; possession of one device token cannot mint another.
-Transport requires TLS. Credential rotation and revocation take effect before
-a new request or WebSocket subscription; neither device credentials nor OAuth
-secrets enter JSONL, responses, URLs, or routine logs.
+The first listener targets an explicitly configured LAN or owner-managed VPN
+interface, never a public bind by default. Transport requires TLS; the client
+must verify the host certificate, with a pinned fingerprint or a trusted local
+CA established during owner-local pairing. A bearer credential alone does not
+justify skipping certificate verification. Credential rotation and revocation
+take effect before a new request or WebSocket subscription; neither device
+credentials nor OAuth secrets enter JSONL, responses, URLs, or routine logs.
 
 ## 3. Durable sessions and replay
 
@@ -113,7 +118,9 @@ Phase 4D is complete only when all five slices pass their stated runtime,
 security, and recovery checks. A reachable HTTP endpoint or a successful
 handshake alone is not completion evidence.
 
-Current 4D1 code provides `RemoteAccessCatalog`, `RemoteDeviceStore`, and
-`RemoteThreadStore` without wiring them into a listener or turn creation.
-It does not yet offer owner-local pairing commands or authorize the existing
-app-server method set. These are required before 4D1 closes.
+Current 4D1 code provides `RemoteAccessCatalog`, `RemoteWorkspaceStore`,
+`RemoteDeviceStore`, and `RemoteThreadStore` without wiring them into a listener
+or turn creation. The owner-host CLI can register workspaces, issue scoped
+device credentials, and revoke devices. It does not yet transfer a verified
+server certificate to a client or authorize the existing app-server method set.
+These are required before 4D1 closes.

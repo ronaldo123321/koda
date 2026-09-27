@@ -189,6 +189,21 @@ koda chat --cwd .
 
 连接检查必须显式指定 `--check`。它通过所选服务提供商适配器发送一次不带工具的最小请求，可能消耗 API 配额；缺少凭据、凭据或模型被拒绝、限流、网络故障、取消或其他有界错误时以状态码 1 退出。它不会输出凭据或原始服务提供商响应。未指定 `--check` 的设置命令不会构造服务提供商实例，也不会发起网络请求，因此可以在尚无凭据时安全地保存偏好。
 
+## 远程访问准备
+
+首版远程访问面向同一使用者的多台设备，计划在局域网或自有 VPN 内使用 TLS 连接。当前只有主机本地的工作区登记、设备凭据签发与撤销；远程监听器和客户端尚未启用。
+
+在将来作为服务端的 Mac 上执行：
+
+```bash
+koda remote workspace add project --path /absolute/path/to/project
+koda remote workspace list
+koda remote device issue macbook --workspace project
+koda remote device revoke <device-id>
+```
+
+签发命令默认只授予 `workspace:read,thread:read`；如需其他权限，可在签发时用 `--permissions` 指定逗号分隔的权限。令牌只在签发时显示一次，主机仅保存其摘要；请将令牌交给目标设备并妥善保存。每台设备单独签发，丢失时按设备 ID 撤销并重新签发。这些准备命令目前不会让设备连上主机。
+
 ## 使用 CLI
 
 构建 Koda，为一个内置服务提供商提供凭据，然后在工作区运行任务。默认使用 OpenAI：
