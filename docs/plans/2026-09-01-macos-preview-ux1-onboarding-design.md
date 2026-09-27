@@ -1,7 +1,7 @@
 # macOS Preview UX1: First-Run Onboarding and Provider Setup
 
-- Status: In progress — UX1A/UX1B complete and UX1C implementation locally
-  accepted; dedicated real-Provider dogfooding remains
+- Status: Complete for the unsigned macOS arm64 preview — UX1A/UX1B and UX1C
+  passed local and live OpenAI acceptance on 2026-09-27
 - Date: 2026-09-01
 - Scope: credential-safe first-run setup, workspace Provider/model preference,
   explicit connection checking, and clearer CLI/TUI readiness guidance
@@ -158,8 +158,8 @@ Provider preference through the same revision-safe boundary as `koda setup`.
 
 ### UX1C: explicit check and dogfooding
 
-Status: Implementation complete and credential-free macOS acceptance passed on
-2026-09-01; live real-Provider acceptance remains manual.
+Status: Complete for the unsigned macOS arm64 preview. Credential-free
+acceptance passed on 2026-09-01 and live OpenAI acceptance passed on 2026-09-27.
 
 - opt-in minimal live Provider check;
 - fake-Provider conformance and error normalization;
@@ -188,11 +188,22 @@ was assembled from implementation commit `a99b0e5`, and its active installed
 identity `0.1.0+a99b0e551fec` bound the acceptance result to that exact source.
 The unsigned candidate remains local and was not published.
 
-A successful live check and the broader chat/approval/patch/command/PTY/
-background/recovery matrix require an intentionally supplied low-privilege test
-credential. They remain the final UX1 external acceptance item and the MR1A4
-runbook remains authoritative for public-release evidence. No credential is
-introduced into CI or repository state to close that item artificially.
+An installed unsigned arm64 preview built from `c89971e` was accepted as
+`0.1.0+c89971ed0eec` with `status=ready`, `doctor=passed`, and no pending
+recovery. With a user-supplied OpenAI project credential, `koda setup --check`
+passed for `gpt-5.6-terra`; installed CLI and TUI completed real turns. The TUI
+approved an `apply_patch` create and a native `exec_command` under macOS
+Seatbelt with workspace-write filesystem and denied network. It also approved
+a background `exec_terminal` PTY. After TUI restart without the credential,
+the resumed thread found the running job, attached, echoed input, and
+confirmed termination. `recovery list` found no mutation conflicts. The
+temporary credential file was removed; no credential was added to the
+repository or CI.
+
+One installed TUI request failed with bounded `PROVIDER_REQUEST_FAILED` before
+a later retry succeeded. Its underlying Provider/network cause was not exposed,
+so this acceptance does not establish request reliability. MR1A4's runbook
+remains authoritative for signed public-release and clean-machine evidence.
 
 ## Verification
 

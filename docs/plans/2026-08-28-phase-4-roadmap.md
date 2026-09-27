@@ -64,8 +64,9 @@ It keeps API keys in the process environment and does not pull Keychain or a
 graphical application into Mac Release 1A. UX1A setup core/CLI and UX1B
 credential-safe client readiness guidance are complete. UX1C explicit Provider
 checking, fake-Provider conformance, and unsigned installed-preview acceptance
-are implemented and locally verified. A successful live check and the broader
-real-Provider workflow matrix remain an explicit manual acceptance item.
+are implemented and locally verified. Live OpenAI arm64 check and the
+chat/approval/patch/command/PTY/background/recovery workflow passed on
+2026-09-27; public-release acceptance remains in MR1A4.
 
 ## Guiding policies
 
