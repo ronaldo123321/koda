@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 
 struct ContentView: View {
+    @Environment(\.openWindow) private var openWindow
     @StateObject private var model = KodaModel()
     @State private var credentialProvider: ProviderOption?
 
@@ -94,6 +95,7 @@ struct ContentView: View {
                 if !model.connected {
                     Button("重连") { model.reconnect() }
                 }
+                Button("远程…") { openWindow(id: "remote") }
             }
             HStack {
                 Picker("Provider", selection: Binding(

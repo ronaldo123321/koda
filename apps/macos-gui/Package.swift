@@ -6,5 +6,8 @@ let package = Package(
     name: "KodaGUI",
     platforms: [.macOS(.v14)],
     products: [.executable(name: "KodaGUI", targets: ["KodaGUI"])],
-    targets: [.executableTarget(name: "KodaGUI")]
+    targets: [
+        .executableTarget(name: "KodaGUI"),
+        .testTarget(name: "KodaGUITests", dependencies: ["KodaGUI"]),
+    ]
 )
