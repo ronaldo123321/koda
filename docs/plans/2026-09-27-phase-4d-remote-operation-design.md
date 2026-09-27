@@ -6,7 +6,8 @@
   and assistant-update cursor polling, and restricted remote Turn start with durable request
   idempotency and authenticated WSS replay implemented; a native macOS client
   preview now verifies a pinned certificate, stores its device token in Keychain,
-  lists authorized Threads, and replays assistant updates. Full event content
+  lists authorized Threads, replays assistant updates, and previews verified
+  Thread artifacts in bounded UTF-8 ranges. Full event content
   projection, approvals, automatic pairing, and two-device acceptance remain open.
   Swift client tests now exercise the actual local HTTPS/WSS listener with
   temporary devices, restricted Turn idempotency, and replay, and reject late
@@ -22,6 +23,9 @@
   covers cross-workspace denial, absent references, invalid cursors, and
   changed artifact bytes. Remote retention ownership and physical-device
   acceptance remain open.
+  The Swift client integration test reads a real artifact through the pinned
+  HTTPS connection in two ranges, checks missing grants and references, and
+  verifies the model assembles the same UTF-8 text for display.
 - Date: 2026-09-27
 - Depends on: local app-server v18, durable JSONL events, thread leases, artifact integrity, and Phase 4A–4C security evidence
 - Scope: one owner across multiple devices, authenticated HTTP/WebSocket clients, reconnect/replay, remote MCP/OAuth, shared state ownership, and owner/workspace/thread authorization
@@ -174,7 +178,8 @@ register workspaces, explicitly expose an existing Thread
 after verifying its workspace, issue scoped device credentials, revoke devices,
 and start a restricted HTTPS listener on an explicit private address. The
 listener authenticates each request and projects only opaque workspace IDs,
-bound Thread summaries, payload-free event envelopes, or assistant updates.
+bound Thread summaries, payload-free event envelopes, assistant updates, and
+verified Thread artifact ranges.
 The SwiftUI preview verifies an out-of-band pinned server certificate and
 replays authorized assistant updates. Automatic pairing, the full app-server
 method set, complete event content, remote approvals and effects, and physical

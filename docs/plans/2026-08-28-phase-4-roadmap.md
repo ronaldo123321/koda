@@ -360,7 +360,8 @@ authenticated WSS subscriptions with replay, and restricted
 remote Turn starts with pre-execution binding and durable request idempotency.
 Thread-scoped artifact listing and verified text-range reads are now exposed
 through the same authorization boundary. The native SwiftUI client preview
-uses pinned TLS and cursor replay.
+uses pinned TLS and cursor replay and can display authorized text artifacts
+in bounded ranges.
 Remote effectful operations, complete event projection, remote MCP/OAuth, and remote
 acceptance are not enabled yet. First deployment targets LAN or an
 owner-managed VPN.

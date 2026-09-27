@@ -32,6 +32,15 @@ final class RemoteModel: ObservableObject {
     @Published var startRetrying = false
     @Published var activeTurns: [String: String] = [:]
     @Published var stopPendingTurns = Set<String>()
+    @Published var artifacts: [RemoteArtifactDescriptor] = []
+    @Published var artifactListBusy = false
+    @Published var hasEarlierArtifacts = false
+    @Published var selectedArtifactID: String?
+    @Published var artifactText = ""
+    @Published var artifactEndByte = 0
+    @Published var artifactHasLater = false
+    @Published var artifactBusy = false
+    @Published var artifactNotice: String?
 
     private var client: RemoteClient?
     private var connectTask: Task<Void, Never>?
@@ -41,6 +50,9 @@ final class RemoteModel: ObservableObject {
     private var cursor = -1
     private var lastRenderedSequence = -1
     private var pendingStart: PendingRemoteStart?
+    private var artifactGeneration = 0
+    private var artifactReadGeneration = 0
+    private var nextBeforeArtifactSequence: Int?
 
     var canSend: Bool {
         connected && selectedWorkspaceID != nil && !hasPendingStart &&
@@ -157,6 +169,7 @@ final class RemoteModel: ObservableObject {
         selectedWorkspaceID = id
         selectedThreadID = nil
         entries = []
+        resetArtifacts()
         refreshThreads()
     }
 
@@ -177,12 +190,124 @@ final class RemoteModel: ObservableObject {
 
     func selectThread(_ id: String?) {
         stopStream()
+        resetArtifacts()
         selectedThreadID = id
         entries = []
         cursor = -1
         lastRenderedSequence = -1
         guard let id, let client else { return }
+        refreshArtifacts()
         streamTask = Task { await stream(threadID: id, client: client) }
+    }
+
+    func refreshArtifacts() {
+        artifactGeneration += 1
+        artifactReadGeneration += 1
+        artifacts = []
+        artifactListBusy = false
+        hasEarlierArtifacts = false
+        nextBeforeArtifactSequence = nil
+        selectedArtifactID = nil
+        artifactText = ""
+        artifactEndByte = 0
+        artifactHasLater = false
+        artifactBusy = false
+        artifactNotice = nil
+        loadArtifactPage()
+    }
+
+    func loadEarlierArtifacts() {
+        guard hasEarlierArtifacts else { return }
+        loadArtifactPage()
+    }
+
+    private func loadArtifactPage() {
+        guard let client, let threadID = selectedThreadID, !artifactListBusy else { return }
+        let generation = artifactGeneration
+        let before = nextBeforeArtifactSequence
+        artifactListBusy = true
+        Task {
+            do {
+                let page = try await client.listArtifacts(threadID: threadID, beforeSequence: before)
+                guard self.client === client, selectedThreadID == threadID,
+                      artifactGeneration == generation else { return }
+                artifacts.append(contentsOf: page.artifacts)
+                hasEarlierArtifacts = page.hasEarlier
+                nextBeforeArtifactSequence = page.nextBeforeSequence
+                artifactNotice = nil
+            } catch {
+                guard self.client === client, selectedThreadID == threadID,
+                      artifactGeneration == generation else { return }
+                artifactNotice = "无法读取远程产物：\(error.localizedDescription)"
+            }
+            guard self.client === client, selectedThreadID == threadID,
+                  artifactGeneration == generation else { return }
+            artifactListBusy = false
+        }
+    }
+
+    func openArtifact(_ id: String) {
+        artifactReadGeneration += 1
+        selectedArtifactID = id
+        artifactText = ""
+        artifactEndByte = 0
+        artifactHasLater = false
+        artifactBusy = false
+        artifactNotice = nil
+        guard let descriptor = artifacts.first(where: { $0.id == id }) else { return }
+        guard descriptor.artifact.mediaType == "text/plain; charset=utf-8" ||
+              descriptor.artifact.mediaType == "application/json" else {
+            artifactNotice = "此产物不是可预览的文本或 JSON。"
+            return
+        }
+        loadMoreArtifact()
+    }
+
+    func loadMoreArtifact() {
+        guard let client, let threadID = selectedThreadID,
+              let id = selectedArtifactID, !artifactBusy else { return }
+        let generation = artifactReadGeneration
+        let after = artifactEndByte
+        artifactBusy = true
+        Task {
+            do {
+                let range = try await client.readArtifact(
+                    threadID: threadID, artifactID: id, afterByte: after
+                )
+                guard self.client === client, selectedThreadID == threadID,
+                      selectedArtifactID == id, artifactReadGeneration == generation else { return }
+                guard range.artifact.id == id, range.startByte == after,
+                      range.endByte > after || !range.hasLater else {
+                    throw RemoteError(message: "远程产物分页响应无效。")
+                }
+                artifactText += range.content
+                artifactEndByte = range.endByte
+                artifactHasLater = range.hasLater
+                artifactNotice = nil
+            } catch {
+                guard self.client === client, selectedThreadID == threadID,
+                      selectedArtifactID == id, artifactReadGeneration == generation else { return }
+                artifactNotice = "无法读取产物内容：\(error.localizedDescription)"
+            }
+            guard self.client === client, selectedThreadID == threadID,
+                  selectedArtifactID == id, artifactReadGeneration == generation else { return }
+            artifactBusy = false
+        }
+    }
+
+    private func resetArtifacts() {
+        artifactGeneration += 1
+        artifactReadGeneration += 1
+        artifacts = []
+        artifactListBusy = false
+        hasEarlierArtifacts = false
+        nextBeforeArtifactSequence = nil
+        selectedArtifactID = nil
+        artifactText = ""
+        artifactEndByte = 0
+        artifactHasLater = false
+        artifactBusy = false
+        artifactNotice = nil
     }
 
     func startTurn() {
@@ -360,6 +485,7 @@ final class RemoteModel: ObservableObject {
 
     private func disconnect() {
         stopStream()
+        resetArtifacts()
         client?.close()
         client = nil
         connected = false

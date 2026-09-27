@@ -36,6 +36,35 @@ struct RemoteTurnStart: Decodable {
     let status: String
 }
 
+struct RemoteArtifact: Decodable, Identifiable {
+    let id: String
+    let sha256: String
+    let bytes: Int
+    let mediaType: String
+}
+
+struct RemoteArtifactDescriptor: Decodable, Identifiable {
+    let sequence: Int
+    let artifact: RemoteArtifact
+    var id: String { artifact.id }
+}
+
+struct RemoteArtifactPage: Decodable {
+    let artifacts: [RemoteArtifactDescriptor]
+    let hasEarlier: Bool
+    let nextBeforeSequence: Int?
+}
+
+struct RemoteArtifactRange: Decodable {
+    let artifact: RemoteArtifact
+    let content: String
+    let startByte: Int
+    let endByte: Int
+    let totalBytes: Int
+    let hasEarlier: Bool
+    let hasLater: Bool
+}
+
 private struct RemoteTurnCancel: Decodable {
     let status: String
 }
@@ -140,10 +169,36 @@ final class RemoteClient: NSObject, URLSessionDelegate, URLSessionTaskDelegate {
         }
     }
 
+    func listArtifacts(threadID: String, beforeSequence: Int? = nil) async throws -> RemoteArtifactPage {
+        guard validThreadID(threadID) else {
+            throw RemoteError(message: "远程产物请求无效。")
+        }
+        if let beforeSequence, beforeSequence < 0 {
+            throw RemoteError(message: "远程产物游标无效。")
+        }
+        return try await get(
+            "/v1/threads/\(threadID)/artifacts",
+            query: [URLQueryItem(name: "limit", value: "25")] +
+                (beforeSequence.map { [URLQueryItem(name: "before", value: String($0))] } ?? [])
+        )
+    }
+
+    func readArtifact(threadID: String, artifactID: String, afterByte: Int = 0) async throws -> RemoteArtifactRange {
+        guard validThreadID(threadID), afterByte >= 0,
+              artifactID.range(of: "^sha256:[a-f0-9]{64}$", options: .regularExpression) != nil else {
+            throw RemoteError(message: "远程产物标识或游标无效。")
+        }
+        return try await get(
+            "/v1/threads/\(threadID)/artifacts/\(artifactID)",
+            query: [
+                URLQueryItem(name: "afterByte", value: String(afterByte)),
+                URLQueryItem(name: "maxBytes", value: "16384"),
+            ]
+        )
+    }
+
     func subscribe(threadID: String, after: Int) throws -> URLSessionWebSocketTask {
-        guard threadID.range(
-            of: "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$", options: .regularExpression
-        ) != nil else { throw RemoteError(message: "远程 Thread ID 无效。") }
+        guard validThreadID(threadID) else { throw RemoteError(message: "远程 Thread ID 无效。") }
         var components = URLComponents(url: origin, resolvingAgainstBaseURL: false)!
         components.scheme = "wss"
         components.path = "/v1/threads/\(threadID)/subscribe"
@@ -159,6 +214,10 @@ final class RemoteClient: NSObject, URLSessionDelegate, URLSessionTaskDelegate {
         let task = session.webSocketTask(with: request)
         task.resume()
         return task
+    }
+
+    private func validThreadID(_ value: String) -> Bool {
+        value.range(of: "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$", options: .regularExpression) != nil
     }
 
     private func get<T: Decodable>(

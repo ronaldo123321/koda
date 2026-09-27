@@ -3,6 +3,7 @@ import SwiftUI
 struct RemoteContentView: View {
     @StateObject private var model = RemoteModel()
     @State private var showingConnection = false
+    @State private var showingArtifacts = false
 
     var body: some View {
         NavigationSplitView {
@@ -65,6 +66,9 @@ struct RemoteContentView: View {
         .sheet(isPresented: $showingConnection) {
             RemoteConnectionView(model: model)
         }
+        .sheet(isPresented: $showingArtifacts) {
+            RemoteArtifactView(model: model)
+        }
     }
 
     private var header: some View {
@@ -82,6 +86,9 @@ struct RemoteContentView: View {
                 if !model.connected && model.hasSavedConnection {
                     Button("重连") { model.reconnect() }
                 }
+                if model.connected && model.selectedThreadID != nil {
+                    Button("产物") { showingArtifacts = true }
+                }
                 Button("连接设置…") { showingConnection = true }
             }
             HStack {
@@ -97,7 +104,7 @@ struct RemoteContentView: View {
                 .disabled(!model.connected)
                 Spacer()
             }
-            Text("远程预览当前只显示助手文本和 Turn 状态；工具、文件与审批内容不会传输。")
+            Text("远程预览显示助手文本、Turn 状态和已记录的文本产物；工具调用与审批内容尚未投射。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             if let notice = model.notice {
@@ -166,6 +173,80 @@ struct RemoteContentView: View {
             }
         }
         .padding()
+    }
+}
+
+private struct RemoteArtifactView: View {
+    @ObservedObject var model: RemoteModel
+
+    var body: some View {
+        NavigationSplitView {
+            VStack(spacing: 0) {
+                HStack {
+                    Text("Thread 产物").font(.headline)
+                    Spacer()
+                    Button("刷新", systemImage: "arrow.clockwise") {
+                        model.refreshArtifacts()
+                    }
+                    .labelStyle(.iconOnly)
+                }
+                .padding(12)
+                List(selection: Binding(
+                    get: { model.selectedArtifactID },
+                    set: { if let id = $0 { model.openArtifact(id) } }
+                )) {
+                    ForEach(model.artifacts) { descriptor in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(String(descriptor.id.suffix(16)))
+                                .font(.system(.body, design: .monospaced))
+                            Text("\(descriptor.artifact.bytes) 字节 · \(descriptor.artifact.mediaType)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .tag(descriptor.id)
+                    }
+                }
+                if model.hasEarlierArtifacts {
+                    Button(model.artifactListBusy ? "加载中…" : "加载更早产物") {
+                        model.loadEarlierArtifacts()
+                    }
+                    .disabled(model.artifactListBusy)
+                    .padding(12)
+                }
+            }
+            .navigationSplitViewColumnWidth(min: 220, ideal: 280)
+        } detail: {
+            VStack(alignment: .leading, spacing: 12) {
+                if let notice = model.artifactNotice {
+                    Text(notice).foregroundStyle(.orange).textSelection(.enabled)
+                }
+                if model.selectedArtifactID == nil {
+                    ContentUnavailableView("选择产物", systemImage: "doc.text")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    ScrollView {
+                        Text(model.artifactText)
+                            .font(.system(.body, design: .monospaced))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    HStack {
+                        Text("已读取 \(model.artifactEndByte) 字节")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        if model.artifactHasLater {
+                            Button(model.artifactBusy ? "加载中…" : "加载后续内容") {
+                                model.loadMoreArtifact()
+                            }
+                            .disabled(model.artifactBusy)
+                        }
+                    }
+                }
+            }
+            .padding(16)
+        }
+        .frame(minWidth: 780, minHeight: 520)
     }
 }
 

@@ -1,11 +1,15 @@
 import { realpath } from "node:fs/promises";
 
+import { KodaApplication } from "@koda/app";
 import {
   RemoteDeviceStore,
   RemoteThreadStore,
   RemoteWorkspaceStore,
   startRemoteHttpsServer,
 } from "@koda/app-server";
+import { agentEventSchema } from "@koda/protocol";
+import { ArtifactStore, JsonlEventStore } from "@koda/runtime-node";
+import { join } from "node:path";
 
 const [home, workspacePath, certificatePath, privateKeyPath] = process.argv.slice(2);
 const workspaceRoot = await realpath(workspacePath);
@@ -22,6 +26,29 @@ const workspaceOnly = await devices.issue("tablet", [{
 }]);
 const threads = await RemoteThreadStore.open(home, "owner");
 await threads.bind({ ownerId: "owner", workspaceId: "project", threadId: "thread-1" });
+const artifactStore = await ArtifactStore.open(join(home, "artifacts"));
+const artifactText = "A".repeat(16_383) + "中文 artifact";
+const published = await artifactStore.materializeText(artifactText, { inlineBytes: 4 });
+if (published.artifact === undefined) throw new Error("Expected a stored artifact.");
+const artifact = published.artifact;
+const artifactLog = new JsonlEventStore(join(home, "threads", "thread-1.jsonl"));
+await artifactLog.append(agentEventSchema.parse({
+  schemaVersion: 1, sequence: 0, timestamp: "2026-09-27T00:00:00.000Z",
+  threadId: "thread-1", turnId: "turn-1", type: "turn.context",
+  payload: {
+    provider: "openai", model: "gpt-test", workspaceRoot,
+    approvalMode: "on-request", instructionsSha256: "0".repeat(64),
+    repositoryInstructions: [],
+  },
+}));
+await artifactLog.append(agentEventSchema.parse({
+  schemaVersion: 1, sequence: 1, timestamp: "2026-09-27T00:00:01.000Z",
+  threadId: "thread-1", turnId: "turn-1", type: "artifact.recorded",
+  payload: { callId: "artifact-call", name: "read_file", artifact },
+}));
+const artifactApplication = new KodaApplication({
+  environment: { KODA_HOME: home }, processDirectory: workspaceRoot,
+});
 
 const metadata = {
   threadId: "thread-1",
@@ -64,6 +91,8 @@ const application = {
       hasLater: matching.length > limit,
     };
   },
+  listThreadArtifacts: artifactApplication.listThreadArtifacts.bind(artifactApplication),
+  readArtifact: artifactApplication.readArtifact.bind(artifactApplication),
   startTurnAfter: async (_input, _client, beforeStart) => {
     const ids = { threadId: "thread-1", turnId: "turn-2" };
     await beforeStart(ids);
@@ -89,6 +118,7 @@ process.stdout.write(JSON.stringify({
   fingerprint: server.certificateSha256,
   token: full.token,
   workspaceOnlyToken: workspaceOnly.token,
+  artifactId: artifact.id,
 }) + "\n");
 process.stdin.on("data", (chunk) => {
   if (chunk.toString("utf8").trim() !== "restart") return;

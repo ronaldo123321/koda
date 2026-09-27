@@ -120,15 +120,41 @@ final class RemoteClientTests: XCTestCase {
             _ = try await workspaceOnly.listThreads(workspaceID: "project")
             XCTFail("A workspace-only grant must not list Threads")
         } catch { }
+        do {
+            _ = try await workspaceOnly.listArtifacts(threadID: "thread-1")
+            XCTFail("A workspace-only grant must not list artifacts")
+        } catch { }
         workspaceOnly.close()
 
         let client = try RemoteClient(settings: RemoteSettings(
             origin: setup.origin, certificateSha256: setup.fingerprint, token: setup.token
         ))
+        let expectedArtifactText = String(repeating: "A", count: 16_383) + "中文 artifact"
         let workspaces = try await client.listWorkspaces()
         let threads = try await client.listThreads(workspaceID: "project")
         XCTAssertEqual(workspaces, ["project"])
         XCTAssertEqual(threads.map(\.threadId), ["thread-1"])
+        let artifactPage = try await client.listArtifacts(threadID: "thread-1")
+        XCTAssertEqual(artifactPage.artifacts.map(\.id), [setup.artifactId])
+        XCTAssertFalse(artifactPage.hasEarlier)
+        let firstRange = try await client.readArtifact(
+            threadID: "thread-1", artifactID: setup.artifactId
+        )
+        XCTAssertEqual(firstRange.startByte, 0)
+        XCTAssertTrue(firstRange.hasLater)
+        let secondRange = try await client.readArtifact(
+            threadID: "thread-1", artifactID: setup.artifactId,
+            afterByte: firstRange.endByte
+        )
+        XCTAssertEqual(secondRange.startByte, firstRange.endByte)
+        XCTAssertFalse(secondRange.hasLater)
+        XCTAssertEqual(firstRange.content + secondRange.content, expectedArtifactText)
+        do {
+            _ = try await client.readArtifact(
+                threadID: "thread-1", artifactID: "sha256:" + String(repeating: "f", count: 64)
+            )
+            XCTFail("An unreferenced artifact must not be readable")
+        } catch { }
         let started = try await client.startTurn(
             workspaceID: "project", prompt: "hello",
             requestID: String(repeating: "a", count: 32), resumeThreadID: "thread-1"
@@ -175,6 +201,28 @@ final class RemoteClientTests: XCTestCase {
         let connected = await reconnectModel.connected
         XCTAssertTrue(connected)
         await reconnectModel.selectThread("thread-1")
+        for _ in 0..<50 {
+            if await reconnectModel.artifacts.map(\.id) == [setup.artifactId] { break }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        let listed = await reconnectModel.artifacts.map(\.id)
+        XCTAssertEqual(listed, [setup.artifactId])
+        await reconnectModel.openArtifact(setup.artifactId)
+        for _ in 0..<50 {
+            if await reconnectModel.artifactHasLater { break }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        let firstPreview = await reconnectModel.artifactText
+        XCTAssertFalse(firstPreview.isEmpty)
+        await reconnectModel.loadMoreArtifact()
+        for _ in 0..<50 {
+            let preview = await (reconnectModel.artifactHasLater,
+                                 reconnectModel.artifactText)
+            if !preview.0 && preview.1 == expectedArtifactText { break }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        let fullPreview = await reconnectModel.artifactText
+        XCTAssertEqual(fullPreview, expectedArtifactText)
         for _ in 0..<50 {
             if await reconnectModel.entries.first?.text == "firstsecond" { break }
             try await Task.sleep(nanoseconds: 100_000_000)
@@ -228,4 +276,5 @@ private struct FixtureSetup: Decodable {
     let fingerprint: String
     let token: String
     let workspaceOnlyToken: String
+    let artifactId: String
 }
