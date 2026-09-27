@@ -46,6 +46,18 @@ import { afterEach, describe, expect, it } from "vitest";
 
 const directories: string[] = [];
 const domain = Buffer.from("KODA_PLUGIN_MANIFEST_V1\0", "utf8");
+const managedProtocolScript = `import { createInterface } from 'node:readline';
+import { readFileSync } from 'node:fs';
+const version = JSON.parse(readFileSync(new URL('./manifest.json', import.meta.url))).version;
+const lines = createInterface({input:process.stdin});
+lines.on('line', (line) => {
+  const request = JSON.parse(line);
+  const result = request.method === 'initialize'
+    ? {protocolVersion:1,plugin:{name:'Reviewer',version},contributions:{tools:[]}}
+    : {};
+  process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:request.id,result}) + '\\n');
+  if (request.method === 'shutdown') setImmediate(() => process.exit(0));
+});\n`;
 
 afterEach(async () => {
   await Promise.all(
@@ -105,7 +117,7 @@ describe("signed local plugin packages", () => {
   });
 
   it("validates a signed catalog and downloads a package through HTTPS", async () => {
-    const fixture = await packageFixture();
+    const fixture = await packageFixture("index.mjs", managedProtocolScript);
     const now = Date.parse("2026-09-27T12:00:00.000Z");
     const manifestBytes = await readFile(join(fixture.root, "manifest.json"));
     const manifest = verifySignedPluginManifest(manifestBytes, fixture.trust);
@@ -348,7 +360,7 @@ lines.on('line', (line) => {
   });
 
   it("installs disabled, verifies before launch, and rolls back to the previous signed version", async () => {
-    const fixture = await packageFixture();
+    const fixture = await packageFixture("index.mjs", managedProtocolScript);
     const home = join(fixture.parent, "home");
     const install = () =>
       installManagedPluginPackage({
@@ -402,6 +414,16 @@ lines.on('line', (line) => {
       enabled: false,
     });
     expect((await listManagedPlugins(home))[0]).toMatchObject(second);
+    await setManagedPluginEnabled(home, "reviewer", true);
+    await rewriteVersion(fixture, "1.2.0", "export default 1;\n");
+    await expect(install()).rejects.toMatchObject({
+      code: "PLUGIN_SERVER_EXITED",
+    });
+    expect((await listManagedPlugins(home))[0]).toMatchObject({
+      version: "1.1.0",
+      previousVersion: "1.0.0",
+      enabled: true,
+    });
     const restored = await rollbackManagedPlugin(home, "reviewer");
     expect(restored).toMatchObject({
       version: "1.0.0",
@@ -624,12 +646,19 @@ async function packageFixture(
 async function rewriteVersion(
   fixture: Awaited<ReturnType<typeof packageFixture>>,
   version: string,
+  content?: string,
 ): Promise<void> {
   const path = join(fixture.root, "manifest.json");
   const { signature: _oldSignature, ...signed } = JSON.parse(
     await readFile(path, "utf8"),
   );
   signed.version = version;
+  if (content !== undefined) {
+    const payload = Buffer.from(content);
+    await writeFile(join(fixture.root, "index.mjs"), payload);
+    signed.files[0].bytes = payload.length;
+    signed.files[0].sha256 = createHash("sha256").update(payload).digest("hex");
+  }
   const digest = Buffer.from(sha256CanonicalJson(signed), "hex");
   const signature = sign(
     null,

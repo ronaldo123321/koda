@@ -510,7 +510,7 @@ koda plugin install-remote reviewer --version 1.0.0 --catalog https://example.co
 koda plugin update reviewer
 ```
 
-发布目录应按 `插件ID/版本/manifest.json` 和清单列出的负载文件摆放。`publish-catalog` 会先核验目录下每个包的签名和文件清单，再原子写入 `catalog.json`；私钥文件必须仅本机所有者可读，发布者须自行将整个目录放到 HTTPS 静态源。目录与包共用所有者提供的发布者公钥；目录中包含生成和过期时间、按插件 ID 与版本排序的清单路径及清单摘要。安装记录目录摘要以供追溯。`update` 使用已保存的目录和公钥，选择高于当前版本的最新稳定版，下载后仍保持停用。目录不自动授权能力，也不会定时检查或自动启用插件。信任根轮换、更新前初始化及崩溃点验收仍待实现，见 [Phase 4E 设计](docs/plans/2026-09-27-phase-4e-plugin-and-update-supply-chain-design.md)。
+发布目录应按 `插件ID/版本/manifest.json` 和清单列出的负载文件摆放。`publish-catalog` 会先核验目录下每个包的签名和文件清单，再原子写入 `catalog.json`；私钥文件必须仅本机所有者可读，发布者须自行将整个目录放到 HTTPS 静态源。目录与包共用所有者提供的发布者公钥；目录中包含生成和过期时间、按插件 ID 与版本排序的清单路径及清单摘要。安装记录目录摘要以供追溯。`update` 使用已保存的目录和公钥，选择高于当前版本的最新稳定版，下载后仍保持停用。更新会在暂存目录执行新包的 `initialize` 协议检查，不传 Provider 凭据、不调用工具；失败时保留旧版。首次安装仍不执行插件。目录不自动授权能力，也不会定时检查或自动启用插件。信任根轮换及崩溃点验收仍待实现，见 [Phase 4E 设计](docs/plans/2026-09-27-phase-4e-plugin-and-update-supply-chain-design.md)。
 
 `koda extension list` 和协议 `extension/catalog` 会解析清单，但不会执行配置的命令。活跃贡献的元数据只能在正常事务式 Turn 启动后，从持久化 Thread 快照中获取。
 

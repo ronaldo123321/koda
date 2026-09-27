@@ -14,10 +14,12 @@ import { ThreadLease } from "@koda/runtime-node";
 import { z } from "zod";
 
 import type { PluginConfiguration } from "./config.js";
+import { connectPluginStdio } from "./connection.js";
 import { PluginHostError } from "./errors.js";
 import {
   verifyLocalPluginPackage,
   type PluginPublisherTrustRoot,
+  type VerifiedPluginPackage,
 } from "./package-verification.js";
 
 const digestSchema = z.string().regex(/^[a-f0-9]{64}$/u);
@@ -109,16 +111,31 @@ export async function installManagedPluginPackage(options: {
         "Plugin publisher key changed; explicit trust rotation is required.",
       );
     }
+    const needsPreflight =
+      old !== undefined &&
+      old.active.manifest_sha256 !== verified.manifestSha256;
+    const candidate: PackageRecord = {
+      version: verified.version,
+      manifest_sha256: verified.manifestSha256,
+      key_id: options.trustRoot.keyId,
+      public_key_pem: options.trustRoot.publicKeyPem,
+      capabilities,
+    };
     const target = packagePath(root, verified.id, verified.manifestSha256);
     await mkdir(dirname(target), { recursive: true, mode: 0o700 });
     if (await exists(target)) {
-      await checkPackage(target, verified.id, {
-        version: verified.version,
-        manifest_sha256: verified.manifestSha256,
-        key_id: options.trustRoot.keyId,
-        public_key_pem: options.trustRoot.publicKeyPem,
-        capabilities,
-      });
+      await checkPackage(target, verified.id, candidate);
+      if (needsPreflight) {
+        const staging = await mkdtemp(join(root, ".stage-"));
+        try {
+          const copied = join(staging, "package");
+          await cp(target, copied, { recursive: true, dereference: false });
+          await preflightPackage(copied, verified, capabilities);
+          await checkPackage(copied, verified.id, candidate);
+        } finally {
+          await rm(staging, { recursive: true, force: true });
+        }
+      }
     } else {
       const staging = await mkdtemp(join(root, ".stage-"));
       try {
@@ -127,24 +144,18 @@ export async function installManagedPluginPackage(options: {
           recursive: true,
           dereference: false,
         });
-        await checkPackage(copied, verified.id, {
-          version: verified.version,
-          manifest_sha256: verified.manifestSha256,
-          key_id: options.trustRoot.keyId,
-          public_key_pem: options.trustRoot.publicKeyPem,
-          capabilities,
-        });
+        await checkPackage(copied, verified.id, candidate);
+        if (needsPreflight) {
+          await preflightPackage(copied, verified, capabilities);
+          await checkPackage(copied, verified.id, candidate);
+        }
         await rename(copied, target);
       } finally {
         await rm(staging, { recursive: true, force: true });
       }
     }
     const active: PackageRecord = {
-      version: verified.version,
-      manifest_sha256: verified.manifestSha256,
-      key_id: options.trustRoot.keyId,
-      public_key_pem: options.trustRoot.publicKeyPem,
-      capabilities,
+      ...candidate,
       ...(options.provenance === undefined
         ? {}
         : {
@@ -321,6 +332,39 @@ async function checkPackage(
   )
     throw invalidState("Installed plugin identity changed.");
   return verified;
+}
+
+async function preflightPackage(
+  directory: string,
+  verified: VerifiedPluginPackage,
+  capabilities: PluginCapability[],
+): Promise<void> {
+  const configuration: PluginConfiguration = {
+    id: verified.id,
+    command: process.execPath,
+    args: [join(directory, ...verified.entrypoint.split("/"))],
+    cwd: directory,
+    environmentNames: [],
+    required: true,
+    capabilities,
+    tools: {},
+    startupTimeoutMs: 15_000,
+    callTimeoutMs: 60_000,
+    shutdownTimeoutMs: 5_000,
+    manifestSha256: verified.manifestSha256,
+  };
+  const signal = new AbortController().signal;
+  const connection = await connectPluginStdio(configuration, {}, signal);
+  try {
+    const initialized = await connection.initialize(signal);
+    if (initialized.plugin.version !== verified.version) {
+      throw invalidState(
+        "Plugin initialize version differs from signed package.",
+      );
+    }
+  } finally {
+    await connection.close();
+  }
 }
 
 function validateCapabilities(
