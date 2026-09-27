@@ -350,9 +350,10 @@ of these items is considered complete when macOS or Linux closes.
 
 ### Phase 4D: authenticated remote operation
 
-Status: In progress — the single-owner, multi-device authorization and device
-credential foundation is implemented locally; no remote listener, remote
-Thread binding, replay, remote MCP/OAuth, or remote acceptance is enabled yet.
+Status: In progress — the single-owner, multi-device authorization, device
+credential, and immutable remote Thread-binding foundation is implemented
+locally; no remote listener, turn-binding integration, replay, remote MCP/OAuth,
+or remote acceptance is enabled yet.
 The chosen client direction is a native SwiftUI macOS application.
 
 The current contract and delivery checks are in

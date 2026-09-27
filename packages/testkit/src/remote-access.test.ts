@@ -133,14 +133,19 @@ describe("remote access catalog", () => {
     ).rejects.toBeInstanceOf(RemoteAccessDeniedError);
   });
 
-  it("rejects a workspace root that is replaced after configuration", async () => {
-    const { catalog, owner, root } = await fixture();
-    const replacement = await mkdtemp(join(tmpdir(), "koda-remote-replaced-"));
-    directories.push(replacement);
-    await rename(root, join(replacement, "old-root"));
-    await symlink(replacement, root);
-    await expect(
-      catalog.authorizeWorkspace(owner, "project", "workspace:read"),
-    ).rejects.toBeInstanceOf(RemoteAccessDeniedError);
-  });
+  it.skipIf(process.platform === "win32")(
+    "rejects a workspace root that is replaced after configuration",
+    async () => {
+      const { catalog, owner, root } = await fixture();
+      const replacement = await mkdtemp(
+        join(tmpdir(), "koda-remote-replaced-"),
+      );
+      directories.push(replacement);
+      await rename(root, join(replacement, "old-root"));
+      await symlink(replacement, root);
+      await expect(
+        catalog.authorizeWorkspace(owner, "project", "workspace:read"),
+      ).rejects.toBeInstanceOf(RemoteAccessDeniedError);
+    },
+  );
 });

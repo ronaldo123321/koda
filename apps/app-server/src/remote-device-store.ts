@@ -67,6 +67,9 @@ export class RemoteDeviceStore {
     ownerId: string,
     now: () => number = Date.now,
   ): Promise<RemoteDeviceStore> {
+    if (process.platform === "win32") {
+      throw new Error("Remote device credentials are unavailable on Windows.");
+    }
     idSchema.parse(ownerId);
     const root = join(resolve(kodaHome), "remote", "devices");
     await mkdir(root, { recursive: true, mode: 0o700 });

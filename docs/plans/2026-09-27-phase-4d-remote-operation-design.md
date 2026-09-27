@@ -1,8 +1,8 @@
 # Koda Phase 4D: Authenticated Remote Operation
 
 - Status: 4D1 in progress — local owner/device grants, credential issuance,
-  verification, revocation, and safe Thread summary projection implemented;
-  no remote listener is enabled
+  verification, revocation, immutable remote Thread bindings, and safe Thread
+  summary projection implemented; no remote listener is enabled
 - Date: 2026-09-27
 - Depends on: local app-server v18, durable JSONL events, thread leases, artifact integrity, and Phase 4A–4C security evidence
 - Scope: one owner across multiple devices, authenticated HTTP/WebSocket clients, reconnect/replay, remote MCP/OAuth, shared state ownership, and owner/workspace/thread authorization
@@ -113,7 +113,7 @@ Phase 4D is complete only when all five slices pass their stated runtime,
 security, and recovery checks. A reachable HTTP endpoint or a successful
 handshake alone is not completion evidence.
 
-Current 4D1 code provides `RemoteAccessCatalog` and `RemoteDeviceStore`
-without wiring them into a listener. It does not yet persist remote Thread
-bindings, offer owner-local pairing commands, or authorize the existing
+Current 4D1 code provides `RemoteAccessCatalog`, `RemoteDeviceStore`, and
+`RemoteThreadStore` without wiring them into a listener or turn creation.
+It does not yet offer owner-local pairing commands or authorize the existing
 app-server method set. These are required before 4D1 closes.
