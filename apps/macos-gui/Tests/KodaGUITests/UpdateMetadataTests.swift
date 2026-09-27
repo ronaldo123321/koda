@@ -4,7 +4,7 @@ import XCTest
 @testable import KodaGUI
 
 final class UpdateMetadataTests: XCTestCase {
-    func testNodeSignerAndSwiftVerifierRejectTampering() throws {
+    func testNodeSignerAndSwiftVerifierRejectTampering() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("koda-update-metadata-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -47,6 +47,44 @@ final class UpdateMetadataTests: XCTestCase {
                                            packageName: packageURL.lastPathComponent,
                                            publicKey: privateKey.publicKey.rawRepresentation)
         try verified.verifyPackage(at: packageURL)
+        UpdatePackageURLProtocol.bytes = try Data(contentsOf: packageURL)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [UpdatePackageURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let candidate = ReleaseUpdate(
+            version: "0.2.0", page: URL(string: "https://github.com/ronaldo123321/koda")!,
+            packageName: packageURL.lastPathComponent,
+            packageURL: URL(string: "https://updates.example.test/package.pkg")!,
+            verifiedMetadata: verified
+        )
+        let staged = try await ReleaseUpdates.download(candidate, session: session)
+        defer { try? FileManager.default.removeItem(at: staged.deletingLastPathComponent()) }
+        XCTAssertEqual(try Data(contentsOf: staged), UpdatePackageURLProtocol.bytes)
+        UpdatePackageURLProtocol.bytes = Data(repeating: 0x78, count: verified.packageSize)
+        do {
+            _ = try await ReleaseUpdates.download(candidate, session: session)
+            XCTFail("Changed package bytes must fail after download")
+        } catch {
+            XCTAssertEqual(error.localizedDescription,
+                           UpdateMetadataError.packageMismatch.localizedDescription)
+        }
+        UpdatePackageURLProtocol.bytes = Data(repeating: 0x78, count: verified.packageSize + 1)
+        do {
+            _ = try await ReleaseUpdates.download(candidate, session: session)
+            XCTFail("An oversized package must fail")
+        } catch {
+            XCTAssertEqual(error.localizedDescription,
+                           UpdateMetadataError.packageMismatch.localizedDescription)
+        }
+        UpdatePackageURLProtocol.statusCode = 404
+        do {
+            _ = try await ReleaseUpdates.download(candidate, session: session)
+            XCTFail("An absent release asset must fail")
+        } catch {
+            XCTAssertEqual(error.localizedDescription,
+                           UpdateMetadataError.downloadFailed.localizedDescription)
+        }
         XCTAssertThrowsError(try metadata.verify(version: "0.2.0", architecture: "x64",
                                                  packageName: packageURL.lastPathComponent,
                                                  publicKey: privateKey.publicKey.rawRepresentation))
@@ -67,4 +105,26 @@ final class UpdateMetadataTests: XCTestCase {
         try Data(repeating: 0x78, count: verified.packageSize).write(to: packageURL)
         XCTAssertThrowsError(try verified.verifyPackage(at: packageURL))
     }
+}
+
+private final class UpdatePackageURLProtocol: URLProtocol {
+    static var bytes = Data()
+    static var statusCode = 200
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        request.url?.host == "updates.example.test"
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let response = HTTPURLResponse(url: request.url!, statusCode: Self.statusCode,
+                                       httpVersion: "HTTP/1.1",
+                                       headerFields: ["Content-Length": "\(Self.bytes.count)"])!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Self.bytes)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() { }
 }

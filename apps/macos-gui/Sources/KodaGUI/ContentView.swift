@@ -6,8 +6,10 @@ struct ContentView: View {
     @StateObject private var model = KodaModel()
     @State private var credentialProvider: ProviderOption?
     @State private var checkingUpdates = false
+    @State private var downloadingUpdate = false
     @State private var updateNotice: String?
-    @State private var updatePage: URL?
+    @State private var updateCandidate: ReleaseUpdate?
+    @State private var downloadedUpdateURL: URL?
 
     var body: some View {
         NavigationSplitView {
@@ -82,12 +84,13 @@ struct ContentView: View {
         }
         checkingUpdates = true
         updateNotice = nil
-        updatePage = nil
+        updateCandidate = nil
+        downloadedUpdateURL = nil
         Task {
             do {
                 if let candidate = try await ReleaseUpdates.check(installedVersion: version) {
-                    updateNotice = "发现 macOS 应用候选版本 v\(candidate.version)；应用内安装尚未开放。"
-                    updatePage = candidate.page
+                    updateNotice = "发现 macOS 应用候选版本 v\(candidate.version)。"
+                    updateCandidate = candidate
                 } else {
                     updateNotice = "GitHub Releases 暂无适用于此 Mac 的较新应用版本。"
                 }
@@ -95,6 +98,21 @@ struct ContentView: View {
                 updateNotice = "检查更新失败：\(error.localizedDescription)"
             }
             checkingUpdates = false
+        }
+    }
+
+    private func downloadUpdate() {
+        guard let candidate = updateCandidate else { return }
+        downloadingUpdate = true
+        updateNotice = "正在下载并验证更新包…"
+        Task {
+            do {
+                downloadedUpdateURL = try await ReleaseUpdates.download(candidate)
+                updateNotice = "更新包已通过摘要验证；应用内安装尚未开放。"
+            } catch {
+                updateNotice = "更新包下载或验证失败：\(error.localizedDescription)"
+            }
+            downloadingUpdate = false
         }
     }
 
@@ -124,14 +142,27 @@ struct ContentView: View {
                 }
                 Button("远程…") { openWindow(id: "remote") }
                 Button(checkingUpdates ? "检查中…" : "检查更新") { checkForUpdates() }
-                    .disabled(checkingUpdates)
+                    .disabled(checkingUpdates || downloadingUpdate)
             }
             if let updateNotice {
                 HStack {
                     Text(updateNotice)
-                    if let updatePage { Link("查看 Release", destination: updatePage) }
+                    if let updateCandidate {
+                        Link("查看 Release", destination: updateCandidate.page)
+                        if downloadedUpdateURL == nil {
+                            Button(downloadingUpdate ? "下载中…" : "下载并验证") {
+                                downloadUpdate()
+                            }
+                            .disabled(downloadingUpdate)
+                        }
+                    }
                 }
                 .font(.caption)
+            }
+            if let downloadedUpdateURL {
+                Text(downloadedUpdateURL.path)
+                    .font(.caption)
+                    .textSelection(.enabled)
             }
             HStack {
                 Picker("Provider", selection: Binding(

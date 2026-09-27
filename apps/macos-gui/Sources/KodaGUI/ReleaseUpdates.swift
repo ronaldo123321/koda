@@ -1,9 +1,18 @@
 import Foundation
 
-struct ReleaseUpdate: Equatable {
+struct ReleaseUpdate {
     let version: String
     let page: URL
     let packageName: String
+    let packageURL: URL
+    let verifiedMetadata: VerifiedUpdateMetadata
+}
+
+struct ReleaseCandidate {
+    let version: String
+    let page: URL
+    let packageName: String
+    let packageURL: URL
     let metadataURL: URL
 }
 
@@ -25,20 +34,59 @@ enum ReleaseUpdates {
         guard let candidate = try select(from: data, installedVersion: installedVersion,
                                          architecture: currentArchitecture) else { return nil }
         let publicKey = try loadTrustRoot()
-        let (metadataData, metadataResponse) = try await session.data(from: candidate.metadataURL)
-        guard let http = metadataResponse as? HTTPURLResponse, http.statusCode == 200,
-              metadataData.count <= 8_192 else { throw UpdateMetadataError.invalid }
+        let (metadataBytes, metadataResponse) = try await session.bytes(from: candidate.metadataURL)
+        guard let http = metadataResponse as? HTTPURLResponse, http.statusCode == 200
+        else { throw UpdateMetadataError.invalid }
+        var metadataData = Data()
+        for try await byte in metadataBytes {
+            guard metadataData.count < 8_192 else { throw UpdateMetadataError.invalid }
+            metadataData.append(byte)
+        }
         let metadata = try JSONDecoder().decode(UpdateMetadata.self, from: metadataData)
-        _ = try metadata.verify(version: candidate.version, architecture: currentArchitecture,
-                                packageName: candidate.packageName, publicKey: publicKey)
-        return candidate
+        return ReleaseUpdate(version: candidate.version, page: candidate.page,
+                             packageName: candidate.packageName,
+                             packageURL: candidate.packageURL,
+                             verifiedMetadata: try metadata.verify(
+                                version: candidate.version, architecture: currentArchitecture,
+                                packageName: candidate.packageName, publicKey: publicKey))
+    }
+
+    static func download(_ update: ReleaseUpdate, session: URLSession = .shared) async throws -> URL {
+        var request = URLRequest(url: update.packageURL)
+        request.setValue("Koda-macOS-update-download", forHTTPHeaderField: "User-Agent")
+        request.timeoutInterval = 300
+        let limiter = BoundedDownloadDelegate(maxBytes: update.verifiedMetadata.packageSize)
+        let downloadedURL: URL
+        let response: URLResponse
+        do {
+            (downloadedURL, response) = try await session.download(for: request, delegate: limiter)
+        } catch {
+            if limiter.exceeded { throw UpdateMetadataError.packageMismatch }
+            throw error
+        }
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            throw UpdateMetadataError.downloadFailed
+        }
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("koda-update-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
+                                                attributes: [.posixPermissions: 0o700])
+        do {
+            let packageURL = directory.appendingPathComponent(update.packageName)
+            try FileManager.default.moveItem(at: downloadedURL, to: packageURL)
+            try update.verifiedMetadata.verifyPackage(at: packageURL)
+            return packageURL
+        } catch {
+            try? FileManager.default.removeItem(at: directory)
+            throw error
+        }
     }
 
     static func select(from data: Data, installedVersion: String,
-                       architecture: String) throws -> ReleaseUpdate? {
+                       architecture: String) throws -> ReleaseCandidate? {
         guard let installed = Version(installedVersion) else { throw UpdateCheckError.invalidVersion }
         let releases = try JSONDecoder().decode([Release].self, from: data)
-        return releases.compactMap { release -> (Version, ReleaseUpdate)? in
+        return releases.compactMap { release -> (Version, ReleaseCandidate)? in
             guard !release.draft, release.tagName.hasPrefix("v"),
                   let version = Version(String(release.tagName.dropFirst())),
                   version > installed,
@@ -51,17 +99,18 @@ enum ReleaseUpdates {
             let packageName = "\(base).pkg"
             let metadataName = "\(base).update.json"
             let downloadBase = "https://github.com/ronaldo123321/koda/releases/download/\(release.tagName)/"
-            guard release.assets.contains(where: {
+            guard let packageAsset = release.assets.first(where: {
                 $0.name == packageName && $0.state == "uploaded" &&
                     $0.browserDownloadURL == downloadBase + packageName
             }), let metadataAsset = release.assets.first(where: {
                 $0.name == metadataName && $0.state == "uploaded" &&
                     $0.browserDownloadURL == downloadBase + metadataName
-            }), let metadataURL = URL(string: metadataAsset.browserDownloadURL)
+            }), let packageURL = URL(string: packageAsset.browserDownloadURL),
+               let metadataURL = URL(string: metadataAsset.browserDownloadURL)
             else { return nil }
-            return (version, ReleaseUpdate(version: String(release.tagName.dropFirst()),
-                                           page: page, packageName: packageName,
-                                           metadataURL: metadataURL))
+            return (version, ReleaseCandidate(version: String(release.tagName.dropFirst()),
+                                              page: page, packageName: packageName,
+                                              packageURL: packageURL, metadataURL: metadataURL))
         }.max(by: { $0.0 < $1.0 })?.1
     }
 
@@ -82,6 +131,34 @@ enum ReleaseUpdates {
         "unsupported"
         #endif
     }
+}
+
+private final class BoundedDownloadDelegate: NSObject, URLSessionDownloadDelegate {
+    private let maxBytes: Int64
+    private let lock = NSLock()
+    private var exceededLimit = false
+
+    init(maxBytes: Int) { self.maxBytes = Int64(maxBytes) }
+
+    var exceeded: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return exceededLimit
+    }
+
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
+                    didWriteData bytesWritten: Int64, totalBytesWritten: Int64,
+                    totalBytesExpectedToWrite: Int64) {
+        if totalBytesWritten > maxBytes || totalBytesExpectedToWrite > maxBytes {
+            lock.lock()
+            exceededLimit = true
+            lock.unlock()
+            downloadTask.cancel()
+        }
+    }
+
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
+                    didFinishDownloadingTo location: URL) { }
 }
 
 private struct Release: Decodable {

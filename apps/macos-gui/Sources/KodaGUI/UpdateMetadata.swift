@@ -55,23 +55,27 @@ struct VerifiedUpdateMetadata {
         var size = 0
         while let chunk = try handle.read(upToCount: 64 * 1024), !chunk.isEmpty {
             size += chunk.count
-            if size > packageSize { throw UpdateMetadataError.invalid }
+            if size > packageSize { throw UpdateMetadataError.packageMismatch }
             hash.update(data: chunk)
         }
         guard size == packageSize,
               hash.finalize().map({ String(format: "%02x", $0) }).joined() == packageSha256
-        else { throw UpdateMetadataError.invalid }
+        else { throw UpdateMetadataError.packageMismatch }
     }
 }
 
 enum UpdateMetadataError: LocalizedError {
     case invalid
     case missingTrustRoot
+    case downloadFailed
+    case packageMismatch
 
     var errorDescription: String? {
         switch self {
         case .invalid: "应用更新元数据签名或内容无效。"
         case .missingTrustRoot: "此版本尚未配置应用更新信任密钥。"
+        case .downloadFailed: "更新包下载失败。"
+        case .packageMismatch: "更新包大小或摘要不匹配。"
         }
     }
 }
