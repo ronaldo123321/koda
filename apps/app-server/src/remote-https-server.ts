@@ -6,6 +6,7 @@ import { resolve } from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 import { ConfigurationError, type KodaApplication } from "@koda/app";
+import type { AgentEvent } from "@koda/protocol";
 import { z, ZodError } from "zod";
 
 import {
@@ -28,6 +29,7 @@ import { RemoteWorkspaceStore } from "./remote-workspace-store.js";
 const OWNER_ID = "owner";
 const MAX_URL_LENGTH = 2_048;
 const MAX_RESPONSE_BYTES = 64 * 1_024;
+const MAX_UPDATE_RESPONSE_BYTES = 3 * 1_024 * 1_024;
 const MAX_REQUEST_BYTES = 16 * 1_024;
 const turnStartSchema = z
   .object({
@@ -213,7 +215,7 @@ async function handleRequest(
       return;
     }
     const match =
-      /^\/v1\/threads\/([A-Za-z0-9][A-Za-z0-9_-]{0,127})(\/events)?$/u.exec(
+      /^\/v1\/threads\/([A-Za-z0-9][A-Za-z0-9_-]{0,127})(\/(?:events|updates))?$/u.exec(
         url.pathname,
       );
     if (match !== null) {
@@ -233,7 +235,7 @@ async function handleRequest(
         send(response, 404, { error: "Unavailable" });
         return;
       }
-      if (match[2] === "/events") {
+      if (match[2] === "/events" || match[2] === "/updates") {
         const cursor = parseEventCursor(url);
         if (cursor === undefined) {
           send(response, 400, { error: "Invalid event cursor" });
@@ -244,17 +246,25 @@ async function handleRequest(
           afterSequence: cursor.after,
           limit: cursor.limit,
         });
-        const events = page.events.map((event) => ({
-          sequence: event.sequence,
-          timestamp: event.timestamp,
-          turnId: event.turnId,
-          type: event.type,
-        }));
-        send(response, 200, {
-          events,
-          hasMore: page.hasLater,
-          nextAfterSequence: events.at(-1)?.sequence ?? cursor.after,
-        });
+        const updates = match[2] === "/updates";
+        const events = updates
+          ? page.events.flatMap(projectRemoteUpdate)
+          : page.events.map((event) => ({
+              sequence: event.sequence,
+              timestamp: event.timestamp,
+              turnId: event.turnId,
+              type: event.type,
+            }));
+        send(
+          response,
+          200,
+          {
+            events,
+            hasMore: page.hasLater,
+            nextAfterSequence: page.events.at(-1)?.sequence ?? cursor.after,
+          },
+          updates ? MAX_UPDATE_RESPONSE_BYTES : MAX_RESPONSE_BYTES,
+        );
         return;
       }
       if (url.search !== "") {
@@ -358,10 +368,15 @@ function bearerToken(request: IncomingMessage): string | undefined {
   return token;
 }
 
-function send(response: ServerResponse, status: number, body: object): void {
+function send(
+  response: ServerResponse,
+  status: number,
+  body: object,
+  maximumBytes = MAX_RESPONSE_BYTES,
+): void {
   if (response.headersSent || response.destroyed) return;
   const content = JSON.stringify(body);
-  if (Buffer.byteLength(content) > MAX_RESPONSE_BYTES) {
+  if (Buffer.byteLength(content) > maximumBytes) {
     send(response, 500, { error: "Internal error" });
     return;
   }
@@ -372,6 +387,26 @@ function send(response: ServerResponse, status: number, body: object): void {
     "x-content-type-options": "nosniff",
   });
   response.end(content);
+}
+
+function projectRemoteUpdate(event: AgentEvent): object[] {
+  const common = {
+    sequence: event.sequence,
+    timestamp: event.timestamp,
+    turnId: event.turnId,
+    type: event.type,
+  };
+  switch (event.type) {
+    case "assistant.delta":
+      return [{ ...common, text: event.payload.text }];
+    case "turn.completed":
+    case "turn.cancelled":
+      return [common];
+    case "turn.failed":
+      return [{ ...common, code: event.payload.code }];
+    default:
+      return [];
+  }
 }
 
 async function readPrivateKey(path: string): Promise<Buffer> {

@@ -191,7 +191,7 @@ koda chat --cwd .
 
 ## 远程访问准备
 
-首版远程访问面向同一使用者的多台设备，使用局域网或自有 VPN。当前按需启动的 HTTPS 入口可查询获授权的工作区 ID、已绑定 Thread 的脱敏概要和事件序号摘要；持有显式 `turn:start` 权限的设备还可以启动仅含工作区读取工具的 Turn。远程客户端、任务控制、完整事件内容、WebSocket 实时订阅和自动配对仍在开发中。
+首版远程访问面向同一使用者的多台设备，使用局域网或自有 VPN。当前按需启动的 HTTPS 入口可查询获授权的工作区 ID、已绑定 Thread 的脱敏概要、事件序号摘要及助手回答更新；持有显式 `turn:start` 权限的设备还可以启动仅含工作区读取工具的 Turn。远程客户端、任务控制、完整事件内容、WebSocket 实时订阅和自动配对仍在开发中。
 
 在作为服务端的 Mac 上登记工作区和设备：
 
@@ -213,7 +213,9 @@ koda remote serve --host 192.168.1.10 --port 8443 --cert /absolute/path/server.p
 
 服务端拒绝公网和通配监听地址。客户端必须验证证书；自签名证书需预先信任或固定其指纹。既有本地 Thread 必须由主机所有者显式执行 `remote thread expose`，命令会核对其权威工作区。`GET /v1/workspaces`、`GET /v1/threads/<thread-id>` 和 `GET /v1/threads/<thread-id>/events?after=-1&limit=100` 要求 `Authorization: Bearer <device-token>`，返回结果不含主机路径。事件接口以排他游标分页：首次用 `after=-1`，此后使用响应中的 `nextAfterSequence`；当前只返回序号、时间、Turn ID 与事件类型，不返回原始事件内容。
 
-启动受限 Turn 使用 `POST /v1/workspaces/<workspace-id>/turns`，JSON 请求包含 32 位小写十六进制 `requestId`、`prompt`，续接时另带 `resumeThreadId`。主机会先持久化请求身份与 Thread 绑定，再执行 Turn；同一设备用相同 `requestId` 和相同请求重试会得到原 Thread／Turn ID，不会再次启动。若记录仍处于 `reserved`，返回 409 和原 ID，表示启动结果尚不确定，客户端不得自动换新 ID 重试。客户端连接结束不会取消进行中的 Turn；显式停止主机服务会取消当前活跃 Turn。远程审批、写入与命令执行、完整回答内容、WebSocket 事件流和端到端客户端验收尚未完成。
+获授 `thread:read` 权限的设备还可调用 `GET /v1/threads/<thread-id>/updates?after=-1&limit=100` 读取助手文本与 Turn 结束状态。该接口只投射 `assistant.delta` 文本、完成／取消事件，以及失败代码；工具输入输出、错误详情和其他原始事件不会传输。游标按所有原始事件前进，因此一页可以没有可见更新，客户端仍须保存 `nextAfterSequence` 并在 `hasMore` 为 true 时继续读取。助手文本可能包含它从工作区读到的内容或路径，应只向信任的个人设备签发 `thread:read` 权限。
+
+启动受限 Turn 使用 `POST /v1/workspaces/<workspace-id>/turns`，JSON 请求包含 32 位小写十六进制 `requestId`、`prompt`，续接时另带 `resumeThreadId`。主机会先持久化请求身份与 Thread 绑定，再执行 Turn；同一设备用相同 `requestId` 和相同请求重试会得到原 Thread／Turn ID，不会再次启动。若记录仍处于 `reserved`，返回 409 和原 ID，表示启动结果尚不确定，客户端不得自动换新 ID 重试。客户端连接结束不会取消进行中的 Turn；显式停止主机服务会取消当前活跃 Turn。远程审批、写入与命令执行、完整事件内容、WebSocket 事件流和端到端客户端验收尚未完成。
 
 ## 使用 CLI
 

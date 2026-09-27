@@ -105,6 +105,7 @@ describe.skipIf(process.platform === "win32")(
         sourceMtimeMs: 1,
         errorMessage: "private diagnostic",
       });
+      const largeAnswer = "x".repeat(70_000);
       const replayEvents = [
         agentEventSchema.parse({
           schemaVersion: 1,
@@ -123,6 +124,24 @@ describe.skipIf(process.platform === "win32")(
           turnId: "turn-1",
           type: "assistant.delta",
           payload: { text: `private path ${workspace}` },
+        }),
+        agentEventSchema.parse({
+          schemaVersion: 1,
+          sequence: 2,
+          timestamp: "2026-09-27T00:00:02.000Z",
+          threadId: "thread-1",
+          turnId: "turn-1",
+          type: "assistant.delta",
+          payload: { text: largeAnswer },
+        }),
+        agentEventSchema.parse({
+          schemaVersion: 1,
+          sequence: 3,
+          timestamp: "2026-09-27T00:00:03.000Z",
+          threadId: "thread-1",
+          turnId: "turn-1",
+          type: "turn.failed",
+          payload: { code: "TEST_FAILURE", message: `private ${home}` },
         }),
       ];
       let starts = 0;
@@ -221,18 +240,70 @@ describe.skipIf(process.platform === "win32")(
         const resumedEvents = await get(
           port,
           certificate,
-          "/v1/threads/thread-1/events?after=0",
+          "/v1/threads/thread-1/events?after=0&limit=1",
           issued.token,
         );
         expect(resumedEvents.body).toMatchObject({
           events: [{ sequence: 1, type: "assistant.delta" }],
-          hasMore: false,
+          hasMore: true,
           nextAfterSequence: 1,
         });
         expect(JSON.stringify(resumedEvents.body)).not.toContain(workspace);
         expect(JSON.stringify(resumedEvents.body)).not.toContain(
           "private path",
         );
+        const firstUpdates = await get(
+          port,
+          certificate,
+          "/v1/threads/thread-1/updates?after=-1&limit=1",
+          issued.token,
+        );
+        expect(firstUpdates.body).toEqual({
+          events: [],
+          hasMore: true,
+          nextAfterSequence: 0,
+        });
+        const answer = await get(
+          port,
+          certificate,
+          "/v1/threads/thread-1/updates?after=0&limit=1",
+          issued.token,
+        );
+        expect(answer.body).toMatchObject({
+          events: [
+            {
+              sequence: 1,
+              type: "assistant.delta",
+              text: `private path ${workspace}`,
+            },
+          ],
+          hasMore: true,
+          nextAfterSequence: 1,
+        });
+        const largeUpdate = await get(
+          port,
+          certificate,
+          "/v1/threads/thread-1/updates?after=1&limit=1",
+          issued.token,
+        );
+        expect(largeUpdate.status).toBe(200);
+        expect(largeUpdate.body).toMatchObject({
+          events: [{ sequence: 2, type: "assistant.delta", text: largeAnswer }],
+          hasMore: true,
+          nextAfterSequence: 2,
+        });
+        const failed = await get(
+          port,
+          certificate,
+          "/v1/threads/thread-1/updates?after=2",
+          issued.token,
+        );
+        expect(failed.body).toMatchObject({
+          events: [{ sequence: 3, type: "turn.failed", code: "TEST_FAILURE" }],
+          hasMore: false,
+          nextAfterSequence: 3,
+        });
+        expect(JSON.stringify(failed.body)).not.toContain(home);
         const badCursor = await get(
           port,
           certificate,
@@ -254,6 +325,13 @@ describe.skipIf(process.platform === "win32")(
           readOnly.token,
         );
         expect(deniedEvents.status).toBe(404);
+        const deniedUpdates = await get(
+          port,
+          certificate,
+          "/v1/threads/thread-1/updates?after=-1",
+          readOnly.token,
+        );
+        expect(deniedUpdates.status).toBe(404);
         const missing = await get(
           port,
           certificate,
