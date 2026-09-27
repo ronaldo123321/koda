@@ -1,188 +1,121 @@
 # Koda
 
-Koda is a local-first coding-agent runtime, CLI, and interactive terminal client under active development.
+Koda 是一个仍在开发中的本地优先编程智能体运行时，提供命令行工具（CLI）和交互式终端界面（TUI）。目前尚无 macOS 图形桌面应用。
 
-The project is building the control plane around a coding model: typed conversation state, deterministic model/tool loops, runtime-validated tools, append-only events, cancellation, recovery, and explicit security boundaries.
+项目围绕编程模型构建控制层：类型化的会话状态、确定性的模型与工具循环、运行时校验的工具、只追加事件、取消与恢复机制，以及明确的安全边界。
 
-## Current status
+## 当前状态
 
-The Phase 3 local-agent foundation, Phase 4A crash-safe workspace recovery,
-Phase 4B supervised native execution, Phase 4C1 execution policy/reporting,
-Phase 4C2A macOS Seatbelt delivery, Phase 4C2B Linux Bubblewrap delivery,
-Phase 4C3 secret lifecycle/client closure, Phase 4C4A resource contract/client
-projection, Phase 4C4B macOS resource enforcement, and Phase 4C4C1 contract
-evolution are complete; Linux resource enforcement remains in C4C2-C4C4.
-Verified macOS and Linux native executors advertise and enforce protected Pipe/PTY
-execution. macOS additionally enforces exact per-process CPU time, open-file,
-and file-size hard limits through `RLIMIT_CPU`, `RLIMIT_NOFILE`, and
-`RLIMIT_FSIZE`; it verifies the installed values before durably recording
-`applied` evidence and releasing user code. Native protocol v8, durable format
-v8 with exact v1-v7 recovery, app-server v18 resource evidence, grant binding,
-background PTY recovery, safe secret lifecycle evidence, adversarial
-syscall/network/resource tests, and dedicated native gates are shared or
-explicitly verified. Current policy v3 and capability/security v5 call the
-cgroup-backed dimension `job_task_count`; frozen policy v2/security v4 records
-retain `job_process_count` without reinterpretation. Linux and Windows resource
-requests remain fail-closed; macOS address-space and aggregate job-task limits
-also remain unsupported.
-Windows sandboxing and resource enforcement remain deferred. Koda has an
-opt-in Rust execution supervisor with a versioned local protocol, reconnectable
-job observation, POSIX process groups, Windows Job Objects and ConPTY, bounded
-retained output, explicit native capability reporting, and end-to-end
-execution-policy evidence on top of those foundations:
+Phase 3 本地智能体基础、Phase 4A 工作区变更崩溃恢复、Phase 4B 原生进程托管、Phase 4C1 执行策略与报告、Phase 4C2A macOS Seatbelt、Phase 4C2B Linux Bubblewrap、Phase 4C3 密钥生命周期与客户端呈现、Phase 4C4A 资源策略与客户端呈现、Phase 4C4B macOS 资源限制，以及 Phase 4C4C1 契约演进均已完成；Linux 资源限制仍待 C4C2 至 C4C4 完成。
 
-The current delivery priority is
-[Mac Release 1A](docs/plans/2026-08-31-macos-cli-release-design.md): a
-self-contained macOS CLI/TUI developer preview with an embedded Node runtime,
-the matching native executor, strict installed-runtime diagnostics, native
-arm64/Intel artifacts, signing/notarization, and Homebrew delivery. Remaining
-Linux resource and new Windows security work is deferred, not removed; existing
-cross-platform CI remains a regression gate.
+通过验证的 macOS 和 Linux 原生执行器会声明并执行受保护的 Pipe/PTY 命令。macOS 还通过 `RLIMIT_CPU`、`RLIMIT_NOFILE` 和 `RLIMIT_FSIZE` 实施精确的单进程 CPU 时间、打开文件数和文件大小硬限制；验证实际限制值、持久化记录 `applied` 证据后才运行用户代码。原生协议 v8、持久化格式 v8（精确兼容 v1 至 v7 恢复）、app-server v18 资源证据、授权绑定、后台 PTY 恢复、安全的密钥生命周期证据，以及系统调用、网络和资源的对抗性测试已有相应实现或验证。当前策略 v3 和能力／安全 v5 将基于 cgroup 的维度称为 `job_task_count`；冻结的策略 v2／安全 v4 记录保留 `job_process_count` 原意，不作重新解释。Linux 和 Windows 的资源限制请求仍会在不支持时拒绝；macOS 的地址空间和整个任务树的任务数限制也尚不支持。
 
-MR1A1 through MR1A3 are complete: Koda now has one version authority, strict
-versioned runtime and integrity manifests, structural source/release discovery,
-fail-closed critical-file verification, a unified `koda`/`koda-chat`
-dispatcher, and a reproducible repository-independent macOS arm64 bundle with
-embedded Node.js, release `koda-exec`, target-only native add-ons, full doctor,
-and real app-server/native smoke coverage. Explicit native arm64/Intel jobs now
-retain unsigned artifacts, compare strict same-commit release metadata, rerun
-clean-archive and corruption-negative acceptance, and install/test a generated
-Formula through an isolated Homebrew tap. MR1A4 now implements OpenPGP Node
-provenance, all-Mach-O Developer ID signing/audit, exact-ZIP notarization,
-transitive release evidence, immutable GitHub prerelease publication, and
-idempotent public Tap updates. Credential-safe Provider setup, readiness
-guidance, and explicit connection checking are implemented; Apple signing
-credentials and the first clean-machine/real-Provider publication acceptance
-are still pending. The
-protected Environment, active `v*` tag ruleset, public
-[`homebrew-koda`](https://github.com/ronaldo123321/homebrew-koda) repository,
-Tap repository variable, and repository-scoped Tap token secret are configured;
-Apple credentials are not.
+Windows 沙箱和资源限制仍待实现。Koda 已具备可选的 Rust 执行 Supervisor：使用版本化本地协议、可重连的任务观察、POSIX 进程组、Windows Job Object 与 ConPTY、有界的保留输出、明确的原生能力报告，以及贯穿执行过程的策略证据。
 
-MR1A4 is therefore paused waiting for an Apple Developer Program account. Koda
-continues with unsigned macOS internal testing and CLI/TUI experience work; the
-project will not create the public `v0.1.0` tag or weaken signing/notarization
-gates to bypass the missing external credential.
+当前交付重点是 [Mac Release 1A](docs/plans/2026-08-31-macos-cli-release-design.md)：自包含的 macOS CLI/TUI 开发者预览版，包含内置 Node 运行时、匹配的原生执行器、严格的安装诊断、arm64/Intel 原生构建，以及签名、公证和 Homebrew 分发。其余 Linux 资源限制与 Windows 安全功能暂缓；已有跨平台 CI 继续作为回归检查。
 
-The unsigned internal-preview installer is now implemented. It uses a
-versioned user-local store, atomic `current`/`previous` activation, strict
-release integrity and native smoke checks, stable launchers, exact rollback,
-crash recovery, and ownership-checked uninstall. The macOS release workflow
-also exercises the credential-free lifecycle on native arm64 and Intel runners;
-implementation commit `50ae01c` passed both architectures in
-[macOS Release Contract run 33505291467](https://github.com/ronaldo123321/koda/actions/runs/33505291467).
-This remains an unsigned internal path and does not complete MR1A4.
+MR1A1 至 MR1A3 已完成：统一版本来源、严格的运行时与完整性清单、源码／发布版识别、关键文件完整性校验、统一的 `koda`／`koda-chat` 入口，以及可复现、脱离仓库运行的 macOS arm64 安装包。安装包内含 Node.js、发布版 `koda-exec` 和对应架构的原生扩展，并通过完整诊断和真实 app-server／原生执行器冒烟测试。arm64 和 Intel 原生 CI 会保留未签名产物、比对同一提交的发布元数据、验证全新解包和损坏文件拒绝，并通过隔离的 Homebrew Tap 安装和测试生成的 Formula。MR1A4 的 Node OpenPGP 来源校验、Mach-O Developer ID 签名与审计、精确 ZIP 公证、发布证据、GitHub 预发布和公开 Tap 更新流程已实现。安全的服务提供商设置、启动提示和显式连接检查也已实现；Apple 签名凭据，以及首次在干净机器上安装公开版并连接真实服务提供商的验收，仍未完成。受保护的 GitHub Environment、`v*` 标签规则、公开 [`homebrew-koda`](https://github.com/ronaldo123321/homebrew-koda) 仓库、Tap 仓库变量和限定仓库范围的 Tap 令牌密钥已配置；Apple 凭据尚未配置。
 
-Phase 4C3A/C3B/C3C/C3D are complete with strict value-free secret
-declarations/evidence, stable cross-language digests and limits, matching
-TypeScript/Rust exact-byte streaming redactors, frozen trusted application
-catalogs, host-environment resolution into single-use in-memory leases, and
-fresh secret-aware command approval. C3C adds a non-replayed authenticated
-native start exchange, per-job `0700` directories and `0400` files, declared
-`*_FILE` targets, exact Seatbelt/Bubblewrap read-only paths, pre-persistence
-Pipe/PTY redaction, and value-free cleanup/redaction evidence. C3D adds strict
-app-server v16 evidence, durable process/result projection, and bounded
-value-free CLI/TUI summaries. Implementation commit `7a34668` passed the
-same-commit Linux verify/native, macOS native, and Windows native acceptance
-matrix in [GitHub Actions run 33354068315](https://github.com/ronaldo123321/koda/actions/runs/33354068315).
+因此，MR1A4 正等待 Apple Developer Program 账号。期间继续进行未签名 macOS 内部测试和 CLI/TUI 体验改进；在具备凭据前不会创建公开的 `v0.1.0` 标签，也不会降低签名和公证要求。
 
-- Versioned Thread, Turn, Item, and Agent Event schemas.
-- A provider-neutral streaming model interface.
-- A runtime-validated tool registry.
-- A model -> tool -> model agent loop.
-- An OpenAI Responses adapter, an Anthropic Messages adapter, and reviewed DeepSeek, Kimi, and GLM Chat Completions profiles.
-- Explicit provider selection, provider-specific credentials and defaults, normalized usage/errors, and offline adapter conformance tests.
-- Bounded durable provider continuation state for signed Anthropic thinking blocks and domestic-provider `reasoning_content` across tool rounds, compaction, and recovery.
-- Workspace-confined `list_files`, `read_file`, and literal `search_text` tools.
-- A one-file `apply_patch` tool for exact UTF-8 creates and replacements.
-- Runtime write policy, durable approval events, and terminal patch previews.
-- SHA-256 snapshot checks and atomic same-directory writes.
-- A structured `exec_command` tool that always uses `shell: false`.
-- Workspace-confined command directories, filtered environments, bounded output, timeouts, and cancellation.
-- Bounded nested `AGENTS.md` and `KODA.md` discovery with explicit directory scopes, stable broad-to-deep ordering, and hashes.
-- Provider-neutral per-response token usage events and turn-level aggregation.
-- A single-turn `koda run` command with JSONL event persistence.
-- Cross-process `koda run --resume <thread-id>` using normalized local history replay.
-- Per-turn context snapshots, globally contiguous event sequences, and typed recovery notices.
-- Conservative recovery for unfinished tool calls: uncertain side effects are reported and never automatically retried.
-- A local thread lease that prevents two live CLI processes from appending to the same log.
-- Content-addressed SHA-256 artifacts for oversized read, search, and command output.
-- Uniform 64 KiB model-facing excerpts with exact byte counts and retrievable full output.
-- A bounded `read_artifact` tool, missing/corrupt artifact recovery diagnostics, and stale temporary-file cleanup.
-- A 256 KiB per-model-step provider-output guard and 64 MiB per-stream artifact hard limit.
-- A provider-neutral `ContextEngine` with configured input budgets, conservative token estimates, and measured-usage calibration.
-- Append-only structured compaction with exact retained item IDs and atomic tool-call/result retention.
-- Recovery validation for compaction metadata plus visible added/removed/changed repository-instruction notices.
-- OpenAI response-chain reset after mid-turn compaction and a configured `max_output_tokens` reserve.
-- A durable `tool.execution_started` boundary after policy and approval, immediately before handler execution.
-- Typed process start, exit, termination-attempt, and termination-outcome events tied to the originating tool call.
-- POSIX process-group ownership with graceful-to-force escalation, descendant cleanup, and bounded confirmation.
-- An independent Rust `koda-exec` supervisor over a private same-user Unix Socket or authenticated Windows Named Pipe, with strict length-prefixed framing, capability negotiation, idempotent starts, reconnectable status/output reads, and no silent TypeScript fallback.
-- A startup-frozen execution profile, policy-bound exact-command grants, pre-approval admission evidence, and retained launch-security snapshots across TypeScript Pipe, native Pipe, and native PTY execution.
-- Native POSIX process-group and Windows Job Object ownership, plus Worker-owned POSIX PTYs and Windows ConPTY with background jobs, attach/detach, fenced input, resize, restart continuity, and bounded retained terminal output.
-- A TypeScript compatibility backend whose Windows tree-aware `taskkill` fallback reports uncertainty honestly rather than claiming native Job Object guarantees.
-- Structured interrupted-operation recovery that reports effect and process evidence without replaying a side effect or killing a historical PID.
-- A rebuildable SQLite schema v2 projection for thread metadata plus bounded display-worthy history search; JSONL remains authoritative.
-- Credential-free `koda thread list` and `koda thread show` commands with canonical workspace filtering.
-- WAL-backed concurrent metadata writers, source fingerprint refresh, invalid-log visibility, and corrupt-database quarantine.
-- Best-effort post-run indexing that never makes the derived database authoritative over JSONL.
-- Reference-aware artifact garbage collection derived only from valid JSONL logs, with a global maintenance lease and fail-closed concurrency checks.
-- Credential-free `koda artifact gc` dry runs and explicit `--delete` collection with a configurable minimum age.
-- Six deterministic binary scenarios for resume, compaction, prompt injection, process-tree cancellation, artifact retrieval, and uncertain side-effect recovery.
-- A shared `KodaApplication` workflow used by both CLI and protocol clients.
-- A strict, versioned, newline-delimited JSON-RPC 2.0 app-server over local stdio.
-- Durable-before-notify event streaming, one-shot interactive approvals, active-turn cancellation, and graceful shutdown/EOF cleanup.
-- Credential-free app-server thread list/get/search operations, bounded bidirectional JSONL event history, and different-thread concurrency guarded by existing per-thread leases.
-- A reusable Node app-server client with strict NDJSON framing, typed JSON-RPC correlation, bounded stderr diagnostics, request timeouts, and owned child-process cleanup.
-- An Ink `koda-chat` REPL that uses app-server v18 exclusively for sequential chat, approvals, thread browsing, durable search, windowed history navigation, runtime settings, artifact, context, Plan, extension, activity, process/secret/resource evidence, and mutation-recovery inspection, Stage acceptance, and resume.
-- Typed bidirectional `thread/events` pages over authoritative JSONL with exclusive sequence cursors, a 200-event cap, a 768 KiB result budget, and explicit corruption/oversize errors.
-- Revision-paginated `thread/search` over normalized SQLite substring projections, with 256-byte queries, eight-term AND semantics, 512-byte snippets, and an approximately 256 KiB result budget.
-- Idle-only `/threads`, `Ctrl+T`, and `/search <query>` interaction across the current canonical workspace, match-centered authoritative preview, metadata recheck before resume, and persisted provider/model adoption.
-- Bounded 400-event/200-row preview windows, 500 cached search results, terminal-resize-aware 5–30 row viewports, PageUp/PageDown/Home/End navigation, and stale-response generations.
-- Workspace-scoped provider/model preferences with revision-checked atomic persistence, corruption quarantine, credential-availability metadata, and no API-key transport or storage.
-- Idle-only `/settings` provider selection and editable model IDs, with explicit Apply, layered Escape, startup precedence, and separate current-thread versus next-new-thread configuration.
-- Thread-scoped `thread/artifacts` discovery and `artifact/read` ranges authorized by canonical workspace plus authoritative JSONL references, with ArtifactStore size, SHA-256, regular-file, and UTF-8 verification.
-- Idle-only `/artifacts`, `/artifact <id>`, and preview `a` navigation with newest-first deduplication, 16 KiB bidirectional byte pages, terminal-aware wrapping, stale-response rejection, and layered Escape.
-- Static completed transcript output plus one bounded live region, normal terminal scrollback, `/help`, `/status`, `/clear`, `/new`, `/exit`, `Esc` cancellation/navigation, and context-sensitive `Ctrl+C`.
-- Official MCP v2 client integration for explicitly configured local stdio servers, with one isolated session per turn.
-- Frozen, validated MCP tool catalogs exposed as stable `mcp__<server>__<tool>` aliases without importing MCP into `agent-core`.
-- Atomic MCP namespace generations refreshed only between model steps, with complete-candidate validation and no partial visibility.
-- Generation-bound prepared calls, durable catalog diffs, exact recovery-chain validation, and aggregate resume change evidence.
-- Fail-closed MCP effects: external tools require approval by default, and only explicitly reviewed `read` tools bypass approval.
-- MCP call timeouts, turn cancellation, reverse-order child cleanup, bounded binary/result normalization, artifact-backed large output, and conservative interrupted-call recovery.
-- Strict user-configured local plugins over NDJSON JSON-RPC, with one isolated owned process per active plugin and Turn.
-- Transactional required/optional plugin startup, capability allowlists, filtered named environments, bounded diagnostics, reverse shutdown, and process-tree cleanup.
-- Plugin tools behind normal policy and approval plus qualified, immutable plugin Skills and command templates validated by the existing parsers.
-- A bounded thread-scoped Plan/Stage/Todo state machine maintained through the built-in, provider-neutral `update_plan` control tool.
-- Durable safe checkpoints, Plan-aware step/time pauses, exact recovery validation, and pinned current-Plan context that survives compaction.
-- App-server `plan/get` and exact live `plan/acceptance/resolve`, plus CLI and Ink `/plan`, acceptance, rejection-feedback, and recovery views.
-- Strict `<scope>/.koda/skills/<name>/SKILL.md` discovery with deterministic broad-to-deep ordering, byte/count budgets, canonical containment, and fail-closed symlink handling.
-- Bounded Skill metadata in effective instructions, immutable Skill bodies through the built-in `read_skill` tool, durable catalog snapshots, resume changes, and current-source inspection.
-- Strict `<scope>/.koda/commands/<name>.md` prompt templates with bounded string parameters, one-pass literal rendering, explicit CLI/Ink `/template` activation, and no executable handlers.
-- Credential-free protocol v17 `extension/catalog`, `extension/read`, and `thread/extensions`, direct CLI inspection, and idle-only Ink `/extensions` with current-versus-historical labeling.
-- Crash-durable `apply_changes` and `apply_patchset` journals with synchronized original backups, endpoint/staging evidence, conservative restart classification, safe automatic rollback, thread-audit reconciliation, and fail-closed writes after divergence.
-- Credential-free conflict list/inspection, explicit token-bound backup export, `restore-original` and `accept-current` resolution, idempotent `workspace.change_set_resolved` audit, protocol/CLI/TUI clients, and restart-safe pending-resolution receipts.
-- Compact live Tool activity and deterministic completed summaries for proven successful local reads, while approvals, mutations, execution, external calls, failures, rollback, and uncertainty stay individually visible.
-- Idle-only `/activity` pagination over the complete durable execution trace plus 32 ms assistant-delta notification coalescing that preserves exact final output and flushes semantic events immediately.
-- Offline provider, runtime, CLI, and deterministic agent-loop tests.
+macOS arm64 未签名预览版的 UX1 本机真实使用验收已完成，涵盖服务提供商连接检查、CLI/TUI 对话、审批、文件修改、命令执行、后台终端和重启恢复。验收中曾有一次原因未明的 `PROVIDER_REQUEST_FAILED`，后续重试成功；请求可靠性仍需继续排查。详见 [UX1 验收记录](docs/plans/2026-09-01-macos-preview-ux1-onboarding-design.md)。
 
-Provider-assisted semantic compaction, exact provider tokenizers and pricing, custom endpoints/profiles, live model discovery, automatic routing/fallback, cross-provider resume, additional providers, FTS5/fuzzy/live or cross-workspace search, alternate-screen navigation, rich Markdown/syntax/diff rendering, binary artifact views, overlapping/fuzzy/directory change operations, and the non-Tool MCP capability surface are deliberately deferred beyond the completed Phase 3 baseline. Phase 4A provides durable post-crash journals, safe automatic change-set recovery, audit reconciliation, conflict write blocking, and explicit human resolution clients. Phase 4B provides restart-safe native process ownership, PTY/background jobs, attachments, POSIX process groups, Windows Job Objects, and ConPTY. Strong sandboxing, remote MCP/HTTP/OAuth, shared storage, remote app-server transports, signed releases, and any high-risk shell-string support remain later Phase 4 work. Parent/child thread lineage and multi-agent scenario matrices remain Phase 5 work. Workspace writes, process execution, and MCP tools not explicitly classified as read require approval by default.
+未签名内部预览版安装器已实现：使用用户目录中的版本化存储，原子切换 `current`／`previous`，严格检查发布包完整性与原生运行，提供稳定启动入口、精确回滚、崩溃恢复和所有权校验后卸载。macOS 发布工作流也在 arm64 和 Intel 原生环境验证无凭据安装流程；实现提交 `50ae01c` 在 [macOS Release Contract 运行 33505291467](https://github.com/ronaldo123321/koda/actions/runs/33505291467) 中通过两种架构的检查。这仍是未签名内部测试路径，不代表 MR1A4 完成。
 
-## Build the standalone macOS bundle
+Phase 4C3A/C3B/C3C/C3D 已完成：严格的不含密钥值的声明和证据、跨 TypeScript／Rust 稳定一致的摘要与限制、按原始字节流工作的脱敏器、固定的可信应用目录、将宿主环境变量解析为一次性内存租约，以及每条涉密命令的重新审批。C3C 加入不可重放的原生启动认证交换、每任务 `0700` 目录和 `0400` 文件、声明的 `*_FILE` 目标、精确的 Seatbelt／Bubblewrap 只读路径、Pipe/PTY 输出持久化前脱敏及不含密钥值的清理证据。C3D 加入 app-server v16 证据、持久化进程／结果呈现，以及 CLI/TUI 的有界摘要。实现提交 `7a34668` 在 [GitHub Actions 运行 33354068315](https://github.com/ronaldo123321/koda/actions/runs/33354068315) 中通过同一提交的 Linux、macOS、Windows 验收矩阵。
 
-On an Apple Silicon Mac, build and verify the local standalone archive with:
+- 版本化的 Thread、Turn、Item 和 Agent Event 模式。
+- 与服务提供商无关的流式模型接口。
+- 运行时校验的工具注册表。
+- 模型 → 工具 → 模型的智能体循环。
+- OpenAI Responses、Anthropic Messages 适配器，以及经过审查的 DeepSeek、Kimi、GLM Chat Completions 配置。
+- 显式选择服务提供商、各自的凭据和默认值、统一的用量与错误，以及离线适配器一致性测试。
+- 对 Anthropic 已签名思考块和国内服务提供商 `reasoning_content` 的有界持久化续接状态，跨工具轮次、上下文压缩和恢复保留。
+- 限定在工作区内的 `list_files`、`read_file` 和字面文本 `search_text` 工具。
+- 对单个 UTF-8 文件进行精确创建或替换的 `apply_patch` 工具。
+- 运行时写入策略、持久化审批事件和终端补丁预览。
+- SHA-256 快照校验与同目录原子写入。
+- 始终使用 `shell: false` 的结构化 `exec_command` 工具。
+- 限定工作区的命令目录、过滤后的环境、有界输出、超时与取消。
+- 按明确目录作用域、有界地发现嵌套的 `AGENTS.md` 和 `KODA.md`，从宽到窄稳定排序并记录摘要。
+- 与服务提供商无关的单次响应 Token 用量事件和 Turn 汇总。
+- 单轮 `koda run` 命令及 JSONL 事件持久化。
+- 通过标准化本地历史重放，跨进程执行 `koda run --resume <thread-id>`。
+- 每轮上下文快照、全局连续事件序号与类型化恢复提示。
+- 保守恢复未完成的工具调用：报告不确定的副作用，绝不自动重试。
+- 本地 Thread 租约，阻止两个活跃 CLI 进程写入同一日志。
+- 读取、搜索和命令的大型输出以 SHA-256 内容寻址工件存储。
+- 面向模型统一提供 64 KiB 摘录、准确字节数及可取回的完整输出。
+- 有界 `read_artifact` 工具、缺失或损坏工件的恢复诊断，以及过期临时文件清理。
+- 每次模型步骤 256 KiB 的服务提供商输出保护限制，及每条流 64 MiB 的工件硬限制。
+- 与服务提供商无关的 `ContextEngine`，支持配置输入预算、保守 Token 估算和实测用量校准。
+- 只追加的结构化上下文压缩，精确保留 Item ID，并原子保留工具调用与结果。
+- 校验压缩元数据的恢复过程，并显示仓库指令的新增、删除和修改。
+- 轮次中途压缩后重置 OpenAI 响应链，并预留配置的 `max_output_tokens`。
+- 策略和审批之后、处理器执行之前，持久化记录 `tool.execution_started` 边界。
+- 与原工具调用关联的类型化进程启动、退出、终止尝试和终止结果事件。
+- POSIX 进程组所有权、从温和到强制的终止升级、后代清理及有界确认。
+- 独立 Rust `koda-exec` Supervisor，使用同用户私有 Unix Socket 或认证的 Windows Named Pipe；具备严格的长度前缀帧、能力协商、幂等启动、可重连状态／输出读取，且不会悄悄回退到 TypeScript。
+- 启动时冻结的执行配置、与策略绑定的精确命令授权、审批前准入证据，以及 TypeScript Pipe、原生 Pipe 和原生 PTY 的启动安全快照。
+- 原生 POSIX 进程组和 Windows Job Object 所有权；Worker 托管的 POSIX PTY 与 Windows ConPTY 支持后台任务、连接／断开、输入权隔离、终端尺寸调整、重启连续性和有界终端输出。
+- TypeScript 兼容后端在 Windows 使用感知进程树的 `taskkill` 回退，并如实报告不确定性，不冒称具备原生 Job Object 保证。
+- 结构化中断操作恢复：报告副作用与进程证据，不重放副作用，也不凭历史 PID 终止进程。
+- 可重建的 SQLite v2 Thread 元数据投影与有界历史搜索；JSONL 始终是权威记录。
+- 无需凭据的 `koda thread list` 和 `koda thread show`，按规范化工作区过滤。
+- 基于 WAL 的并发元数据写入、源指纹刷新、无效日志可见性和损坏数据库隔离。
+- 运行后尽力建立索引，但派生数据库不会凌驾于 JSONL 之上。
+- 仅从有效 JSONL 推导引用的工件垃圾回收，使用全局维护租约及保守的并发检查。
+- 无需凭据的 `koda artifact gc` 预览，以及指定 `--delete` 和最小保留时间的删除。
+- 六个确定性二进制场景：续接、上下文压缩、提示注入、进程树取消、工件读取和不确定副作用恢复。
+- CLI 和协议客户端共用 `KodaApplication` 工作流。
+- 通过本地标准输入／输出运行、严格且版本化的逐行 JSON-RPC 2.0 app-server。
+- 先持久化再通知的事件流、单次交互审批、活跃 Turn 取消，以及正常关闭／EOF 清理。
+- 无需凭据的 app-server Thread 列表、详情和搜索；有界双向 JSONL 事件历史；不同 Thread 的并发由各自租约约束。
+- 可复用的 Node app-server 客户端，具备严格 NDJSON 帧、类型化 JSON-RPC 关联、有界 stderr 诊断、请求超时和自有子进程清理。
+- Ink `koda-chat` REPL 仅通过 app-server v18 提供顺序对话、审批、Thread 浏览、持久化搜索、分页历史、运行时设置、工件、上下文、Plan、扩展、活动、进程／密钥／资源证据、变更恢复检查、Stage 验收和续接。
+- 基于权威 JSONL 的双向类型化 `thread/events` 分页，使用排他的序号游标、每页最多 200 事件、768 KiB 结果预算及明确的损坏／超限错误。
+- 基于标准化 SQLite 子串投影的修订版分页 `thread/search`：查询不超过 256 字节、最多八词 AND、512 字节摘要、结果约 256 KiB。
+- 仅在空闲时使用 `/threads`、`Ctrl+T` 和 `/search <query>` 浏览当前规范化工作区；提供以命中位置为中心的权威预览、续接前元数据复查和服务提供商／模型配置继承。
+- 预览窗口最多 400 事件／200 行、缓存 500 条搜索结果、随终端尺寸变化的 5 至 30 行视窗、PageUp/PageDown/Home/End 导航和过期响应代次检查。
+- 按工作区保存服务提供商／模型偏好，使用修订版检查的原子持久化、损坏文件隔离和凭据可用性元数据；不传输或存储 API Key。
+- 仅在空闲时使用 `/settings` 选择服务提供商或编辑模型 ID；提供显式应用、逐层 Escape、启动优先级，以及当前 Thread 与下一新 Thread 的不同配置。
+- `thread/artifacts` 发现与 `artifact/read` 区间读取通过规范化工作区和权威 JSONL 引用授权，并校验 ArtifactStore 的大小、SHA-256、普通文件类型和 UTF-8。
+- 仅在空闲时使用 `/artifacts`、`/artifact <id>` 和预览键 `a`；按新到旧去重、16 KiB 双向字节分页、按终端宽度换行、拒绝过期响应并逐层退出。
+- 已完成对话静态输出加一个有界实时区域，使用普通终端滚动历史；支持 `/help`、`/status`、`/clear`、`/new`、`/exit`、`Esc` 取消／导航和按上下文工作的 `Ctrl+C`。
+- 官方 MCP v2 客户端接入显式配置的本地 stdio 服务，每个 Turn 使用独立会话。
+- 冻结且校验过的 MCP 工具目录以稳定的 `mcp__<server>__<tool>` 别名呈现，不将 MCP 引入 `agent-core`。
+- 仅在模型步骤之间原子刷新 MCP 命名空间代次；完整验证候选目录，不暴露部分结果。
+- 准备好的调用绑定目录代次，并保留目录差异、精确恢复链校验及续接时的累计变更证据。
+- MCP 副作用采取保守策略：外部工具默认需要审批，只有明确审查过的 `read` 工具可以免审。
+- MCP 调用超时、Turn 取消、逆序清理子进程、有界的二进制／结果规范化、大输出工件存储，以及保守的中断调用恢复。
+- 通过 NDJSON JSON-RPC 使用用户显式配置的本地插件；每个活跃插件和 Turn 使用独立的受控进程。
+- 必需／可选插件的事务式启动、能力允许清单、过滤后的命名环境、有界诊断、逆序关闭和进程树清理。
+- 插件工具遵循普通策略与审批；有命名空间且不可变的插件 Skill 和命令模板由现有解析器校验。
+- 内置且不依赖服务提供商的 `update_plan` 控制工具维护有界的 Thread 级 Plan／Stage／Todo 状态机。
+- 持久化安全检查点、感知 Plan 的步骤／时间暂停、精确恢复校验，以及在上下文压缩后仍保留的当前 Plan。
+- app-server `plan/get` 与精确匹配活跃请求的 `plan/acceptance/resolve`，以及 CLI／Ink 的 `/plan`、验收、拒绝反馈和恢复视图。
+- 严格发现 `<scope>/.koda/skills/<name>/SKILL.md`：从宽到窄确定性排序、字节／数量预算、规范化路径限制和遇到符号链接时保守拒绝。
+- 有效指令中使用有界 Skill 元数据；通过内置 `read_skill` 读取不可变正文，并持久化目录快照、续接变更和当前来源检查。
+- 严格解析 `<scope>/.koda/commands/<name>.md` 提示模板：有界字符串参数、单次字面替换、显式 CLI／Ink `/template` 激活，且不运行处理器。
+- 无需凭据的协议 v17 `extension/catalog`、`extension/read` 和 `thread/extensions`；CLI 直接检查与仅空闲时可用的 Ink `/extensions` 会区分当前和历史内容。
+- 崩溃后仍可恢复的 `apply_changes` 与 `apply_patchset` 日志：同步原始备份、端点／暂存证据、保守的重启分类、安全自动回滚、Thread 审计对账，以及分歧后的写入拒绝。
+- 无需凭据的冲突列表／检查、绑定状态令牌的备份导出、显式 `restore-original` 与 `accept-current` 解决、幂等 `workspace.change_set_resolved` 审计、协议／CLI／TUI 客户端和重启安全的待决回执。
+- 对已证实成功的本地读取显示紧凑的实时工具活动与确定性完成摘要；审批、修改、执行、外部调用、失败、回滚和不确定操作仍逐项可见。
+- 仅空闲时可用的 `/activity` 对完整持久化执行记录分页；32 毫秒合并助手文本增量通知，同时保留精确最终输出并立即刷新语义事件。
+- 离线的服务提供商、运行时、CLI 及确定性智能体循环测试。
+
+Phase 3 基线之后仍有明确暂缓项：服务提供商辅助的语义压缩、精确 Token 计算和定价、自定义端点／配置、在线模型发现、自动路由／回退、跨服务提供商续接、更多服务提供商、FTS5／模糊／实时／跨工作区搜索、终端备用屏幕、丰富的 Markdown／语法／差异渲染、二进制工件查看、重叠／模糊／目录级文件变更，以及 MCP 的非工具能力。Phase 4A 提供崩溃后持久化日志、安全自动回滚、审计对账、冲突写入阻断和显式人工解决；Phase 4B 提供重启后仍有效的原生进程所有权、PTY／后台任务及连接、POSIX 进程组、Windows Job Object 和 ConPTY。更完整的沙箱、远程 MCP／HTTP／OAuth、共享存储、远程 app-server、签名发布和高风险 Shell 字符串能力仍属后续 Phase 4 工作。父子 Thread 关系和多智能体场景矩阵属于 Phase 5。工作区写入、进程执行及未明确标为只读的 MCP 工具默认都需要审批。
+
+## 构建独立的 macOS 安装包
+
+在 Apple Silicon Mac 上构建并验证本地独立安装包：
 
 ```bash
 pnpm install --frozen-lockfile
 pnpm bundle:macos --output dist/release/local-arm64
 ```
 
-The output directory must not already exist. Assembly builds release
-`koda-exec`, pins and verifies Node.js 22.20.0, rejects mixed Mach-O
-architectures and payload symlinks, runs `koda --version`, full bundle doctor,
-and an app-server/native handshake outside the repository, then emits a
-deterministic archive, `.sha256` file, and strict `.release.json` metadata. Run
-the same clean-extraction and corruption-negative acceptance used by CI:
+输出目录必须不存在。组装过程会构建发布版 `koda-exec`、固定并验证 Node.js 22.20.0、拒绝混合架构的 Mach-O 文件和载荷中的符号链接，在仓库外运行 `koda --version`、完整安装包诊断及 app-server／原生执行器握手，然后生成确定性的压缩包、`.sha256` 文件和严格的 `.release.json` 元数据。可运行与 CI 相同的全新解包和损坏文件拒绝验收：
 
 ```bash
 node apps/distribution/dist/release-main.js verify \
@@ -191,7 +124,7 @@ node apps/distribution/dist/release-main.js verify \
   --corruption-check
 ```
 
-Try the unpacked candidate directly:
+直接运行解包后的候选版本：
 
 ```bash
 dist/release/local-arm64/koda/bin/koda --version
@@ -199,17 +132,11 @@ dist/release/local-arm64/koda/bin/koda doctor --bundle-only
 dist/release/local-arm64/koda/bin/koda
 ```
 
-This is an unsigned local developer-preview bundle. MR1A3 supplies native
-dual-architecture CI artifacts and the generated/tested Formula contract.
-MR1A4's protected tag workflow adds Developer ID signing, Node
-checksum-signature verification, notarization, GitHub Release publication, and
-the public Tap; it cannot run until the protected credentials and environment
-described in the release runbook are configured.
+这是未签名的本地开发者预览包。MR1A3 提供双架构原生 CI 产物及生成、测试 Formula 的流程。MR1A4 的受保护标签工作流负责 Developer ID 签名、Node 校验和签名验证、公证、发布 GitHub Release 和更新公开 Tap；运行前必须按[发布操作手册](docs/release/macos-public-preview-runbook.md)配置受保护的凭据和环境。
 
-## Install the unsigned macOS internal preview
+## 安装未签名的 macOS 内部预览版
 
-Build the current native architecture and install it beneath
-`~/.local/share/koda-preview` without `sudo`:
+构建当前原生架构，并在不使用 `sudo` 的情况下安装到 `~/.local/share/koda-preview`：
 
 ```bash
 pnpm preview:build
@@ -217,9 +144,7 @@ pnpm preview:install
 pnpm preview:status
 ```
 
-If `~/.local/bin` is not already on `PATH`, add it in your current shell before
-running the stable commands. Koda reports this remedy but never edits shell
-startup files:
+如果 `~/.local/bin` 不在 `PATH` 中，请先在当前 Shell 添加。Koda 会提示这个解决办法，但不会修改 Shell 启动文件：
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
@@ -227,31 +152,24 @@ koda --version
 koda doctor
 ```
 
-Install a downloaded CI candidate by passing its absolute archive path. The
-installer uses the sibling `.release.json` automatically; `--metadata` can
-select an explicit metadata document when needed:
+传入压缩包绝对路径即可安装下载的 CI 候选版本。安装器默认使用同目录的 `.release.json`；必要时可用 `--metadata` 指定元数据文件：
 
 ```bash
 pnpm preview:install --archive /absolute/path/koda-v0.1.0-darwin-arm64.tar.gz
 ```
 
-Every upgrade preserves the former active target as `previous`:
+每次升级都会将原先的当前版本保留为 `previous`：
 
 ```bash
 pnpm preview:rollback
 pnpm preview:uninstall --yes
 ```
 
-Uninstall removes only preview-owned launchers and version state. It does not
-remove `KODA_HOME`, Provider credentials, threads, artifacts, or settings.
-These commands intentionally report `unsigned internal preview`; they do not
-sign, notarize, publish, or claim Gatekeeper acceptance.
+卸载只删除预览版拥有的启动入口和版本状态，不删除 `KODA_HOME`、服务提供商凭据、Thread、工件或设置。这些命令会明确报告 `unsigned internal preview`；它们不执行签名、公证或发布，也不代表通过 Gatekeeper 验收。
 
-## Configure a workspace
+## 配置工作区
 
-Use the installed `koda setup` command to select a Provider and model before
-starting a task. Setup stores only the non-secret workspace preference. It does
-not require, prompt for, or persist an API key:
+开始任务前，用已安装的 `koda setup` 选择服务提供商和模型。设置只保存不含密钥的工作区偏好；不会要求输入、提示输入或持久化 API Key：
 
 ```bash
 koda setup --cwd .
@@ -260,50 +178,38 @@ koda setup --cwd . --provider deepseek --model deepseek-v4-pro --check
 koda setup --cwd . --json
 ```
 
-In a terminal, omitted Provider/model values are prompted with current defaults.
-With piped input or `--json`, setup is deterministic and never waits. Its output
-reports the exact credential environment-variable name and whether it is
-currently available, but never its value. Set the reported variable in the
-shell that will start Koda, for example:
+在终端中省略服务提供商或模型时，命令会显示当前默认值并提示选择。使用管道输入或 `--json` 时，行为是确定性的且不会等待交互。输出会告知凭据环境变量的准确名称及当前是否可用，但不会显示变量值。请在启动 Koda 的 Shell 中设置所提示的变量，例如：
 
 ```bash
 export DEEPSEEK_API_KEY='<your-key>'
 koda chat --cwd .
 ```
 
-Repository development builds expose the same flow through
-`node apps/cli/dist/main.js setup --cwd .`. Repeating an unchanged setup is
-idempotent and does not advance the settings revision.
+仓库开发构建也可通过 `node apps/cli/dist/main.js setup --cwd .` 使用相同流程。重复保存未变化的设置是幂等的，不会增加设置修订号。
 
-Connection checking is always explicit. `--check` sends one minimal no-Tool
-request through the selected Provider adapter, may consume Provider quota, and
-exits 1 for a missing credential, rejected credential/model, rate limit,
-network failure, cancellation, or other bounded Provider failure. It never
-prints the credential or raw Provider response. Setup without `--check` never
-constructs a Provider or makes a Provider network request; saving a preference
-therefore remains safe before the credential is available.
+连接检查必须显式指定 `--check`。它通过所选服务提供商适配器发送一次不带工具的最小请求，可能消耗 API 配额；缺少凭据、凭据或模型被拒绝、限流、网络故障、取消或其他有界错误时以状态码 1 退出。它不会输出凭据或原始服务提供商响应。未指定 `--check` 的设置命令不会构造服务提供商实例，也不会发起网络请求，因此可以在尚无凭据时安全地保存偏好。
 
-## Run the CLI
+## 使用 CLI
 
-Build Koda, provide the credential for one built-in provider, and run one task against a workspace. OpenAI remains the default:
+构建 Koda，为一个内置服务提供商提供凭据，然后在工作区运行任务。默认使用 OpenAI：
 
 ```bash
 pnpm build
 export OPENAI_API_KEY=...
-node apps/cli/dist/main.js run "explain this repository" --cwd .
+node apps/cli/dist/main.js run "解释这个仓库" --cwd .
 ```
 
-Select another provider with `--provider` or `KODA_PROVIDER`:
+通过 `--provider` 或 `KODA_PROVIDER` 选择其他服务提供商：
 
 ```bash
 export ANTHROPIC_API_KEY=...
-node apps/cli/dist/main.js run "explain this repository" --cwd . --provider anthropic
+node apps/cli/dist/main.js run "解释这个仓库" --cwd . --provider anthropic
 
 export DEEPSEEK_API_KEY=...
-node apps/cli/dist/main.js run "explain this repository" --cwd . --provider deepseek
+node apps/cli/dist/main.js run "解释这个仓库" --cwd . --provider deepseek
 ```
 
-| Provider    | Credential          | Default model     |
+| 服务提供商  | 凭据环境变量        | 默认模型          |
 | ----------- | ------------------- | ----------------- |
 | `openai`    | `OPENAI_API_KEY`    | `gpt-5.6-terra`   |
 | `anthropic` | `ANTHROPIC_API_KEY` | `claude-sonnet-5` |
@@ -311,19 +217,19 @@ node apps/cli/dist/main.js run "explain this repository" --cwd . --provider deep
 | `kimi`      | `MOONSHOT_API_KEY`  | `kimi-k2.6`       |
 | `glm`       | `ZAI_API_KEY`       | `glm-5.2`         |
 
-Only the selected provider's credential is required. `--model` or `KODA_MODEL` overrides that provider's default. Resume a thread with the same provider; Koda rejects cross-provider resume before issuing a model request.
+只需要当前所选服务提供商的凭据。`--model` 或 `KODA_MODEL` 可以覆盖其默认模型。续接 Thread 时必须使用原服务提供商；跨服务提供商续接会在发起模型请求前被拒绝。
 
-Koda prints the generated thread ID at turn start. Continue it from a later CLI process with the same canonical workspace:
+Koda 在 Turn 开始时打印生成的 Thread ID。之后可在相同的规范化工作区内，从另一个 CLI 进程继续：
 
 ```bash
-node apps/cli/dist/main.js run "continue with the next task" --cwd . --resume <thread-id>
+node apps/cli/dist/main.js run "继续下一项任务" --cwd . --resume <thread-id>
 ```
 
-Koda exposes three bounded write representations to the selected model. `apply_patch` creates or exactly updates one UTF-8 text file. `apply_patchset` accepts one strict Koda Patch v1 document for compact Codex-style line edits; it is not Git unified diff and every context/removal sequence must match exactly once without fuzz. `apply_changes` exposes the underlying structured transaction grammar for up to 16 independent creates, ordered exact updates, same-filesystem moves, or deletions. Patchsets and structured change sets are fully prepared and previewed before one approval, revalidated under a workspace-scoped writer lease, and compensated in reverse order after ordinary failure or cancellation. If rollback cannot prove that it is undoing Koda's own bytes, the result is explicitly uncertain and must be inspected rather than automatically repeated.
+Koda 向所选模型提供三种有界的写入形式。`apply_patch` 创建或精确更新一个 UTF-8 文本文件。`apply_patchset` 接受严格的 Koda Patch v1 文档，用于紧凑的逐行编辑；它不是 Git unified diff，所有上下文和删除行都必须恰好匹配一次，不做模糊匹配。`apply_changes` 提供底层结构化事务语法，最多包含 16 个独立创建、有序精确更新、同文件系统移动或删除操作。补丁集和结构化变更集会在一次审批前完整准备并预览，在工作区写入租约下重新校验，普通失败或取消后按逆序补偿。如果回滚无法证明自己正在撤销 Koda 写入的字节，结果会明确标为不确定，必须人工检查，不会自动重试。
 
-Koda Patch v1 uses one `*** Begin Patch` / `*** End Patch` envelope. Add sections contain `+` lines, update sections contain `@@` hunks with space/`-`/`+` line prefixes, pure moves use `*** Move File:` followed by `*** To:`, and deletes use `*** Delete File:`. Updates preserve consistent LF or CRLF endings and the target's final-newline state; malformed, missing, ambiguous, or mixed-ending hunks fail before approval.
+Koda Patch v1 使用一组 `*** Begin Patch`／`*** End Patch` 包裹内容。新增段使用 `+` 行；更新段使用 `@@` 区块和空格／`-`／`+` 行前缀；纯移动使用 `*** Move File:` 后接 `*** To:`；删除使用 `*** Delete File:`。更新会保留一致的 LF 或 CRLF 行尾及目标文件末尾换行状态。格式错误、缺失、歧义或混用行尾的区块会在审批前失败。
 
-If restart recovery quarantines an external edit, inspect it without provider credentials. Copy the exact `stateToken` returned by the latest inspection; any endpoint or staging change invalidates it:
+如果重启恢复过程隔离了外部修改，可以在没有服务提供商凭据的情况下检查。复制最近一次检查返回的准确 `stateToken`；端点或暂存区的任何变化都会使它失效：
 
 ```bash
 node apps/cli/dist/main.js recovery list --workspace .
@@ -333,9 +239,9 @@ node apps/cli/dist/main.js recovery resolve <conflict-id> --workspace . --state-
 node apps/cli/dist/main.js recovery resolve <conflict-id> --workspace . --state-token <sha256> --action restore-original
 ```
 
-Export creates a new mode-`0600` file and refuses to overwrite an existing path. `accept-current` preserves current workspace endpoints. `restore-original` deliberately replaces divergent endpoints from verified backups and therefore requires reviewing the inspection evidence first. Both decisions append an idempotent resolution event to the originating thread before Koda removes the private journal.
+导出会创建权限为 `0600` 的新文件，拒绝覆盖已有路径。`accept-current` 保留工作区当前内容。`restore-original` 从已验证备份替换有分歧的内容，因此应先审阅检查证据。两种决定都会在删除私有恢复日志前，向原 Thread 追加幂等的解决事件。
 
-Inspect local thread metadata without provider credentials:
+无需服务提供商凭据即可检查本地 Thread 元数据：
 
 ```bash
 node apps/cli/dist/main.js thread list --limit 20
@@ -343,9 +249,9 @@ node apps/cli/dist/main.js thread list --workspace .
 node apps/cli/dist/main.js thread show <thread-id>
 ```
 
-These commands refresh `KODA_HOME/state.db` from changed JSONL logs before querying. The database is a disposable projection: if it is deleted, Koda recreates it; if it is corrupt, Koda preserves a timestamped `.corrupt-*` copy and rebuilds current rows from JSONL.
+这些命令查询前会根据变化的 JSONL 日志刷新 `KODA_HOME/state.db`。数据库只是可重建的投影：删除后 Koda 会重新创建；损坏时会保留带时间戳的 `.corrupt-*` 副本，并从 JSONL 重建当前数据。
 
-Inspect current project Skills, command templates, and safe plugin-manifest metadata without Provider credentials or starting a plugin/MCP process:
+无需服务提供商凭据，也不启动插件或 MCP 进程，即可检查项目当前的 Skill、命令模板和安全的插件清单元数据：
 
 ```bash
 node apps/cli/dist/main.js extension list --workspace .
@@ -353,10 +259,9 @@ node apps/cli/dist/main.js extension read skill <skill-id> --workspace .
 node apps/cli/dist/main.js extension read command-template <template-id> --workspace .
 ```
 
-## Run interactive chat
+## 使用交互式终端聊天
 
-Build Koda and start the Ink client in an interactive terminal. Exporting the
-selected Provider credential first makes model turns ready immediately:
+构建 Koda 后，在交互式终端启动 Ink 客户端。先设置所选服务提供商的凭据，即可直接开始模型对话：
 
 ```bash
 pnpm build
@@ -364,41 +269,43 @@ export OPENAI_API_KEY=...
 pnpm chat --cwd . --provider openai
 ```
 
-The installed binary is `koda-chat`; the built workspace entry can also be run directly:
+安装后的命令是 `koda-chat`；也可以直接运行工作区中的构建入口：
 
 ```bash
 node apps/tui/dist/main.js --cwd . --provider deepseek --model deepseek-v4-pro
 node apps/tui/dist/main.js --cwd . --provider openai --resume <thread-id>
 ```
 
-Workspace and approval mode are fixed at startup. Provider/model startup precedence is CLI argument, environment variable, matching workspace preference, then registry default. `/settings` opens the Provider list and model editor; Apply persists the choice for the canonical workspace without storing credentials. Existing or resumed threads keep their durable provider/model, while `/new` adopts the saved next-thread choice. Ordinary input starts a turn. `/threads` or `Ctrl+T` opens the latest 100 threads in the current canonical workspace. Press `/` there to search, or run `/search <query>` from chat. Search uses case-normalized substring AND terms across durable display-worthy history; Enter opens authoritative history and marks the hit. `/artifacts` lists UTF-8 text/JSON artifacts referenced by the current thread, `/artifact <sha256:...>` opens a known referenced ID, and `a` opens artifacts from a thread preview without resuming it. `/context` lists prepared model requests for the current thread; `c` opens the same inspector from a thread preview. `/plan` opens the current authoritative Plan, Stage/Todo state, last safe checkpoint, and recovery evidence without starting a provider or tool. `/extensions` compares the current workspace catalog with the newest durable extension snapshot for the selected Thread without starting a Provider, MCP server, or plugin. `/activity` opens the current Thread's authoritative execution trace; PageUp/PageDown move across event pages, Home/End reach event boundaries, and Escape returns to chat. `/recovery` lists quarantined workspace changes; `inspect` prints exact evidence, `export` writes one verified backup to a new path, and `resolve` stages either action for a separate `/recovery confirm`. A live Stage acceptance card uses `y` to accept or `n` to submit bounded change feedback against the exact Plan revision. The context detail shows exact or legacy budget telemetry, measured Usage, active Item identity, Compaction, and current repository-instruction status. Enter opens a bounded current instruction source. Artifact and instruction PageUp/PageDown request adjacent verified UTF-8 byte ranges; Home/End reaches content boundaries. Arrows move one row, `r` resumes a thread preview, and `Esc` returns one layer. `/new` detaches locally without deleting history. `/approvals` lists active exact-command grants, `/approvals revoke <id>` revokes one, and `/approvals clear` revokes all grants for the current workspace. `/help`, `/status`, `/clear`, and `/exit` retain their existing behavior. On an eligible `exec_command` approval, press `y` to approve once or `a` to approve that exact normalized command for 15 minutes; `n` rejects and `d` toggles details. `Esc` cancels an active turn. `Ctrl+C` cancels while a turn is active and exits while idle. The client requires a TTY; scripts should continue to use `koda run` or the stdio app-server.
+工作区和审批模式在启动时固定。服务提供商／模型的启动优先级依次为 CLI 参数、环境变量、匹配的工作区偏好和注册表默认值。输入 `/settings` 可打开服务提供商列表和模型编辑器；选择“应用”后会为规范化工作区保存配置，不保存凭据。已有或续接的 Thread 保留原服务提供商／模型，`/new` 则使用为下一新 Thread 保存的选择。普通输入会开始一个 Turn。
 
-The TUI may also start without the selected Provider credential. History,
-settings, extensions, artifacts, Plans, processes, and recovery remain
-available. The startup notice, bottom status line, and `/status` report
-credential readiness. Submitting a model Prompt while the credential is
-missing is blocked locally before `turn/start`; the input is preserved and Koda
-prints the exact `koda setup`, `export`, and restart recovery steps. `/settings`
-may save a Provider/model preference before its credential exists.
+`/threads` 或 `Ctrl+T` 可打开当前工作区最近 100 个 Thread。在列表中按 `/` 搜索，或在聊天界面输入 `/search <query>`。搜索对值得展示的持久化历史使用不区分大小写的子串 AND 匹配；按 Enter 打开权威历史并标记命中位置。`/artifacts` 列出当前 Thread 引用的 UTF-8 文本／JSON 工件；`/artifact <sha256:...>` 打开已知引用；在 Thread 预览中按 `a` 可直接查看工件，无需续接。`/context` 列出当前 Thread 已准备的模型请求；在 Thread 预览中按 `c` 打开相同检查器。
 
-Workspace preferences are stored under `${KODA_HOME:-$HOME/.koda}/settings/workspaces/` as bounded, versioned files keyed by the canonical workspace hash. API-key values stay only in the app-server environment; the protocol exposes only whether each named credential is configured.
+`/plan` 可在不启动服务提供商或工具的情况下，查看当前权威 Plan、Stage／Todo 状态、最近安全检查点和恢复证据。`/extensions` 可在不启动服务提供商、MCP 服务或插件的情况下，比较当前工作区目录和所选 Thread 最近的持久化扩展快照。`/activity` 打开当前 Thread 的权威执行记录；PageUp/PageDown 翻页，Home/End 跳到事件边界，Escape 返回聊天界面。`/recovery` 列出隔离的工作区变更；`inspect` 显示精确证据，`export` 将一份验证过的备份写入新路径，`resolve` 暂存解决决定后还需单独执行 `/recovery confirm`。在活跃 Stage 验收卡上按 `y` 可接受，按 `n` 可针对准确的 Plan 修订提交有界修改反馈。
 
-## Run the local app-server
+上下文详情显示准确或旧版预算数据、实测用量、当前 Item 身份、上下文压缩状态及仓库指令状态。按 Enter 打开有界的当前指令来源。工件和指令内容使用 PageUp/PageDown 读取相邻的已验证 UTF-8 字节区间，Home/End 到达内容边界。方向键逐行移动；在 Thread 预览中按 `r` 续接，`Esc` 返回上一层。`/new` 只在本地脱离当前 Thread，不删除历史。`/approvals` 列出活跃的精确命令授权，`/approvals revoke <id>` 撤销一项，`/approvals clear` 撤销当前工作区的全部授权。`/help`、`/status`、`/clear` 和 `/exit` 保持各自功能。
 
-Build Koda, place provider credentials in the server environment, and launch the stdio transport:
+审批符合条件的 `exec_command` 时，按 `y` 仅批准本次，按 `a` 对完全相同的规范化命令授权 15 分钟；按 `n` 拒绝，按 `d` 切换详细信息。活跃 Turn 中按 `Esc` 或 `Ctrl+C` 可取消；空闲时 `Ctrl+C` 退出。该客户端要求 TTY；脚本请使用 `koda run` 或 stdio app-server。
+
+即使没有所选服务提供商的凭据，也能启动 TUI，浏览历史、设置、扩展、工件、Plan、进程和恢复信息。启动提示、底部状态栏和 `/status` 会显示凭据是否就绪。凭据缺失时，模型输入会在本地 `turn/start` 之前被阻止；Koda 保留输入，并给出准确的 `koda setup`、`export` 和重启步骤。`/settings` 允许先保存服务提供商／模型偏好。
+
+工作区偏好保存在 `${KODA_HOME:-$HOME/.koda}/settings/workspaces/` 中，以规范化工作区摘要为键，采用有界、版本化文件。API Key 的值只存在于 app-server 的环境中；协议仅暴露指定凭据是否已配置。
+
+## 运行本地 app-server
+
+构建 Koda，在服务进程环境中设置服务提供商凭据，然后启动 stdio 传输：
 
 ```bash
 pnpm build
 OPENAI_API_KEY=... node apps/app-server/dist/main.js
 ```
 
-The process accepts one JSON-RPC 2.0 object per UTF-8 line. `initialize` must be the first request:
+进程每行接受一个 UTF-8 编码的 JSON-RPC 2.0 对象。首个请求必须是 `initialize`：
 
 ```json
-{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":15,"client":{"name":"my-koda-client","version":"0.1.0"}}}
-{"jsonrpc":"2.0","id":2,"method":"turn/start","params":{"prompt":"explain this repository","cwd":".","provider":"openai"}}
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":18,"client":{"name":"my-koda-client","version":"0.1.0"}}}
+{"jsonrpc":"2.0","id":2,"method":"turn/start","params":{"prompt":"解释这个仓库","cwd":".","provider":"openai"}}
 {"jsonrpc":"2.0","id":3,"method":"thread/events","params":{"threadId":"<thread-id>","limit":200}}
-{"jsonrpc":"2.0","id":4,"method":"thread/search","params":{"workspace":".","query":"parser failure","limit":50}}
+{"jsonrpc":"2.0","id":4,"method":"thread/search","params":{"workspace":".","query":"解析失败","limit":50}}
 {"jsonrpc":"2.0","id":5,"method":"settings/get","params":{"workspace":"."}}
 {"jsonrpc":"2.0","id":6,"method":"settings/update","params":{"workspace":".","provider":"deepseek","model":"deepseek-v4-pro","expectedRevision":0}}
 {"jsonrpc":"2.0","id":7,"method":"thread/artifacts","params":{"workspace":".","threadId":"<thread-id>","limit":100}}
@@ -421,36 +328,46 @@ The process accepts one JSON-RPC 2.0 object per UTF-8 line. `initialize` must be
 {"jsonrpc":"2.0","id":24,"method":"workspace/mutation/conflict/resolve","params":{"workspace":".","conflictId":"wmc_<64-lowercase-hex>","stateToken":"<64-lowercase-hex>","resolution":"accept_current"}}
 ```
 
-The v16 initialize result advertises `secretEvidence` and `workspaceMutationRecovery` alongside extension inspection, planning, and the existing capabilities, supported providers, credential environment-variable names, default models, and runtime-only availability booleans. Interactive process list, attach, read, and terminate responses expose the same strict value-free secret evidence retained by the native job; historical and non-secret jobs omit it. The four `workspace/mutation/*` methods are credential-free control-plane operations: list/get return metadata only, backup export is explicit and bounded, and resolution requires the exact latest state token. `restore_original` may replace divergent endpoints; `accept_current` does not change them. Neither method is exposed as an agent Tool. A successful resolution appends `workspace.change_set_resolved` after the matching uncertain event before journal acknowledgement. `extension/catalog` performs strict current project discovery and exposes only safe plugin-manifest metadata; it never starts an external process. `extension/read` returns only one currently validated project Skill or command-template source. `thread/extensions` rereads authorized JSONL and returns the newest or exact anchored durable extension snapshot without rediscovering historical content. `thread/events` returns validated events chronologically; mutually exclusive `beforeSequence` and `afterSequence` are exclusive cursors and `limit` is 1–200. `workspace.change_set_prepared`, `workspace.change_set_committed`, `workspace.change_set_rolled_back`, and `workspace.change_set_uncertain` provide bounded path-and-digest evidence for both `apply_changes` and `apply_patchset` without file bodies. `thread/search` is restricted to the canonical workspace and returns revision-bound cursor pages. `settings/get` returns the canonical workspace preference and revision; `settings/update` requires that revision so concurrent writers cannot silently overwrite one another. `thread/artifacts` lists newest unique references only after canonical-workspace and strict-JSONL authorization. `artifact/read` additionally requires that exact thread reference and returns a bounded, integrity-verified UTF-8 range with mutually exclusive `beforeByte`/`afterByte` cursors. Before each production Provider request, Koda writes `context.prepared` after any Compaction Item. `thread/context` discovers these durable snapshots newest first and projects old logs from `model.usage` without inventing missing estimates. `context/read` reconstructs precise active Items from authoritative JSONL and rejects digest mismatches. `context/instruction/read` accepts only an opaque source ID issued for that authorized request and returns bounded current content; it is not a general workspace file reader. `plan/get` rereads the authorized thread JSONL and returns the latest Plan, checkpoint, and recovery metadata without starting execution. `plan/acceptance/resolve` accepts only an exact live pending identity; restart recovery never turns historical acceptance evidence into a reusable capability. Responses and `turn/event` / `turn/finished` notifications use stdout exclusively; diagnostics use stderr. Clients answer an `approval.requested` event with `approval/resolve`, answer a `plan.acceptance_requested` event with `plan/acceptance/resolve`, may optionally create a bounded session grant only from an eligible command candidate, may inspect or revoke grants through the three `approval/grants/*` methods, may stop a live turn with `turn/cancel`, and should finish with `shutdown`. Provider credentials are server configuration and are never protocol fields.
+v18 的 `initialize` 结果会公布 `secretEvidence`、`workspaceMutationRecovery`，以及扩展检查、规划和其他已有能力；还会列出支持的服务提供商、凭据环境变量名称、默认模型和仅反映运行时状态的可用性布尔值。交互进程的列表、连接、读取与终止响应会呈现原生任务保留的、严格不含密钥值的证据；历史任务和非涉密任务不包含该字段。
 
-## Configure project Skills
+四个 `workspace/mutation/*` 方法是无需凭据的控制层操作：列表和详情只返回元数据，备份导出需要显式请求且有界，解决冲突必须提供最近一次检查得到的准确状态令牌。`restore_original` 可能替换有分歧的文件内容；`accept_current` 不改变当前内容。这些方法都不会作为智能体工具暴露。成功解决后，Koda 会在对应的不确定事件之后追加 `workspace.change_set_resolved`，再确认恢复日志。
 
-Place a Skill at `<scope>/.koda/skills/<name>/SKILL.md`. The scope is the directory containing `.koda`; a nested Skill applies to that subtree and is listed after broader sources. Phase 3H1 accepts only `name` and `description` single-line frontmatter fields, and the name must match its directory:
+`extension/catalog` 严格发现当前项目扩展，只暴露安全的插件清单元数据，不启动外部进程。`extension/read` 只返回一个当前有效的项目 Skill 或命令模板来源。`thread/extensions` 重读已授权的 JSONL，返回最近或指定锚点的持久化扩展快照，不重新发现历史内容。`thread/events` 按时间顺序返回已验证事件；`beforeSequence` 和 `afterSequence` 是互斥的排他游标，`limit` 范围为 1 至 200。`workspace.change_set_prepared`、`workspace.change_set_committed`、`workspace.change_set_rolled_back` 和 `workspace.change_set_uncertain` 为 `apply_changes` 与 `apply_patchset` 提供有界的路径及摘要证据，不包含文件正文。
+
+`thread/search` 限定规范化工作区，并返回绑定修订版的游标页面。`settings/get` 返回规范化工作区偏好与修订号；`settings/update` 必须提供该修订号，以免并发写入静默覆盖。`thread/artifacts` 在规范化工作区和严格 JSONL 授权后，仅列出按时间倒序去重的引用。`artifact/read` 还要求准确的 Thread 引用，并返回经过完整性校验、有界的 UTF-8 字节范围；`beforeByte` 和 `afterByte` 游标互斥。
+
+每次正式的服务提供商请求前，Koda 会在任何 Compaction Item 之后写入 `context.prepared`。`thread/context` 从新到旧发现这些持久化快照；对旧日志只根据 `model.usage` 呈现信息，不编造缺失的估算值。`context/read` 从权威 JSONL 精确重建当前 Item，并拒绝摘要不匹配。`context/instruction/read` 只接受该授权请求颁发的不透明来源 ID，返回有界的当前内容；它不是通用工作区文件读取接口。`plan/get` 重读已授权的 Thread JSONL，返回最新 Plan、检查点与恢复元数据，不启动执行。`plan/acceptance/resolve` 仅接受准确匹配的活跃待决请求；重启恢复不会将历史验收证据变成可再次使用的权限。
+
+响应与 `turn/event`／`turn/finished` 通知只使用 stdout；诊断信息使用 stderr。客户端通过 `approval/resolve` 回答 `approval.requested`，通过 `plan/acceptance/resolve` 回答 `plan.acceptance_requested`；可仅针对符合条件的命令候选创建有界会话授权，可通过三个 `approval/grants/*` 方法检查或撤销授权，可通过 `turn/cancel` 停止活跃 Turn，结束时应调用 `shutdown`。服务提供商凭据属于服务端配置，从不作为协议字段传输。
+
+## 配置项目 Skill
+
+将 Skill 放在 `<scope>/.koda/skills/<name>/SKILL.md`。`<scope>` 是包含 `.koda` 的目录；嵌套 Skill 仅作用于对应子树，并排在更宽作用域的来源之后。Phase 3H1 仅接受单行的 `name` 和 `description` frontmatter 字段，且名称必须与目录名一致：
 
 ```markdown
 ---
 name: code-review
-description: Review changes for correctness, recovery, and missing tests.
+description: 检查变更的正确性、恢复行为和缺失的测试。
 ---
 
-Inspect the affected flow, verify failure boundaries, and run focused tests.
+检查受影响的流程，验证故障边界，并运行针对性测试。
 ```
 
-Koda injects only bounded catalog metadata. The model calls `read_skill` to obtain one immutable Skill body for the current Turn. Skill text is lower-priority project guidance: it cannot register tools, bypass approval, escape the workspace, or weaken Runtime policy. Files are limited to 48 KiB, with at most 32 Skills and 192 KiB combined content per workspace.
+Koda 仅注入有界的目录元数据。模型通过 `read_skill` 获取当前 Turn 中一份不可变的 Skill 正文。Skill 文本属于低优先级项目指导，不能注册工具、绕过审批、越出工作区或削弱运行时策略。单文件不超过 48 KiB；每个工作区最多 32 个 Skill，总正文不超过 192 KiB。
 
-## Configure command templates
+## 配置命令模板
 
-Place a reviewed prompt template at `<scope>/.koda/commands/<name>.md`. Parameters use one single-line JSON array in frontmatter; Phase 3H2 accepts bounded strings only:
+将经过审查的提示模板放在 `<scope>/.koda/commands/<name>.md`。参数在 frontmatter 中使用单行 JSON 数组；Phase 3H2 只接受有长度限制的字符串：
 
 ```markdown
 ---
 name: review
-description: Review one target for correctness and missing tests.
+description: 检查一个目标的正确性和缺失的测试。
 parameters:
   [
     {
       "name": "target",
-      "description": "Workspace-relative target.",
+      "description": "相对于工作区的目标路径。",
       "type": "string",
       "required": true,
       "max_bytes": 1024,
@@ -458,14 +375,14 @@ parameters:
   ]
 ---
 
-Review {{target}} for correctness, recovery gaps, and missing tests.
+检查 {{target}} 的正确性、恢复缺口和缺失的测试。
 ```
 
-Invoke a root template with `koda run '/template review {"target":"src/agent.ts"}' --cwd .` or enter the same `/template` prompt in Ink. Nested templates use selectors such as `packages/ui/review`. Koda freezes and validates the catalog, performs one literal substitution pass, and records source, argument, and rendered-input digests before the Provider starts. Templates are ordinary user prompts: they cannot define argv, environment, effects, approvals, tools, or local slash-command handlers.
+可用 `koda run '/template review {"target":"src/agent.ts"}' --cwd .` 调用根目录模板，也可在 Ink 中输入相同的 `/template` 提示。嵌套模板使用 `packages/ui/review` 等选择器。Koda 在启动服务提供商前冻结并校验目录、进行一次字面替换，并记录来源、参数和渲染后输入的摘要。模板只是普通用户提示，不能定义 argv、环境、副作用、审批、工具或本地斜杠命令处理器。
 
-## Configure local MCP tools
+## 配置本地 MCP 工具
 
-Create `${KODA_HOME:-$HOME/.koda}/mcp.json` to start local stdio MCP servers for each turn. An absent default file disables MCP. `KODA_MCP_CONFIG` may select another file relative to the process directory or by absolute path.
+创建 `${KODA_HOME:-$HOME/.koda}/mcp.json`，即可在每个 Turn 启动本地 stdio MCP 服务。默认文件不存在时，MCP 关闭。`KODA_MCP_CONFIG` 可指定相对于进程目录或使用绝对路径的其他配置文件。
 
 ```json
 {
@@ -486,13 +403,13 @@ Create `${KODA_HOME:-$HOME/.koda}/mcp.json` to start local stdio MCP servers for
 }
 ```
 
-`command` and `args` are passed directly without a shell. `env` contains parent environment variable names, never secret values; each child receives only a small runtime baseline plus those allowlisted names. Missing variables, relative or nonexistent `cwd` values, malformed schemas, oversized catalogs, and stale read classifications fail the turn before the model sees a partial catalog.
+`command` 和 `args` 直接传递，不经过 Shell。`env` 只包含父进程环境变量名称，不包含密钥值；子进程仅接收少量运行时基础变量和列入允许清单的变量。变量缺失、`cwd` 为相对或不存在的路径、模式格式错误、目录超限、只读分类过期等情况，都会在模型看到部分目录前使 Turn 失败。
 
-Every discovered tool defaults to effect `execute`. Under the default `on-request` mode it needs one approval per call; under `never` it is denied. Add `{ "effect": "read" }` only after reviewing that exact server tool. MCP annotations are treated as untrusted hints and cannot weaken this policy. MCP Tools use local stdio and refresh complete catalogs only at safe model-step boundaries; HTTP/OAuth, resources, prompts, sampling, elicitation, notifications, and cross-turn shared sessions remain deferred.
+发现的工具默认副作用为 `execute`：在默认 `on-request` 模式下，每次调用都需要审批；在 `never` 模式下会被拒绝。只有审查过该服务的准确工具后，才添加 `{ "effect": "read" }`。MCP 注解只是未受信任的提示，不能降低该策略要求。MCP 工具使用本地 stdio，仅在安全的模型步骤边界刷新完整目录；HTTP／OAuth、资源、提示、采样、征询、通知和跨 Turn 共享会话仍待后续实现。
 
-## Configure local plugins
+## 配置本地插件
 
-Create `${KODA_HOME:-$HOME/.koda}/plugins.json` to start reviewed local plugins for each Turn. An absent default file disables plugins. `KODA_PLUGIN_CONFIG` may explicitly select another file relative to the process directory or by absolute path.
+创建 `${KODA_HOME:-$HOME/.koda}/plugins.json`，即可在每个 Turn 启动经过审查的本地插件。默认文件不存在时，插件关闭。`KODA_PLUGIN_CONFIG` 可显式指定相对于进程目录或使用绝对路径的其他配置文件。
 
 ```json
 {
@@ -515,66 +432,66 @@ Create `${KODA_HOME:-$HOME/.koda}/plugins.json` to start reviewed local plugins 
 }
 ```
 
-Plugin stdout is strict NDJSON JSON-RPC 2.0 protocol traffic. Koda negotiates protocol version 1, copies and validates only requested `tools`, `skills`, and `command_templates`, qualifies all contributed identities, and publishes nothing until the complete required set is healthy. Optional failures are isolated and recorded without copying plugin stderr. Tool names become `plugin__<plugin-id>__<tool-name>` and default to `execute`; an exact manifest entry may review one as `read`. Plugin Skills and templates must contain the same complete Markdown/frontmatter accepted from project sources.
+插件 stdout 严格用于 NDJSON JSON-RPC 2.0 协议流量。Koda 协商协议 v1，仅复制并校验所请求的 `tools`、`skills` 和 `command_templates`，为所有贡献的身份加上限定名；必需插件全部正常前不会发布任何能力。可选插件的失败会被隔离并记录，不复制插件 stderr。工具名称变为 `plugin__<plugin-id>__<tool-name>`，默认副作用为 `execute`；清单中可针对准确工具审查并标为 `read`。插件 Skill 和模板必须使用与项目来源相同的完整 Markdown／frontmatter 格式。
 
-Plugins are ordinary local executables running with the current user's operating-system permissions; process isolation and filtered environments are lifecycle guardrails, not an OS security sandbox. Koda never auto-discovers plugin executables from a repository, installs packages, restarts crashed plugins, or keeps them alive across Turns.
+插件是使用当前用户操作系统权限运行的普通本地可执行文件。进程隔离和过滤后的环境只是生命周期保护措施，不构成操作系统安全沙箱。Koda 不会从仓库自动发现插件可执行文件、安装软件包、重启崩溃的插件，或让插件跨 Turn 常驻。
 
-`koda extension list` and protocol `extension/catalog` parse this manifest but never execute the configured command. Active contribution metadata is available only from a durable Thread snapshot after normal transactional Turn startup.
+`koda extension list` 和协议 `extension/catalog` 会解析清单，但不会执行配置的命令。活跃贡献的元数据只能在正常事务式 Turn 启动后，从持久化 Thread 快照中获取。
 
-Preview old unreferenced artifacts without provider credentials, then delete them only after reviewing the report:
+无需服务提供商凭据即可预览未引用的旧工件；审阅报告后再决定是否删除：
 
 ```bash
 node apps/cli/dist/main.js artifact gc
 node apps/cli/dist/main.js artifact gc --delete --min-age-hours 24
 ```
 
-GC derives reachability from every valid JSONL event rather than SQLite. It refuses to delete anything while a thread is active or when a log is partial, corrupt, unsafe, or unreadable. The default minimum age is 24 hours; dry-run is always the default.
+垃圾回收从每条有效 JSONL 事件推导引用关系，不依赖 SQLite。存在活跃 Thread，或日志不完整、损坏、不安全、无法读取时，它拒绝删除任何内容。默认最小保留时间为 24 小时，并且始终默认只预览。
 
-Resume reads and validates the local JSONL log, rebuilds provider-neutral history, and projects it through the thread's selected provider. A legacy log without a context snapshot, a provider or workspace mismatch, a busy thread, or an invalid log fails closed. If the prior process stopped during a tool call, Koda reports the durable effect and process evidence it has and does not execute the call again automatically. It never sends a signal using only a PID recovered from an earlier process because operating systems can reuse PIDs.
+续接会读取并校验本地 JSONL 日志，重建与服务提供商无关的历史，再通过该 Thread 原先选择的服务提供商呈现。旧日志缺少上下文快照、服务提供商或工作区不匹配、Thread 正忙或日志无效时，会保守地拒绝续接。如果旧进程在工具调用中停止，Koda 只报告已持久化的副作用和进程证据，不自动再次执行。操作系统可能复用 PID，因此 Koda 不会仅凭旧进程恢复出的 PID 发送信号。
 
-Oversized tool text keeps a bounded head/tail excerpt in the transcript and stores the complete captured bytes under `KODA_HOME/artifacts/sha256`. Artifact references are content-addressed and deduplicated. The model can call `read_artifact` with an ID, byte offset, and range size; the TUI can inspect only text artifacts authorized by the current or previewed thread's JSONL. Missing or corrupt blobs are reported explicitly rather than repaired silently. Koda removes stale temporary captures automatically and reclaims published blobs only through explicit reference-aware garbage collection.
+工具文本过大时，对话记录只保留有界的首尾摘录，完整捕获字节保存在 `KODA_HOME/artifacts/sha256`。工件按内容寻址并去重。模型可用 ID、字节偏移和区间长度调用 `read_artifact`；TUI 只能查看当前或预览 Thread 的 JSONL 已授权的文本工件。缺失或损坏的内容会被明确报告，不会悄悄修复。Koda 会自动删除过期的临时捕获文件；已发布的工件只能通过显式、感知引用的垃圾回收清理。
 
-Before every model request, Koda budgets base instructions, scoped repository guidance, tool schemas, and the active transcript. The defaults are a 128,000-token context window, a 16,384-token output reserve, and an 8,192-token safety margin. Override the first two with `KODA_CONTEXT_WINDOW_TOKENS` and `KODA_MAX_OUTPUT_TOKENS`. When history no longer fits, Koda appends a structured compaction record to JSONL, preserves the newest coherent suffix, and rebuilds the same model-facing view after restart without deleting original events.
+每次模型请求前，Koda 都会为基础指令、适用的仓库指导、工具模式和活跃对话记录计算预算。默认上下文窗口为 128,000 Token、输出预留 16,384 Token、安全余量 8,192 Token。前两项可通过 `KODA_CONTEXT_WINDOW_TOKENS` 和 `KODA_MAX_OUTPUT_TOKENS` 覆盖。历史超出窗口时，Koda 会向 JSONL 追加结构化压缩记录，保留最新且语义完整的后缀；重启后可重建相同的模型视图，不删除原始事件。
 
-The provider defaults to `openai`; select it with `--provider <provider>` or `KODA_PROVIDER`. The model defaults to the selected provider's registry entry and can be overridden with `--model <model>` or `KODA_MODEL`. Runtime event logs are written under `~/.koda/threads` by default; set `KODA_HOME` to move them. `KODA_EXECUTION_PROFILE` selects the startup-frozen execution profile described below.
+服务提供商默认为 `openai`，可通过 `--provider <provider>` 或 `KODA_PROVIDER` 选择。模型默认采用所选服务提供商的注册配置，可通过 `--model <model>` 或 `KODA_MODEL` 覆盖。运行事件日志默认写入 `~/.koda/threads`，可用 `KODA_HOME` 更改位置。`KODA_EXECUTION_PROFILE` 选择下文所述、启动后固定的执行配置。
 
-Koda discovers `AGENTS.md` and `KODA.md` from the workspace root downward, excluding `.git`, `.koda`, `node_modules`, symlinked directories, and paths deeper than 20 levels. It loads broader scopes before deeper scopes and `AGENTS.md` before `KODA.md` within one directory. Each source applies only to its subtree, must be a regular UTF-8 file no larger than 64 KiB, and cannot override runtime policy or approvals. Discovery is capped at 32 files and 256 KiB total. If these files change between turns, resume records the exact added, removed, or changed paths and uses the current versions.
+Koda 从工作区根目录向下发现 `AGENTS.md` 和 `KODA.md`，排除 `.git`、`.koda`、`node_modules`、符号链接目录和超过 20 层的路径。加载顺序先宽作用域、后窄作用域；同一目录先 `AGENTS.md`、后 `KODA.md`。每个来源只适用于其子树，必须是不超过 64 KiB 的普通 UTF-8 文件，不能覆盖运行时策略或审批。最多发现 32 个文件，总计不超过 256 KiB。如果文件在 Turn 之间变化，续接会记录准确的新增、删除或修改路径，并采用当前版本。
 
-When Koda proposes a patch or command, it prints the exact action and asks for approval. The line-oriented CLI remains one-shot with `Approve this action? [y/N]`. In one TUI/app-server process, an eligible built-in command can instead receive a 15-minute grant scoped to the canonical workspace, exact normalized `argv`, working directory, and timeout. Grants are memory-only, inspectable, revocable, capped at one hour, never apply to writes, MCP tools, or plugin tools, and disappear on restart. A command is represented as a JSON `argv` array, never reconstructed as shell syntax. Use `--approval-mode never` or `KODA_APPROVAL_MODE=never` to deny all writes and process execution even when a matching grant exists.
+Koda 提议补丁或命令时会打印准确操作并请求审批。逐行 CLI 的 `Approve this action? [y/N]` 每次只批准一项操作。在同一个 TUI／app-server 进程中，符合条件的内置命令可获得 15 分钟授权，范围绑定规范化工作区、准确的标准化 `argv`、工作目录和超时。授权只存在于内存中，可检查、可撤销，最长一小时；不适用于写入、MCP 或插件工具，重启后失效。命令表示为 JSON `argv` 数组，不会重新拼成 Shell 语法。设置 `--approval-mode never` 或 `KODA_APPROVAL_MODE=never` 可拒绝所有写入和进程执行，即使存在匹配授权也一样。
 
-The TypeScript compatibility backend runs commands without stdin, has a 30-second default timeout, and retains at most 64 KiB from each output stream. On POSIX, each command owns a process group; timeout, cancellation, output failure, or unsupported surviving descendants trigger `SIGTERM`, a grace period, and then `SIGKILL` when needed. Its Windows fallback uses tree-aware `taskkill` with explicit uncertainty when termination cannot be confirmed. These guardrails are not a security sandbox: an approved executable or repository script still runs with the current user's operating-system permissions.
+TypeScript 兼容后端运行命令时不提供 stdin，默认超时 30 秒，每条输出流最多保留 64 KiB。在 POSIX 上，每条命令拥有独立进程组；超时、取消、输出故障或仍存活的后代进程会触发 `SIGTERM`，经过宽限期后按需发送 `SIGKILL`。Windows 回退方案使用感知进程树的 `taskkill`；无法确认终止时会明确报告不确定性。这些保护措施不是安全沙箱：经批准的可执行文件或仓库脚本仍以当前用户的操作系统权限运行。
 
-Execution policy defaults to `unconfined` and may be selected before startup with `KODA_EXECUTION_PROFILE`. A macOS native executor that passes Koda's real Seatbelt startup self-test and a Linux native executor that passes the exact Bubblewrap/namespace/seccomp startup probe support `read-only` and `workspace-write`; TypeScript and Windows backends reject those profiles before approval or job creation. There is no silent downgrade:
+执行策略默认为 `unconfined`，可在启动前通过 `KODA_EXECUTION_PROFILE` 选择。通过真实 Seatbelt 启动自检的 macOS 原生执行器，以及通过精确 Bubblewrap／命名空间／seccomp 启动探测的 Linux 原生执行器支持 `read-only` 和 `workspace-write`；TypeScript 和 Windows 后端会在审批或创建任务前拒绝这些配置，不会静默降级：
 
 ```bash
 export KODA_EXEC_PATH="$PWD/target/debug/koda-exec"
 export KODA_EXECUTION_PROFILE=read-only
 ```
 
-Every prepared command records its requested policy dimensions, selected backend, capability digest, expected launch controls, and the frozen Linux Bubblewrap runtime identity where applicable. A protected macOS or Linux start publishes `running` and applied filesystem/network evidence only after sandbox-internal confirmation, process-identity recheck, durable evidence, and a second release gate; user code cannot run during that validation window. Linux launch evidence is displayed as `OS sandbox: Linux Bubblewrap + seccomp`; unconfined and unsupported backends state `OS sandbox: none`. Process-tree supervision and environment filtering are reported separately. Exact-command approval grants bind the policy, backend, capabilities, and runtime fingerprint, so changing any of them invalidates the grant before execution.
+每条准备好的命令都会记录请求的策略维度、所选后端、能力摘要、预期启动控制，以及适用时冻结的 Linux Bubblewrap 运行时身份。受保护的 macOS 或 Linux 命令只有经过沙箱内部确认、进程身份复查、证据持久化和第二道放行门槛后，才发布 `running` 状态及已应用的文件系统／网络证据；用户代码在验证期间不会运行。Linux 启动证据显示为 `OS sandbox: Linux Bubblewrap + seccomp`；无约束或不支持的后端显示 `OS sandbox: none`。进程树托管和环境过滤另行报告。精确命令授权绑定策略、后端、能力及运行时指纹，任一变化都会使授权在执行前失效。
 
-The complete guarantee, evidence, failure, legacy-compatibility, and platform acceptance contract is documented in [Koda execution security guarantees](docs/security/execution-security.md).
+完整的安全保证、证据、失败、旧版兼容及平台验收契约见 [Koda 执行安全保证](docs/security/execution-security.md)。
 
-Phase 4B provides the Rust Supervisor and per-job Workers on macOS, Linux, and Windows. `pnpm build` builds `target/debug/koda-exec` (`target/debug/koda-exec.exe` on Windows); set its absolute path to select the native backend explicitly:
+Phase 4B 在 macOS、Linux 和 Windows 上提供 Rust Supervisor 及每任务独立的 Worker。`pnpm build` 会构建 `target/debug/koda-exec`（Windows 上为 `target/debug/koda-exec.exe`）；设置其绝对路径以显式选择原生后端：
 
 ```bash
 export KODA_EXEC_PATH="$PWD/target/debug/koda-exec"
-node apps/cli/dist/main.js run "run the tests" --cwd .
+node apps/cli/dist/main.js run "运行测试" --cwd .
 ```
 
-When selected, Koda starts or reconnects to the private Supervisor beneath `KODA_HOME/executor`, performs a mandatory version/capability handshake, and delegates each accepted command to an independently detached Worker. Durable manifests, state heads, bounded output stores, authenticated Worker control, and PID start identities let a replacement Supervisor reconnect without restarting a running command. POSIX process groups and Windows Job Objects own complete process trees; POSIX PTYs and ConPTY provide managed background terminals, attach/detach, fenced input, resize, and restart-safe observation. Pre-command jobs resume safely; loss after the command boundary becomes `termination_uncertain` and never guesses success. Removing `KODA_EXEC_PATH` selects the existing TypeScript compatibility backend during the migration. Koda never silently falls back after a native startup or protocol failure.
+选择原生后端后，Koda 会在 `KODA_HOME/executor` 下启动或重连私有 Supervisor，完成强制版本／能力握手，并将每条已接受命令交给独立分离的 Worker。持久化清单、状态头、有界输出存储、认证的 Worker 控制和 PID 启动身份，使替换后的 Supervisor 无需重启正在运行的命令即可重连。POSIX 进程组和 Windows Job Object 管理完整进程树；POSIX PTY 和 ConPTY 提供受控后台终端、连接／断开、输入权隔离、尺寸调整和重启安全观察。命令开始前的任务可安全续接；越过命令边界后若失去任务，结果标为 `termination_uncertain`，不会猜测成功。迁移期间移除 `KODA_EXEC_PATH` 可选择现有 TypeScript 兼容后端；原生启动或协议失败后 Koda 不会静默回退。
 
-When the provider reports usage, Koda persists normalized input, cached, cache-write, output, reasoning, and total token counts and prints a turn summary. Missing provider usage is reported as unmeasured rather than treated as zero billable usage.
+服务提供商返回用量时，Koda 持久化标准化的输入、缓存命中、缓存写入、输出、推理和总 Token 数，并打印 Turn 摘要。未返回用量时标为未测量，不视作零计费用量。
 
-`ripgrep` (`rg`) must be available for the `search_text` tool. `list_files` and `read_file` continue to work without it.
+使用 `search_text` 工具需要安装 `ripgrep`（`rg`）；没有它时 `list_files` 和 `read_file` 仍可使用。
 
-## Development
+## 开发
 
-Requirements:
+环境要求：
 
-- Node.js 22.20 or later; CI runs Node.js 24.
+- Node.js 22.20 或更新版本；CI 使用 Node.js 24。
 - pnpm 10.28.2.
-- Rust 1.85 or later with Cargo; the workspace uses Rust 2024 edition.
+- Rust 1.85 或更新版本，包含 Cargo；工作区使用 Rust 2024 edition。
 
 ```bash
 pnpm install
@@ -584,54 +501,54 @@ pnpm test
 pnpm eval:scenarios
 ```
 
-## Packages
+## 软件包
 
-- `@koda/protocol`: versioned runtime schemas and domain types.
-- `@koda/agent-core`: agent loop, provider and tool ports, event ports.
-- `@koda/providers`: OpenAI Responses, Anthropic Messages, named OpenAI-compatible profiles, normalized provider errors, and deterministic scripted providers.
-- `@koda/runtime-node`: JSONL, artifact, and rebuildable SQLite metadata persistence plus constrained workspace, patch, and process tools.
-- `@koda/mcp-client-node`: strict local MCP configuration, official stdio client lifecycle, tool adaptation, policy metadata, and bounded result conversion.
-- `@koda/plugin-host-node`: strict local plugin manifests, NDJSON protocol, transactional capability validation, tool adaptation, diagnostics, and owned process lifecycle.
-- `@koda/app`: transport-neutral turn orchestration and credential-free thread metadata/history use cases.
-- `@koda/cli`: line-oriented command parsing, terminal approval, and console projection over `@koda/app`.
-- `@koda/app-server`: local stdio JSON-RPC transport, active-turn coordination, and interactive approval routing.
-- `@koda/app-server-client-node`: typed local JSON-RPC client, NDJSON framing, request lifecycle, diagnostics, and owned app-server process cleanup.
-- `@koda/tui`: React/Ink controller, static transcript and live-region rendering, keyboard interaction, and `koda-chat` entry point.
-- `@koda/testkit`: deterministic clocks, IDs, tools, in-memory event storage, and offline reliability scenarios.
-- `koda-exec`: native POSIX process supervisor, private local protocol, bounded output ownership, timeout, cancellation, and reconnectable live job status.
+- `@koda/protocol`：版本化运行时模式和领域类型。
+- `@koda/agent-core`：智能体循环、服务提供商与工具端口、事件端口。
+- `@koda/providers`：OpenAI Responses、Anthropic Messages、具名 OpenAI 兼容配置、标准化错误及确定性的脚本化服务提供商。
+- `@koda/runtime-node`：JSONL、工件和可重建 SQLite 元数据持久化，以及受限制的工作区、补丁和进程工具。
+- `@koda/mcp-client-node`：严格的本地 MCP 配置、官方 stdio 客户端生命周期、工具适配、策略元数据和有界结果转换。
+- `@koda/plugin-host-node`：严格的本地插件清单、NDJSON 协议、事务式能力验证、工具适配、诊断和进程生命周期管理。
+- `@koda/app`：与传输方式无关的 Turn 编排，以及无需凭据的 Thread 元数据／历史操作。
+- `@koda/cli`：逐行命令解析、终端审批，以及基于 `@koda/app` 的控制台呈现。
+- `@koda/app-server`：本地 stdio JSON-RPC 传输、活跃 Turn 协调和交互审批路由。
+- `@koda/app-server-client-node`：类型化本地 JSON-RPC 客户端、NDJSON 帧、请求生命周期、诊断及自有 app-server 子进程清理。
+- `@koda/tui`：React／Ink 控制器、静态对话和实时区域渲染、键盘交互及 `koda-chat` 入口。
+- `@koda/testkit`：确定性的时钟、ID、工具、内存事件存储和离线可靠性场景。
+- `koda-exec`：原生 POSIX 进程 Supervisor、私有本地协议、有界输出、超时、取消及可重连的实时任务状态。
 
-## Architecture
+## 架构与设计文档
 
-- [Architecture design](docs/plans/2026-08-26-koda-agent-architecture-design.md)
-- [Phase 0 implementation plan](docs/plans/2026-08-26-phase-0-implementation-plan.md)
-- [Phase 1A OpenAI CLI design](docs/plans/2026-08-26-phase-1a-openai-cli-design.md)
-- [Phase 1B safe patch design](docs/plans/2026-08-26-phase-1b-safe-patch-design.md)
-- [Phase 1C safe exec design](docs/plans/2026-08-26-phase-1c-safe-exec-design.md)
-- [Phase 1D context and accounting design](docs/plans/2026-08-26-phase-1d-context-accounting-design.md)
-- [Phase 2 reliability roadmap](docs/plans/2026-08-26-phase-2-roadmap.md)
-- [Phase 2A durable resume and recovery design](docs/plans/2026-08-26-phase-2a-resume-recovery-design.md)
-- [Phase 2B artifacts and output budgets design](docs/plans/2026-08-26-phase-2b-artifacts-output-budgets-design.md)
-- [Phase 2C context and compaction design](docs/plans/2026-08-26-phase-2c-context-compaction-design.md)
-- [Phase 2D process reliability design](docs/plans/2026-08-26-phase-2d-process-reliability-design.md)
-- [Phase 2E SQLite metadata design](docs/plans/2026-08-26-phase-2e-sqlite-metadata-design.md)
-- [Phase 2F scenarios and artifact GC design](docs/plans/2026-08-26-phase-2f-scenarios-artifact-gc-design.md)
-- [Phase 4 hardening roadmap](docs/plans/2026-08-28-phase-4-roadmap.md)
-- [macOS public preview release runbook](docs/release/macos-public-preview-runbook.md)
-- [Phase 4B supervised native execution design](docs/plans/2026-08-28-phase-4b-supervised-native-execution-design.md)
-- [Phase 3 extensibility roadmap](docs/plans/2026-08-26-phase-3-roadmap.md)
-- [Phase 3A local stdio app-server design](docs/plans/2026-08-26-phase-3a-stdio-app-server-design.md)
-- [Phase 3B local MCP client design](docs/plans/2026-08-26-phase-3b-mcp-client-design.md)
-- [Phase 3C multi-provider runtime design](docs/plans/2026-08-26-phase-3c-multi-provider-design.md)
-- [Phase 3D Ink chat REPL design](docs/plans/2026-08-26-phase-3d-ink-chat-repl-design.md)
-- [Phase 3E1 thread browser and history restore design](docs/plans/2026-08-27-phase-3e1-thread-browser-history-design.md)
-- [Phase 3E2 history search and windowed navigation design](docs/plans/2026-08-27-phase-3e2-history-search-navigation-design.md)
-- [Phase 3E3 workspace runtime settings design](docs/plans/2026-08-27-phase-3e3-runtime-settings-design.md)
-- [Phase 3E4 thread-scoped artifact inspection design](docs/plans/2026-08-27-phase-3e4-artifact-inspection-design.md)
-- [Phase 3E5 auditable context and instruction inspection design](docs/plans/2026-08-27-phase-3e5-context-inspection-design.md)
-- [Phase 3F1 auditable multi-file change transactions design](docs/plans/2026-08-27-phase-3f1-multi-file-change-transactions-design.md)
-- [Phase 3F2 strict native patch documents design](docs/plans/2026-08-27-phase-3f2-native-patch-documents-design.md)
-- [Phase 3F3 session-scoped exact-command approval grants design](docs/plans/2026-08-28-phase-3f3-session-command-approval-grants-design.md)
-- [Phase 3G durable planning and Harness checkpoints design](docs/plans/2026-08-28-phase-3g-planning-harness-design.md)
-- [Phase 3H Skills and extension system design](docs/plans/2026-08-28-phase-3h-skills-extension-system-design.md)
+- [架构设计](docs/plans/2026-08-26-koda-agent-architecture-design.md)
+- [Phase 0 实施计划](docs/plans/2026-08-26-phase-0-implementation-plan.md)
+- [Phase 1A OpenAI CLI 设计](docs/plans/2026-08-26-phase-1a-openai-cli-design.md)
+- [Phase 1B 安全补丁设计](docs/plans/2026-08-26-phase-1b-safe-patch-design.md)
+- [Phase 1C 安全命令执行设计](docs/plans/2026-08-26-phase-1c-safe-exec-design.md)
+- [Phase 1D 上下文与用量设计](docs/plans/2026-08-26-phase-1d-context-accounting-design.md)
+- [Phase 2 可靠性路线图](docs/plans/2026-08-26-phase-2-roadmap.md)
+- [Phase 2A 持久化续接与恢复设计](docs/plans/2026-08-26-phase-2a-resume-recovery-design.md)
+- [Phase 2B 工件与输出预算设计](docs/plans/2026-08-26-phase-2b-artifacts-output-budgets-design.md)
+- [Phase 2C 上下文与压缩设计](docs/plans/2026-08-26-phase-2c-context-compaction-design.md)
+- [Phase 2D 进程可靠性设计](docs/plans/2026-08-26-phase-2d-process-reliability-design.md)
+- [Phase 2E SQLite 元数据设计](docs/plans/2026-08-26-phase-2e-sqlite-metadata-design.md)
+- [Phase 2F 场景与工件回收设计](docs/plans/2026-08-26-phase-2f-scenarios-artifact-gc-design.md)
+- [Phase 4 加固路线图](docs/plans/2026-08-28-phase-4-roadmap.md)
+- [macOS 公开预览版发布操作手册](docs/release/macos-public-preview-runbook.md)
+- [Phase 4B 原生进程托管设计](docs/plans/2026-08-28-phase-4b-supervised-native-execution-design.md)
+- [Phase 3 扩展能力路线图](docs/plans/2026-08-26-phase-3-roadmap.md)
+- [Phase 3A 本地 stdio app-server 设计](docs/plans/2026-08-26-phase-3a-stdio-app-server-design.md)
+- [Phase 3B 本地 MCP 客户端设计](docs/plans/2026-08-26-phase-3b-mcp-client-design.md)
+- [Phase 3C 多服务提供商运行时设计](docs/plans/2026-08-26-phase-3c-multi-provider-design.md)
+- [Phase 3D Ink 聊天 REPL 设计](docs/plans/2026-08-26-phase-3d-ink-chat-repl-design.md)
+- [Phase 3E1 Thread 浏览与历史恢复设计](docs/plans/2026-08-27-phase-3e1-thread-browser-history-design.md)
+- [Phase 3E2 历史搜索与分页导航设计](docs/plans/2026-08-27-phase-3e2-history-search-navigation-design.md)
+- [Phase 3E3 工作区运行时设置设计](docs/plans/2026-08-27-phase-3e3-runtime-settings-design.md)
+- [Phase 3E4 Thread 工件查看设计](docs/plans/2026-08-27-phase-3e4-artifact-inspection-design.md)
+- [Phase 3E5 可审计的上下文与指令检查设计](docs/plans/2026-08-27-phase-3e5-context-inspection-design.md)
+- [Phase 3F1 可审计的多文件变更事务设计](docs/plans/2026-08-27-phase-3f1-multi-file-change-transactions-design.md)
+- [Phase 3F2 严格的原生补丁文档设计](docs/plans/2026-08-27-phase-3f2-native-patch-documents-design.md)
+- [Phase 3F3 会话级精确命令授权设计](docs/plans/2026-08-28-phase-3f3-session-command-approval-grants-design.md)
+- [Phase 3G 持久化规划与 Harness 检查点设计](docs/plans/2026-08-28-phase-3g-planning-harness-design.md)
+- [Phase 3H Skill 与扩展系统设计](docs/plans/2026-08-28-phase-3h-skills-extension-system-design.md)
 
-The model can propose actions, but the Koda runtime owns validation, policy, approval, and execution. User interfaces consume typed events and do not own agent state.
+模型可以提出操作，但验证、策略、审批和执行由 Koda 运行时负责。用户界面消费类型化事件，不拥有智能体状态。
