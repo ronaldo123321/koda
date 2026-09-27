@@ -191,7 +191,7 @@ koda chat --cwd .
 
 ## 远程访问准备
 
-首版远程访问面向同一使用者的多台设备，使用局域网或自有 VPN。当前按需启动的 HTTPS 入口可查询获授权的工作区 ID、已绑定 Thread 的脱敏概要、事件序号摘要及助手回答更新；持有显式 `turn:start` 权限的设备还可以启动仅含工作区读取工具的 Turn，持有 `turn:control` 权限的设备可取消当前活跃的远程 Turn。已绑定 Thread 另可通过 WSS 订阅助手更新。macOS 图形界面已有远程连接与停止预览；完整事件内容和自动配对仍在开发中。
+首版远程访问面向同一使用者的多台设备，使用局域网或自有 VPN。当前按需启动的 HTTPS 入口可查询获授权的工作区 ID、已绑定 Thread 的脱敏概要、事件序号摘要、助手回答更新及已记录的文本产物；持有显式 `turn:start` 权限的设备还可以启动仅含工作区读取工具的 Turn，持有 `turn:control` 权限的设备可取消当前活跃的远程 Turn。已绑定 Thread 另可通过 WSS 订阅助手更新。macOS 图形界面已有远程连接、停止和文本产物预览；完整事件内容和自动配对仍在开发中。
 
 图形界面的“忘记已存连接”会取消正在验证的连接，并删除本机保存的设备令牌及待确认远程请求；若 Keychain 删除失败，界面会保留错误提示。
 
@@ -217,13 +217,15 @@ koda remote serve --host 192.168.1.10 --port 8443 --cert /absolute/path/server.p
 
 获授 `thread:read` 权限的设备还可调用 `GET /v1/threads/<thread-id>/updates?after=-1&limit=100` 读取助手文本与 Turn 结束状态。该接口只投射 `assistant.delta` 文本、完成／取消事件，以及失败代码；工具输入输出、错误详情和其他原始事件不会传输。游标按所有原始事件前进，因此一页可以没有可见更新，客户端仍须保存 `nextAfterSequence` 并在 `hasMore` 为 true 时继续读取。助手文本可能包含它从工作区读到的内容或路径，应只向信任的个人设备签发 `thread:read` 权限。
 
+同一权限可调用 `GET /v1/threads/<thread-id>/artifacts?limit=25` 列出该 Thread 已记录的产物；更早的记录使用响应中的 `nextBeforeSequence` 作为下一页 `before`。`GET /v1/threads/<thread-id>/artifacts/sha256:<摘要>?afterByte=0&maxBytes=16384` 分段读取经过完整 SHA-256 校验的 UTF-8 文本或 JSON。列表不返回主机路径和工具名；未引用的产物及无权限 Thread 不可读取，内容被篡改时不会返回字节。
+
 实时订阅使用 `wss://<host>:<port>/v1/threads/<thread-id>/subscribe?after=-1&limit=100`，握手同样携带 `Authorization: Bearer <device-token>` 并验证服务端证书。服务端先从持久化事件日志补读，再持续推送 `{ "kind": "update", "event": ... }` 和 `{ "kind": "cursor", "nextAfterSequence": ... }`。客户端在处理完之前的更新后保存游标；断线时用该游标重新订阅，并按事件 `sequence` 去重。每个连接只读，最多同时保持 8 个订阅；积压超过限制会关闭连接，客户端仍可按游标补读。设备令牌被撤销后，已有订阅也会关闭。关闭订阅不会取消 Turn。
 
-启动受限 Turn 使用 `POST /v1/workspaces/<workspace-id>/turns`，JSON 请求包含 32 位小写十六进制 `requestId`、`prompt`，续接时另带 `resumeThreadId`。主机会先持久化请求身份与 Thread 绑定，再执行 Turn；同一设备用相同 `requestId` 和相同请求重试会得到原 Thread／Turn ID，不会再次启动。若记录仍处于 `reserved`，返回 409 和原 ID，表示启动结果尚不确定，客户端不得自动换新 ID 重试。客户端连接结束不会取消进行中的 Turn；显式停止主机服务会取消当前活跃 Turn。远程审批、写入与命令执行、完整事件内容和端到端客户端验收尚未完成。
+启动受限 Turn 使用 `POST /v1/workspaces/<workspace-id>/turns`，JSON 请求包含 32 位小写十六进制 `requestId`、`prompt`，续接时另带 `resumeThreadId`。主机会先持久化请求身份与 Thread 绑定，再执行 Turn；同一设备用相同 `requestId` 和相同请求重试会得到原 Thread／Turn ID，不会再次启动。若记录仍处于 `reserved`，返回 409 和原 ID，表示启动结果尚不确定，客户端不得自动换新 ID 重试。主机所有者可在本机执行 `koda remote request inspect <request-id>` 检查记录，再对仍处于 `reserved`、没有 Thread 绑定及日志、且不再由启动流程持锁的请求执行 `koda remote request abandon <request-id>`。放弃会持久保留该请求 ID，重试返回 409／`abandoned`；客户端此时才可由使用者重新发送并生成新 ID，新的 Provider 请求可能再次消耗配额。已绑定、已有日志或已启动的请求不能放弃。客户端连接结束不会取消进行中的 Turn；显式停止主机服务会取消当前活跃 Turn。远程审批、写入与命令执行、完整事件内容和实体双设备验收尚未完成。
 
 取消当前活跃 Turn 使用不带请求体的 `POST /v1/threads/<thread-id>/turns/<turn-id>/cancel`。设备必须有该 Thread 工作区的 `turn:control` 权限，且主机验证 Thread 绑定和权威工作区后才会向对应 Turn 发出取消信号；成功返回 202，权限不足、Thread 不可见或 Turn 已不活跃返回 404。网络中断后应先按事件游标查询结果，不要自动重复控制请求。
 
-在另一台 Mac 的 Koda 图形界面点“远程…”，填入主机的 `https://<内网 IP>:<端口>`、主机启动时显示的证书 SHA-256 指纹和该设备单独签发的令牌，再点“验证并保存”。证书须包含所填地址对应的 IP/DNS SAN；首次验证成功后，这台 Mac 才会将连接配置保存到 Keychain。列表只显示获授权且已绑定的 Thread；“发送”还要求该令牌有 `turn:start` 权限，“停止”要求 `turn:control` 权限。远程窗口只展示助手文本和 Turn 结束状态，不显示工具或审批详情。网络中断后订阅会按事件游标重连；启动请求结果不明时，界面保留相同请求 ID，供手动重试或放弃。Swift 客户端已与本机启动的真实 Koda 远程入口完成证书、授权、Turn 重试、取消和 WSS 游标回放联调；两台真实设备的网络、断线和实际对话验收仍未完成。
+在另一台 Mac 的 Koda 图形界面点“远程…”，填入主机的 `https://<内网 IP>:<端口>`、主机启动时显示的证书 SHA-256 指纹和该设备单独签发的令牌，再点“验证并保存”。证书须包含所填地址对应的 IP/DNS SAN；首次验证成功后，这台 Mac 才会将连接配置保存到 Keychain。列表只显示获授权且已绑定的 Thread；“发送”还要求该令牌有 `turn:start` 权限，“停止”要求 `turn:control` 权限。远程窗口展示助手文本、Turn 状态和已记录的文本产物，不显示工具调用或审批详情。网络中断后订阅会按事件游标重连；启动请求结果不明时，界面保留相同请求 ID 供手动重试，所有者标记为 `abandoned` 后才能由使用者重新发送。Swift 客户端已与本机启动的真实 Koda 远程入口完成证书、授权、Turn 重试、取消、产物分页及 WSS 游标回放联调；两台真实设备的网络、断线和实际对话验收仍未完成。
 
 ## macOS 图形界面内部预览
 
@@ -243,7 +245,7 @@ Intel Mac 将 `arm64` 换成 `x64`。打包脚本会验证复制后的运行时�
 apps/macos-gui/package-unsigned-pkg.sh dist/Koda.app dist/Koda-unsigned.pkg
 ```
 
-该预览安装包尚未签名或公证，也没有自动更新。图形应用的“检查更新”读取项目 [GitHub Releases](https://github.com/ronaldo123321/koda/releases)，只列出版本较新、含当前 Mac 架构对应 `Koda-v<版本>-darwin-<架构>.pkg` 和 `.update.json` 资产的已发布版本；若发现候选版，还会用应用内固定的 Ed25519 公钥验证更新元数据签名。用户可选择“下载并验证”，应用会将 `.pkg` 暂存到本机临时目录，复核完整字节数和 SHA-256，并显示路径；应用内安装尚未开放。公开签名密钥尚未配置，发布工作流也只生成命令行资产，因此目前没有可用的图形应用更新；下载路径仅通过本机模拟响应验证。制作 `.pkg` 时应用目录必须命名为 `Koda.app`，以确保安装路径一致；打包脚本会从内置运行时写入应用版本，并可通过第三个参数嵌入更新公钥。已在本机验证 SwiftUI 应用能打开、连接真实 app-server、读取已有 Thread，并从 Keychain 加载凭据完成无工具的 OpenAI 对话；远程连接窗口已完成本机界面检查，GUI 内的工具审批、Keychain 删除、`.pkg` 安装和两台设备的远程使用仍待单独验收。
+该预览安装包尚未签名或公证，也没有可用的公开自动更新。图形应用在内置发行公钥时会在启动后及每日检查项目 [GitHub Releases](https://github.com/ronaldo123321/koda/releases)，也可手动检查；它只列出版本较新、含当前 Mac 架构对应 `Koda-v<版本>-darwin-<架构>.pkg` 和 `.update.json` 资产的已发布版本，并使用应用内固定的 Ed25519 公钥验证更新元数据。用户可选择“下载并验证”，应用会暂存 `.pkg` 并复核完整字节数和 SHA-256；打开系统安装器前还会检查 Apple 安装包签名、与当前应用一致的团队身份及 Gatekeeper 评估。公开发布工作流已包含双架构 GUI 包与更新元数据，但缺少 Apple 和元数据签名凭据，尚无可用的正式 GUI 更新资产；下载链路仅通过本机模拟响应验证。制作 `.pkg` 时应用目录必须命名为 `Koda.app`，以确保安装路径一致；打包脚本会从内置运行时写入应用版本，并可通过第三个参数嵌入更新公钥。已在本机验证 SwiftUI 应用能打开、连接真实 app-server、读取已有 Thread，并从 Keychain 加载凭据完成无工具的 OpenAI 对话；远程连接窗口已完成本机界面检查，GUI 内的工具审批、Keychain 删除、正式签名 `.pkg` 安装和两台设备的远程使用仍待单独验收。
 
 ## 使用 CLI
 

@@ -354,6 +354,16 @@ final class RemoteModel: ObservableObject {
                     notice = "请求已预留但启动结果未确认，请稍后重试同一请求。"
                     return
                 }
+                if result.status == "abandoned" {
+                    try RemoteSettingsStore.deletePendingStart()
+                    self.pendingStart = nil
+                    hasPendingStart = false
+                    notice = "主机所有者已放弃这次未启动的请求。可以重新发送并生成新请求 ID。"
+                    return
+                }
+                guard result.status == "started" else {
+                    throw RemoteError(message: "远程请求状态无效。")
+                }
                 try RemoteSettingsStore.deletePendingStart()
                 self.pendingStart = nil
                 hasPendingStart = false

@@ -25,6 +25,7 @@ const bindings = await RemoteThreadStore.open(home, "owner");
 const requests = await RemoteTurnRequestStore.open(home, "owner");
 let result;
 if (stage === "reserved") {
+  await requests.acquireLease("2".repeat(32));
   const claim = await requests.claim({
     requestId: "2".repeat(32),
     deviceId: principal.deviceId,

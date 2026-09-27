@@ -4,6 +4,9 @@ import { chmod, lstat, mkdir, open, rename } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 import { z } from "zod";
+import { ThreadLease, ThreadRecoveryError } from "@koda/runtime-node";
+
+import { RemoteThreadStore } from "./remote-thread-store.js";
 
 const MAX_RECORD_BYTES = 2 * 1_024;
 const idSchema = z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u);
@@ -21,7 +24,7 @@ const recordSchema = z
     bodySha256: sha256Schema,
     threadId: threadIdSchema,
     turnId: threadIdSchema,
-    status: z.enum(["reserved", "started"]),
+    status: z.enum(["reserved", "started", "abandoned"]),
   })
   .strict();
 
@@ -35,6 +38,13 @@ export class RemoteTurnRequestConflictError extends Error {
   public constructor() {
     super("Remote Turn request ID was already used for another request.");
     this.name = "RemoteTurnRequestConflictError";
+  }
+}
+
+export class RemoteTurnRequestBusyError extends Error {
+  public constructor() {
+    super("Remote Turn request is still being started.");
+    this.name = "RemoteTurnRequestBusyError";
   }
 }
 
@@ -147,17 +157,79 @@ export class RemoteTurnRequestStore {
       throw new Error("Remote Turn request record does not match.");
     }
     if (record.status === "started") return;
-    const temporary = join(this.root, `${requestId}.${randomUUID()}.tmp`);
-    await this.writeNew(
-      temporary,
-      JSON.stringify({ ...record, status: "started" }),
-    );
-    await rename(temporary, this.pathFor(requestId));
-    await syncDirectory(this.root);
+    if (record.status !== "reserved") {
+      throw new Error("Remote Turn request is no longer reserved.");
+    }
+    await this.replace(record, "started");
+  }
+
+  public async abandon(
+    requestId: string,
+    threads: RemoteThreadStore,
+  ): Promise<RemoteTurnRequestRecord> {
+    const lease = await this.acquireLease(requestId);
+    try {
+      const record = await this.get(requestId);
+      if (record === undefined)
+        throw new Error("Remote Turn request is unavailable.");
+      if (record.status === "abandoned") return record;
+      if (record.status !== "reserved") {
+        throw new Error(
+          "Only a reserved remote Turn request can be abandoned.",
+        );
+      }
+      if ((await threads.get(record.threadId)) !== undefined) {
+        throw new Error("Remote Turn request already has a Thread binding.");
+      }
+      try {
+        await lstat(
+          join(
+            resolve(this.root, "../.."),
+            "threads",
+            `${record.threadId}.jsonl`,
+          ),
+        );
+        throw new Error("Remote Turn request already has a Thread log.");
+      } catch (error) {
+        if (!isNodeError(error, "ENOENT")) throw error;
+      }
+      await this.replace(record, "abandoned");
+      return { ...record, status: "abandoned" };
+    } finally {
+      await lease.release();
+    }
+  }
+
+  public async acquireLease(requestId: string): Promise<ThreadLease> {
+    requestIdSchema.parse(requestId);
+    try {
+      return await ThreadLease.acquire(this.pathFor(requestId));
+    } catch (error) {
+      if (
+        error instanceof ThreadRecoveryError &&
+        error.code === "THREAD_BUSY"
+      ) {
+        throw new RemoteTurnRequestBusyError();
+      }
+      throw error;
+    }
   }
 
   private pathFor(requestId: string): string {
     return join(this.root, `${requestId}.json`);
+  }
+
+  private async replace(
+    record: RemoteTurnRequestRecord,
+    status: RemoteTurnRequestRecord["status"],
+  ): Promise<void> {
+    const temporary = join(
+      this.root,
+      `${record.requestId}.${randomUUID()}.tmp`,
+    );
+    await this.writeNew(temporary, JSON.stringify({ ...record, status }));
+    await rename(temporary, this.pathFor(record.requestId));
+    await syncDirectory(this.root);
   }
 
   private async writeNew(path: string, content: string): Promise<void> {

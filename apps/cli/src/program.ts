@@ -23,6 +23,8 @@ import { runCommand, type RunCommandInput } from "./run-command.js";
 import {
   runRemoteDeviceIssueCommand,
   runRemoteDeviceRevokeCommand,
+  runRemoteRequestAbandonCommand,
+  runRemoteRequestInspectCommand,
   runRemoteServeCommand,
   runRemoteThreadExposeCommand,
   runRemoteWorkspaceAddCommand,
@@ -546,6 +548,27 @@ export function createProgram(runtime: ProgramRuntime): Command {
           options.workspace,
           runtime,
         ),
+      );
+    });
+  const remoteRequest = remote
+    .command("request")
+    .description(
+      "Inspect or abandon an uncertain remote Turn request on the owner host",
+    );
+  remoteRequest
+    .command("inspect")
+    .argument("<request-id>", "durable remote request ID")
+    .action(async (requestId: string) => {
+      runtime.setExitCode(
+        await runRemoteRequestInspectCommand(requestId, runtime),
+      );
+    });
+  remoteRequest
+    .command("abandon")
+    .argument("<request-id>", "reserved remote request ID")
+    .action(async (requestId: string) => {
+      runtime.setExitCode(
+        await runRemoteRequestAbandonCommand(requestId, runtime),
       );
     });
 

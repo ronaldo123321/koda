@@ -112,6 +112,19 @@ describe.skipIf(process.platform === "win32")("remote Turn host", () => {
         replayed: true,
       });
       expect(starts).toBe(0);
+      if (stage === "reserved") {
+        expect(await requests.abandon("2".repeat(32), bindings)).toMatchObject({
+          status: "abandoned",
+        });
+        expect(
+          await host.start(principal, catalog, {
+            requestId: "2".repeat(32),
+            workspaceId: "project",
+            prompt: "Explain the project.",
+          }),
+        ).toMatchObject({ status: "abandoned", replayed: true });
+        expect(starts).toBe(0);
+      }
       await host.close();
     }
   });

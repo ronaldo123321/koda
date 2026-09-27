@@ -25,7 +25,7 @@ export interface RemoteTurnStartResult {
   requestId: string;
   threadId: string;
   turnId: string;
-  status: "started" | "reserved";
+  status: "started" | "reserved" | "abandoned";
   replayed: boolean;
 }
 
@@ -87,95 +87,104 @@ export class RemoteTurnHost {
     if (existing !== undefined) {
       return replay(existing, principal, input, bodySha256);
     }
-    if (this.active.size + this.pendingStarts >= 8) {
-      throw new RemoteTurnHostCapacityError();
-    }
-    this.pendingStarts += 1;
-    let duplicate: RemoteTurnRequestRecord | undefined;
-    let handle: TurnHandle;
+    const lease = await this.requests.acquireLease(input.requestId);
     try {
-      handle = await this.application.startTurnAfter(
-        {
-          prompt: input.prompt,
-          cwd: root,
-          approvalMode: "never",
-          ...(input.resumeThreadId === undefined
-            ? {}
-            : { resume: input.resumeThreadId }),
-        },
-        {
-          events: { append: async () => undefined },
-          approvals: {
-            request: async () => ({
-              decision: "rejected",
-              reason: "Remote approval is unavailable.",
-            }),
-          },
-        },
-        async (ids) => {
-          if (this.closed)
-            throw new Error("Remote Turn host is shutting down.");
-          const claimed = await this.requests.claim({
-            requestId: input.requestId,
-            deviceId: principal.deviceId,
-            workspaceId: input.workspaceId,
-            bodySha256,
-            threadId: ids.threadId,
-            turnId: ids.turnId,
-          });
-          if (!claimed.created) {
-            duplicate = claimed.record;
-            throw new ExistingRemoteTurnRequest();
-          }
-          if (input.resumeThreadId === undefined) {
-            await this.threads.bind({
-              ownerId: principal.ownerId,
-              workspaceId: input.workspaceId,
-              threadId: ids.threadId,
-            });
-          }
-        },
-      );
-    } catch (error) {
-      this.pendingStarts -= 1;
-      if (
-        error instanceof ExistingRemoteTurnRequest &&
-        duplicate !== undefined
-      ) {
-        return replay(duplicate, principal, input, bodySha256);
+      const inFlight = await this.requests.get(input.requestId);
+      if (inFlight !== undefined) {
+        return replay(inFlight, principal, input, bodySha256);
       }
-      throw error;
-    }
-    try {
-      await this.requests.markStarted(
-        input.requestId,
-        handle.threadId,
-        handle.turnId,
-      );
-    } catch (error) {
+      if (this.active.size + this.pendingStarts >= 8) {
+        throw new RemoteTurnHostCapacityError();
+      }
+      this.pendingStarts += 1;
+      let duplicate: RemoteTurnRequestRecord | undefined;
+      let handle: TurnHandle;
+      try {
+        handle = await this.application.startTurnAfter(
+          {
+            prompt: input.prompt,
+            cwd: root,
+            approvalMode: "never",
+            ...(input.resumeThreadId === undefined
+              ? {}
+              : { resume: input.resumeThreadId }),
+          },
+          {
+            events: { append: async () => undefined },
+            approvals: {
+              request: async () => ({
+                decision: "rejected",
+                reason: "Remote approval is unavailable.",
+              }),
+            },
+          },
+          async (ids) => {
+            if (this.closed)
+              throw new Error("Remote Turn host is shutting down.");
+            const claimed = await this.requests.claim({
+              requestId: input.requestId,
+              deviceId: principal.deviceId,
+              workspaceId: input.workspaceId,
+              bodySha256,
+              threadId: ids.threadId,
+              turnId: ids.turnId,
+            });
+            if (!claimed.created) {
+              duplicate = claimed.record;
+              throw new ExistingRemoteTurnRequest();
+            }
+            if (input.resumeThreadId === undefined) {
+              await this.threads.bind({
+                ownerId: principal.ownerId,
+                workspaceId: input.workspaceId,
+                threadId: ids.threadId,
+              });
+            }
+          },
+        );
+      } catch (error) {
+        this.pendingStarts -= 1;
+        if (
+          error instanceof ExistingRemoteTurnRequest &&
+          duplicate !== undefined
+        ) {
+          return replay(duplicate, principal, input, bodySha256);
+        }
+        throw error;
+      }
+      try {
+        await this.requests.markStarted(
+          input.requestId,
+          handle.threadId,
+          handle.turnId,
+        );
+      } catch (error) {
+        this.pendingStarts -= 1;
+        handle.cancel("Remote Turn request could not be committed.");
+        await handle.completion;
+        throw error;
+      }
+      if (this.closed) {
+        this.pendingStarts -= 1;
+        handle.cancel("Remote host is shutting down.");
+        await handle.completion;
+        throw new Error("Remote Turn host is shutting down.");
+      }
+      this.active.set(handle.turnId, handle);
       this.pendingStarts -= 1;
-      handle.cancel("Remote Turn request could not be committed.");
-      await handle.completion;
-      throw error;
+      void handle.completion
+        .finally(() => this.active.delete(handle.turnId))
+        .catch(() => undefined);
+      return {
+        requestId: input.requestId,
+        threadId: handle.threadId,
+        turnId: handle.turnId,
+        status: "started",
+        replayed: false,
+      };
+    } finally {
+      await lease.release();
     }
-    if (this.closed) {
-      this.pendingStarts -= 1;
-      handle.cancel("Remote host is shutting down.");
-      await handle.completion;
-      throw new Error("Remote Turn host is shutting down.");
-    }
-    this.active.set(handle.turnId, handle);
-    this.pendingStarts -= 1;
-    void handle.completion
-      .finally(() => this.active.delete(handle.turnId))
-      .catch(() => undefined);
-    return {
-      requestId: input.requestId,
-      threadId: handle.threadId,
-      turnId: handle.turnId,
-      status: "started",
-      replayed: false,
-    };
   }
 
   public async cancel(

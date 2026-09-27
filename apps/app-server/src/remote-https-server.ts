@@ -29,6 +29,7 @@ import {
 } from "./remote-turn-host.js";
 import {
   RemoteTurnRequestConflictError,
+  RemoteTurnRequestBusyError,
   RemoteTurnRequestStore,
 } from "./remote-turn-request-store.js";
 import { RemoteWorkspaceStore } from "./remote-workspace-store.js";
@@ -243,7 +244,7 @@ async function handleRequest(
           ? {}
           : { resumeThreadId: body.resumeThreadId }),
       });
-      send(response, result.status === "reserved" ? 409 : 202, result);
+      send(response, result.status === "started" ? 202 : 409, result);
       return;
     }
     const cancelMatch =
@@ -480,6 +481,8 @@ async function handleRequest(
         error.code === "THREAD_WORKSPACE_MISMATCH")
     ) {
       send(response, 404, { error: "Unavailable" });
+    } else if (error instanceof RemoteTurnRequestBusyError) {
+      send(response, 409, { error: "Request in progress" });
     } else if (error instanceof RemoteTurnRequestConflictError) {
       send(response, 409, { error: "Request conflict" });
     } else if (error instanceof RemoteTurnHostCapacityError) {

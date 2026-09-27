@@ -1,9 +1,11 @@
+import { createHash } from "node:crypto";
 import { realpath } from "node:fs/promises";
 
 import { KodaApplication } from "@koda/app";
 import {
   RemoteDeviceStore,
   RemoteThreadStore,
+  RemoteTurnRequestStore,
   RemoteWorkspaceStore,
   startRemoteHttpsServer,
 } from "@koda/app-server";
@@ -26,6 +28,17 @@ const workspaceOnly = await devices.issue("tablet", [{
 }]);
 const threads = await RemoteThreadStore.open(home, "owner");
 await threads.bind({ ownerId: "owner", workspaceId: "project", threadId: "thread-1" });
+const requests = await RemoteTurnRequestStore.open(home, "owner");
+await requests.claim({
+  requestId: "b".repeat(32),
+  deviceId: full.deviceId,
+  workspaceId: "project",
+  bodySha256: createHash("sha256").update(JSON.stringify({
+    workspaceId: "project", prompt: "uncertain request", resumeThreadId: null,
+  })).digest("hex"),
+  threadId: "reserved-thread",
+  turnId: "reserved-turn",
+});
 const artifactStore = await ArtifactStore.open(join(home, "artifacts"));
 const artifactText = "A".repeat(16_383) + "中文 artifact";
 const published = await artifactStore.materializeText(artifactText, { inlineBytes: 4 });
@@ -121,7 +134,15 @@ process.stdout.write(JSON.stringify({
   artifactId: artifact.id,
 }) + "\n");
 process.stdin.on("data", (chunk) => {
-  if (chunk.toString("utf8").trim() !== "restart") return;
+  const command = chunk.toString("utf8").trim();
+  if (command === "abandon") {
+    void requests.abandon("b".repeat(32), threads).catch((error) => {
+      process.stderr.write(String(error) + "\n");
+      process.exitCode = 1;
+    });
+    return;
+  }
+  if (command !== "restart") return;
   void (async () => {
     await server.close();
     events.push(

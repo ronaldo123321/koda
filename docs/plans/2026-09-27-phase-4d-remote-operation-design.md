@@ -126,9 +126,15 @@ are never retried merely because a request response was lost.
 A real child-process `SIGKILL` test now covers the durable request record after
 reservation and after the request is marked started with a Thread binding.
 Reopening the stores and retrying the same request returns the original IDs
-without starting another Turn. A reservation interrupted before binding stays
-`reserved`; owner-side resolution of that uncertain state and the remaining
-crash points are still open.
+without starting another Turn. For a reservation interrupted before binding,
+the owner-host `remote request inspect` and explicit `remote request abandon`
+commands now provide a guarded recovery path. Abandonment requires an unbound
+`reserved` record with no Thread log and the same per-request lease used by
+startup; it persists
+`abandoned` rather than deleting the request ID. A retry returns 409 and the
+original IDs without execution, so a client can ask the user to send a new
+request. Started or bound requests cannot be abandoned. The remaining crash
+points, uncertain effects, and physical-device recovery still need acceptance.
 
 ## 4. Storage and process ownership
 

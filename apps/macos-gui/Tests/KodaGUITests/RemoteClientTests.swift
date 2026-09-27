@@ -165,6 +165,24 @@ final class RemoteClientTests: XCTestCase {
             requestID: String(repeating: "a", count: 32), resumeThreadID: "thread-1"
         )
         XCTAssertEqual(replayed.turnId, started.turnId)
+        let reservedID = String(repeating: "b", count: 32)
+        let reserved = try await client.startTurn(
+            workspaceID: "project", prompt: "uncertain request",
+            requestID: reservedID, resumeThreadID: nil
+        )
+        XCTAssertEqual(reserved.status, "reserved")
+        control.fileHandleForWriting.write(Data("abandon\n".utf8))
+        var abandoned: RemoteTurnStart?
+        for _ in 0..<50 {
+            let result = try await client.startTurn(
+                workspaceID: "project", prompt: "uncertain request",
+                requestID: reservedID, resumeThreadID: nil
+            )
+            if result.status == "abandoned" { abandoned = result; break }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        XCTAssertEqual(abandoned?.status, "abandoned")
+        XCTAssertEqual(abandoned?.threadId, "reserved-thread")
 
         let first = try client.subscribe(threadID: "thread-1", after: -1)
         let initial = try await receiveFrames(4, from: first)

@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { X509Certificate } from "node:crypto";
+import { createHash, X509Certificate } from "node:crypto";
 import {
   chmod,
   mkdtemp,
@@ -17,6 +17,7 @@ import { KodaApplication } from "@koda/app";
 import {
   RemoteDeviceStore,
   RemoteThreadStore,
+  RemoteTurnRequestStore,
   RemoteWorkspaceStore,
   startRemoteHttpsServer,
 } from "@koda/app-server";
@@ -687,6 +688,59 @@ describe.skipIf(process.platform === "win32")(
           requestId: "a".repeat(32),
           prompt: "Explain this workspace.",
         };
+        const requests = await RemoteTurnRequestStore.open(home, "owner");
+        const startupLease = await requests.acquireLease("c".repeat(32));
+        try {
+          const busyStart = await post(
+            port,
+            certificate,
+            "/v1/workspaces/project/turns",
+            issued.token,
+            { requestId: "c".repeat(32), prompt: "Already starting." },
+          );
+          expect(busyStart).toEqual({
+            status: 409,
+            body: { error: "Request in progress" },
+          });
+          expect(starts).toBe(0);
+        } finally {
+          await startupLease.release();
+        }
+        const abandonedPrompt = "Owner abandoned this request.";
+        await requests.claim({
+          requestId: "d".repeat(32),
+          deviceId: issued.deviceId,
+          workspaceId: "project",
+          bodySha256: createHash("sha256")
+            .update(
+              JSON.stringify({
+                workspaceId: "project",
+                prompt: abandonedPrompt,
+                resumeThreadId: null,
+              }),
+            )
+            .digest("hex"),
+          threadId: "abandoned-thread",
+          turnId: "abandoned-turn",
+        });
+        await requests.abandon("d".repeat(32), bindings);
+        expect(
+          await post(
+            port,
+            certificate,
+            "/v1/workspaces/project/turns",
+            issued.token,
+            { requestId: "d".repeat(32), prompt: abandonedPrompt },
+          ),
+        ).toMatchObject({
+          status: 409,
+          body: {
+            status: "abandoned",
+            threadId: "abandoned-thread",
+            replayed: true,
+          },
+        });
+        expect(starts).toBe(0);
         const deniedStart = await post(
           port,
           certificate,

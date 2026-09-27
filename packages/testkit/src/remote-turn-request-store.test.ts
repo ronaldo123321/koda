@@ -1,8 +1,8 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { RemoteTurnRequestStore } from "@koda/app-server";
+import { RemoteThreadStore, RemoteTurnRequestStore } from "@koda/app-server";
 import { afterEach, describe, expect, it } from "vitest";
 
 const directories: string[] = [];
@@ -58,6 +58,73 @@ describe.skipIf(process.platform === "win32")(
       await expect(
         store.claim({ ...input, deviceId: `device-${"5".repeat(32)}` }),
       ).rejects.toThrow("already used");
+    });
+
+    it("abandons only an unbound reservation after the startup lease ends", async () => {
+      const home = await mkdtemp(join(tmpdir(), "koda-remote-abandon-"));
+      directories.push(home);
+      const store = await RemoteTurnRequestStore.open(home, "owner");
+      const threads = await RemoteThreadStore.open(home, "owner");
+      const input = {
+        requestId: "6".repeat(32),
+        deviceId: `device-${"2".repeat(32)}`,
+        workspaceId: "project",
+        bodySha256: "3".repeat(64),
+        threadId: "reserved-thread",
+        turnId: "reserved-turn",
+      };
+      const lease = await store.acquireLease(input.requestId);
+      await store.claim(input);
+      await expect(store.abandon(input.requestId, threads)).rejects.toThrow(
+        "still being started",
+      );
+      await lease.release();
+      expect(await store.abandon(input.requestId, threads)).toMatchObject({
+        status: "abandoned",
+      });
+      expect(await store.abandon(input.requestId, threads)).toMatchObject({
+        status: "abandoned",
+      });
+      await expect(
+        store.markStarted(input.requestId, input.threadId, input.turnId),
+      ).rejects.toThrow("no longer reserved");
+      const reopened = await RemoteTurnRequestStore.open(home, "owner");
+      expect(await reopened.get(input.requestId)).toMatchObject({
+        status: "abandoned",
+      });
+
+      const bound = {
+        ...input,
+        requestId: "7".repeat(32),
+        threadId: "bound-thread",
+      };
+      await store.claim(bound);
+      await threads.bind({
+        ownerId: "owner",
+        workspaceId: "project",
+        threadId: bound.threadId,
+      });
+      await expect(store.abandon(bound.requestId, threads)).rejects.toThrow(
+        "already has a Thread binding",
+      );
+      await store.markStarted(bound.requestId, bound.threadId, bound.turnId);
+      await expect(store.abandon(bound.requestId, threads)).rejects.toThrow(
+        "Only a reserved",
+      );
+      const logged = {
+        ...input,
+        requestId: "9".repeat(32),
+        threadId: "logged-thread",
+      };
+      await store.claim(logged);
+      await mkdir(join(home, "threads"), { recursive: true });
+      await writeFile(
+        join(home, "threads", "logged-thread.jsonl"),
+        "durable event\n",
+      );
+      await expect(store.abandon(logged.requestId, threads)).rejects.toThrow(
+        "already has a Thread log",
+      );
     });
   },
 );

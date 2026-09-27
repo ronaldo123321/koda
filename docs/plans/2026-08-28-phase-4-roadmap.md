@@ -395,11 +395,12 @@ Linux/Windows release expansion remains deferred.
 ### Phase 4F: hardening acceptance
 
 Status: In progress — the 2026-09-27 local full-suite baseline passed:
-`pnpm test` completed the build, 89 Rust tests, and 815 Vitest tests
+`pnpm test` completed the build, 89 Rust tests, and 817 Vitest tests
 (35 skipped); `pnpm typecheck` and six SwiftUI package tests also passed.
 Remote Turn request reservation and committed-binding recovery now have a real
-child-process `SIGKILL` regression test; uncertain reserved requests still
-need an explicit owner recovery path.
+child-process `SIGKILL` regression test. Unbound, unlogged reserved requests now have a
+lease-guarded, owner-local abandon command that preserves the used request ID;
+other interrupted states and physical-device recovery remain open.
 This establishes a local regression baseline only; the
 platform, physical-device remote, power-loss, and signed public-release
 scenarios below still require separate evidence.

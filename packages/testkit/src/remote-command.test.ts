@@ -1,8 +1,19 @@
-import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { RemoteDeviceStore, RemoteThreadStore } from "@koda/app-server";
+import {
+  RemoteDeviceStore,
+  RemoteThreadStore,
+  RemoteTurnRequestStore,
+} from "@koda/app-server";
 import { createProgram, type TextWriter } from "@koda/cli";
 import { agentEventSchema } from "@koda/protocol";
 import { JsonlEventStore } from "@koda/runtime-node";
@@ -27,6 +38,84 @@ class MemoryWriter implements TextWriter {
 }
 
 describe.skipIf(process.platform === "win32")("remote owner commands", () => {
+  it("inspects and explicitly abandons an unbound reserved request", async () => {
+    const home = await mkdtemp(join(tmpdir(), "koda-remote-request-cli-"));
+    directories.push(home);
+    const requests = await RemoteTurnRequestStore.open(home, "owner");
+    const requestId = "8".repeat(32);
+    await requests.claim({
+      requestId,
+      deviceId: `device-${"2".repeat(32)}`,
+      workspaceId: "project",
+      bodySha256: "3".repeat(64),
+      threadId: "unbound-thread",
+      turnId: "unbound-turn",
+    });
+    const inspected = await invoke(home, [
+      "remote",
+      "request",
+      "inspect",
+      requestId,
+    ]);
+    expect(inspected.exitCode).toBe(0);
+    expect(JSON.parse(inspected.stdout.value)).toMatchObject({
+      requestId,
+      status: "reserved",
+      threadBound: false,
+      threadLogPresent: false,
+    });
+    expect(inspected.stdout.value).not.toContain("3".repeat(64));
+    const lease = await requests.acquireLease(requestId);
+    const busy = await invoke(home, [
+      "remote",
+      "request",
+      "abandon",
+      requestId,
+    ]);
+    expect(busy.exitCode).toBe(1);
+    expect(busy.stderr.value).toContain("still being started");
+    await lease.release();
+    const abandoned = await invoke(home, [
+      "remote",
+      "request",
+      "abandon",
+      requestId,
+    ]);
+    expect(abandoned.exitCode).toBe(0);
+    expect(abandoned.stdout.value).toContain(requestId);
+    const after = await invoke(home, [
+      "remote",
+      "request",
+      "inspect",
+      requestId,
+    ]);
+    expect(JSON.parse(after.stdout.value)).toMatchObject({
+      status: "abandoned",
+    });
+    const loggedRequestId = "9".repeat(32);
+    await requests.claim({
+      requestId: loggedRequestId,
+      deviceId: `device-${"2".repeat(32)}`,
+      workspaceId: "project",
+      bodySha256: "3".repeat(64),
+      threadId: "logged-thread",
+      turnId: "logged-turn",
+    });
+    await mkdir(join(home, "threads"), { recursive: true });
+    await writeFile(join(home, "threads", "logged-thread.jsonl"), "event\n");
+    const logged = await invoke(home, [
+      "remote",
+      "request",
+      "inspect",
+      loggedRequestId,
+    ]);
+    expect(JSON.parse(logged.stdout.value)).toMatchObject({
+      status: "reserved",
+      threadBound: false,
+      threadLogPresent: true,
+    });
+  });
+
   it("exposes only an existing Thread from its registered workspace", async () => {
     const home = await mkdtemp(join(tmpdir(), "koda-remote-cli-home-"));
     const workspace = await mkdtemp(join(tmpdir(), "koda-remote-cli-project-"));

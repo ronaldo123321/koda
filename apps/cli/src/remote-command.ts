@@ -1,6 +1,10 @@
+import { lstat } from "node:fs/promises";
+import { join } from "node:path";
+
 import {
   RemoteDeviceStore,
   RemoteThreadStore,
+  RemoteTurnRequestStore,
   RemoteWorkspaceStore,
   remotePermissionSchema,
   startRemoteHttpsServer,
@@ -126,6 +130,59 @@ export async function runRemoteThreadExposeCommand(
     context.stdout.write(
       `Exposed Thread ${threadId} in workspace ${workspaceId}\n`,
     );
+    return 0;
+  } catch (error) {
+    return fail(context, error);
+  }
+}
+
+export async function runRemoteRequestInspectCommand(
+  requestId: string,
+  context: RemoteCommandContext,
+): Promise<number> {
+  try {
+    const home = resolveKodaHome(context.environment);
+    const requests = await RemoteTurnRequestStore.open(home, OWNER_ID);
+    const record = await requests.get(requestId);
+    if (record === undefined)
+      throw new Error("Remote Turn request is unavailable.");
+    const threads = await RemoteThreadStore.open(home, OWNER_ID);
+    const binding = await threads.get(record.threadId);
+    let threadLogPresent = false;
+    try {
+      await lstat(join(home, "threads", `${record.threadId}.jsonl`));
+      threadLogPresent = true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    context.stdout.write(
+      `${JSON.stringify({
+        requestId: record.requestId,
+        status: record.status,
+        deviceId: record.deviceId,
+        workspaceId: record.workspaceId,
+        threadId: record.threadId,
+        turnId: record.turnId,
+        threadBound: binding !== undefined,
+        threadLogPresent,
+      })}\n`,
+    );
+    return 0;
+  } catch (error) {
+    return fail(context, error);
+  }
+}
+
+export async function runRemoteRequestAbandonCommand(
+  requestId: string,
+  context: RemoteCommandContext,
+): Promise<number> {
+  try {
+    const home = resolveKodaHome(context.environment);
+    const requests = await RemoteTurnRequestStore.open(home, OWNER_ID);
+    const threads = await RemoteThreadStore.open(home, OWNER_ID);
+    const record = await requests.abandon(requestId, threads);
+    context.stdout.write(`Abandoned remote request ${record.requestId}\n`);
     return 0;
   } catch (error) {
     return fail(context, error);
