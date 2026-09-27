@@ -193,6 +193,8 @@ koda chat --cwd .
 
 首版远程访问面向同一使用者的多台设备，使用局域网或自有 VPN。当前按需启动的 HTTPS 入口可查询获授权的工作区 ID、已绑定 Thread 的脱敏概要、事件序号摘要及助手回答更新；持有显式 `turn:start` 权限的设备还可以启动仅含工作区读取工具的 Turn，持有 `turn:control` 权限的设备可取消当前活跃的远程 Turn。已绑定 Thread 另可通过 WSS 订阅助手更新。macOS 图形界面已有远程连接与停止预览；完整事件内容和自动配对仍在开发中。
 
+图形界面的“忘记已存连接”会取消正在验证的连接，并删除本机保存的设备令牌及待确认远程请求；若 Keychain 删除失败，界面会保留错误提示。
+
 在作为服务端的 Mac 上登记工作区和设备：
 
 ```bash
@@ -241,7 +243,7 @@ Intel Mac 将 `arm64` 换成 `x64`。打包脚本会验证复制后的运行时�
 apps/macos-gui/package-unsigned-pkg.sh dist/Koda.app dist/Koda-unsigned.pkg
 ```
 
-该预览安装包尚未签名或公证，也没有自动更新。后续 macOS 图形应用更新将从项目 [GitHub Releases](https://github.com/ronaldo123321/koda/releases) 获取；当前发布流程只生成命令行资产，尚无可用的图形应用更新。制作 `.pkg` 时应用目录必须命名为 `Koda.app`，以确保安装路径一致。已在本机验证 SwiftUI 应用能打开、连接真实 app-server、读取已有 Thread，并从 Keychain 加载凭据完成无工具的 OpenAI 对话；远程连接窗口已完成本机界面检查，GUI 内的工具审批、Keychain 删除、`.pkg` 安装和两台设备的远程使用仍待单独验收。
+该预览安装包尚未签名或公证，也没有自动更新。图形应用的“检查更新”读取项目 [GitHub Releases](https://github.com/ronaldo123321/koda/releases)，只列出版本较新、含当前 Mac 架构对应 `Koda-v<版本>-darwin-<架构>.pkg` 和 `.update.json` 资产的已发布版本，并提供 Release 页面入口。它只做发现，不下载或安装；签名元数据验证、包完整性验证和安装仍待实现。当前发布流程只生成命令行资产，尚无可用的图形应用更新。制作 `.pkg` 时应用目录必须命名为 `Koda.app`，以确保安装路径一致。已在本机验证 SwiftUI 应用能打开、连接真实 app-server、读取已有 Thread，并从 Keychain 加载凭据完成无工具的 OpenAI 对话；远程连接窗口已完成本机界面检查，GUI 内的工具审批、Keychain 删除、`.pkg` 安装和两台设备的远程使用仍待单独验收。
 
 ## 使用 CLI
 

@@ -5,6 +5,9 @@ struct ContentView: View {
     @Environment(\.openWindow) private var openWindow
     @StateObject private var model = KodaModel()
     @State private var credentialProvider: ProviderOption?
+    @State private var checkingUpdates = false
+    @State private var updateNotice: String?
+    @State private var updatePage: URL?
 
     var body: some View {
         NavigationSplitView {
@@ -71,6 +74,30 @@ struct ContentView: View {
         }
     }
 
+    private func checkForUpdates() {
+        guard let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString")
+                as? String else {
+            updateNotice = "无法读取当前应用版本。"
+            return
+        }
+        checkingUpdates = true
+        updateNotice = nil
+        updatePage = nil
+        Task {
+            do {
+                if let candidate = try await ReleaseUpdates.check(installedVersion: version) {
+                    updateNotice = "发现 macOS 应用候选版本 v\(candidate.version)；应用内安装尚未开放。"
+                    updatePage = candidate.page
+                } else {
+                    updateNotice = "GitHub Releases 暂无适用于此 Mac 的较新应用版本。"
+                }
+            } catch {
+                updateNotice = "检查更新失败：\(error.localizedDescription)"
+            }
+            checkingUpdates = false
+        }
+    }
+
     private var header: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
@@ -96,6 +123,15 @@ struct ContentView: View {
                     Button("重连") { model.reconnect() }
                 }
                 Button("远程…") { openWindow(id: "remote") }
+                Button(checkingUpdates ? "检查中…" : "检查更新") { checkForUpdates() }
+                    .disabled(checkingUpdates)
+            }
+            if let updateNotice {
+                HStack {
+                    Text(updateNotice)
+                    if let updatePage { Link("查看 Release", destination: updatePage) }
+                }
+                .font(.caption)
             }
             HStack {
                 Picker("Provider", selection: Binding(

@@ -88,6 +88,16 @@ final class RemoteClientTests: XCTestCase {
             return
         }
 
+        let cancelledModel = await RemoteModel()
+        await cancelledModel.connect(RemoteSettings(
+            origin: setup.origin, certificateSha256: setup.fingerprint, token: setup.token
+        ), save: false)
+        await cancelledModel.cancelPendingConnection()
+        try await Task.sleep(nanoseconds: 200_000_000)
+        let cancelledState = await (cancelledModel.connected, cancelledModel.connecting)
+        XCTAssertFalse(cancelledState.0)
+        XCTAssertFalse(cancelledState.1)
+
         let wrong = try RemoteClient(settings: RemoteSettings(
             origin: setup.origin, certificateSha256: String(repeating: "0", count: 64),
             token: setup.token

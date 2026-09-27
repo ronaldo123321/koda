@@ -215,8 +215,8 @@ private struct RemoteConnectionView: View {
         .padding(24)
         .frame(minWidth: 560)
         .onAppear { origin = model.endpoint }
-        .confirmationDialog("删除这台 Mac 保存的远程设备令牌？", isPresented: $confirmingForget) {
-            Button("删除本机凭据", role: .destructive) {
+        .confirmationDialog("删除这台 Mac 保存的远程设备令牌和待确认请求？", isPresented: $confirmingForget) {
+            Button("忘记远程连接", role: .destructive) {
                 model.forgetConnection()
                 dismiss()
             }

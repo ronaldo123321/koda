@@ -34,6 +34,8 @@ final class RemoteModel: ObservableObject {
     @Published var stopPendingTurns = Set<String>()
 
     private var client: RemoteClient?
+    private var connectTask: Task<Void, Never>?
+    private var connectionGeneration = 0
     private var streamTask: Task<Void, Never>?
     private var socket: URLSessionWebSocketTask?
     private var cursor = -1
@@ -67,14 +69,20 @@ final class RemoteModel: ObservableObject {
 
     func connect(_ settings: RemoteSettings, save: Bool) {
         guard !connecting else { return }
+        connectionGeneration += 1
+        let generation = connectionGeneration
         connecting = true
         notice = nil
-        Task {
+        connectTask = Task {
             var candidate: RemoteClient?
             do {
                 let connection = try RemoteClient(settings: settings)
                 candidate = connection
                 let ids = try await connection.listWorkspaces()
+                guard generation == connectionGeneration, !Task.isCancelled else {
+                    candidate?.close()
+                    return
+                }
                 if save { try RemoteSettingsStore.save(settings) }
                 disconnect()
                 client = candidate
@@ -85,11 +93,14 @@ final class RemoteModel: ObservableObject {
                 selectedWorkspaceID = ids.first
                 connected = true
                 connecting = false
+                connectTask = nil
                 refreshThreads()
             } catch {
                 candidate?.close()
+                guard generation == connectionGeneration else { return }
                 notice = "远程连接失败：\(error.localizedDescription)"
                 connecting = false
+                connectTask = nil
             }
         }
     }
@@ -108,15 +119,31 @@ final class RemoteModel: ObservableObject {
     }
 
     func forgetConnection() {
+        cancelPendingConnection()
         do {
             try RemoteSettingsStore.delete()
             disconnect()
             hasSavedConnection = false
             endpoint = ""
-            notice = nil
+            do {
+                try RemoteSettingsStore.deletePendingStart()
+                pendingStart = nil
+                hasPendingStart = false
+                prompt = ""
+                notice = nil
+            } catch {
+                notice = "已删除远程令牌，但待确认请求未清除：\(error.localizedDescription)"
+            }
         } catch {
             notice = error.localizedDescription
         }
+    }
+
+    func cancelPendingConnection() {
+        connectionGeneration += 1
+        connectTask?.cancel()
+        connectTask = nil
+        connecting = false
     }
 
     func selectWorkspace(_ id: String) {
