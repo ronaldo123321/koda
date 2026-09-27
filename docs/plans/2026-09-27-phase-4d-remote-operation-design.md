@@ -161,7 +161,7 @@ after verifying its workspace, issue scoped device credentials, revoke devices,
 and start a restricted HTTPS listener on an explicit private address. The
 listener authenticates each request and projects only opaque workspace IDs,
 bound Thread summaries, payload-free event envelopes, or assistant updates.
-It does not yet transfer a verified server certificate to a client,
-authorize the full app-server method set, project complete event content, support
-remote approvals or effects, or provide a finished client. These are
-required before 4D1/4D2 close.
+The SwiftUI preview verifies an out-of-band pinned server certificate and
+replays authorized assistant updates. Automatic pairing, the full app-server
+method set, complete event content, remote approvals and effects, and physical
+two-device acceptance remain open before Phase 4D can close.

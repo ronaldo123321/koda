@@ -393,7 +393,8 @@ Linux/Windows release expansion remains deferred.
 
 Status: In progress — the 2026-09-27 local full-suite baseline passed:
 `pnpm test` completed the build, 89 Rust tests, and 814 Vitest tests
-(35 skipped). This establishes a local regression baseline only; the
+(35 skipped); `pnpm typecheck` and six SwiftUI package tests also passed.
+This establishes a local regression baseline only; the
 platform, physical-device remote, power-loss, and signed public-release
 scenarios below still require separate evidence.
 
