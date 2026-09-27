@@ -75,6 +75,7 @@ export interface ManagedPluginUpdateSource {
   readonly trustRoot: PluginPublisherTrustRoot;
   readonly capabilities: readonly PluginCapability[];
   readonly currentVersion: string;
+  readonly stateSha256: string;
 }
 
 export async function installManagedPluginPackage(options: {
@@ -88,6 +89,7 @@ export async function installManagedPluginPackage(options: {
     manifestPath: string;
   };
   rotation?: { previousTrustRoot: PluginPublisherTrustRoot };
+  expectedStateSha256?: string;
 }): Promise<ManagedPluginStatus> {
   const capabilities = validateCapabilities(options.capabilities);
   const verified = await verifyLocalPluginPackage(
@@ -100,8 +102,22 @@ export async function installManagedPluginPackage(options: {
   try {
     const state = await readState(root);
     const old = state.plugins[verified.id];
+    if (
+      options.expectedStateSha256 !== undefined &&
+      (old === undefined ||
+        sha256CanonicalJson(old) !== options.expectedStateSha256)
+    ) {
+      throw invalidState("Managed plugin changed during update.");
+    }
     if (old === undefined && Object.keys(state.plugins).length >= MAX_PLUGINS) {
       throw invalidState("Managed plugin limit reached.");
+    }
+    if (old !== undefined) {
+      await checkPackage(
+        packagePath(root, verified.id, old.active.manifest_sha256),
+        verified.id,
+        old.active,
+      );
     }
     const keyChanged =
       old !== undefined &&
@@ -120,11 +136,6 @@ export async function installManagedPluginPackage(options: {
       ) {
         throw invalidState("Current plugin publisher key does not match.");
       }
-      await checkPackage(
-        packagePath(root, verified.id, old.active.manifest_sha256),
-        verified.id,
-        old.active,
-      );
     }
     const needsPreflight =
       old !== undefined &&
@@ -220,15 +231,20 @@ export async function readManagedPluginUpdateSource(
   pluginIdSchema.parse(id);
   const root = storeRoot(kodaHome);
   const state = await readState(root);
-  const active = state.plugins[id]?.active;
-  if (active?.provenance === undefined)
+  const entry = state.plugins[id];
+  if (entry === undefined)
     throw invalidState("Managed plugin has no signed catalog source.");
+  const provenance = entry.active.provenance;
+  if (provenance === undefined)
+    throw invalidState("Managed plugin has no signed catalog source.");
+  const active = entry.active;
   await checkPackage(packagePath(root, id, active.manifest_sha256), id, active);
   return {
-    catalogUrl: active.provenance.catalog_url,
+    catalogUrl: provenance.catalog_url,
     trustRoot: { keyId: active.key_id, publicKeyPem: active.public_key_pem },
     capabilities: active.capabilities,
     currentVersion: active.version,
+    stateSha256: sha256CanonicalJson(entry),
   };
 }
 

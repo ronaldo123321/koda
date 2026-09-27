@@ -178,6 +178,7 @@ async function installCatalogEntry(
     kodaHome: string;
     capabilities: readonly PluginCapability[];
     rotation?: { previousTrustRoot: PluginPublisherTrustRoot };
+    expectedStateSha256?: string;
     ca?: Buffer;
   },
   catalog: VerifiedPluginCatalog,
@@ -222,6 +223,9 @@ async function installCatalogEntry(
       trustRoot: options.trustRoot,
       capabilities: options.capabilities,
       ...(options.rotation === undefined ? {} : { rotation: options.rotation }),
+      ...(options.expectedStateSha256 === undefined
+        ? {}
+        : { expectedStateSha256: options.expectedStateSha256 }),
       provenance: {
         catalogUrl: base.href,
         catalogSha256: catalog.catalogSha256,
@@ -266,6 +270,7 @@ export async function updatePluginFromCatalog(options: {
       trustRoot: current.trustRoot,
       kodaHome: options.kodaHome,
       capabilities: current.capabilities,
+      expectedStateSha256: current.stateSha256,
       ...(options.ca === undefined ? {} : { ca: options.ca }),
     },
     catalog,

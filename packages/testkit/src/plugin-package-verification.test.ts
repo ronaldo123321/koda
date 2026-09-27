@@ -34,6 +34,7 @@ import {
   listManagedPlugins,
   loadPluginConfiguration,
   PluginTurnSession,
+  readManagedPluginUpdateSource,
   rollbackManagedPlugin,
   setManagedPluginEnabled,
   updatePluginFromCatalog,
@@ -73,6 +74,82 @@ afterEach(async () => {
 });
 
 describe("signed local plugin packages", () => {
+  it("rejects a stale update after an owner changes the installed plugin", async () => {
+    const fixture = await packageFixture("index.mjs", managedProtocolScript);
+    const home = join(fixture.parent, "home");
+    const install = (expectedStateSha256?: string) =>
+      installManagedPluginPackage({
+        kodaHome: home,
+        sourceDirectory: fixture.root,
+        trustRoot: fixture.trust,
+        capabilities: ["tools"],
+        provenance: {
+          catalogUrl: "https://plugins.example/catalog.json",
+          catalogSha256: "a".repeat(64),
+          manifestPath: "reviewer/manifest.json",
+        },
+        ...(expectedStateSha256 === undefined ? {} : { expectedStateSha256 }),
+      });
+    await install();
+    const stale = await readManagedPluginUpdateSource(home, "reviewer");
+    await rewriteVersion(fixture, "2.0.0");
+    await install();
+    await rewriteVersion(fixture, "1.5.0");
+    await expect(install(stale.stateSha256)).rejects.toMatchObject({
+      code: "PLUGIN_PACKAGE_INVALID",
+    });
+    expect((await listManagedPlugins(home))[0]).toMatchObject({
+      version: "2.0.0",
+      enabled: false,
+    });
+
+    const beforeEnable = await readManagedPluginUpdateSource(home, "reviewer");
+    await setManagedPluginEnabled(home, "reviewer", true);
+    await rewriteVersion(fixture, "3.0.0");
+    await expect(install(beforeEnable.stateSha256)).rejects.toMatchObject({
+      code: "PLUGIN_PACKAGE_INVALID",
+    });
+    expect((await listManagedPlugins(home))[0]).toMatchObject({
+      version: "2.0.0",
+      enabled: true,
+    });
+  });
+
+  it("refuses to replace a tampered active package silently", async () => {
+    const fixture = await packageFixture("index.mjs", managedProtocolScript);
+    const home = join(fixture.parent, "home");
+    const first = await installManagedPluginPackage({
+      kodaHome: home,
+      sourceDirectory: fixture.root,
+      trustRoot: fixture.trust,
+      capabilities: ["tools"],
+    });
+    await writeFile(
+      join(
+        home,
+        "managed-plugins",
+        "packages",
+        "reviewer",
+        first.manifestSha256,
+        "index.mjs",
+      ),
+      "tampered",
+    );
+    await rewriteVersion(fixture, "2.0.0");
+    await expect(
+      installManagedPluginPackage({
+        kodaHome: home,
+        sourceDirectory: fixture.root,
+        trustRoot: fixture.trust,
+        capabilities: ["tools"],
+      }),
+    ).rejects.toMatchObject({ code: "PLUGIN_PACKAGE_INVALID" });
+    expect((await listManagedPlugins(home))[0]).toMatchObject({
+      version: "1.0.0",
+      manifestSha256: first.manifestSha256,
+    });
+  });
+
   it("rotates only with the expected old key and drops old-key rollback", async () => {
     const old = await packageFixture("index.mjs", managedProtocolScript);
     const next = await packageFixture(
@@ -245,15 +322,29 @@ describe("signed local plugin packages", () => {
         await readFile(join(fixture.root, "index.mjs")),
       ],
     ]);
+    let holdNextManifest = false;
+    let manifestSeen: (() => void) | undefined;
+    let releaseManifest: (() => void) | undefined;
     const server = createServer(
       {
         cert: await readFile(certificate),
         key: await readFile(key),
       },
       (request, response) => {
-        const body = files.get(request.url ?? "");
-        response.writeHead(body === undefined ? 404 : 200);
-        response.end(body);
+        const send = () => {
+          const body = files.get(request.url ?? "");
+          response.writeHead(body === undefined ? 404 : 200);
+          response.end(body);
+        };
+        if (
+          holdNextManifest &&
+          request.url === "/reviewer/1.10.0/manifest.json"
+        ) {
+          releaseManifest = send;
+          manifestSeen?.();
+          return;
+        }
+        send();
       },
     );
     await new Promise<void>((resolve) =>
@@ -319,6 +410,31 @@ describe("signed local plugin packages", () => {
         "/reviewer/1.10.0/index.mjs",
         await readFile(join(fixture.root, "index.mjs")),
       );
+      const requested = new Promise<void>((resolve) => {
+        manifestSeen = resolve;
+      });
+      holdNextManifest = true;
+      const staleUpdate = updatePluginFromCatalog({
+        kodaHome: home,
+        id: "reviewer",
+        ca,
+        nowMs: now,
+      });
+      const rejected = expect(staleUpdate).rejects.toMatchObject({
+        code: "PLUGIN_PACKAGE_INVALID",
+      });
+      await requested;
+      try {
+        await setManagedPluginEnabled(home, "reviewer", true);
+      } finally {
+        holdNextManifest = false;
+        releaseManifest?.();
+      }
+      await rejected;
+      expect((await listManagedPlugins(home))[0]).toMatchObject({
+        version: "1.0.0",
+        enabled: true,
+      });
       const updated = await updatePluginFromCatalog({
         kodaHome: home,
         id: "reviewer",
