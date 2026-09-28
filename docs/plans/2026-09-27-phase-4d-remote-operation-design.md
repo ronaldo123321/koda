@@ -3,11 +3,12 @@
 - Status: 4D1 and 4D2 in progress — local owner/device grants, workspace
   registration, credential lifecycle, immutable remote Thread bindings, safe
   Thread summary and authorized list projection, opt-in TLS transport, durable event-envelope
-  and assistant-update cursor polling, and restricted remote Turn start with durable request
+  and assistant-update cursor polling, safe all-type activity projection, and
+  restricted remote Turn start with durable request
   idempotency and authenticated WSS replay implemented; a native macOS client
   preview now verifies a pinned certificate, stores its device token in Keychain,
-  lists authorized Threads, replays assistant updates, and previews verified
-  Thread artifacts in bounded UTF-8 ranges. Full event content
+  lists authorized Threads, replays assistant updates and event status, and
+  previews verified Thread artifacts in bounded UTF-8 ranges. Full event payload
   projection, approvals, automatic pairing, and two-device acceptance remain open.
   Swift client tests now exercise the actual local HTTPS/WSS listener with
   temporary devices, restricted Turn idempotency, and replay, and reject late
@@ -41,11 +42,16 @@ not expose them unchanged.
 Remote operation uses a separate versioned API and server-side workspace IDs.
 The local stdio protocol and its installed CLI/TUI behavior remain intact.
 The opt-in HTTPS listener serves authenticated workspace IDs, bound Thread
-summaries and paginated lists, bounded event envelopes, assistant updates, and restricted Turn starts. It has TLS,
+summaries and paginated lists, bounded event envelopes, assistant updates,
+safe event activity, and restricted Turn starts. It has TLS,
 bounded headers, request bodies, and responses, per-request authorization,
 and negative security tests. The event-envelope endpoint uses exclusive
 `after` cursors; `-1` starts at sequence zero. It omits raw event payloads, which may contain
-host paths or sensitive diagnostics. The separate assistant-update endpoint
+host paths or sensitive diagnostics. The `/activity` endpoint and WSS
+`view=activity` project every event type with only selected status fields;
+tool arguments, approval details, process security evidence, and structured
+host paths remain on the owner host. Assistant text can quote workspace content.
+The separate assistant-update endpoint
 returns assistant text and limited Turn status only. Assistant text can quote
 workspace content, so devices need `thread:read` and must be trusted by the owner.
 The enabled Turn start mode uses read-only tools. It binds a new Thread before execution, uses a durable request ID
@@ -191,9 +197,9 @@ register workspaces, explicitly expose an existing Thread
 after verifying its workspace, issue scoped device credentials, revoke devices,
 and start a restricted HTTPS listener on an explicit private address. The
 listener authenticates each request and projects only opaque workspace IDs,
-bound Thread summaries, payload-free event envelopes, assistant updates, and
-verified Thread artifact ranges.
+bound Thread summaries, payload-free event envelopes, assistant updates,
+safe all-type activity status, and verified Thread artifact ranges.
 The SwiftUI preview verifies an out-of-band pinned server certificate and
-replays authorized assistant updates. Automatic pairing, the full app-server
-method set, complete event content, remote approvals and effects, and physical
+replays authorized assistant updates and event status. Automatic pairing, the full app-server
+method set, complete event payloads, remote approvals and effects, and physical
 two-device acceptance remain open before Phase 4D can close.

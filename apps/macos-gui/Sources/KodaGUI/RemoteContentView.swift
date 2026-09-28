@@ -104,7 +104,7 @@ struct RemoteContentView: View {
                 .disabled(!model.connected)
                 Spacer()
             }
-            Text("远程预览显示助手文本、Turn 状态和已记录的文本产物；工具调用与审批内容尚未投射。")
+            Text("远程视图按游标显示助手文本和事件状态；工具参数、审批详情及主机路径字段不会投射，助手文本可能引用工作区内容。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             if let notice = model.notice {
@@ -132,9 +132,11 @@ struct RemoteContentView: View {
                     ForEach(model.entries) { entry in
                         Text(entry.text)
                             .textSelection(.enabled)
+                            .font(entry.isActivity ? .caption : .body)
+                            .foregroundStyle(entry.isActivity ? .secondary : .primary)
                             .frame(maxWidth: 680, alignment: .leading)
                             .padding(12)
-                            .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+                            .background(Color.secondary.opacity(entry.isActivity ? 0.04 : 0.08), in: RoundedRectangle(cornerRadius: 12))
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .id(entry.id)
                     }

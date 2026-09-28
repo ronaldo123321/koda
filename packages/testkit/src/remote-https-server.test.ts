@@ -534,7 +534,76 @@ describe.skipIf(process.platform === "win32")(
           nextAfterSequence: 3,
         });
         expect(JSON.stringify(failed.body)).not.toContain(home);
+        const activityStart = await get(
+          port,
+          certificate,
+          "/v1/threads/thread-1/activity?after=-1&limit=1",
+          issued.token,
+        );
+        expect(activityStart).toEqual({
+          status: 200,
+          body: {
+            events: [
+              {
+                sequence: 0,
+                timestamp: "2026-09-27T00:00:00.000Z",
+                turnId: "turn-1",
+                type: "turn.started",
+              },
+            ],
+            hasMore: true,
+            nextAfterSequence: 0,
+          },
+        });
+        const activityFailure = await get(
+          port,
+          certificate,
+          "/v1/threads/thread-1/activity?after=2&limit=1",
+          issued.token,
+        );
+        expect(activityFailure.body).toMatchObject({
+          events: [{ sequence: 3, type: "turn.failed", code: "TEST_FAILURE" }],
+          nextAfterSequence: 3,
+        });
+        expect(JSON.stringify(activityFailure.body)).not.toContain(home);
+        const largeActivity = await get(
+          port,
+          certificate,
+          "/v1/threads/thread-1/activity?after=1&limit=1",
+          issued.token,
+        );
+        expect(largeActivity.body).toMatchObject({
+          events: [{ sequence: 2, type: "assistant.delta", text: largeAnswer }],
+        });
         const subscriptionUrl = `wss://127.0.0.1:${port}/v1/threads/thread-1/subscribe`;
+        const activitySubscription = new WebSocket(
+          `${subscriptionUrl}?after=-1&limit=1&view=activity`,
+          {
+            ca: certificate,
+            headers: { authorization: `Bearer ${issued.token}` },
+          },
+        );
+        const activityFrames = collectWebSocketFrames(activitySubscription, 2);
+        await openWebSocket(activitySubscription);
+        expect(await activityFrames).toMatchObject([
+          { kind: "update", event: { sequence: 0, type: "turn.started" } },
+          { kind: "cursor", nextAfterSequence: 0 },
+        ]);
+        const activityClosed = new Promise<void>((resolveClose) =>
+          activitySubscription.once("close", () => resolveClose()),
+        );
+        activitySubscription.close();
+        await activityClosed;
+        const invalidActivityView = new WebSocket(
+          `${subscriptionUrl}?after=-1&view=raw`,
+          {
+            ca: certificate,
+            headers: { authorization: `Bearer ${issued.token}` },
+          },
+        );
+        await expect(openWebSocket(invalidActivityView)).rejects.toThrow(
+          "Unexpected server response: 404",
+        );
         const unauthenticatedSubscription = new WebSocket(
           `${subscriptionUrl}?after=-1`,
           { ca: certificate },
@@ -636,6 +705,16 @@ describe.skipIf(process.platform === "win32")(
           issued.token,
         );
         expect(badCursor.status).toBe(400);
+        expect(
+          (
+            await get(
+              port,
+              certificate,
+              "/v1/threads/thread-1/activity?view=raw",
+              issued.token,
+            )
+          ).status,
+        ).toBe(400);
         const deniedThread = await get(
           port,
           certificate,
@@ -657,6 +736,16 @@ describe.skipIf(process.platform === "win32")(
           readOnly.token,
         );
         expect(deniedUpdates.status).toBe(404);
+        expect(
+          (
+            await get(
+              port,
+              certificate,
+              "/v1/threads/thread-1/activity?after=-1",
+              readOnly.token,
+            )
+          ).status,
+        ).toBe(404);
         await writeFile(
           join(
             home,
@@ -874,6 +963,74 @@ describe.skipIf(process.platform === "win32")(
         );
         secondSubscription.close();
         await secondClosed;
+        replayEvents.push(
+          agentEventSchema.parse({
+            schemaVersion: 1,
+            sequence: 7,
+            timestamp: "2026-09-27T00:00:07.000Z",
+            threadId: "thread-1",
+            turnId: "turn-2",
+            type: "tool.started",
+            payload: { callId: "private-call", name: `private ${home}` },
+          }),
+          agentEventSchema.parse({
+            schemaVersion: 1,
+            sequence: 8,
+            timestamp: "2026-09-27T00:00:08.000Z",
+            threadId: "thread-1",
+            turnId: "turn-2",
+            type: "approval.requested",
+            payload: {
+              callId: "private-call",
+              name: "exec_command",
+              title: `private ${home}`,
+              summary: `private ${home}`,
+              details: `private ${home}`,
+              reason: `private ${home}`,
+            },
+          }),
+        );
+        const activityDetails = await get(
+          port,
+          certificate,
+          "/v1/threads/thread-1/activity?after=6&limit=2",
+          observer.token,
+        );
+        expect(activityDetails.body).toMatchObject({
+          events: [
+            { sequence: 7, type: "tool.started", callId: "private-call" },
+            { sequence: 8, type: "approval.requested", callId: "private-call" },
+          ],
+          nextAfterSequence: 8,
+        });
+        expect(JSON.stringify(activityDetails.body)).not.toContain(home);
+        const privateActivitySubscription = new WebSocket(
+          `${subscriptionUrl}?after=6&limit=2&view=activity`,
+          {
+            ca: certificate,
+            headers: { authorization: `Bearer ${observer.token}` },
+          },
+        );
+        const privateActivityFrames = collectWebSocketFrames(
+          privateActivitySubscription,
+          3,
+        );
+        await openWebSocket(privateActivitySubscription);
+        const projectedFrames = await privateActivityFrames;
+        expect(projectedFrames).toMatchObject([
+          { kind: "update", event: { sequence: 7, type: "tool.started" } },
+          {
+            kind: "update",
+            event: { sequence: 8, type: "approval.requested" },
+          },
+          { kind: "cursor", nextAfterSequence: 8 },
+        ]);
+        expect(JSON.stringify(projectedFrames)).not.toContain(home);
+        const privateActivityClosed = new Promise<void>((resolveClose) =>
+          privateActivitySubscription.once("close", () => resolveClose()),
+        );
+        privateActivitySubscription.close();
+        await privateActivityClosed;
         const revoked = await get(
           port,
           certificate,

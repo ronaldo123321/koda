@@ -103,7 +103,7 @@ koda remote device issue macbook --workspace project
 koda remote serve --host 192.168.1.10 --port 8443 --cert /absolute/path/server.pem --key /absolute/path/server-key.pem
 ```
 
-默认令牌只有读取权限。远程启动只读任务或取消任务，分别需要显式签发 `turn:start` 或 `turn:control` 权限；启动任务会使用主机的模型凭据并可能消耗配额。客户端必须核对主机证书指纹。现有 Thread 需由主机所有者显式执行 `koda remote thread expose <thread-id> --workspace project` 才会对远程设备可见。双设备真实网络验收尚未完成，具体权限、协议和恢复规则见 [远程操作设计](docs/plans/2026-09-27-phase-4d-remote-operation-design.md)。
+默认令牌只有读取权限。远程启动只读任务或取消任务，分别需要显式签发 `turn:start` 或 `turn:control` 权限；启动任务会使用主机的模型凭据并可能消耗配额。客户端必须核对主机证书指纹。现有 Thread 需由主机所有者显式执行 `koda remote thread expose <thread-id> --workspace project` 才会对远程设备可见。macOS 远程窗口可按游标回放助手文本和各类事件状态；工具参数、审批详情与结构化的主机路径字段不会投射，助手文本仍可能引用工作区内容。双设备真实网络验收尚未完成，具体权限、协议和恢复规则见 [远程操作设计](docs/plans/2026-09-27-phase-4d-remote-operation-design.md)。
 
 ## 扩展与本地数据
 

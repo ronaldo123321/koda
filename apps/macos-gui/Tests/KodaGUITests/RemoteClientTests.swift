@@ -32,10 +32,32 @@ final class RemoteClientTests: XCTestCase {
             nextAfterSequence: nil
         ), for: "second")
         XCTAssertEqual(model.entries.map(\.text), ["second"])
-        model.activeTurns["second"] = "turn-second"
         model.handle(RemoteSubscriptionFrame(
             kind: "update",
             event: RemoteUpdate(sequence: 2, turnId: "turn-second",
+                                type: "tool.started", text: nil, code: nil),
+            nextAfterSequence: nil
+        ), for: "second")
+        XCTAssertEqual(model.entries.last?.text, "工具调用已开始")
+        XCTAssertTrue(model.entries.last?.isActivity == true)
+        model.handle(RemoteSubscriptionFrame(
+            kind: "update",
+            event: RemoteUpdate(sequence: 2, turnId: "turn-second",
+                                type: "tool.started", text: nil, code: nil),
+            nextAfterSequence: nil
+        ), for: "second")
+        XCTAssertEqual(model.entries.count, 2)
+        model.handle(RemoteSubscriptionFrame(
+            kind: "update",
+            event: RemoteUpdate(sequence: 3, turnId: "turn-second",
+                                type: "assistant.delta", text: "after tool", code: nil),
+            nextAfterSequence: nil
+        ), for: "second")
+        XCTAssertEqual(model.entries.map(\.text), ["second", "工具调用已开始", "after tool"])
+        model.activeTurns["second"] = "turn-second"
+        model.handle(RemoteSubscriptionFrame(
+            kind: "update",
+            event: RemoteUpdate(sequence: 4, turnId: "turn-second",
                                 type: "turn.cancelled", text: nil, code: nil),
             nextAfterSequence: nil
         ), for: "second")
@@ -242,17 +264,19 @@ final class RemoteClientTests: XCTestCase {
         let fullPreview = await reconnectModel.artifactText
         XCTAssertEqual(fullPreview, expectedArtifactText)
         for _ in 0..<50 {
-            if await reconnectModel.entries.first?.text == "firstsecond" { break }
+            if await reconnectModel.entries.first(where: { !$0.isActivity })?.text == "firstsecond" { break }
             try await Task.sleep(nanoseconds: 100_000_000)
         }
-        let before = await reconnectModel.entries.map(\.text)
+        let before = await reconnectModel.entries.filter { !$0.isActivity }.map(\.text)
         XCTAssertEqual(before, ["firstsecond"])
+        let initialActivity = await reconnectModel.entries.filter(\.isActivity).map(\.text)
+        XCTAssertTrue(initialActivity.contains("Turn 已开始"))
         control.fileHandleForWriting.write(Data("restart\n".utf8))
         for _ in 0..<100 {
             if await reconnectModel.entries.contains(where: { $0.text == "after reconnect" }) { break }
             try await Task.sleep(nanoseconds: 100_000_000)
         }
-        let after = await reconnectModel.entries.map(\.text)
+        let after = await reconnectModel.entries.filter { !$0.isActivity }.map(\.text)
         XCTAssertEqual(after, ["firstsecond", "after reconnect"])
         await reconnectModel.close()
         let closed = await (reconnectModel.connected, reconnectModel.entries.count)

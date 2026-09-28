@@ -22,6 +22,14 @@ struct RemoteUpdate: Decodable {
     let type: String
     let text: String?
     let code: String?
+    var itemType: String? = nil
+    var effect: String? = nil
+    var status: String? = nil
+    var outcome: String? = nil
+    var decision: String? = nil
+    var step: Int? = nil
+    var steps: Int? = nil
+    var exitCode: Int? = nil
 }
 
 struct RemoteSubscriptionFrame: Decodable {
@@ -197,7 +205,7 @@ final class RemoteClient: NSObject, URLSessionDelegate, URLSessionTaskDelegate {
         )
     }
 
-    func subscribe(threadID: String, after: Int) throws -> URLSessionWebSocketTask {
+    func subscribe(threadID: String, after: Int, activity: Bool = false) throws -> URLSessionWebSocketTask {
         guard validThreadID(threadID) else { throw RemoteError(message: "远程 Thread ID 无效。") }
         var components = URLComponents(url: origin, resolvingAgainstBaseURL: false)!
         components.scheme = "wss"
@@ -205,7 +213,7 @@ final class RemoteClient: NSObject, URLSessionDelegate, URLSessionTaskDelegate {
         components.queryItems = [
             URLQueryItem(name: "after", value: String(after)),
             URLQueryItem(name: "limit", value: "100"),
-        ]
+        ] + (activity ? [URLQueryItem(name: "view", value: "activity")] : [])
         guard let url = components.url else {
             throw RemoteError(message: "远程订阅地址无效。")
         }

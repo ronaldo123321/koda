@@ -4,6 +4,8 @@ import Foundation
 struct RemoteChatEntry: Identifiable {
     let id: String
     var text: String
+    var isActivity = false
+    var turnID: String? = nil
 }
 
 struct PendingRemoteStart: Codable {
@@ -418,7 +420,7 @@ final class RemoteModel: ObservableObject {
         while !Task.isCancelled && self.client === client && selectedThreadID == threadID {
             var subscription: URLSessionWebSocketTask?
             do {
-                let socket = try client.subscribe(threadID: threadID, after: cursor)
+                let socket = try client.subscribe(threadID: threadID, after: cursor, activity: true)
                 subscription = socket
                 self.socket = socket
                 while !Task.isCancelled {
@@ -462,10 +464,14 @@ final class RemoteModel: ObservableObject {
         lastRenderedSequence = update.sequence
         switch update.type {
         case "assistant.delta":
-            if let index = entries.firstIndex(where: { $0.id == update.turnId }) {
+            if let index = entries.indices.last,
+               entries[index].turnID == update.turnId, !entries[index].isActivity {
                 entries[index].text += update.text ?? ""
             } else {
-                entries.append(RemoteChatEntry(id: update.turnId, text: update.text ?? ""))
+                entries.append(RemoteChatEntry(
+                    id: "assistant-\(update.sequence)", text: update.text ?? "",
+                    turnID: update.turnId
+                ))
             }
         case "turn.failed":
             if activeTurns[threadID] == update.turnId {
@@ -473,7 +479,9 @@ final class RemoteModel: ObservableObject {
                 stopPendingTurns.remove(update.turnId)
             }
             entries.append(RemoteChatEntry(
-                id: "failure-\(update.sequence)", text: "Turn 失败：\(update.code ?? "未知错误")"
+                id: "failure-\(update.sequence)",
+                text: "Turn 失败：\(update.code ?? "未知错误")",
+                isActivity: true
             ))
             refreshThreads()
         case "turn.completed", "turn.cancelled":
@@ -481,8 +489,49 @@ final class RemoteModel: ObservableObject {
                 activeTurns.removeValue(forKey: threadID)
                 stopPendingTurns.remove(update.turnId)
             }
+            entries.append(RemoteChatEntry(
+                id: "activity-\(update.sequence)",
+                text: update.type == "turn.completed" ? "Turn 已完成" : "Turn 已取消",
+                isActivity: true
+            ))
             refreshThreads()
-        default: break
+        default:
+            entries.append(RemoteChatEntry(
+                id: "activity-\(update.sequence)",
+                text: activityText(update),
+                isActivity: true
+            ))
+        }
+    }
+
+    private func activityText(_ update: RemoteUpdate) -> String {
+        switch update.type {
+        case "turn.started": return "Turn 已开始"
+        case "turn.context", "context.prepared": return "上下文已准备"
+        case "tool.catalog_changed": return "工具目录已更新"
+        case "model.usage": return "模型第 \(update.step ?? 0) 步用量已记录"
+        case "item.recorded": return "消息已记录：\(update.itemType ?? "未知类型")"
+        case "artifact.recorded": return "产物已记录"
+        case "tool.started": return "工具调用已开始"
+        case "tool.execution_started": return "工具执行已开始：\(update.effect ?? "未知效果")"
+        case "tool.completed": return "工具调用已结束：\(update.status ?? "未知状态")"
+        case "process.started": return "命令进程已开始"
+        case "process.exited": return "命令进程已退出：\(update.exitCode.map(String.init) ?? "无退出码")"
+        case "process.termination_requested": return "命令终止已请求"
+        case "process.termination_completed": return "命令终止已完成：\(update.outcome ?? "未知结果")"
+        case "workspace.change_set_prepared": return "工作区变更已准备"
+        case "workspace.change_set_committed": return "工作区变更已提交"
+        case "workspace.change_set_rolled_back": return "工作区变更已回滚"
+        case "workspace.change_set_uncertain": return "工作区变更结果待确认"
+        case "workspace.change_set_resolved": return "工作区变更结果已确认"
+        case "approval.requested": return "审批请求已记录"
+        case "approval.resolved": return "审批已处理：\(update.decision ?? "未知结果")"
+        case "approval.grant_created", "approval.grant_used": return "审批授权状态已更新"
+        case "plan.updated", "plan.checkpointed": return "计划已更新"
+        case "plan.acceptance_requested": return "计划验收已请求"
+        case "plan.acceptance_resolved": return "计划验收已处理"
+        case "turn.paused": return "Turn 已暂停"
+        default: return "事件：\(update.type)"
         }
     }
 

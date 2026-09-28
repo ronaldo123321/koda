@@ -347,7 +347,7 @@ async function handleRequest(
       return;
     }
     const match =
-      /^\/v1\/threads\/([A-Za-z0-9][A-Za-z0-9_-]{0,127})(\/(?:events|updates))?$/u.exec(
+      /^\/v1\/threads\/([A-Za-z0-9][A-Za-z0-9_-]{0,127})(\/(?:events|updates|activity))?$/u.exec(
         url.pathname,
       );
     const artifactsMatch =
@@ -428,7 +428,11 @@ async function handleRequest(
         send(response, 404, { error: "Unavailable" });
         return;
       }
-      if (match[2] === "/events" || match[2] === "/updates") {
+      if (
+        match[2] === "/events" ||
+        match[2] === "/updates" ||
+        match[2] === "/activity"
+      ) {
         const cursor = parseEventCursor(url);
         if (cursor === undefined) {
           send(response, 400, { error: "Invalid event cursor" });
@@ -440,14 +444,17 @@ async function handleRequest(
           limit: cursor.limit,
         });
         const updates = match[2] === "/updates";
+        const activity = match[2] === "/activity";
         const events = updates
           ? page.events.flatMap(projectRemoteUpdate)
-          : page.events.map((event) => ({
-              sequence: event.sequence,
-              timestamp: event.timestamp,
-              turnId: event.turnId,
-              type: event.type,
-            }));
+          : activity
+            ? page.events.map(projectRemoteActivity)
+            : page.events.map((event) => ({
+                sequence: event.sequence,
+                timestamp: event.timestamp,
+                turnId: event.turnId,
+                type: event.type,
+              }));
         send(
           response,
           200,
@@ -456,7 +463,7 @@ async function handleRequest(
             hasMore: page.hasLater,
             nextAfterSequence: page.events.at(-1)?.sequence ?? cursor.after,
           },
-          updates ? MAX_UPDATE_RESPONSE_BYTES : MAX_RESPONSE_BYTES,
+          updates || activity ? MAX_UPDATE_RESPONSE_BYTES : MAX_RESPONSE_BYTES,
         );
         return;
       }
@@ -533,7 +540,7 @@ async function acceptSubscription(
       /^\/v1\/threads\/([A-Za-z0-9][A-Za-z0-9_-]{0,127})\/subscribe$/u.exec(
         url.pathname,
       );
-    const cursor = parseEventCursor(url);
+    const cursor = parseEventCursor(url, true);
     if (match === null || cursor === undefined || url.hash !== "") {
       rejectUpgrade(socket, 404);
       return;
@@ -562,6 +569,7 @@ async function acceptSubscription(
         threadId,
         cursor.after,
         cursor.limit,
+        url.searchParams.get("view") === "activity",
         application,
         devices,
         workspaces,
@@ -579,6 +587,7 @@ async function streamSubscription(
   threadId: string,
   initialAfter: number,
   limit: number,
+  activity: boolean,
   application: KodaApplication,
   devices: RemoteDeviceStore,
   workspaces: RemoteWorkspaceStore,
@@ -606,7 +615,10 @@ async function streamSubscription(
         limit,
       });
       for (const event of page.events) {
-        for (const update of projectRemoteUpdate(event)) {
+        const projected = activity
+          ? [projectRemoteActivity(event)]
+          : projectRemoteUpdate(event);
+        for (const update of projected) {
           if (!sendWebSocket(client, { kind: "update", event: update })) return;
         }
       }
@@ -705,13 +717,22 @@ async function readJsonBody(request: IncomingMessage): Promise<unknown> {
 
 function parseEventCursor(
   url: URL,
+  allowActivityView = false,
 ): { after: number; limit: number } | undefined {
   for (const key of url.searchParams.keys()) {
-    if (key !== "after" && key !== "limit") return undefined;
+    if (
+      key !== "after" &&
+      key !== "limit" &&
+      !(allowActivityView && key === "view")
+    )
+      return undefined;
   }
   if (
     url.searchParams.getAll("after").length > 1 ||
-    url.searchParams.getAll("limit").length > 1
+    url.searchParams.getAll("limit").length > 1 ||
+    url.searchParams.getAll("view").length > 1 ||
+    (url.searchParams.has("view") &&
+      (!allowActivityView || url.searchParams.get("view") !== "activity"))
   )
     return undefined;
   const afterText = url.searchParams.get("after") ?? "-1";
@@ -892,6 +913,71 @@ function projectRemoteUpdate(event: AgentEvent): object[] {
       return [{ ...common, code: event.payload.code }];
     default:
       return [];
+  }
+}
+
+function projectRemoteActivity(event: AgentEvent): object {
+  const common = {
+    sequence: event.sequence,
+    timestamp: event.timestamp,
+    turnId: event.turnId,
+    type: event.type,
+  };
+  switch (event.type) {
+    case "assistant.delta":
+      return { ...common, text: event.payload.text };
+    case "turn.failed":
+      return { ...common, code: event.payload.code };
+    case "turn.completed":
+      return { ...common, steps: event.payload.steps };
+    case "model.usage":
+      return { ...common, step: event.payload.step };
+    case "item.recorded":
+      return { ...common, itemType: event.payload.item.type };
+    case "tool.started":
+    case "tool.execution_started":
+    case "tool.completed":
+      return {
+        ...common,
+        callId: event.payload.callId,
+        ...(event.type === "tool.execution_started"
+          ? { effect: event.payload.effect }
+          : event.type === "tool.completed"
+            ? { status: event.payload.status }
+            : {}),
+      };
+    case "process.started":
+    case "process.exited":
+    case "process.termination_requested":
+    case "process.termination_completed":
+      return {
+        ...common,
+        callId: event.payload.callId,
+        ...(event.type === "process.exited"
+          ? { exitCode: event.payload.exitCode }
+          : event.type === "process.termination_completed"
+            ? { outcome: event.payload.outcome }
+            : {}),
+      };
+    case "artifact.recorded":
+    case "workspace.change_set_prepared":
+    case "workspace.change_set_committed":
+    case "workspace.change_set_rolled_back":
+    case "workspace.change_set_uncertain":
+    case "workspace.change_set_resolved":
+    case "approval.requested":
+    case "approval.resolved":
+    case "approval.grant_created":
+    case "approval.grant_used":
+      return {
+        ...common,
+        callId: event.payload.callId,
+        ...(event.type === "approval.resolved"
+          ? { decision: event.payload.decision }
+          : {}),
+      };
+    default:
+      return common;
   }
 }
 
