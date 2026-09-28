@@ -137,9 +137,9 @@ The completed Windows terminal contract and acceptance evidence are in [Phase 4B
 
 ### Phase 4C: sandbox, network, and secret policy
 
-Status: Paused after C4C1 contract evolution — Phase 4C1, Phase 4C2A/C2B,
-Phase 4C3, Phase 4C4A/C4B, and Phase 4C4C1 are complete; remaining Linux and
-Windows feature slices resume after Mac Release 1A
+Status: In progress — Phase 4C1, Phase 4C2A/C2B, Phase 4C3,
+Phase 4C4A/C4B, and Phase 4C4C1/C4C2 are complete; Linux cgroup and Windows
+feature slices remain.
 
 - Add explicit filesystem, process, environment, and network capabilities.
 - Implement available OS isolation mechanisms and expose their effective strength rather than a portable boolean claim.
@@ -333,8 +333,9 @@ The approved next resource slice is
 C4C1 is implemented: current policy v3, capability/security v5, native
 protocol/durable v8, and app-server v18 use `job_task_count`, while historical
 policy-v2/security-v4 `job_process_count` records remain readable without
-reinterpretation. C4C2 implements exact Linux rlimits and has passed local
-cross-language tests; Linux CI remains pending. C4C3 will advertise cgroup
+reinterpretation. C4C2 implements exact Linux rlimits and passed
+[same-commit CI](https://github.com/ronaldo123321/koda/actions/runs/36370681831)
+at `c557d1b`. C4C3 will advertise cgroup
 v2 `pids.max` only when Koda owns a verified delegated subtree and can prevent
 same-UID command code from modifying it. C4C4 remains the acceptance and
 closure slice.

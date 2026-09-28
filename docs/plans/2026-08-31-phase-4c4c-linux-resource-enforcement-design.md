@@ -1,7 +1,8 @@
 # Phase 4C4C Linux Resource Enforcement
 
-- Status: C4C1 complete; C4C2 implemented and locally verified, Linux CI pending;
-  C4C3-C4C4 pending
+- Status: C4C1-C4C2 complete; C4C3-C4C4 pending. C4C2 passed
+  [same-commit CI](https://github.com/ronaldo123321/koda/actions/runs/36370681831)
+  at `c557d1b` on Linux, macOS, and Windows.
 - Date: 2026-08-31
 - Depends on: completed Phase 4C4A resource contracts and Phase 4C4B macOS
   resource enforcement
@@ -168,7 +169,7 @@ failure rather than continuing to claim enforcement.
 1. **C4C1 — contract upgrade (completed):** policy v3, capability/security v5, native
    protocol and durable v8, app-server v18, `job_task_count`, frozen historical
    reconstruction, shared fixtures, and fail-closed platform matrices.
-2. **C4C2 — Linux rlimits (implemented; Linux CI pending):** exact
+2. **C4C2 — Linux rlimits (completed):** exact
    `RLIMIT_CPU`, `RLIMIT_AS`, `RLIMIT_NOFILE`, and `RLIMIT_FSIZE` application,
    read-back, confirmation, evidence, and shared launch wiring.
 3. **C4C3 — cgroup v2:** delegated-root discovery and self-test, private
