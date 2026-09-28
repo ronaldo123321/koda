@@ -38,12 +38,19 @@ describe.skipIf(process.platform === "win32")(
         principal: { ownerId: "owner", deviceId: issued.deviceId },
         grants: [{ workspaceId: "project" }],
       });
+      await expect(store.activeGrants(issued.deviceId)).resolves.toMatchObject({
+        principal: { ownerId: "owner", deviceId: issued.deviceId },
+        grants: [{ workspaceId: "project" }],
+      });
       await expect(store.verify(`${issued.token}x`)).rejects.toBeInstanceOf(
         RemoteAccessDeniedError,
       );
       await store.revoke(issued.deviceId);
       await store.revoke(issued.deviceId);
       await expect(store.verify(issued.token)).rejects.toBeInstanceOf(
+        RemoteAccessDeniedError,
+      );
+      await expect(store.activeGrants(issued.deviceId)).rejects.toBeInstanceOf(
         RemoteAccessDeniedError,
       );
     });

@@ -147,33 +147,21 @@ export class RemoteDeviceStore {
       throw new RemoteAccessDeniedError();
     }
     try {
-      const file = deviceFileSchema.parse(
-        JSON.parse(await this.readDeviceFile(this.filePath(deviceId))),
-      );
-      if (
-        file.ownerId !== this.ownerId ||
-        file.deviceId !== deviceId ||
-        Date.parse(file.expiresAt) <= this.now() ||
-        (await this.isRevoked(deviceId))
-      ) {
-        throw new RemoteAccessDeniedError();
-      }
+      const file = await this.readActiveDevice(deviceId);
       const expected = Buffer.from(file.secretSha256, "hex");
       if (!timingSafeEqual(expected, Buffer.from(sha256(secret), "hex"))) {
         throw new RemoteAccessDeniedError();
       }
-      return {
-        principal: { ownerId: file.ownerId, deviceId },
-        grants: file.grants.map((grant) => ({
-          ownerId: file.ownerId,
-          deviceId,
-          workspaceId: grant.workspaceId,
-          permissions: grant.permissions,
-          ...(grant.mcpServerIds === undefined
-            ? {}
-            : { mcpServerIds: grant.mcpServerIds }),
-        })),
-      };
+      return this.verifiedDevice(file);
+    } catch {
+      throw new RemoteAccessDeniedError();
+    }
+  }
+
+  public async activeGrants(deviceId: string): Promise<VerifiedRemoteDevice> {
+    try {
+      deviceIdSchema.parse(deviceId);
+      return this.verifiedDevice(await this.readActiveDevice(deviceId));
     } catch {
       throw new RemoteAccessDeniedError();
     }
@@ -209,6 +197,38 @@ export class RemoteDeviceStore {
       }
       throw error;
     }
+  }
+
+  private async readActiveDevice(deviceId: string) {
+    const file = deviceFileSchema.parse(
+      JSON.parse(await this.readDeviceFile(this.filePath(deviceId))),
+    );
+    if (
+      file.ownerId !== this.ownerId ||
+      file.deviceId !== deviceId ||
+      Date.parse(file.expiresAt) <= this.now() ||
+      (await this.isRevoked(deviceId))
+    ) {
+      throw new RemoteAccessDeniedError();
+    }
+    return file;
+  }
+
+  private verifiedDevice(
+    file: z.infer<typeof deviceFileSchema>,
+  ): VerifiedRemoteDevice {
+    return {
+      principal: { ownerId: file.ownerId, deviceId: file.deviceId },
+      grants: file.grants.map((grant) => ({
+        ownerId: file.ownerId,
+        deviceId: file.deviceId,
+        workspaceId: grant.workspaceId,
+        permissions: grant.permissions,
+        ...(grant.mcpServerIds === undefined
+          ? {}
+          : { mcpServerIds: grant.mcpServerIds }),
+      })),
+    };
   }
 
   private async readDeviceFile(path: string): Promise<string> {

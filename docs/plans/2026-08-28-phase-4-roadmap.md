@@ -369,8 +369,10 @@ requires matching device grants and an exact, expiring approval on the
 initiating device. A real host patch, rejection, HTTPS authorization, and
 macOS client approval transport have local tests. Devices can invoke only
 explicitly granted host-local MCP servers and host-allowlisted tool names; a real
-MCP effect and its approval are locally tested. Approval ownership transfer,
-full event payloads, HTTPS MCP/OAuth, and physical two-Mac acceptance remain
+MCP effect and its approval are locally tested. An exact-call approval can be
+transferred to another authorized device without extending its expiry; the
+transfer request has a durable owner-host audit record. Approval recovery after
+host restart, full event payloads, HTTPS MCP/OAuth, and physical two-Mac acceptance remain
 open. First deployment targets LAN or an
 owner-managed VPN.
 

@@ -1,7 +1,14 @@
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  readdir,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -10,6 +17,7 @@ import { fileURLToPath } from "node:url";
 import { KodaApplication, type TurnClient } from "@koda/app";
 import {
   RemoteAccessCatalog,
+  RemoteApprovalTransferStore,
   RemoteThreadStore,
   RemoteTurnHost,
   RemoteTurnRequestStore,
@@ -17,7 +25,7 @@ import {
 import { threadIdSchema, toolCallIdSchema, turnIdSchema } from "@koda/protocol";
 import { ScriptedModelProvider } from "@koda/providers";
 import { ReadOnlyWorkspace } from "@koda/runtime-node";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { DeterministicItemIdFactory } from "./deterministic.js";
 
@@ -522,6 +530,7 @@ describe.skipIf(process.platform === "win32")("remote Turn host", () => {
     const root = await realpath(workspace);
     const owner = { ownerId: "owner", deviceId: `device-${"1".repeat(32)}` };
     const other = { ownerId: "owner", deviceId: `device-${"2".repeat(32)}` };
+    const limited = { ownerId: "owner", deviceId: `device-${"3".repeat(32)}` };
     const allowed = await RemoteAccessCatalog.create(
       "owner",
       [{ id: "project", root }],
@@ -539,6 +548,16 @@ describe.skipIf(process.platform === "win32")("remote Turn host", () => {
         },
         {
           ...other,
+          workspaceId: "project",
+          permissions: [
+            "workspace:read",
+            "thread:read",
+            "workspace:mutate",
+            "approval:resolve",
+          ],
+        },
+        {
+          ...limited,
           workspaceId: "project",
           permissions: ["workspace:read", "thread:read", "approval:resolve"],
         },
@@ -600,7 +619,8 @@ describe.skipIf(process.platform === "win32")("remote Turn host", () => {
       },
       getThread: async () => ({ value: { workspaceRoot: root } }),
     } as unknown as KodaApplication;
-    const host = new RemoteTurnHost(application, bindings, requests);
+    const audit = await RemoteApprovalTransferStore.open(home);
+    const host = new RemoteTurnHost(application, bindings, requests, audit);
     await expect(
       host.start(owner, readOnly, {
         requestId: "1".repeat(32),
@@ -647,8 +667,70 @@ describe.skipIf(process.platform === "win32")("remote Turn host", () => {
         "approved",
       ),
     ).toBe(false);
-    const simultaneous = await Promise.all([
-      host.resolveApproval(
+    await expect(
+      host.transferApproval(
+        owner,
+        allowed,
+        limited,
+        allowed,
+        "approved-thread",
+        "approved-turn",
+        "approved-call",
+      ),
+    ).rejects.toThrow("Remote resource is unavailable");
+    const auditWrite = vi
+      .spyOn(audit, "append")
+      .mockRejectedValueOnce(new Error("audit unavailable"));
+    await expect(
+      host.transferApproval(
+        owner,
+        allowed,
+        other,
+        allowed,
+        "approved-thread",
+        "approved-turn",
+        "approved-call",
+      ),
+    ).rejects.toThrow("audit unavailable");
+    auditWrite.mockRestore();
+    expect(
+      await host.listApprovals(owner, allowed, "approved-thread"),
+    ).toHaveLength(1);
+    expect(
+      await host.transferApproval(
+        owner,
+        allowed,
+        other,
+        allowed,
+        "approved-thread",
+        "approved-turn",
+        "approved-call",
+      ),
+    ).toBe(true);
+    const auditFiles = await readdir(
+      join(home, "remote", "approval-transfers"),
+    );
+    expect(auditFiles).toHaveLength(1);
+    expect(
+      JSON.parse(
+        await readFile(
+          join(home, "remote", "approval-transfers", auditFiles[0]!),
+          "utf8",
+        ),
+      ),
+    ).toMatchObject({
+      fromDeviceId: owner.deviceId,
+      toDeviceId: other.deviceId,
+      callId: "approved-call",
+    });
+    expect(await host.listApprovals(owner, allowed, "approved-thread")).toEqual(
+      [],
+    );
+    expect(
+      await host.listApprovals(other, allowed, "approved-thread"),
+    ).toHaveLength(1);
+    expect(
+      await host.resolveApproval(
         owner,
         allowed,
         "approved-thread",
@@ -656,8 +738,18 @@ describe.skipIf(process.platform === "win32")("remote Turn host", () => {
         "approved-call",
         "approved",
       ),
+    ).toBe(false);
+    const simultaneous = await Promise.all([
       host.resolveApproval(
-        owner,
+        other,
+        allowed,
+        "approved-thread",
+        "approved-turn",
+        "approved-call",
+        "approved",
+      ),
+      host.resolveApproval(
+        other,
         allowed,
         "approved-thread",
         "approved-turn",

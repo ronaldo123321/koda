@@ -21,6 +21,7 @@ import {
   RemoteAccessDeniedError,
   type RemoteThreadSummary,
 } from "./remote-access.js";
+import { RemoteApprovalTransferStore } from "./remote-approval-transfer-store.js";
 import { RemoteDeviceStore } from "./remote-device-store.js";
 import { RemoteThreadStore } from "./remote-thread-store.js";
 import {
@@ -66,6 +67,13 @@ const approvalResolutionSchema = z
     decision: z.enum(["approved", "rejected"]),
   })
   .strict();
+const approvalTransferSchema = z
+  .object({
+    turnId: z.string().min(1).max(128),
+    callId: z.string().min(1).max(256),
+    targetDeviceId: z.string().regex(/^device-[a-f0-9]{32}$/u),
+  })
+  .strict();
 
 export interface RemoteHttpsServerOptions {
   application: KodaApplication;
@@ -104,13 +112,20 @@ export async function startRemoteHttpsServer(
   const certificateSha256 = new X509Certificate(certificate).fingerprint256
     .replaceAll(":", "")
     .toLowerCase();
-  const [devices, workspaces, threads, requests] = await Promise.all([
-    RemoteDeviceStore.open(options.kodaHome, OWNER_ID),
-    RemoteWorkspaceStore.open(options.kodaHome, OWNER_ID),
-    RemoteThreadStore.open(options.kodaHome, OWNER_ID),
-    RemoteTurnRequestStore.open(options.kodaHome, OWNER_ID),
-  ]);
-  const turnHost = new RemoteTurnHost(options.application, threads, requests);
+  const [devices, workspaces, threads, requests, transferAudit] =
+    await Promise.all([
+      RemoteDeviceStore.open(options.kodaHome, OWNER_ID),
+      RemoteWorkspaceStore.open(options.kodaHome, OWNER_ID),
+      RemoteThreadStore.open(options.kodaHome, OWNER_ID),
+      RemoteTurnRequestStore.open(options.kodaHome, OWNER_ID),
+      RemoteApprovalTransferStore.open(options.kodaHome),
+    ]);
+  const turnHost = new RemoteTurnHost(
+    options.application,
+    threads,
+    requests,
+    transferAudit,
+  );
   const subscriptions = new WebSocketServer({
     noServer: true,
     perMessageDeflate: false,
@@ -319,6 +334,46 @@ async function handleRequest(
         response,
         resolved ? 202 : 404,
         resolved ? { status: "resolved" } : { error: "Unavailable" },
+      );
+      return;
+    }
+    const approvalTransferMatch =
+      /^\/v1\/threads\/([A-Za-z0-9][A-Za-z0-9_-]{0,127})\/approvals\/transfer$/u.exec(
+        url.pathname,
+      );
+    if (
+      request.method === "POST" &&
+      approvalTransferMatch !== null &&
+      url.search === ""
+    ) {
+      const threadId = approvalTransferMatch[1];
+      if (threadId === undefined) throw new RemoteInvalidRequestError();
+      const body = approvalTransferSchema.parse(await readJsonBody(request));
+      const binding = await threads.get(threadId);
+      await catalog.authorizeThread(
+        verified.principal,
+        binding,
+        "approval:resolve",
+      );
+      const target = await devices.activeGrants(body.targetDeviceId);
+      const targetCatalog = await RemoteAccessCatalog.create(
+        OWNER_ID,
+        definitions,
+        target.grants,
+      );
+      const transferred = await turnHost.transferApproval(
+        verified.principal,
+        catalog,
+        target.principal,
+        targetCatalog,
+        threadId,
+        body.turnId,
+        body.callId,
+      );
+      send(
+        response,
+        transferred ? 202 : 404,
+        transferred ? { status: "transferred" } : { error: "Unavailable" },
       );
       return;
     }

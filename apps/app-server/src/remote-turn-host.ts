@@ -8,6 +8,7 @@ import {
   RemoteAccessDeniedError,
   type RemotePrincipal,
 } from "./remote-access.js";
+import { RemoteApprovalTransferStore } from "./remote-approval-transfer-store.js";
 import { RemoteThreadStore } from "./remote-thread-store.js";
 import {
   RemoteTurnRequestConflictError,
@@ -27,8 +28,11 @@ interface PendingRemoteApproval {
   threadId: string;
   turnId: string;
   deviceId: string;
+  effects: readonly ("workspace:mutate" | "process:control" | "mcp:invoke")[];
+  mcpServerIds?: readonly string[];
   request: ApprovalRequest;
   expiresAt: number;
+  transferring?: boolean;
   settle(decision: ApprovalDecision): boolean;
 }
 
@@ -64,6 +68,7 @@ export class RemoteTurnHost {
     private readonly application: KodaApplication,
     private readonly threads: RemoteThreadStore,
     private readonly requests: RemoteTurnRequestStore,
+    private readonly transferAudit?: RemoteApprovalTransferStore,
   ) {
     if (!application.isRemoteRestricted) {
       throw new Error("Remote Turn host requires a restricted application.");
@@ -177,6 +182,8 @@ export class RemoteTurnHost {
                 return this.requestApproval(
                   turnIds,
                   principal.deviceId,
+                  input.effects ?? [],
+                  mcpServerIds,
                   request,
                   signal,
                 );
@@ -300,6 +307,7 @@ export class RemoteTurnHost {
         (pending) =>
           pending.threadId === threadId &&
           pending.deviceId === principal.deviceId &&
+          !pending.transferring &&
           pending.expiresAt > Date.now(),
       )
       .map((pending) => ({
@@ -328,10 +336,97 @@ export class RemoteTurnHost {
       pending === undefined ||
       pending.threadId !== threadId ||
       pending.deviceId !== principal.deviceId ||
+      pending.transferring === true ||
       pending.expiresAt <= Date.now()
     )
       return false;
     return pending.settle({ decision });
+  }
+
+  public async transferApproval(
+    principal: RemotePrincipal,
+    catalog: RemoteAccessCatalog,
+    target: RemotePrincipal,
+    targetCatalog: RemoteAccessCatalog,
+    threadId: string,
+    turnId: string,
+    callId: string,
+  ): Promise<boolean> {
+    await this.authorizeApprovalThread(principal, catalog, threadId);
+    await this.authorizeApprovalThread(target, targetCatalog, threadId);
+    if (
+      this.closed ||
+      principal.ownerId !== target.ownerId ||
+      principal.deviceId === target.deviceId
+    ) {
+      return false;
+    }
+    const binding = await this.threads.get(threadId);
+    const key = JSON.stringify([turnId, callId]);
+    const pending = this.pendingApprovals.get(key);
+    if (
+      binding === undefined ||
+      pending === undefined ||
+      pending.threadId !== threadId ||
+      pending.deviceId !== principal.deviceId ||
+      pending.transferring === true ||
+      pending.expiresAt <= Date.now()
+    ) {
+      return false;
+    }
+    for (const effect of pending.effects) {
+      await targetCatalog.authorizeWorkspace(
+        target,
+        binding.workspaceId,
+        effect,
+      );
+    }
+    if (pending.mcpServerIds !== undefined) {
+      const targetServers = await targetCatalog.authorizedMcpServers(
+        target,
+        binding.workspaceId,
+      );
+      if (pending.mcpServerIds.some((id) => !targetServers.includes(id))) {
+        return false;
+      }
+    }
+    if (this.transferAudit === undefined) {
+      throw new Error("Remote approval transfer audit is unavailable.");
+    }
+    const current = this.pendingApprovals.get(key);
+    if (
+      this.closed ||
+      current !== pending ||
+      current?.transferring === true ||
+      pending.deviceId !== principal.deviceId ||
+      pending.expiresAt <= Date.now()
+    ) {
+      return false;
+    }
+    pending.transferring = true;
+    try {
+      await this.transferAudit.append({
+        ownerId: principal.ownerId,
+        workspaceId: binding.workspaceId,
+        threadId,
+        turnId,
+        callId,
+        fromDeviceId: principal.deviceId,
+        toDeviceId: target.deviceId,
+        requestedAt: new Date().toISOString(),
+      });
+      if (
+        this.closed ||
+        this.pendingApprovals.get(key) !== pending ||
+        pending.expiresAt <= Date.now()
+      ) {
+        return false;
+      }
+      pending.deviceId = target.deviceId;
+      return true;
+    } finally {
+      pending.transferring = false;
+    }
   }
 
   private async authorizeApprovalThread(
@@ -369,6 +464,8 @@ export class RemoteTurnHost {
   private requestApproval(
     ids: { threadId: string; turnId: string },
     deviceId: string,
+    effects: readonly ("workspace:mutate" | "process:control" | "mcp:invoke")[],
+    mcpServerIds: readonly string[] | undefined,
     request: ApprovalRequest,
     signal: AbortSignal,
   ): Promise<ApprovalDecision> {
@@ -408,6 +505,8 @@ export class RemoteTurnHost {
       this.pendingApprovals.set(key, {
         ...ids,
         deviceId,
+        effects,
+        ...(mcpServerIds === undefined ? {} : { mcpServerIds }),
         request,
         expiresAt,
         settle,

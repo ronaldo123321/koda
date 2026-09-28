@@ -229,6 +229,12 @@ private struct RemoteApprovalView: View {
                     .buttonStyle(.borderedProminent)
                     .disabled(model.approvalBusy)
             }
+            HStack {
+                TextField("目标设备 ID", text: $model.approvalTransferDeviceID)
+                    .textFieldStyle(.roundedBorder)
+                Button("转交审批") { model.transferApproval() }
+                    .disabled(model.approvalBusy || model.approvalTransferDeviceID.isEmpty)
+            }
         }
         .padding(20)
         .frame(minWidth: 620, minHeight: 430)

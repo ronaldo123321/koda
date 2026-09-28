@@ -230,6 +230,29 @@ final class RemoteClient: NSObject, URLSessionDelegate, URLSessionTaskDelegate {
         }
     }
 
+    func transferApproval(
+        threadID: String, turnID: String, callID: String,
+        targetDeviceID: String
+    ) async throws {
+        guard validThreadID(threadID), validThreadID(turnID),
+              !callID.isEmpty, callID.utf8.count <= 256,
+              targetDeviceID.range(
+                of: "^device-[a-f0-9]{32}$", options: .regularExpression
+              ) != nil else {
+            throw RemoteError(message: "远程审批或目标设备 ID 无效。")
+        }
+        let body = [
+            "turnId": turnID, "callId": callID, "targetDeviceId": targetDeviceID
+        ]
+        let result: RemoteApprovalResolution = try await perform(
+            "/v1/threads/\(threadID)/approvals/transfer", method: "POST",
+            body: try JSONEncoder().encode(body), acceptedStatuses: [202]
+        )
+        guard result.status == "transferred" else {
+            throw RemoteError(message: "远程审批转交响应无效。")
+        }
+    }
+
     func cancelTurn(threadID: String, turnID: String) async throws {
         guard [threadID, turnID].allSatisfy({
             $0.range(of: "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",

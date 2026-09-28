@@ -61,6 +61,18 @@ const mcpDevice = await devices.issue("mac-mcp", [
     mcpServerIds: ["reviewed"],
   },
 ]);
+const mcpReceiver = await devices.issue("mac-mcp-receiver", [
+  {
+    workspaceId: "project",
+    permissions: [
+      "workspace:read",
+      "thread:read",
+      "approval:resolve",
+      "mcp:invoke",
+    ],
+    mcpServerIds: ["reviewed"],
+  },
+]);
 const threads = await RemoteThreadStore.open(home, "owner");
 await threads.bind({
   ownerId: "owner",
@@ -269,6 +281,8 @@ process.stdout.write(
     token: full.token,
     effectfulToken: effectful.token,
     mcpToken: mcpDevice.token,
+    mcpReceiverToken: mcpReceiver.token,
+    mcpReceiverDeviceId: mcpReceiver.deviceId,
     workspaceOnlyToken: workspaceOnly.token,
     artifactId: artifact.id,
   }) + "\n",

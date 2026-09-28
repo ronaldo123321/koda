@@ -273,10 +273,24 @@ final class RemoteClientTests: XCTestCase {
         let mcpApprovals = try await mcpClient.listApprovals(threadID: mcpTurn.threadId)
         XCTAssertEqual(mcpApprovals.first?.name, "mcp__reviewed__effect")
         if let mcpApproval = mcpApprovals.first {
-            try await mcpClient.resolveApproval(
+            try await mcpClient.transferApproval(
+                threadID: mcpTurn.threadId, turnID: mcpTurn.turnId,
+                callID: mcpApproval.callId,
+                targetDeviceID: setup.mcpReceiverDeviceId
+            )
+            let ownerPending = try await mcpClient.listApprovals(threadID: mcpTurn.threadId)
+            XCTAssertTrue(ownerPending.isEmpty)
+            let receiver = try RemoteClient(settings: RemoteSettings(
+                origin: setup.origin, certificateSha256: setup.fingerprint,
+                token: setup.mcpReceiverToken
+            ))
+            let receiverPending = try await receiver.listApprovals(threadID: mcpTurn.threadId)
+            XCTAssertEqual(receiverPending.first?.callId, mcpApproval.callId)
+            try await receiver.resolveApproval(
                 threadID: mcpTurn.threadId, turnID: mcpTurn.turnId,
                 callID: mcpApproval.callId, decision: "approved"
             )
+            receiver.close()
         }
         mcpClient.close()
 
@@ -369,6 +383,8 @@ private struct FixtureSetup: Decodable {
     let token: String
     let effectfulToken: String
     let mcpToken: String
+    let mcpReceiverToken: String
+    let mcpReceiverDeviceId: String
     let workspaceOnlyToken: String
     let artifactId: String
 }

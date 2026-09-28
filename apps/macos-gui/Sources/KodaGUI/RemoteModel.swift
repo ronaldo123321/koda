@@ -39,7 +39,12 @@ final class RemoteModel: ObservableObject {
     @Published var activeTurns: [String: String] = [:]
     @Published var stopPendingTurns = Set<String>()
     @Published var approvals: [RemoteApprovalPreview] = []
-    @Published var selectedApproval: RemoteApprovalPreview?
+    @Published var selectedApproval: RemoteApprovalPreview? {
+        didSet {
+            if oldValue?.id != selectedApproval?.id { approvalTransferDeviceID = "" }
+        }
+    }
+    @Published var approvalTransferDeviceID = ""
     @Published var approvalBusy = false
     @Published var artifacts: [RemoteArtifactDescriptor] = []
     @Published var artifactListBusy = false
@@ -259,6 +264,31 @@ final class RemoteModel: ObservableObject {
             } catch {
                 guard self.client === client, selectedThreadID == threadID else { return }
                 notice = "审批结果未确认；请查看待审批项与事件记录，不会自动重试：\(error.localizedDescription)"
+                refreshApprovals()
+            }
+        }
+    }
+
+    func transferApproval() {
+        guard !approvalBusy, let client, let threadID = selectedThreadID,
+              let approval = selectedApproval else { return }
+        let targetDeviceID = approvalTransferDeviceID.trimmingCharacters(in: .whitespacesAndNewlines)
+        approvalBusy = true
+        Task {
+            defer { approvalBusy = false }
+            do {
+                try await client.transferApproval(
+                    threadID: threadID, turnID: approval.turnId,
+                    callID: approval.callId, targetDeviceID: targetDeviceID
+                )
+                guard self.client === client, selectedThreadID == threadID else { return }
+                selectedApproval = nil
+                approvalTransferDeviceID = ""
+                notice = "审批已转交给目标设备；目标设备仍须逐项预览并决定。"
+                refreshApprovals()
+            } catch {
+                guard self.client === client, selectedThreadID == threadID else { return }
+                notice = "审批转交未确认；请刷新待审批项，不会自动重试：\(error.localizedDescription)"
                 refreshApprovals()
             }
         }

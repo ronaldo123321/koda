@@ -11,7 +11,7 @@
   previews verified Thread artifacts in bounded UTF-8 ranges. Scoped remote
   write/command approvals and allowlisted host-local MCP scopes are locally tested;
   full event payload projection,
-  durable approval transfer, automatic pairing, and physical two-device
+  approval recovery after host restart, automatic pairing, and physical two-device
   acceptance remain open.
   Swift client tests now exercise the actual local HTTPS/WSS listener with
   temporary devices, restricted Turn idempotency, and replay, and reject late
@@ -143,9 +143,15 @@ scope requires matching device grants; the default remains read-only. An
 approval is removed before its decision is delivered, so a repeated resolution
 cannot execute twice. The ordinary activity projection excludes tool arguments;
 the separately authorized approval preview intentionally shows exact details
-and may include host paths. The approval lease is not yet durable or
-transferable. Host shutdown rejects pending approvals; process loss cannot
-resume a pending tool call. Ownership transfer and audit remain open work.
+and may include host paths. The approval lease is not yet durable. The current
+device may explicitly transfer one pending call to another active device with
+the same workspace, effect scope, and MCP server grants. The host writes a
+minimal transfer-request audit record before switching ownership; the old
+device then loses preview and resolution rights. Transfer never extends the
+five-minute expiry. An audit request may exist without an applied transfer if
+the Turn ends during the write. Host shutdown rejects pending approvals;
+process loss cannot resume a pending tool call. Crash-recoverable approval
+ownership remains open work.
 
 A real child-process `SIGKILL` test now covers the durable request record after
 reservation and after the request is marked started with a Thread binding.
@@ -229,7 +235,7 @@ bound Thread summaries, payload-free event envelopes, assistant updates,
 safe all-type activity status, and verified Thread artifact ranges.
 The SwiftUI preview verifies an out-of-band pinned server certificate and
 replays authorized assistant updates and event status. Automatic pairing, the full app-server
-method set, complete event payloads, durable approval transfer, HTTPS MCP
+method set, complete event payloads, crash-recoverable approval ownership, HTTPS MCP
 transport/OAuth, and physical two-device acceptance remain open before Phase 4D can
 close. Scoped remote writes, commands, and exact-call approvals have local
 macOS and HTTPS fixture coverage as described above.
