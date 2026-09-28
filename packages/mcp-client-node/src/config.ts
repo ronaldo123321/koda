@@ -95,6 +95,14 @@ const httpsServerSchema = z
   .object({
     transport: z.literal("streamable_http"),
     url: z.url(),
+    oauth: z
+      .object({
+        redirect_url: z.url(),
+        client_id: z.string().min(1).max(256).optional(),
+        revocation_url: z.url().optional(),
+      })
+      .strict()
+      .optional(),
     ...commonServerShape,
   })
   .strict();
@@ -142,7 +150,13 @@ export type McpServerConfiguration = McpServerCommonConfiguration &
         cwd?: string;
         environmentNames: string[];
       }
-    | { transport: "streamable_http"; url: string }
+    | {
+        transport: "streamable_http";
+        url: string;
+        oauthRedirectUrl?: string;
+        oauthClientId?: string;
+        oauthRevocationUrl?: string;
+      }
   );
 
 export interface McpConfiguration {
@@ -256,7 +270,56 @@ export async function loadMcpConfiguration(
           `MCP server '${id}' must use an HTTPS endpoint without credentials, query, or fragment.`,
         );
       }
-      servers.push({ ...common, transport: "streamable_http", url: url.href });
+      if (server.oauth !== undefined) {
+        const redirect = new URL(server.oauth.redirect_url);
+        if (
+          redirect.protocol !== "http:" ||
+          redirect.hostname !== "127.0.0.1" ||
+          Number(redirect.port) < 1_024 ||
+          Number(redirect.port) > 65_535 ||
+          redirect.pathname !== "/callback" ||
+          redirect.username !== "" ||
+          redirect.password !== "" ||
+          redirect.search !== "" ||
+          redirect.hash !== ""
+        ) {
+          throw new McpClientError(
+            "MCP_CONFIGURATION_INVALID",
+            `MCP server '${id}' OAuth redirect must use http://127.0.0.1:<port>/callback.`,
+          );
+        }
+        if (server.oauth.revocation_url !== undefined) {
+          const revocation = new URL(server.oauth.revocation_url);
+          if (
+            revocation.protocol !== "https:" ||
+            revocation.username !== "" ||
+            revocation.password !== "" ||
+            revocation.search !== "" ||
+            revocation.hash !== ""
+          ) {
+            throw new McpClientError(
+              "MCP_CONFIGURATION_INVALID",
+              `MCP server '${id}' OAuth revocation endpoint must use HTTPS without credentials, query, or fragment.`,
+            );
+          }
+        }
+      }
+      servers.push({
+        ...common,
+        transport: "streamable_http",
+        url: url.href,
+        ...(server.oauth === undefined
+          ? {}
+          : {
+              oauthRedirectUrl: server.oauth.redirect_url,
+              ...(server.oauth.client_id === undefined
+                ? {}
+                : { oauthClientId: server.oauth.client_id }),
+              ...(server.oauth.revocation_url === undefined
+                ? {}
+                : { oauthRevocationUrl: server.oauth.revocation_url }),
+            }),
+      });
       continue;
     }
     let cwd: string | undefined;

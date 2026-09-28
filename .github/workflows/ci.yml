@@ -259,6 +259,13 @@ jobs:
           pnpm exec vitest run
           packages/testkit/src/native-executor-client.test.ts
           packages/testkit/src/native-execution-policy.test.ts
+      - name: Run macOS MCP OAuth acceptance
+        run: |
+          pnpm --filter @koda/cli... build
+          pnpm exec vitest run \
+            packages/testkit/src/mcp-oauth-vault.test.ts \
+            packages/testkit/src/mcp-oauth-login.test.ts \
+            packages/testkit/src/mcp-oauth-cli.test.ts
 
   windows-native:
     if: github.event_name == 'workflow_dispatch'

@@ -379,6 +379,11 @@ approval ownership recovery, OAuth, and physical two-Mac acceptance remain
 open. First deployment targets LAN or an
 owner-managed VPN.
 
+Owner-local HTTPS MCP OAuth authorization-code login, encrypted token storage,
+refresh, local credential removal, optional configured provider revocation,
+and key rotation now pass a real TLS fixture. Live-provider interoperability
+is not yet verified, so OAuth closure remains open.
+
 The current contract and delivery checks are in
 [Phase 4D authenticated remote operation](2026-09-27-phase-4d-remote-operation-design.md).
 

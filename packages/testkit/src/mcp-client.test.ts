@@ -142,6 +142,65 @@ describe("MCP configuration", () => {
         remote: {
           transport: "streamable_http",
           url: "https://mcp.example.test/tools",
+          oauth: {
+            redirect_url: "http://127.0.0.1:8765/callback",
+            client_id: "pre-registered-koda",
+            revocation_url: "https://auth.example.test/revoke",
+          },
+        },
+      },
+    });
+    await expect(loadMcpConfiguration(options)).resolves.toMatchObject({
+      servers: [
+        {
+          oauthRedirectUrl: "http://127.0.0.1:8765/callback",
+          oauthClientId: "pre-registered-koda",
+          oauthRevocationUrl: "https://auth.example.test/revoke",
+        },
+      ],
+    });
+    for (const redirect of [
+      "http://0.0.0.0:8765/callback",
+      "http://127.0.0.1:0/callback",
+      "https://127.0.0.1:8765/callback",
+      "http://127.0.0.1:8765/other",
+    ]) {
+      await writeConfiguration(fixture, {
+        version: 1,
+        servers: {
+          remote: {
+            transport: "streamable_http",
+            url: "https://mcp.example.test/tools",
+            oauth: { redirect_url: redirect },
+          },
+        },
+      });
+      await expect(loadMcpConfiguration(options)).rejects.toMatchObject({
+        code: "MCP_CONFIGURATION_INVALID",
+      });
+    }
+    await writeConfiguration(fixture, {
+      version: 1,
+      servers: {
+        remote: {
+          transport: "streamable_http",
+          url: "https://mcp.example.test/tools",
+          oauth: {
+            redirect_url: "http://127.0.0.1:8765/callback",
+            revocation_url: "http://auth.example.test/revoke",
+          },
+        },
+      },
+    });
+    await expect(loadMcpConfiguration(options)).rejects.toMatchObject({
+      code: "MCP_CONFIGURATION_INVALID",
+    });
+    await writeConfiguration(fixture, {
+      version: 1,
+      servers: {
+        remote: {
+          transport: "streamable_http",
+          url: "https://mcp.example.test/tools",
           remote_tools: ["inspect"],
           remote_tool_digests: { unlisted: "a".repeat(64) },
         },

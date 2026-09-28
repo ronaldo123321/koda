@@ -77,7 +77,7 @@ export async function inspectMcpServerTools(
   }
   const connection = await (
     options.connectionFactory ?? connectOfficialMcpClient
-  )(server, options.environment, options.signal);
+  )(server, options.environment, options.signal, options.kodaHome);
   try {
     const tools = await discoverTools(
       [{ server, connection }],
@@ -138,6 +138,7 @@ export class McpTurnSession {
           server,
           options.environment,
           options.signal,
+          options.kodaHome,
         );
         connections.push({ server, connection });
       }

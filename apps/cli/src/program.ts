@@ -1,7 +1,12 @@
 import { Command, Option } from "commander";
 
 import { KODA_VERSION } from "@koda/distribution";
-import { inspectMcpServerTools } from "@koda/mcp-client-node";
+import {
+  inspectMcpServerTools,
+  loginMcpOAuthServer,
+  revokeMcpOAuthServer,
+  McpOAuthVault,
+} from "@koda/mcp-client-node";
 
 import { runArtifactGarbageCollectionCommand } from "./artifact-command.js";
 import type { TextWriter } from "./console-event-sink.js";
@@ -586,6 +591,76 @@ export function createProgram(runtime: ProgramRuntime): Command {
         process.removeListener("SIGINT", onSigint);
       }
     });
+
+  const mcpAuth = mcp
+    .command("auth")
+    .description("Manage owner-host MCP OAuth");
+  mcpAuth
+    .command("login")
+    .argument("<server-id>", "configured HTTPS MCP server ID")
+    .action(async (serverId: string) => {
+      const controller = new AbortController();
+      const onSigint = () => controller.abort("Interrupted by user.");
+      process.once("SIGINT", onSigint);
+      try {
+        await loginMcpOAuthServer(serverId, {
+          environment: runtime.environment,
+          kodaHome: resolveKodaHome(runtime.environment),
+          processDirectory: runtime.processDirectory,
+          signal: controller.signal,
+          onAuthorizationUrl: (url) => {
+            runtime.stdout.write(`Open this authorization URL: ${url.href}\n`);
+          },
+        });
+        runtime.stdout.write(`MCP OAuth authorized for ${serverId}.\n`);
+        runtime.setExitCode(0);
+      } catch {
+        runtime.stderr.write("[koda] MCP OAuth authorization failed.\n");
+        runtime.setExitCode(1);
+      } finally {
+        process.removeListener("SIGINT", onSigint);
+      }
+    });
+  mcpAuth
+    .command("revoke")
+    .argument("<server-id>", "configured HTTPS MCP server ID")
+    .action(async (serverId: string) => {
+      try {
+        const result = await revokeMcpOAuthServer(serverId, {
+          environment: runtime.environment,
+          kodaHome: resolveKodaHome(runtime.environment),
+          processDirectory: runtime.processDirectory,
+        });
+        runtime.stdout.write(
+          result === "remote_revoked"
+            ? `MCP OAuth credentials revoked for ${serverId}.\n`
+            : `Local MCP OAuth credentials removed for ${serverId}; provider-side revocation was unavailable.\n`,
+        );
+        runtime.setExitCode(0);
+      } catch {
+        runtime.stderr.write("[koda] MCP OAuth credential removal failed.\n");
+        runtime.setExitCode(1);
+      }
+    });
+  mcpAuth.command("rotate-key").action(async () => {
+    try {
+      const current = runtime.environment.KODA_MCP_OAUTH_KEY;
+      const next = runtime.environment.KODA_MCP_OAUTH_NEW_KEY;
+      if (current === undefined || next === undefined) throw new Error();
+      const vault = await McpOAuthVault.open(
+        resolveKodaHome(runtime.environment),
+        current,
+      );
+      await vault.rotateKey(next);
+      runtime.stdout.write(
+        "MCP OAuth vault re-encrypted. Set KODA_MCP_OAUTH_KEY to the new key before reconnecting.\n",
+      );
+      runtime.setExitCode(0);
+    } catch {
+      runtime.stderr.write("[koda] MCP OAuth key rotation failed.\n");
+      runtime.setExitCode(1);
+    }
+  });
 
   const remote = program
     .command("remote")

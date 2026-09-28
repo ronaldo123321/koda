@@ -11,7 +11,11 @@
   previews verified Thread artifacts in bounded UTF-8 ranges. Scoped remote
   write/command approvals and allowlisted stdio/HTTPS MCP scopes are locally tested;
   durable approval ownership recovery after host restart, automatic pairing, and physical two-device
-  acceptance remain open.
+  acceptance remain open. Owner-local HTTPS MCP OAuth now has encrypted credentials,
+  authorization-code/PKCE loopback login, refresh, local revocation, and key rotation;
+  a real TLS OAuth fixture passes, including an explicitly configured
+  provider-side revocation endpoint. Live-provider interoperability remains
+  unverified.
   Swift client tests now exercise the actual local HTTPS/WSS listener with
   temporary devices, restricted Turn idempotency, and replay, and reject late
   subscription frames after switching Threads. A separately authorized
@@ -208,10 +212,19 @@ and limit responses to 8 MiB. The owner inspects definitions with
 refresh. Other servers and tools are not connected or advertised;
 configured read tools retain their read classification, while unknown effects
 require a fresh exact-call approval. Swift client TLS, device-grant, catalog
-isolation, real stdio invocation, and approval tests cover this subset. The
-host still lacks OAuth registration/redirect/token lifecycle, so 4D4 is not
-complete. Servers requiring OAuth
-cannot yet be used through this transport.
+isolation, real stdio invocation, and approval tests cover this subset.
+Configured OAuth HTTPS servers now use owner-local authorization-code/PKCE
+login with a state-bound loopback callback. Providers without dynamic client
+registration can use an owner-configured pre-registered `client_id`. Registration, discovery, tokens,
+and verifier state are encrypted in an owner-only vault whose 32-byte key is
+supplied separately through `KODA_MCP_OAUTH_KEY`; the key is not persisted by
+Koda. Refresh is handled by the pinned MCP SDK. Local credential removal
+prevents later Koda requests; vault key rotation atomically re-encrypts stored
+state. A real TLS fixture covers registration, callback, refresh, tool use,
+and local revocation. An explicitly configured HTTPS revocation endpoint
+is exercised against the TLS fixture for both access and refresh tokens;
+interoperability with a live OAuth MCP provider still needs acceptance,
+so 4D4 remains open.
 
 ## 6. Delivery and acceptance
 

@@ -15,8 +15,11 @@ import type { JsonObject } from "@koda/protocol";
 
 import type { McpServerConfiguration } from "./config.js";
 import { McpClientError, errorMessage } from "./errors.js";
+import { McpOAuthProvider } from "./oauth-provider.js";
+import { McpOAuthVault } from "./oauth-vault.js";
 
 const MAX_HTTP_RESPONSE_BYTES = 8 * 1_024 * 1_024;
+const MAX_OAUTH_RESPONSE_BYTES = 1 * 1_024 * 1_024;
 
 export interface McpConnection {
   readonly serverId: string;
@@ -34,27 +37,60 @@ export type McpConnectionFactory = (
   configuration: McpServerConfiguration,
   environment: NodeJS.ProcessEnv,
   signal: AbortSignal,
+  kodaHome?: string,
 ) => Promise<McpConnection>;
 
 export const connectOfficialMcpClient: McpConnectionFactory = async (
   configuration,
   environment,
   signal,
+  kodaHome,
 ) => {
+  let oauthProvider: McpOAuthProvider | undefined;
+  if (
+    configuration.transport === "streamable_http" &&
+    configuration.oauthRedirectUrl !== undefined
+  ) {
+    if (
+      kodaHome === undefined ||
+      environment.KODA_MCP_OAUTH_KEY === undefined
+    ) {
+      throw new McpClientError(
+        "MCP_CONFIGURATION_INVALID",
+        `MCP server '${configuration.id}' requires KODA_MCP_OAUTH_KEY.`,
+      );
+    }
+    oauthProvider = new McpOAuthProvider(
+      await McpOAuthVault.open(kodaHome, environment.KODA_MCP_OAUTH_KEY),
+      configuration.id,
+      configuration.url,
+      configuration.oauthRedirectUrl,
+      undefined,
+      configuration.oauthClientId,
+    );
+  }
   const transport = (() => {
     if (configuration.transport === "streamable_http") {
       const endpoint = new URL(configuration.url);
       return new StreamableHTTPClientTransport(endpoint, {
         fetch: async (input, init) => {
-          if (new URL(input.toString()).href !== endpoint.href) {
+          const requested = new URL(input.toString());
+          const isMcpEndpoint = requested.href === endpoint.href;
+          if (
+            !isMcpEndpoint &&
+            (oauthProvider === undefined || requested.protocol !== "https:")
+          ) {
             throw new McpClientError(
               "MCP_PROTOCOL_ERROR",
               `MCP server '${configuration.id}' requested an unconfigured URL.`,
             );
           }
           const response = await fetch(input, { ...init, redirect: "error" });
+          const maxBytes = isMcpEndpoint
+            ? MAX_HTTP_RESPONSE_BYTES
+            : MAX_OAUTH_RESPONSE_BYTES;
           const declaredBytes = Number(response.headers.get("content-length"));
-          if (declaredBytes > MAX_HTTP_RESPONSE_BYTES) {
+          if (declaredBytes > maxBytes) {
             await response.body?.cancel();
             throw new McpClientError(
               "MCP_PROTOCOL_ERROR",
@@ -67,7 +103,7 @@ export const connectOfficialMcpClient: McpConnectionFactory = async (
             new TransformStream<Uint8Array, Uint8Array>({
               transform(chunk, controller) {
                 receivedBytes += chunk.byteLength;
-                if (receivedBytes > MAX_HTTP_RESPONSE_BYTES) {
+                if (receivedBytes > maxBytes) {
                   throw new McpClientError(
                     "MCP_PROTOCOL_ERROR",
                     `MCP server '${configuration.id}' response exceeds the byte limit.`,
@@ -83,6 +119,12 @@ export const connectOfficialMcpClient: McpConnectionFactory = async (
             headers: response.headers,
           });
         },
+        ...(oauthProvider === undefined
+          ? {}
+          : {
+              authProvider: oauthProvider,
+              onInsufficientScope: "throw" as const,
+            }),
       });
     }
     const childEnvironment = getDefaultEnvironment();
