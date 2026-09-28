@@ -15,6 +15,7 @@ struct PendingRemoteStart: Codable {
     let prompt: String
     let requestID: String
     let resumeThreadID: String?
+    let effects: [String]?
 }
 
 @MainActor
@@ -29,11 +30,16 @@ final class RemoteModel: ObservableObject {
     @Published var selectedThreadID: String?
     @Published var entries: [RemoteChatEntry] = []
     @Published var prompt = ""
+    @Published var allowWrites = false
+    @Published var allowCommands = false
     @Published var notice: String?
     @Published var hasPendingStart = false
     @Published var startRetrying = false
     @Published var activeTurns: [String: String] = [:]
     @Published var stopPendingTurns = Set<String>()
+    @Published var approvals: [RemoteApprovalPreview] = []
+    @Published var selectedApproval: RemoteApprovalPreview?
+    @Published var approvalBusy = false
     @Published var artifacts: [RemoteArtifactDescriptor] = []
     @Published var artifactListBusy = false
     @Published var hasEarlierArtifacts = false
@@ -55,6 +61,7 @@ final class RemoteModel: ObservableObject {
     private var artifactGeneration = 0
     private var artifactReadGeneration = 0
     private var nextBeforeArtifactSequence: Int?
+    private var approvalGeneration = 0
 
     var canSend: Bool {
         connected && selectedWorkspaceID != nil && !hasPendingStart &&
@@ -171,6 +178,8 @@ final class RemoteModel: ObservableObject {
         selectedWorkspaceID = id
         selectedThreadID = nil
         entries = []
+        approvals = []
+        selectedApproval = nil
         resetArtifacts()
         refreshThreads()
     }
@@ -195,11 +204,63 @@ final class RemoteModel: ObservableObject {
         resetArtifacts()
         selectedThreadID = id
         entries = []
+        approvals = []
+        selectedApproval = nil
         cursor = -1
         lastRenderedSequence = -1
         guard let id, let client else { return }
         refreshArtifacts()
+        refreshApprovals()
         streamTask = Task { await stream(threadID: id, client: client) }
+    }
+
+    func refreshApprovals() {
+        approvalGeneration += 1
+        let generation = approvalGeneration
+        guard let client, let threadID = selectedThreadID else {
+            approvals = []
+            return
+        }
+        Task {
+            do {
+                let pending = try await client.listApprovals(threadID: threadID)
+                guard self.client === client, selectedThreadID == threadID,
+                      approvalGeneration == generation else { return }
+                approvals = pending
+                if let selectedApproval,
+                   !pending.contains(where: { $0.id == selectedApproval.id }) {
+                    self.selectedApproval = nil
+                }
+            } catch {
+                guard self.client === client, selectedThreadID == threadID,
+                      approvalGeneration == generation else { return }
+                approvals = []
+                selectedApproval = nil
+            }
+        }
+    }
+
+    func resolveApproval(_ decision: String) {
+        guard !approvalBusy, let client, let threadID = selectedThreadID,
+              let approval = selectedApproval else { return }
+        approvalBusy = true
+        Task {
+            defer { approvalBusy = false }
+            do {
+                try await client.resolveApproval(
+                    threadID: threadID, turnID: approval.turnId,
+                    callID: approval.callId, decision: decision
+                )
+                guard self.client === client, selectedThreadID == threadID else { return }
+                selectedApproval = nil
+                notice = decision == "approved" ? "审批已提交，等待主机执行。" : "审批已拒绝。"
+                refreshApprovals()
+            } catch {
+                guard self.client === client, selectedThreadID == threadID else { return }
+                notice = "审批结果未确认；请查看待审批项与事件记录，不会自动重试：\(error.localizedDescription)"
+                refreshApprovals()
+            }
+        }
     }
 
     func refreshArtifacts() {
@@ -314,13 +375,16 @@ final class RemoteModel: ObservableObject {
 
     func startTurn() {
         guard canSend, let workspaceID = selectedWorkspaceID, let client else { return }
+        let effects = (allowWrites ? ["workspace:mutate"] : []) +
+            (allowCommands ? ["process:control"] : [])
         let request = PendingRemoteStart(
             origin: client.settings.origin,
             certificateSha256: client.settings.certificateSha256,
             workspaceID: workspaceID,
             prompt: prompt.trimmingCharacters(in: .whitespacesAndNewlines),
             requestID: UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased(),
-            resumeThreadID: selectedThreadID
+            resumeThreadID: selectedThreadID,
+            effects: effects.isEmpty ? nil : effects
         )
         do {
             try RemoteSettingsStore.savePendingStart(request)
@@ -349,7 +413,8 @@ final class RemoteModel: ObservableObject {
                     workspaceID: pendingStart.workspaceID,
                     prompt: pendingStart.prompt,
                     requestID: pendingStart.requestID,
-                    resumeThreadID: pendingStart.resumeThreadID
+                    resumeThreadID: pendingStart.resumeThreadID,
+                    effects: pendingStart.effects
                 )
                 guard self.client === client else { return }
                 if result.status == "reserved" {
@@ -370,6 +435,8 @@ final class RemoteModel: ObservableObject {
                 self.pendingStart = nil
                 hasPendingStart = false
                 prompt = ""
+                allowWrites = false
+                allowCommands = false
                 notice = nil
                 if let previous = activeTurns.updateValue(result.turnId, forKey: result.threadId) {
                     stopPendingTurns.remove(previous)
@@ -502,6 +569,15 @@ final class RemoteModel: ObservableObject {
                 isActivity: true
             ))
         }
+        if update.type == "approval.requested" || update.type == "approval.resolved" {
+            refreshApprovals()
+            if update.type == "approval.requested" {
+                Task {
+                    try? await Task.sleep(nanoseconds: 250_000_000)
+                    if selectedThreadID == threadID { refreshApprovals() }
+                }
+            }
+        }
     }
 
     private func activityText(_ update: RemoteUpdate) -> String {
@@ -555,5 +631,9 @@ final class RemoteModel: ObservableObject {
         entries = []
         activeTurns = [:]
         stopPendingTurns = []
+        approvalGeneration += 1
+        approvals = []
+        selectedApproval = nil
+        approvalBusy = false
     }
 }

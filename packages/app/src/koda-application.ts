@@ -194,6 +194,10 @@ export interface StartTurnInput {
   parentThreadId?: string;
   provider?: string;
   resume?: string;
+  remoteEffects?: {
+    workspaceMutations?: true;
+    processExecution?: true;
+  };
 }
 
 export interface TurnClient {
@@ -516,6 +520,7 @@ export class KodaApplication {
     prompt: string;
     ids: ReturnType<KodaApplicationDependencies["createIds"]>;
     parentThreadId?: ThreadId;
+    remoteEffects?: StartTurnInput["remoteEffects"];
   } {
     if (input.parentThreadId !== undefined && input.resume !== undefined) {
       throw new ConfigurationError(
@@ -539,9 +544,35 @@ export class KodaApplication {
     if (prompt.length === 0) {
       throw new ConfigurationError("Prompt must not be empty.");
     }
-    if (this.remoteRestricted && configuration.approvalMode !== "never") {
+    const remoteEffects = input.remoteEffects;
+    if (
+      remoteEffects !== undefined &&
+      (!this.remoteRestricted ||
+        this.readOnlyChild ||
+        this.worktreeChild !== undefined ||
+        remoteEffects === null ||
+        typeof remoteEffects !== "object" ||
+        (remoteEffects.workspaceMutations !== true &&
+          remoteEffects.processExecution !== true) ||
+        Object.keys(remoteEffects).some(
+          (key) => key !== "workspaceMutations" && key !== "processExecution",
+        ) ||
+        (remoteEffects.workspaceMutations !== undefined &&
+          remoteEffects.workspaceMutations !== true) ||
+        (remoteEffects.processExecution !== undefined &&
+          remoteEffects.processExecution !== true))
+    ) {
+      throw new ConfigurationError("Remote effect scope is invalid.");
+    }
+    if (
+      this.remoteRestricted &&
+      configuration.approvalMode !==
+        (remoteEffects === undefined ? "never" : "on-request")
+    ) {
       throw new ConfigurationError(
-        "Remote restricted turns require approval mode 'never'.",
+        remoteEffects === undefined
+          ? "Remote restricted turns require approval mode 'never'."
+          : "Remote effectful turns require approval mode 'on-request'.",
       );
     }
     const ids = this.dependencies.createIds(configuration.resumeThreadId);
@@ -557,6 +588,9 @@ export class KodaApplication {
       prompt,
       ids,
       ...(parentThreadId === undefined ? {} : { parentThreadId }),
+      ...(remoteEffects === undefined
+        ? {}
+        : { remoteEffects: { ...remoteEffects } }),
     };
   }
 
@@ -564,7 +598,8 @@ export class KodaApplication {
     prepared: ReturnType<KodaApplication["prepareTurn"]>,
     client: TurnClient,
   ): TurnHandle {
-    const { configuration, prompt, ids, parentThreadId } = prepared;
+    const { configuration, prompt, ids, parentThreadId, remoteEffects } =
+      prepared;
     const controller = new AbortController();
     const mailbox = new TurnMailbox();
     const completion = this.executeTurn(
@@ -572,6 +607,7 @@ export class KodaApplication {
       prompt,
       ids,
       parentThreadId,
+      remoteEffects,
       controller,
       mailbox,
       client,
@@ -1443,6 +1479,7 @@ export class KodaApplication {
       itemIds: ItemIdFactory;
     },
     parentThreadId: ThreadId | undefined,
+    remoteEffects: StartTurnInput["remoteEffects"],
     controller: AbortController,
     mailbox: TurnMailbox,
     client: TurnClient,
@@ -1997,7 +2034,10 @@ export class KodaApplication {
           };
         });
       }
-      if (!this.remoteRestricted && mutationJournal !== undefined) {
+      if (
+        (!this.remoteRestricted || remoteEffects?.workspaceMutations) &&
+        mutationJournal !== undefined
+      ) {
         const mutationCoordinator = await WorkspaceMutationCoordinator.open(
           configuration.kodaHome,
           workspace.root,
@@ -2022,46 +2062,60 @@ export class KodaApplication {
           mutationCoordinator,
           mutationJournal,
         );
-        if (this.worktreeChild === undefined) {
-          const nativeExecutorPath = this.environment.KODA_EXEC_PATH?.trim();
-          const nativeExecutor =
-            this.interactiveProcessService?.nativeExecutor ??
-            (nativeExecutorPath === undefined || nativeExecutorPath.length === 0
-              ? undefined
-              : await NativeExecutorClient.open({
-                  binaryPath: nativeExecutorPath,
-                  stateDirectory: join(configuration.kodaHome, "executor"),
-                }));
-          const commandRunner = await WorkspaceCommandRunner.open(
-            workspace.root,
-            {
-              environment: this.environment,
-              artifactStore,
-              executionPolicy,
-              ...(nativeExecutor === undefined ? {} : { nativeExecutor }),
-              ...(this.interactiveProcessService === undefined
-                ? {}
-                : {
-                    interactiveProcessService: this.interactiveProcessService,
-                  }),
-            },
-          );
-          registerExecCommandTool(tools, commandRunner, {
-            secretLeaseManager: this.secretLeaseManager,
-          });
-          registerExecTerminalTool(tools, commandRunner, {
-            secretLeaseManager: this.secretLeaseManager,
-          });
-          pluginSession?.registerTools(tools);
-          mcpSession = await McpTurnSession.open({
+      }
+      if (
+        (!this.remoteRestricted || remoteEffects?.processExecution) &&
+        mutationJournal !== undefined &&
+        this.worktreeChild === undefined
+      ) {
+        const nativeExecutorPath = this.environment.KODA_EXEC_PATH?.trim();
+        const nativeExecutor =
+          this.interactiveProcessService?.nativeExecutor ??
+          (nativeExecutorPath === undefined || nativeExecutorPath.length === 0
+            ? undefined
+            : await NativeExecutorClient.open({
+                binaryPath: nativeExecutorPath,
+                stateDirectory: join(configuration.kodaHome, "executor"),
+              }));
+        const commandRunner = await WorkspaceCommandRunner.open(
+          workspace.root,
+          {
             environment: this.environment,
-            kodaHome: configuration.kodaHome,
-            processDirectory: this.processDirectory,
             artifactStore,
-            signal: controller.signal,
-          });
-          mcpSession.registerTools(tools);
-        }
+            executionPolicy,
+            ...(nativeExecutor === undefined ? {} : { nativeExecutor }),
+            ...(this.interactiveProcessService === undefined
+              ? {}
+              : {
+                  interactiveProcessService: this.interactiveProcessService,
+                }),
+          },
+        );
+        registerExecCommandTool(tools, commandRunner, {
+          ...(this.remoteRestricted
+            ? {}
+            : { secretLeaseManager: this.secretLeaseManager }),
+        });
+        registerExecTerminalTool(tools, commandRunner, {
+          ...(this.remoteRestricted
+            ? {}
+            : { secretLeaseManager: this.secretLeaseManager }),
+        });
+      }
+      if (
+        !this.remoteRestricted &&
+        mutationJournal !== undefined &&
+        this.worktreeChild === undefined
+      ) {
+        pluginSession?.registerTools(tools);
+        mcpSession = await McpTurnSession.open({
+          environment: this.environment,
+          kodaHome: configuration.kodaHome,
+          processDirectory: this.processDirectory,
+          artifactStore,
+          signal: controller.signal,
+        });
+        mcpSession.registerTools(tools);
       }
       const toolCatalogGeneration = tools.catalogGeneration();
       if (
@@ -2106,17 +2160,44 @@ export class KodaApplication {
                   "Only read tools and isolated text-file patches are available to worktree children.",
               },
       };
+      const remotePolicy: ToolPolicy = {
+        evaluate: (input) => {
+          if (input.effect === "read") return { decision: "allow" };
+          if (
+            (input.effect === "write" && remoteEffects?.workspaceMutations) ||
+            (input.effect === "execute" && remoteEffects?.processExecution)
+          ) {
+            return {
+              decision: "ask",
+              reason:
+                "This remote tool call requires approval on the authorized device.",
+            };
+          }
+          return {
+            decision: "deny",
+            reason: "This remote device is not authorized for this effect.",
+          };
+        },
+      };
       const loop = new AgentLoop({
         provider,
         tools,
         events: new FanoutEventSink([eventStore, client.events]),
         ids: ids.itemIds,
         policy:
-          this.worktreeChild === undefined
-            ? new EffectToolPolicy(configuration.approvalMode)
-            : worktreePolicy,
+          this.worktreeChild !== undefined
+            ? worktreePolicy
+            : this.remoteRestricted
+              ? remotePolicy
+              : new EffectToolPolicy(configuration.approvalMode),
         approvals: client.approvals,
-        approvalGrants: this.approvalGrantRegistry.forWorkspace(workspace.root),
+        ...(this.remoteRestricted
+          ? {}
+          : {
+              approvalGrants: this.approvalGrantRegistry.forWorkspace(
+                workspace.root,
+              ),
+            }),
         contextEngine,
         planState,
         mailbox,

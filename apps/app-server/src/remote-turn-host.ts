@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 
+import type { ApprovalDecision, ApprovalRequest } from "@koda/agent-core";
 import type { KodaApplication, TurnHandle } from "@koda/app";
 
 import {
@@ -19,6 +20,27 @@ export interface RemoteTurnStartInput {
   workspaceId: string;
   prompt: string;
   resumeThreadId?: string;
+  effects?: readonly ("workspace:mutate" | "process:control")[];
+}
+
+interface PendingRemoteApproval {
+  threadId: string;
+  turnId: string;
+  deviceId: string;
+  request: ApprovalRequest;
+  expiresAt: number;
+  settle(decision: ApprovalDecision): boolean;
+}
+
+export interface RemoteApprovalPreview {
+  turnId: string;
+  callId: string;
+  name: string;
+  title: string;
+  summary: string;
+  details: string;
+  reason: string;
+  expiresAt: string;
 }
 
 export interface RemoteTurnStartResult {
@@ -30,7 +52,11 @@ export interface RemoteTurnStartResult {
 }
 
 export class RemoteTurnHost {
-  private readonly active = new Map<string, TurnHandle>();
+  private readonly active = new Map<
+    string,
+    { handle: TurnHandle; workspaceRoot: string }
+  >();
+  private readonly pendingApprovals = new Map<string, PendingRemoteApproval>();
   private pendingStarts = 0;
   private closed = false;
 
@@ -60,6 +86,21 @@ export class RemoteTurnHost {
       input.workspaceId,
       "turn:start",
     );
+    for (const effect of input.effects ?? []) {
+      await catalog.authorizeWorkspace(principal, input.workspaceId, effect);
+    }
+    if ((input.effects?.length ?? 0) > 0) {
+      await catalog.authorizeWorkspace(
+        principal,
+        input.workspaceId,
+        "approval:resolve",
+      );
+      await catalog.authorizeWorkspace(
+        principal,
+        input.workspaceId,
+        "thread:read",
+      );
+    }
     if (input.resumeThreadId !== undefined) {
       const binding = await this.threads.get(input.resumeThreadId);
       if (
@@ -80,6 +121,7 @@ export class RemoteTurnHost {
           workspaceId: input.workspaceId,
           prompt: input.prompt,
           resumeThreadId: input.resumeThreadId ?? null,
+          ...(input.effects?.length ? { effects: input.effects } : {}),
         }),
       )
       .digest("hex");
@@ -99,12 +141,25 @@ export class RemoteTurnHost {
       this.pendingStarts += 1;
       let duplicate: RemoteTurnRequestRecord | undefined;
       let handle: TurnHandle;
+      let turnIds: { threadId: string; turnId: string } | undefined;
       try {
         handle = await this.application.startTurnAfter(
           {
             prompt: input.prompt,
             cwd: root,
-            approvalMode: "never",
+            approvalMode: input.effects?.length ? "on-request" : "never",
+            ...(input.effects?.length
+              ? {
+                  remoteEffects: {
+                    ...(input.effects.includes("workspace:mutate")
+                      ? { workspaceMutations: true as const }
+                      : {}),
+                    ...(input.effects.includes("process:control")
+                      ? { processExecution: true as const }
+                      : {}),
+                  },
+                }
+              : {}),
             ...(input.resumeThreadId === undefined
               ? {}
               : { resume: input.resumeThreadId }),
@@ -112,15 +167,22 @@ export class RemoteTurnHost {
           {
             events: { append: async () => undefined },
             approvals: {
-              request: async () => ({
-                decision: "rejected",
-                reason: "Remote approval is unavailable.",
-              }),
+              request: (request, signal) => {
+                if (turnIds === undefined)
+                  throw new Error("Remote approval has no bound Turn.");
+                return this.requestApproval(
+                  turnIds,
+                  principal.deviceId,
+                  request,
+                  signal,
+                );
+              },
             },
           },
           async (ids) => {
             if (this.closed)
               throw new Error("Remote Turn host is shutting down.");
+            turnIds = ids;
             const claimed = await this.requests.claim({
               requestId: input.requestId,
               deviceId: principal.deviceId,
@@ -170,10 +232,13 @@ export class RemoteTurnHost {
         await handle.completion;
         throw new Error("Remote Turn host is shutting down.");
       }
-      this.active.set(handle.turnId, handle);
+      this.active.set(handle.turnId, { handle, workspaceRoot: root });
       this.pendingStarts -= 1;
       void handle.completion
-        .finally(() => this.active.delete(handle.turnId))
+        .finally(() => {
+          this.active.delete(handle.turnId);
+          this.rejectTurnApprovals(handle.turnId);
+        })
         .catch(() => undefined);
       return {
         requestId: input.requestId,
@@ -199,18 +264,160 @@ export class RemoteTurnHost {
       "turn:control",
     );
     const metadata = (await this.application.getThread(threadId)).value;
-    if (metadata?.workspaceRoot !== root) throw new RemoteAccessDeniedError();
-    const handle = this.active.get(turnId);
+    if (
+      !this.matchesLiveOrIndexedThread(threadId, root, metadata?.workspaceRoot)
+    ) {
+      throw new RemoteAccessDeniedError();
+    }
+    const handle = this.active.get(turnId)?.handle;
     if (handle?.threadId !== threadId) return false;
     return handle.cancel("Cancelled by an authorized remote device.");
   }
 
   public async close(): Promise<void> {
     this.closed = true;
-    const handles = [...this.active.values()];
+    for (const pending of this.pendingApprovals.values()) {
+      pending.settle({ decision: "rejected", reason: "Remote host stopped." });
+    }
+    const handles = [...this.active.values()].map((entry) => entry.handle);
     for (const handle of handles)
       handle.cancel("Remote host is shutting down.");
     await Promise.allSettled(handles.map((handle) => handle.completion));
+  }
+
+  public async listApprovals(
+    principal: RemotePrincipal,
+    catalog: RemoteAccessCatalog,
+    threadId: string,
+  ): Promise<RemoteApprovalPreview[]> {
+    await this.authorizeApprovalThread(principal, catalog, threadId);
+    return [...this.pendingApprovals.values()]
+      .filter(
+        (pending) =>
+          pending.threadId === threadId &&
+          pending.deviceId === principal.deviceId &&
+          pending.expiresAt > Date.now(),
+      )
+      .map((pending) => ({
+        turnId: pending.turnId,
+        callId: pending.request.callId,
+        name: pending.request.name,
+        title: pending.request.title,
+        summary: pending.request.summary,
+        details: pending.request.details,
+        reason: pending.request.reason,
+        expiresAt: new Date(pending.expiresAt).toISOString(),
+      }));
+  }
+
+  public async resolveApproval(
+    principal: RemotePrincipal,
+    catalog: RemoteAccessCatalog,
+    threadId: string,
+    turnId: string,
+    callId: string,
+    decision: "approved" | "rejected",
+  ): Promise<boolean> {
+    await this.authorizeApprovalThread(principal, catalog, threadId);
+    const pending = this.pendingApprovals.get(JSON.stringify([turnId, callId]));
+    if (
+      pending === undefined ||
+      pending.threadId !== threadId ||
+      pending.deviceId !== principal.deviceId ||
+      pending.expiresAt <= Date.now()
+    )
+      return false;
+    return pending.settle({ decision });
+  }
+
+  private async authorizeApprovalThread(
+    principal: RemotePrincipal,
+    catalog: RemoteAccessCatalog,
+    threadId: string,
+  ): Promise<void> {
+    const binding = await this.threads.get(threadId);
+    const root = await catalog.authorizeThread(
+      principal,
+      binding,
+      "approval:resolve",
+    );
+    await catalog.authorizeThread(principal, binding, "thread:read");
+    const metadata = (await this.application.getThread(threadId)).value;
+    if (
+      !this.matchesLiveOrIndexedThread(threadId, root, metadata?.workspaceRoot)
+    ) {
+      throw new RemoteAccessDeniedError();
+    }
+  }
+
+  private matchesLiveOrIndexedThread(
+    threadId: string,
+    root: string,
+    indexedRoot: string | undefined,
+  ): boolean {
+    if (indexedRoot !== undefined) return indexedRoot === root;
+    return [...this.active.values()].some(
+      ({ handle, workspaceRoot }) =>
+        handle.threadId === threadId && workspaceRoot === root,
+    );
+  }
+
+  private requestApproval(
+    ids: { threadId: string; turnId: string },
+    deviceId: string,
+    request: ApprovalRequest,
+    signal: AbortSignal,
+  ): Promise<ApprovalDecision> {
+    if (this.closed || signal.aborted || this.pendingApprovals.size >= 4) {
+      return Promise.resolve({
+        decision: "rejected",
+        reason: "Remote approval is unavailable.",
+      });
+    }
+    const key = JSON.stringify([ids.turnId, request.callId]);
+    if (this.pendingApprovals.has(key)) {
+      return Promise.resolve({
+        decision: "rejected",
+        reason: "Approval is already pending.",
+      });
+    }
+    return new Promise<ApprovalDecision>((resolve) => {
+      const expiresAt = Date.now() + 5 * 60_000;
+      let settled = false;
+      const settle = (decision: ApprovalDecision) => {
+        if (settled) return false;
+        settled = true;
+        clearTimeout(timer);
+        signal.removeEventListener("abort", onAbort);
+        this.pendingApprovals.delete(key);
+        resolve(decision);
+        return true;
+      };
+      const onAbort = () =>
+        settle({ decision: "rejected", reason: "Remote Turn was cancelled." });
+      const timer = setTimeout(
+        () =>
+          settle({ decision: "rejected", reason: "Remote approval expired." }),
+        5 * 60_000,
+      );
+      signal.addEventListener("abort", onAbort, { once: true });
+      this.pendingApprovals.set(key, {
+        ...ids,
+        deviceId,
+        request,
+        expiresAt,
+        settle,
+      });
+      if (signal.aborted) onAbort();
+    });
+  }
+
+  private rejectTurnApprovals(turnId: string): void {
+    for (const pending of this.pendingApprovals.values()) {
+      if (pending.turnId === turnId) {
+        pending.settle({ decision: "rejected", reason: "Remote Turn ended." });
+      }
+    }
   }
 }
 

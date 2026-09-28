@@ -364,9 +364,12 @@ remote Turn starts with pre-execution binding and durable request idempotency.
 Thread-scoped artifact listing and verified text-range reads are now exposed
 through the same authorization boundary. The native SwiftUI client preview
 uses pinned TLS and cursor replay and can display authorized text artifacts
-in bounded ranges.
-Remote effectful operations, full event payloads, remote MCP/OAuth, and remote
-acceptance are not enabled yet. First deployment targets LAN or an
+in bounded ranges. Optional per-Turn workspace write or command scope now
+requires matching device grants and an exact, expiring approval on the
+initiating device. A real host patch, rejection, HTTPS authorization, and
+macOS client approval transport have local tests. Approval ownership transfer,
+full event payloads, remote MCP/OAuth, and physical two-Mac acceptance remain
+open. First deployment targets LAN or an
 owner-managed VPN.
 
 The current contract and delivery checks are in

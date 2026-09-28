@@ -1,20 +1,25 @@
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
-import type { KodaApplication } from "@koda/app";
+import { KodaApplication, type TurnClient } from "@koda/app";
 import {
   RemoteAccessCatalog,
   RemoteThreadStore,
   RemoteTurnHost,
   RemoteTurnRequestStore,
 } from "@koda/app-server";
+import { threadIdSchema, toolCallIdSchema, turnIdSchema } from "@koda/protocol";
+import { ScriptedModelProvider } from "@koda/providers";
+import { ReadOnlyWorkspace } from "@koda/runtime-node";
 import { afterEach, describe, expect, it } from "vitest";
+
+import { DeterministicItemIdFactory } from "./deterministic.js";
 
 const directories: string[] = [];
 
@@ -27,6 +32,146 @@ afterEach(async () => {
 });
 
 describe.skipIf(process.platform === "win32")("remote Turn host", () => {
+  it("runs a real remote patch only after approval and leaves a rejected patch unchanged", async () => {
+    for (const decision of ["approved", "rejected"] as const) {
+      const home = await mkdtemp(join(tmpdir(), "koda-remote-real-home-"));
+      const workspace = await mkdtemp(
+        join(tmpdir(), "koda-remote-real-workspace-"),
+      );
+      directories.push(home, workspace);
+      const target = join(workspace, "note.txt");
+      await writeFile(target, "before\n");
+      const provider = new ScriptedModelProvider([
+        {
+          events: [
+            {
+              type: "tool_call",
+              callId: toolCallIdSchema.parse("remote-real-patch"),
+              name: "apply_patch",
+              arguments: {
+                path: "note.txt",
+                operation: "update",
+                old_text: "before\n",
+                new_text: "after\n",
+              },
+            },
+            { type: "completed", finishReason: "tool_calls" },
+          ],
+        },
+        { events: [{ type: "completed", finishReason: "stop" }] },
+      ]);
+      const application = new KodaApplication({
+        environment: { KODA_HOME: home, OPENAI_API_KEY: "offline-test-key" },
+        processDirectory: workspace,
+        remoteRestricted: true,
+        dependencies: {
+          openWorkspace: (root) => ReadOnlyWorkspace.open(root),
+          createProvider: () => provider,
+          createIds: () => ({
+            threadId: threadIdSchema.parse("remote-real-thread"),
+            turnId: turnIdSchema.parse("remote-real-turn"),
+            itemIds: new DeterministicItemIdFactory("remote-real-item"),
+          }),
+        },
+      });
+      const principal = {
+        ownerId: "owner",
+        deviceId: `device-${"1".repeat(32)}`,
+      };
+      const catalog = await RemoteAccessCatalog.create(
+        "owner",
+        [{ id: "project", root: await realpath(workspace) }],
+        [
+          {
+            ...principal,
+            workspaceId: "project",
+            permissions: [
+              "workspace:read",
+              "thread:read",
+              "turn:start",
+              "workspace:mutate",
+              "approval:resolve",
+            ],
+          },
+        ],
+      );
+      const host = new RemoteTurnHost(
+        application,
+        await RemoteThreadStore.open(home, "owner"),
+        await RemoteTurnRequestStore.open(home, "owner"),
+      );
+      try {
+        const started = await host.start(principal, catalog, {
+          requestId: decision === "approved" ? "a".repeat(32) : "b".repeat(32),
+          workspaceId: "project",
+          prompt: "Update note.txt.",
+          effects: ["workspace:mutate"],
+        });
+        let approvals = await host.listApprovals(
+          principal,
+          catalog,
+          started.threadId,
+        );
+        for (
+          let attempt = 0;
+          approvals.length === 0 && attempt < 50;
+          attempt++
+        ) {
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          approvals = await host.listApprovals(
+            principal,
+            catalog,
+            started.threadId,
+          );
+        }
+        expect(approvals).toHaveLength(1);
+        expect(approvals[0]).toMatchObject({
+          turnId: started.turnId,
+          callId: "remote-real-patch",
+          name: "apply_patch",
+        });
+        expect(await readFile(target, "utf8")).toBe("before\n");
+        expect(
+          await host.resolveApproval(
+            principal,
+            catalog,
+            started.threadId,
+            started.turnId,
+            "remote-real-patch",
+            decision,
+          ),
+        ).toBe(true);
+        expect(
+          await host.resolveApproval(
+            principal,
+            catalog,
+            started.threadId,
+            started.turnId,
+            "remote-real-patch",
+            decision,
+          ),
+        ).toBe(false);
+        let status = (await application.getThread(started.threadId)).value
+          ?.status;
+        for (
+          let attempt = 0;
+          status !== "completed" && attempt < 50;
+          attempt++
+        ) {
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          status = (await application.getThread(started.threadId)).value
+            ?.status;
+        }
+        expect(status).toBe("completed");
+        expect(await readFile(target, "utf8")).toBe(
+          decision === "approved" ? "after\n" : "before\n",
+        );
+      } finally {
+        await host.close();
+      }
+    }
+  });
+
   it("does not repeat a remote Turn after SIGKILL at reservation or commit", async () => {
     for (const stage of ["reserved", "started"] as const) {
       const home = await mkdtemp(join(tmpdir(), "koda-remote-kill-home-"));
@@ -280,5 +425,175 @@ describe.skipIf(process.platform === "win32")("remote Turn host", () => {
     });
     expect(starts).toBe(1);
     await reopened.close();
+  });
+
+  it("binds a remote approval to its initiating device, exact call, and live Turn", async () => {
+    const home = await mkdtemp(join(tmpdir(), "koda-remote-approval-home-"));
+    const workspace = await mkdtemp(
+      join(tmpdir(), "koda-remote-approval-workspace-"),
+    );
+    directories.push(home, workspace);
+    const root = await realpath(workspace);
+    const owner = { ownerId: "owner", deviceId: `device-${"1".repeat(32)}` };
+    const other = { ownerId: "owner", deviceId: `device-${"2".repeat(32)}` };
+    const allowed = await RemoteAccessCatalog.create(
+      "owner",
+      [{ id: "project", root }],
+      [
+        {
+          ...owner,
+          workspaceId: "project",
+          permissions: [
+            "workspace:read",
+            "thread:read",
+            "turn:start",
+            "workspace:mutate",
+            "approval:resolve",
+          ],
+        },
+        {
+          ...other,
+          workspaceId: "project",
+          permissions: ["workspace:read", "thread:read", "approval:resolve"],
+        },
+      ],
+    );
+    const readOnly = await RemoteAccessCatalog.create(
+      "owner",
+      [{ id: "project", root }],
+      [
+        {
+          ...owner,
+          workspaceId: "project",
+          permissions: ["workspace:read", "thread:read", "turn:start"],
+        },
+      ],
+    );
+    const bindings = await RemoteThreadStore.open(home, "owner");
+    const requests = await RemoteTurnRequestStore.open(home, "owner");
+    let decision: Promise<{ decision: string }> | undefined;
+    let finish: () => void = () => undefined;
+    const application = {
+      isRemoteRestricted: true,
+      startTurnAfter: async (
+        input: { approvalMode: string; remoteEffects?: object },
+        client: TurnClient,
+        beforeStart: (ids: {
+          threadId: string;
+          turnId: string;
+        }) => Promise<void>,
+      ) => {
+        expect(input).toMatchObject({
+          approvalMode: "on-request",
+          remoteEffects: { workspaceMutations: true },
+        });
+        const ids = { threadId: "approved-thread", turnId: "approved-turn" };
+        await beforeStart(ids);
+        decision = client.approvals.request(
+          {
+            callId: toolCallIdSchema.parse("approved-call"),
+            name: "apply_patch",
+            title: "Review one patch",
+            summary: "Update one file.",
+            details: "Exact patch preview.",
+            reason: "A write requires approval.",
+          },
+          new AbortController().signal,
+        );
+        const completion = new Promise<void>((resolve) => {
+          finish = resolve;
+        });
+        return {
+          ...ids,
+          completion,
+          cancel: () => {
+            finish();
+            return true;
+          },
+        };
+      },
+      getThread: async () => ({ value: { workspaceRoot: root } }),
+    } as unknown as KodaApplication;
+    const host = new RemoteTurnHost(application, bindings, requests);
+    await expect(
+      host.start(owner, readOnly, {
+        requestId: "1".repeat(32),
+        workspaceId: "project",
+        prompt: "Change one file.",
+        effects: ["workspace:mutate"],
+      }),
+    ).rejects.toThrow("Remote resource is unavailable");
+    await host.start(owner, allowed, {
+      requestId: "2".repeat(32),
+      workspaceId: "project",
+      prompt: "Change one file.",
+      effects: ["workspace:mutate"],
+    });
+    expect(await host.listApprovals(owner, allowed, "approved-thread")).toEqual(
+      [
+        expect.objectContaining({
+          turnId: "approved-turn",
+          callId: "approved-call",
+          details: "Exact patch preview.",
+        }),
+      ],
+    );
+    expect(await host.listApprovals(other, allowed, "approved-thread")).toEqual(
+      [],
+    );
+    expect(
+      await host.resolveApproval(
+        other,
+        allowed,
+        "approved-thread",
+        "approved-turn",
+        "approved-call",
+        "approved",
+      ),
+    ).toBe(false);
+    expect(
+      await host.resolveApproval(
+        owner,
+        allowed,
+        "approved-thread",
+        "wrong-turn",
+        "approved-call",
+        "approved",
+      ),
+    ).toBe(false);
+    const simultaneous = await Promise.all([
+      host.resolveApproval(
+        owner,
+        allowed,
+        "approved-thread",
+        "approved-turn",
+        "approved-call",
+        "approved",
+      ),
+      host.resolveApproval(
+        owner,
+        allowed,
+        "approved-thread",
+        "approved-turn",
+        "approved-call",
+        "approved",
+      ),
+    ]);
+    expect(simultaneous.sort()).toEqual([false, true]);
+    await expect(decision).resolves.toMatchObject({ decision: "approved" });
+    expect(await host.listApprovals(owner, allowed, "approved-thread")).toEqual(
+      [],
+    );
+    expect(
+      await host.resolveApproval(
+        owner,
+        allowed,
+        "approved-thread",
+        "approved-turn",
+        "approved-call",
+        "approved",
+      ),
+    ).toBe(false);
+    await host.close();
   });
 });

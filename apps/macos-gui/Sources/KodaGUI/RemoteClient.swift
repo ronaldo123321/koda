@@ -44,6 +44,33 @@ struct RemoteTurnStart: Decodable {
     let status: String
 }
 
+struct RemoteApprovalPreview: Decodable, Identifiable {
+    let turnId: String
+    let callId: String
+    let name: String
+    let title: String
+    let summary: String
+    let details: String
+    let reason: String
+    let expiresAt: String
+    var id: String { "\(turnId):\(callId)" }
+}
+
+private struct RemoteApprovalPage: Decodable {
+    let approvals: [RemoteApprovalPreview]
+}
+
+private struct RemoteApprovalResolution: Decodable {
+    let status: String
+}
+
+private struct RemoteTurnStartBody: Encodable {
+    let requestId: String
+    let prompt: String
+    let resumeThreadId: String?
+    let effects: [String]?
+}
+
 struct RemoteArtifact: Decodable, Identifiable {
     let id: String
     let sha256: String
@@ -150,17 +177,55 @@ final class RemoteClient: NSObject, URLSessionDelegate, URLSessionTaskDelegate {
     }
 
     func startTurn(
-        workspaceID: String, prompt: String, requestID: String, resumeThreadID: String?
+        workspaceID: String, prompt: String, requestID: String, resumeThreadID: String?,
+        effects: [String]? = nil
     ) async throws -> RemoteTurnStart {
         guard workspaceID.range(
             of: "^[a-z][a-z0-9-]{0,63}$", options: .regularExpression
         ) != nil else { throw RemoteError(message: "远程工作区 ID 无效。") }
-        var body = ["requestId": requestID, "prompt": prompt]
-        if let resumeThreadID { body["resumeThreadId"] = resumeThreadID }
+        if let effects {
+            guard !effects.isEmpty, effects.count <= 2,
+                  effects.count == Set(effects).count,
+                  effects.allSatisfy({ $0 == "workspace:mutate" || $0 == "process:control" }) else {
+                throw RemoteError(message: "远程副作用范围无效。")
+            }
+        }
+        let body = RemoteTurnStartBody(
+            requestId: requestID, prompt: prompt,
+            resumeThreadId: resumeThreadID, effects: effects
+        )
         return try await perform(
-            "/v1/workspaces/\(workspaceID)/turns", method: "POST", body: body,
+            "/v1/workspaces/\(workspaceID)/turns", method: "POST",
+            body: try JSONEncoder().encode(body),
             acceptedStatuses: [202, 409]
         )
+    }
+
+    func listApprovals(threadID: String) async throws -> [RemoteApprovalPreview] {
+        guard validThreadID(threadID) else {
+            throw RemoteError(message: "远程 Thread ID 无效。")
+        }
+        let page: RemoteApprovalPage = try await get("/v1/threads/\(threadID)/approvals")
+        return page.approvals
+    }
+
+    func resolveApproval(
+        threadID: String, turnID: String, callID: String,
+        decision: String
+    ) async throws {
+        guard validThreadID(threadID), validThreadID(turnID),
+              !callID.isEmpty, callID.utf8.count <= 256,
+              decision == "approved" || decision == "rejected" else {
+            throw RemoteError(message: "远程审批标识或决定无效。")
+        }
+        let body = ["turnId": turnID, "callId": callID, "decision": decision]
+        let result: RemoteApprovalResolution = try await perform(
+            "/v1/threads/\(threadID)/approvals/resolve", method: "POST",
+            body: try JSONEncoder().encode(body), acceptedStatuses: [202]
+        )
+        guard result.status == "resolved" else {
+            throw RemoteError(message: "远程审批响应无效。")
+        }
     }
 
     func cancelTurn(threadID: String, turnID: String) async throws {
@@ -236,7 +301,7 @@ final class RemoteClient: NSObject, URLSessionDelegate, URLSessionTaskDelegate {
 
     private func perform<T: Decodable>(
         _ path: String, method: String, query: [URLQueryItem] = [],
-        body: [String: String]? = nil, acceptedStatuses: Set<Int> = [200]
+        body: Data? = nil, acceptedStatuses: Set<Int> = [200]
     ) async throws -> T {
         var components = URLComponents(url: origin, resolvingAgainstBaseURL: false)!
         components.path = path
@@ -249,7 +314,7 @@ final class RemoteClient: NSObject, URLSessionDelegate, URLSessionTaskDelegate {
         request.setValue("Bearer \(settings.token)", forHTTPHeaderField: "Authorization")
         if let body {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.httpBody = try JSONEncoder().encode(body)
+            request.httpBody = body
         }
         let (data, response) = try await session.data(for: request)
         guard let response = response as? HTTPURLResponse,

@@ -10,7 +10,7 @@ Koda 是本地优先的编程智能体，提供命令行（CLI）、交互式终
 - 读取工作区、提出文件修改和运行命令。写入与执行默认需要逐项审批；工具调用和结果记录在只追加的 JSONL 日志中。
 - 在 macOS 和 Linux 上通过原生执行器运行受保护的 Pipe/PTY 命令。执行策略和各平台支持范围见[执行安全说明](docs/security/execution-security.md)。
 - 接入本地 MCP 服务、项目 Skill、命令模板和本地插件；可在 TUI 中查看历史、工件、审批与恢复状态。
-- 在自有局域网或 VPN 中，按设备授权查看指定工作区和会话，并启动只读的远程任务。远程写入、命令执行和审批尚未开放。
+- 在自有局域网或 VPN 中，按设备授权查看指定工作区和会话。远程任务默认只读；主机明确授予权限后，macOS 客户端可逐次请求写入或命令执行，并对每次实际操作单独审批。
 
 ## 快速开始
 
@@ -103,7 +103,13 @@ koda remote device issue macbook --workspace project
 koda remote serve --host 192.168.1.10 --port 8443 --cert /absolute/path/server.pem --key /absolute/path/server-key.pem
 ```
 
-默认令牌只有读取权限。远程启动只读任务或取消任务，分别需要显式签发 `turn:start` 或 `turn:control` 权限；启动任务会使用主机的模型凭据并可能消耗配额。客户端必须核对主机证书指纹。现有 Thread 需由主机所有者显式执行 `koda remote thread expose <thread-id> --workspace project` 才会对远程设备可见。macOS 远程窗口可按游标回放助手文本和各类事件状态；工具参数、审批详情与结构化的主机路径字段不会投射，助手文本仍可能引用工作区内容。双设备真实网络验收尚未完成，具体权限、协议和恢复规则见 [远程操作设计](docs/plans/2026-09-27-phase-4d-remote-operation-design.md)。
+默认令牌只有读取权限。远程启动任务或取消任务，分别需要显式签发 `turn:start` 或 `turn:control`；任务会使用主机的模型凭据并可能消耗配额。允许写入或命令执行时，需在主机上分别签发 `workspace:mutate` 或 `process:control`，并同时签发 `thread:read,approval:resolve`，例如：
+
+```bash
+koda remote device issue macbook --workspace project --permissions workspace:read,thread:read,turn:start,workspace:mutate,approval:resolve
+```
+
+客户端按 Turn 选择副作用范围，每次工具调用仍需在同一设备预览并批准；审批五分钟过期，拒绝或超时不会执行该调用。客户端必须核对主机证书指纹。现有 Thread 需由主机所有者显式执行 `koda remote thread expose <thread-id> --workspace project` 才会对远程设备可见。macOS 远程窗口可按游标回放助手文本和事件状态；普通活动流不投射工具参数与结构化主机路径。有 `approval:resolve` 权限的设备可查看待审批操作的确切参数与路径，助手文本也可能引用工作区内容。远程 MCP/OAuth、审批所有权转移和双设备真实网络验收尚未完成；具体边界见 [远程操作设计](docs/plans/2026-09-27-phase-4d-remote-operation-design.md)。
 
 ## 扩展与本地数据
 

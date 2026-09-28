@@ -129,6 +129,16 @@ cancels it according to a documented timeout; ownership transfer is explicit,
 audited, and cannot reuse an earlier approval. Cancellation and command effects
 are never retried merely because a request response was lost.
 
+Current macOS preview implements device/Turn/call-bound pending approvals in
+the owner-host process with a five-minute rejection timeout. Per-Turn effect
+scope requires matching device grants; the default remains read-only. An
+approval is removed before its decision is delivered, so a repeated resolution
+cannot execute twice. The ordinary activity projection excludes tool arguments;
+the separately authorized approval preview intentionally shows exact details
+and may include host paths. The approval lease is not yet durable or
+transferable. Host shutdown rejects pending approvals; process loss cannot
+resume a pending tool call. Ownership transfer and audit remain open work.
+
 A real child-process `SIGKILL` test now covers the durable request record after
 reservation and after the request is marked started with a Thread binding.
 Reopening the stores and retrying the same request returns the original IDs

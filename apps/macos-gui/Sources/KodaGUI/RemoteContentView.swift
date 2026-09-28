@@ -69,6 +69,9 @@ struct RemoteContentView: View {
         .sheet(isPresented: $showingArtifacts) {
             RemoteArtifactView(model: model)
         }
+        .sheet(item: $model.selectedApproval) { approval in
+            RemoteApprovalView(model: model, approval: approval)
+        }
     }
 
     private var header: some View {
@@ -88,6 +91,11 @@ struct RemoteContentView: View {
                 }
                 if model.connected && model.selectedThreadID != nil {
                     Button("产物") { showingArtifacts = true }
+                    if let approval = model.approvals.first {
+                        Button("待审批 \(model.approvals.count)") {
+                            model.selectedApproval = approval
+                        }
+                    }
                 }
                 Button("连接设置…") { showingConnection = true }
             }
@@ -104,7 +112,7 @@ struct RemoteContentView: View {
                 .disabled(!model.connected)
                 Spacer()
             }
-            Text("远程视图按游标显示助手文本和事件状态；工具参数、审批详情及主机路径字段不会投射，助手文本可能引用工作区内容。")
+            Text("活动流按游标显示助手文本和事件状态；待审批详情仅向有审批权限的设备显示，助手文本可能引用工作区内容。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             if let notice = model.notice {
@@ -157,6 +165,17 @@ struct RemoteContentView: View {
                 .scrollContentBackground(.hidden)
                 .padding(6)
                 .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 9))
+            HStack(spacing: 16) {
+                Toggle("允许工作区写入", isOn: $model.allowWrites)
+                Toggle("允许命令执行", isOn: $model.allowCommands)
+                Spacer()
+            }
+            .toggleStyle(.checkbox)
+            .disabled(model.hasPendingStart)
+            Text("仅对本次请求生效；主机须授予对应权限，每次实际写入或执行仍需单独审批。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
             HStack {
                 if model.hasPendingStart {
                     Button("重试同一请求") { model.retryStart() }
@@ -175,6 +194,43 @@ struct RemoteContentView: View {
             }
         }
         .padding()
+    }
+}
+
+private struct RemoteApprovalView: View {
+    @ObservedObject var model: RemoteModel
+    let approval: RemoteApprovalPreview
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(approval.title).font(.title2.bold())
+            Text(approval.summary).textSelection(.enabled)
+            Divider()
+            Text("请求详情").font(.headline)
+            ScrollView {
+                Text(approval.details)
+                    .font(.system(.body, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            Text("原因：\(approval.reason)")
+                .font(.caption)
+                .textSelection(.enabled)
+            Text("有效期至 \(approval.expiresAt) · Turn \(approval.turnId) · 调用 \(approval.callId)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+            HStack {
+                Button("拒绝") { model.resolveApproval("rejected") }
+                    .disabled(model.approvalBusy)
+                Spacer()
+                Button("批准本次操作") { model.resolveApproval("approved") }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(model.approvalBusy)
+            }
+        }
+        .padding(20)
+        .frame(minWidth: 620, minHeight: 430)
     }
 }
 

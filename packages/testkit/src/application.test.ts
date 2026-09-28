@@ -1351,6 +1351,185 @@ describe("KodaApplication", () => {
     );
   });
 
+  it("exposes only the explicitly scoped remote write or command tools", async () => {
+    const fixture = await createFixture();
+    for (const [kind, effects] of [
+      ["write", { workspaceMutations: true as const }],
+      ["command", { processExecution: true as const }],
+    ] as const) {
+      const provider = new ScriptedModelProvider([
+        {
+          assertRequest: (request) => {
+            const names = request.tools.map((tool) => tool.name);
+            expect(names).toContain("read_file");
+            expect(names.includes("apply_patch")).toBe(kind === "write");
+            expect(names.includes("exec_command")).toBe(kind === "command");
+            expect(names).not.toContain("spawn_worktree");
+            expect(names).not.toContain("update_plan");
+            expect(names).not.toContain("read_artifact");
+          },
+          events: [{ type: "completed", finishReason: "stop" }],
+        },
+      ]);
+      const application = new KodaApplication({
+        environment: {
+          KODA_HOME: fixture.kodaHome,
+          OPENAI_API_KEY: "offline-test-key",
+        },
+        processDirectory: fixture.root,
+        remoteRestricted: true,
+        dependencies: dependencies(provider, `remote-${kind}`),
+      });
+      const handle = application.startTurn(
+        {
+          prompt: "Inspect the authorized tools.",
+          cwd: fixture.workspaceRoot,
+          approvalMode: "on-request",
+          remoteEffects: effects,
+        },
+        {
+          events: { append: async () => undefined },
+          approvals: rejectApprovals(),
+        },
+      );
+      await expect(handle.completion).resolves.toMatchObject({
+        status: "completed",
+      });
+    }
+  });
+
+  it("waits for an exact remote write approval before changing a file", async () => {
+    const fixture = await createFixture();
+    const target = join(fixture.workspaceRoot, "remote-note.txt");
+    await writeFile(target, "before\n");
+    const provider = new ScriptedModelProvider([
+      {
+        events: [
+          {
+            type: "tool_call",
+            callId: toolCallIdSchema.parse("remote-write-call"),
+            name: "apply_patch",
+            arguments: {
+              path: "remote-note.txt",
+              operation: "update",
+              old_text: "before\n",
+              new_text: "after\n",
+            },
+          },
+          { type: "completed", finishReason: "tool_calls" },
+        ],
+      },
+      {
+        assertRequest: (request) => {
+          expect(request.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "tool_result",
+                name: "apply_patch",
+                status: "success",
+              }),
+            ]),
+          );
+        },
+        events: [{ type: "completed", finishReason: "stop" }],
+      },
+    ]);
+    const application = new KodaApplication({
+      environment: {
+        KODA_HOME: fixture.kodaHome,
+        OPENAI_API_KEY: "offline-test-key",
+      },
+      processDirectory: fixture.root,
+      remoteRestricted: true,
+      dependencies: dependencies(provider, "remote-write-approved"),
+    });
+    let approvals = 0;
+    const handle = application.startTurn(
+      {
+        prompt: "Update remote-note.txt.",
+        cwd: fixture.workspaceRoot,
+        approvalMode: "on-request",
+        remoteEffects: { workspaceMutations: true },
+      },
+      {
+        events: { append: async () => undefined },
+        approvals: {
+          request: async (request) => {
+            approvals += 1;
+            expect(request.callId).toBe("remote-write-call");
+            expect(request.name).toBe("apply_patch");
+            expect(await readFile(target, "utf8")).toBe("before\n");
+            return { decision: "approved" };
+          },
+        },
+      },
+    );
+    await expect(handle.completion).resolves.toMatchObject({
+      status: "completed",
+    });
+    expect(approvals).toBe(1);
+    expect(await readFile(target, "utf8")).toBe("after\n");
+  });
+
+  it.skipIf(process.platform !== "darwin")(
+    "waits for an exact remote command approval before starting a macOS process",
+    async () => {
+      const fixture = await createFixture();
+      const target = join(fixture.workspaceRoot, "remote-command.txt");
+      const provider = new ScriptedModelProvider([
+        {
+          events: [
+            {
+              type: "tool_call",
+              callId: toolCallIdSchema.parse("remote-command-call"),
+              name: "exec_command",
+              arguments: { argv: ["/usr/bin/touch", "remote-command.txt"] },
+            },
+            { type: "completed", finishReason: "tool_calls" },
+          ],
+        },
+        { events: [{ type: "completed", finishReason: "stop" }] },
+      ]);
+      const application = new KodaApplication({
+        environment: {
+          KODA_HOME: fixture.kodaHome,
+          OPENAI_API_KEY: "offline-test-key",
+        },
+        processDirectory: fixture.root,
+        remoteRestricted: true,
+        dependencies: dependencies(provider, "remote-command-approved"),
+      });
+      let approvals = 0;
+      const handle = application.startTurn(
+        {
+          prompt: "Create remote-command.txt.",
+          cwd: fixture.workspaceRoot,
+          approvalMode: "on-request",
+          remoteEffects: { processExecution: true },
+        },
+        {
+          events: { append: async () => undefined },
+          approvals: {
+            request: async (request) => {
+              approvals += 1;
+              expect(request.callId).toBe("remote-command-call");
+              expect(request.name).toBe("exec_command");
+              await expect(readFile(target)).rejects.toMatchObject({
+                code: "ENOENT",
+              });
+              return { decision: "approved" };
+            },
+          },
+        },
+      );
+      await expect(handle.completion).resolves.toMatchObject({
+        status: "completed",
+      });
+      expect(approvals).toBe(1);
+      expect(await readFile(target, "utf8")).toBe("");
+    },
+  );
+
   it("persists canonical workspace runtime settings and reports credential availability", async () => {
     const fixture = await createFixture();
     const application = new KodaApplication({

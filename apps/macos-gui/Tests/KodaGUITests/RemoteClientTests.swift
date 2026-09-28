@@ -230,6 +230,37 @@ final class RemoteClientTests: XCTestCase {
         try await client.cancelTurn(threadID: "thread-1", turnID: "turn-2")
         client.close()
 
+        let approver = try RemoteClient(settings: RemoteSettings(
+            origin: setup.origin, certificateSha256: setup.fingerprint,
+            token: setup.effectfulToken
+        ))
+        for (requestID, decision) in [("c", "approved"), ("d", "rejected")] {
+            let turn = try await approver.startTurn(
+                workspaceID: "project", prompt: "Review one patch.",
+                requestID: String(repeating: requestID, count: 32),
+                resumeThreadID: "thread-1", effects: ["workspace:mutate"]
+            )
+            let approvals = try await approver.listApprovals(threadID: turn.threadId)
+            XCTAssertEqual(approvals.count, 1)
+            XCTAssertEqual(approvals.first?.turnId, turn.turnId)
+            XCTAssertEqual(approvals.first?.name, "apply_patch")
+            XCTAssertEqual(approvals.first?.details, "remote-note.txt: before -> after")
+            if let approval = approvals.first {
+                try await approver.resolveApproval(
+                    threadID: turn.threadId, turnID: turn.turnId,
+                    callID: approval.callId, decision: decision
+                )
+                do {
+                    try await approver.resolveApproval(
+                        threadID: turn.threadId, turnID: turn.turnId,
+                        callID: approval.callId, decision: decision
+                    )
+                    XCTFail("A resolved approval must not be accepted twice")
+                } catch { }
+            }
+        }
+        approver.close()
+
         let reconnectModel = await RemoteModel()
         await reconnectModel.connect(RemoteSettings(
             origin: setup.origin, certificateSha256: setup.fingerprint, token: setup.token
@@ -317,6 +348,7 @@ private struct FixtureSetup: Decodable {
     let origin: String
     let fingerprint: String
     let token: String
+    let effectfulToken: String
     let workspaceOnlyToken: String
     let artifactId: String
 }

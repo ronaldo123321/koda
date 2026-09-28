@@ -51,6 +51,19 @@ const turnStartSchema = z
       .string()
       .regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u)
       .optional(),
+    effects: z
+      .array(z.enum(["workspace:mutate", "process:control"]))
+      .min(1)
+      .max(2)
+      .refine((effects) => new Set(effects).size === effects.length)
+      .optional(),
+  })
+  .strict();
+const approvalResolutionSchema = z
+  .object({
+    turnId: z.string().min(1).max(128),
+    callId: z.string().min(1).max(256),
+    decision: z.enum(["approved", "rejected"]),
   })
   .strict();
 
@@ -243,6 +256,7 @@ async function handleRequest(
         ...(body.resumeThreadId === undefined
           ? {}
           : { resumeThreadId: body.resumeThreadId }),
+        ...(body.effects === undefined ? {} : { effects: body.effects }),
       });
       send(response, result.status === "started" ? 202 : 409, result);
       return;
@@ -281,6 +295,33 @@ async function handleRequest(
       );
       return;
     }
+    const approvalResolveMatch =
+      /^\/v1\/threads\/([A-Za-z0-9][A-Za-z0-9_-]{0,127})\/approvals\/resolve$/u.exec(
+        url.pathname,
+      );
+    if (
+      request.method === "POST" &&
+      approvalResolveMatch !== null &&
+      url.search === ""
+    ) {
+      const threadId = approvalResolveMatch[1];
+      if (threadId === undefined) throw new RemoteInvalidRequestError();
+      const body = approvalResolutionSchema.parse(await readJsonBody(request));
+      const resolved = await turnHost.resolveApproval(
+        verified.principal,
+        catalog,
+        threadId,
+        body.turnId,
+        body.callId,
+        body.decision,
+      );
+      send(
+        response,
+        resolved ? 202 : 404,
+        resolved ? { status: "resolved" } : { error: "Unavailable" },
+      );
+      return;
+    }
     if (
       request.method !== "GET" ||
       request.headers["content-length"] !== undefined ||
@@ -304,6 +345,21 @@ async function handleRequest(
         }
       }
       send(response, 200, { workspaces: ids.sort() });
+      return;
+    }
+    const approvalsMatch =
+      /^\/v1\/threads\/([A-Za-z0-9][A-Za-z0-9_-]{0,127})\/approvals$/u.exec(
+        url.pathname,
+      );
+    if (approvalsMatch !== null && url.search === "") {
+      const threadId = approvalsMatch[1];
+      if (threadId === undefined) throw new RemoteInvalidRequestError();
+      const approvals = await turnHost.listApprovals(
+        verified.principal,
+        catalog,
+        threadId,
+      );
+      send(response, 200, { approvals }, MAX_UPDATE_RESPONSE_BYTES);
       return;
     }
     const listMatch =

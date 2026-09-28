@@ -36,6 +36,18 @@ const workspaceOnly = await devices.issue("tablet", [
     permissions: ["workspace:read"],
   },
 ]);
+const effectful = await devices.issue("mac-approver", [
+  {
+    workspaceId: "project",
+    permissions: [
+      "workspace:read",
+      "thread:read",
+      "turn:start",
+      "workspace:mutate",
+      "approval:resolve",
+    ],
+  },
+]);
 const threads = await RemoteThreadStore.open(home, "owner");
 await threads.bind({
   ownerId: "owner",
@@ -172,9 +184,37 @@ const application = {
   listThreadArtifacts:
     artifactApplication.listThreadArtifacts.bind(artifactApplication),
   readArtifact: artifactApplication.readArtifact.bind(artifactApplication),
-  startTurnAfter: async (_input, _client, beforeStart) => {
-    const ids = { threadId: "thread-1", turnId: "turn-2" };
+  startTurnAfter: async (input, client, beforeStart) => {
+    const isEffectful = input.remoteEffects?.workspaceMutations === true;
+    const ids = {
+      threadId: "thread-1",
+      turnId: isEffectful ? `turn-effect-${++effectfulTurns}` : "turn-2",
+    };
     await beforeStart(ids);
+    if (isEffectful) {
+      const controller = new AbortController();
+      const completion = client.approvals
+        .request(
+          {
+            callId: `patch-${effectfulTurns}`,
+            name: "apply_patch",
+            title: "Approve one file patch",
+            summary: "Update remote-note.txt.",
+            details: "remote-note.txt: before -> after",
+            reason: "Remote write needs approval.",
+          },
+          controller.signal,
+        )
+        .then(() => undefined);
+      return {
+        ...ids,
+        completion,
+        cancel: () => {
+          controller.abort();
+          return true;
+        },
+      };
+    }
     let finish;
     const completion = new Promise((resolve) => {
       finish = resolve;
@@ -189,6 +229,7 @@ const application = {
     };
   },
 };
+let effectfulTurns = 0;
 let server = await startRemoteHttpsServer({
   application,
   kodaHome: home,
@@ -203,6 +244,7 @@ process.stdout.write(
     origin: `https://${server.address}`,
     fingerprint: server.certificateSha256,
     token: full.token,
+    effectfulToken: effectful.token,
     workspaceOnlyToken: workspaceOnly.token,
     artifactId: artifact.id,
   }) + "\n",

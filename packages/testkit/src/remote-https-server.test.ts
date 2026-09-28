@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
-import { KodaApplication } from "@koda/app";
+import { KodaApplication, type TurnClient } from "@koda/app";
 import {
   RemoteDeviceStore,
   RemoteThreadStore,
@@ -22,7 +22,11 @@ import {
   startRemoteHttpsServer,
 } from "@koda/app-server";
 import { runRemoteServeCommand } from "@koda/cli";
-import { agentEventSchema, threadMetadataSchema } from "@koda/protocol";
+import {
+  agentEventSchema,
+  threadMetadataSchema,
+  toolCallIdSchema,
+} from "@koda/protocol";
 import { ArtifactStore, JsonlEventStore } from "@koda/runtime-node";
 import { afterEach, describe, expect, it } from "vitest";
 import WebSocket from "ws";
@@ -96,6 +100,24 @@ describe.skipIf(process.platform === "win32")(
       ]);
       const controlDevice = await devices.issue("controller", [
         { workspaceId: "project", permissions: ["turn:control"] },
+      ]);
+      const effectful = await devices.issue("effectful", [
+        {
+          workspaceId: "project",
+          permissions: [
+            "workspace:read",
+            "thread:read",
+            "turn:start",
+            "workspace:mutate",
+            "approval:resolve",
+          ],
+        },
+      ]);
+      const otherApprover = await devices.issue("other-approver", [
+        {
+          workspaceId: "project",
+          permissions: ["thread:read", "approval:resolve"],
+        },
       ]);
       const bindings = await RemoteThreadStore.open(home, "owner");
       await bindings.bind({
@@ -236,12 +258,12 @@ describe.skipIf(process.platform === "win32")(
       ];
       let starts = 0;
       let turnCancelled = false;
-      let finishTurn: () => void = () => undefined;
+      let approvalDecision: Promise<{ decision: string }> | undefined;
       const application = {
         isRemoteRestricted: true,
         startTurnAfter: async (
-          _input: unknown,
-          _client: unknown,
+          input: { remoteEffects?: { workspaceMutations?: true } },
+          client: TurnClient,
           beforeStart: (ids: {
             threadId: string;
             turnId: string;
@@ -253,6 +275,20 @@ describe.skipIf(process.platform === "win32")(
             turnId: `turn-new-${starts}`,
           };
           await beforeStart(ids);
+          if (input.remoteEffects?.workspaceMutations) {
+            approvalDecision = client.approvals.request(
+              {
+                callId: toolCallIdSchema.parse("remote-patch-call"),
+                name: "apply_patch",
+                title: "Approve one patch",
+                summary: "Update one file.",
+                details: "Exact reviewed change.",
+                reason: "Remote write needs approval.",
+              },
+              new AbortController().signal,
+            );
+          }
+          let finishTurn: () => void = () => undefined;
           const completion = new Promise<void>((resolve) => {
             finishTurn = resolve;
           });
@@ -934,6 +970,148 @@ describe.skipIf(process.platform === "win32")(
           body: { status: "cancel_requested" },
         });
         expect(turnCancelled).toBe(true);
+        expect(
+          (
+            await post(
+              port,
+              certificate,
+              "/v1/workspaces/project/turns",
+              issued.token,
+              {
+                requestId: "e".repeat(32),
+                prompt: "Write a file.",
+                effects: ["workspace:mutate"],
+              },
+            )
+          ).status,
+        ).toBe(404);
+        expect(
+          (
+            await post(
+              port,
+              certificate,
+              "/v1/workspaces/project/turns",
+              effectful.token,
+              {
+                requestId: "e".repeat(32),
+                prompt: "Write a file.",
+                effects: ["workspace:mutate", "workspace:mutate"],
+              },
+            )
+          ).status,
+        ).toBe(400);
+        const effectfulStart = await post(
+          port,
+          certificate,
+          "/v1/workspaces/project/turns",
+          effectful.token,
+          {
+            requestId: "e".repeat(32),
+            prompt: "Write a file.",
+            effects: ["workspace:mutate"],
+          },
+        );
+        expect(effectfulStart).toMatchObject({
+          status: 202,
+          body: { threadId: "thread-new-2", turnId: "turn-new-2" },
+        });
+        const approvalsPath = "/v1/threads/thread-new-2/approvals";
+        expect(
+          (await get(port, certificate, approvalsPath, issued.token)).status,
+        ).toBe(404);
+        expect(
+          (await get(port, certificate, approvalsPath, otherApprover.token))
+            .body,
+        ).toEqual({ approvals: [] });
+        expect(
+          (await get(port, certificate, approvalsPath, effectful.token)).body,
+        ).toMatchObject({
+          approvals: [
+            {
+              turnId: "turn-new-2",
+              callId: "remote-patch-call",
+              details: "Exact reviewed change.",
+            },
+          ],
+        });
+        const resolvePath = `${approvalsPath}/resolve`;
+        const resolution = {
+          turnId: "turn-new-2",
+          callId: "remote-patch-call",
+          decision: "approved",
+        };
+        expect(
+          (
+            await post(
+              port,
+              certificate,
+              resolvePath,
+              otherApprover.token,
+              resolution,
+            )
+          ).status,
+        ).toBe(404);
+        expect(
+          (
+            await post(port, certificate, resolvePath, effectful.token, {
+              ...resolution,
+              turnId: "wrong-turn",
+            })
+          ).status,
+        ).toBe(404);
+        expect(
+          (
+            await post(
+              port,
+              certificate,
+              resolvePath,
+              effectful.token,
+              resolution,
+            )
+          ).status,
+        ).toBe(202);
+        await expect(approvalDecision).resolves.toMatchObject({
+          decision: "approved",
+        });
+        expect(
+          (
+            await post(
+              port,
+              certificate,
+              resolvePath,
+              effectful.token,
+              resolution,
+            )
+          ).status,
+        ).toBe(404);
+        const pendingAtRevocation = await post(
+          port,
+          certificate,
+          "/v1/workspaces/project/turns",
+          effectful.token,
+          {
+            requestId: "f".repeat(32),
+            prompt: "Write another file.",
+            effects: ["workspace:mutate"],
+          },
+        );
+        expect(pendingAtRevocation.status).toBe(202);
+        await devices.revoke(effectful.deviceId);
+        expect(
+          (
+            await post(
+              port,
+              certificate,
+              `/v1/threads/${(pendingAtRevocation.body as { threadId: string }).threadId}/approvals/resolve`,
+              effectful.token,
+              {
+                turnId: (pendingAtRevocation.body as { turnId: string }).turnId,
+                callId: "remote-patch-call",
+                decision: "approved",
+              },
+            )
+          ).status,
+        ).toBe(401);
         const revokedSubscription = new Promise<number>((resolveClose) =>
           resumedSubscription.once("close", (code) => resolveClose(code)),
         );
