@@ -886,6 +886,7 @@ await installManagedPluginPackage(${JSON.stringify({
     const fixture = await packageFixture("index.mjs", managedProtocolScript);
     const checkpoints = [
       "package_committed",
+      "operation_logged",
       "state_file_synced",
       "state_replaced",
     ] as const;
@@ -977,11 +978,49 @@ await installManagedPluginPackage({
         enabled: false,
       });
       expect(
-        (await readdir(join(home, "managed-plugins"))).filter((name) =>
-          /^\.(?:stage|state)-/u.test(name),
+        (await readdir(join(home, "managed-plugins"))).filter(
+          (name) =>
+            /^\.(?:stage|state|operation)-/u.test(name) ||
+            name === "install-operation.json",
         ),
       ).toEqual([]);
     }
+  });
+
+  it("blocks managed plugin mutations when an install operation diverges", async () => {
+    const fixture = await packageFixture("index.mjs", managedProtocolScript);
+    const home = join(fixture.parent, "home");
+    await installManagedPluginPackage({
+      kodaHome: home,
+      sourceDirectory: fixture.root,
+      trustRoot: fixture.trust,
+      capabilities: ["tools"],
+    });
+    const operation = join(home, "managed-plugins", "install-operation.json");
+    await writeFile(
+      operation,
+      JSON.stringify({
+        schema_version: 1,
+        plugin_id: "reviewer",
+        before_sha256: "0".repeat(64),
+        after_sha256: "1".repeat(64),
+      }),
+    );
+    await expect(
+      setManagedPluginEnabled(home, "reviewer", true),
+    ).rejects.toMatchObject({ code: "PLUGIN_PACKAGE_INVALID" });
+    await expect(
+      installManagedPluginPackage({
+        kodaHome: home,
+        sourceDirectory: fixture.root,
+        trustRoot: fixture.trust,
+        capabilities: ["tools"],
+      }),
+    ).rejects.toMatchObject({ code: "PLUGIN_PACKAGE_INVALID" });
+    expect((await listManagedPlugins(home))[0]?.enabled).toBe(false);
+    expect(await readFile(operation, "utf8")).toContain(
+      '"plugin_id":"reviewer"',
+    );
   });
 
   it("rejects a manual configuration that shadows an enabled managed plugin", async () => {

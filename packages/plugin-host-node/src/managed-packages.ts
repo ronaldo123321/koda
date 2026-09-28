@@ -68,6 +68,15 @@ const managedStateSchema = z
   .strict();
 type ManagedState = z.infer<typeof managedStateSchema>;
 type PackageRecord = z.infer<typeof packageRecordSchema>;
+const installOperationSchema = z
+  .object({
+    schema_version: z.literal(1),
+    plugin_id: pluginIdSchema,
+    before_sha256: digestSchema.nullable(),
+    after_sha256: digestSchema,
+  })
+  .strict();
+type InstallOperation = z.infer<typeof installOperationSchema>;
 
 export interface ManagedPluginStatus {
   id: string;
@@ -88,7 +97,10 @@ export interface ManagedPluginUpdateSource {
 }
 
 type InstallCheckpoint =
-  "package_committed" | "state_file_synced" | "state_replaced";
+  | "package_committed"
+  | "operation_logged"
+  | "state_file_synced"
+  | "state_replaced";
 
 export async function installManagedPluginPackage(options: {
   kodaHome: string;
@@ -114,6 +126,7 @@ export async function installManagedPluginPackage(options: {
   const lease = await ThreadLease.acquire(statePath(root));
   try {
     const state = await readState(root);
+    await reconcileInstallOperation(root, state);
     await removeAbandonedWrites(root);
     const old = state.plugins[verified.id];
     if (
@@ -224,7 +237,15 @@ export async function installManagedPluginPackage(options: {
               enabled: false,
             };
     state.plugins[verified.id] = entry;
+    await writeInstallOperation(root, {
+      schema_version: 1,
+      plugin_id: verified.id,
+      before_sha256: old === undefined ? null : sha256CanonicalJson(old),
+      after_sha256: sha256CanonicalJson(entry),
+    });
+    await options.onCheckpoint?.("operation_logged");
     await writeState(root, state, options.onCheckpoint);
+    await removeInstallOperation(root);
     return projectStatus(verified.id, entry);
   } finally {
     await lease.release();
@@ -276,6 +297,7 @@ export async function setManagedPluginEnabled(
   const lease = await ThreadLease.acquire(statePath(root));
   try {
     const state = await readState(root);
+    await reconcileInstallOperation(root, state);
     const entry = state.plugins[id];
     if (entry === undefined)
       throw invalidState("Managed plugin is not installed.");
@@ -305,6 +327,7 @@ export async function rollbackManagedPlugin(
   const lease = await ThreadLease.acquire(statePath(root));
   try {
     const state = await readState(root);
+    await reconcileInstallOperation(root, state);
     const entry = state.plugins[id];
     if (entry?.previous === undefined)
       throw invalidState("No previous plugin version is available.");
@@ -367,6 +390,9 @@ async function ensureStoreRoot(root: string): Promise<void> {
 }
 function statePath(root: string): string {
   return join(root, "state.json");
+}
+function installOperationPath(root: string): string {
+  return join(root, "install-operation.json");
 }
 function packagePath(root: string, id: string, digest: string): string {
   return join(root, "packages", id, digest);
@@ -508,7 +534,7 @@ async function readState(root: string): Promise<ManagedState> {
 async function removeAbandonedWrites(root: string): Promise<void> {
   for (const name of await readdir(root)) {
     if (
-      /^\.state-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(
+      /^\.(?:state|operation)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(
         name,
       )
     ) {
@@ -517,6 +543,73 @@ async function removeAbandonedWrites(root: string): Promise<void> {
       await rm(join(root, name), { recursive: true, force: true });
     }
   }
+}
+
+async function reconcileInstallOperation(
+  root: string,
+  state: ManagedState,
+): Promise<void> {
+  let handle;
+  try {
+    handle = await open(
+      installOperationPath(root),
+      constants.O_RDONLY | constants.O_NOFOLLOW,
+    );
+  } catch (error) {
+    if (isNodeError(error, "ENOENT")) return;
+    throw invalidState("Managed plugin install operation is invalid.");
+  }
+  let operation: InstallOperation;
+  try {
+    const info = await handle.stat();
+    if (!info.isFile() || info.size > 1_024)
+      throw invalidState("Managed plugin install operation is invalid.");
+    operation = installOperationSchema.parse(
+      JSON.parse(await handle.readFile("utf8")) as unknown,
+    );
+  } catch {
+    throw invalidState("Managed plugin install operation is invalid.");
+  } finally {
+    await handle.close();
+  }
+  const entry = state.plugins[operation.plugin_id];
+  const current = entry === undefined ? null : sha256CanonicalJson(entry);
+  if (current !== operation.before_sha256 && current !== operation.after_sha256)
+    throw invalidState("Managed plugin install state diverged.");
+  if (current === operation.after_sha256 && entry !== undefined) {
+    await checkPackageParent(root, operation.plugin_id);
+    await checkPackage(
+      packagePath(root, operation.plugin_id, entry.active.manifest_sha256),
+      operation.plugin_id,
+      entry.active,
+    );
+  }
+  await removeInstallOperation(root);
+}
+
+async function writeInstallOperation(
+  root: string,
+  operation: InstallOperation,
+): Promise<void> {
+  const temporary = join(root, `.operation-${randomUUID()}`);
+  let handle;
+  try {
+    handle = await open(temporary, "wx", 0o600);
+    await handle.writeFile(`${JSON.stringify(operation)}\n`);
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
+    await rename(temporary, installOperationPath(root));
+    await syncDirectory(root);
+  } finally {
+    await handle?.close().catch(() => undefined);
+    await rm(temporary, { force: true }).catch(() => undefined);
+  }
+}
+
+async function removeInstallOperation(root: string): Promise<void> {
+  await rm(installOperationPath(root));
+  await syncDirectory(root);
 }
 
 async function writeState(
