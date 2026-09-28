@@ -167,6 +167,17 @@ jobs:
             echo "::error title=Bubblewrap namespace preflight failed::The Ubuntu runner cannot create Koda's required user, mount, IPC, and network namespaces."
             exit 1
           fi
+      - name: Verify delegated cgroup v2 pids controls
+        shell: bash
+        run: |
+          sudo systemd-run \
+            --wait \
+            --pipe \
+            --collect \
+            --uid="$(id -un)" \
+            --property=Delegate=pids \
+            --unit="koda-cgroup-preflight-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            /usr/bin/bash "$GITHUB_WORKSPACE/scripts/check-linux-cgroup-delegation.sh"
       - run: pnpm install --frozen-lockfile --ignore-scripts
       - run: pnpm -r --if-present build
       - run: cargo build -p koda-exec
