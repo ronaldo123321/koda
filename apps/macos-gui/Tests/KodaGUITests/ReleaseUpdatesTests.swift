@@ -3,6 +3,31 @@ import XCTest
 @testable import KodaGUI
 
 final class ReleaseUpdatesTests: XCTestCase {
+    func testReleaseListIsLimitedWhileReading() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ReleaseListURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+
+        ReleaseListURLProtocol.bytes = Data(repeating: 0x20, count: 1_000_001)
+        ReleaseListURLProtocol.declaredLength = nil
+        do {
+            _ = try await ReleaseUpdates.check(installedVersion: "0.1.0", session: session)
+            XCTFail("An oversized Release list must be rejected")
+        } catch {
+            XCTAssertEqual(error.localizedDescription, "GitHub Releases 响应无效或暂不可用。")
+        }
+
+        ReleaseListURLProtocol.bytes = Data("[]".utf8)
+        ReleaseListURLProtocol.declaredLength = 1_000_001
+        do {
+            _ = try await ReleaseUpdates.check(installedVersion: "0.1.0", session: session)
+            XCTFail("An oversized declared Release list must be rejected")
+        } catch {
+            XCTAssertEqual(error.localizedDescription, "GitHub Releases 响应无效或暂不可用。")
+        }
+    }
+
     func testSelectsOnlyNewerMacAppReleaseForArchitecture() throws {
         let releases = [
             release("v0.3.0", draft: true, assets: ["Koda-v0.3.0-darwin-arm64.pkg", "Koda-v0.3.0-darwin-arm64.update.json"]),
@@ -46,4 +71,26 @@ final class ReleaseUpdatesTests: XCTestCase {
             ] },
         ]
     }
+}
+
+private final class ReleaseListURLProtocol: URLProtocol {
+    static var bytes = Data()
+    static var declaredLength: Int?
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        request.url?.host == "api.github.com"
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let headers = Self.declaredLength.map { ["Content-Length": String($0)] } ?? [:]
+        let response = HTTPURLResponse(url: request.url!, statusCode: 200,
+                                       httpVersion: "HTTP/1.1", headerFields: headers)!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Self.bytes)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() { }
 }

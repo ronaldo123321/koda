@@ -63,10 +63,15 @@ enum ReleaseUpdates {
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.setValue("Koda-macOS-update-check", forHTTPHeaderField: "User-Agent")
         request.timeoutInterval = 15
-        let (data, response) = try await session.data(for: request)
+        let (bytes, response) = try await session.bytes(for: request)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200,
-              data.count <= 1_000_000 else {
+              response.expectedContentLength <= 1_000_000 else {
             throw UpdateCheckError.invalidResponse
+        }
+        var data = Data()
+        for try await byte in bytes {
+            guard data.count < 1_000_000 else { throw UpdateCheckError.invalidResponse }
+            data.append(byte)
         }
         guard let candidate = try select(from: data, installedVersion: installedVersion,
                                          architecture: currentArchitecture) else { return nil }
