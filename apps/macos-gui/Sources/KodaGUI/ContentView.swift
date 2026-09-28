@@ -61,6 +61,7 @@ struct ContentView: View {
         }
         .onAppear { model.connect() }
         .task {
+            ReleaseUpdates.cleanupStaleDownloads()
             guard ReleaseUpdates.hasTrustRoot else { return }
             while !Task.isCancelled {
                 if downloadedUpdateURL == nil { await checkForUpdates(silent: true) }
@@ -95,6 +96,9 @@ struct ContentView: View {
         if !silent {
             updateNotice = nil
             updateCandidate = nil
+            if let downloadedUpdateURL {
+                ReleaseUpdates.discardDownloadedPackage(at: downloadedUpdateURL)
+            }
             downloadedUpdateURL = nil
         }
         do {
@@ -144,6 +148,8 @@ struct ContentView: View {
                 updateNotice = "已在 macOS 安装器中打开；请确认安装步骤。"
             } catch {
                 updateNotice = "无法打开更新包：\(error.localizedDescription)"
+                ReleaseUpdates.discardDownloadedPackage(at: packageURL)
+                downloadedUpdateURL = nil
             }
             openingInstaller = false
         }

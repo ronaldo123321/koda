@@ -4,6 +4,43 @@ import XCTest
 @testable import KodaGUI
 
 final class UpdateMetadataTests: XCTestCase {
+    func testStaleUpdateStagingIsCleanedWithoutRemovingOtherFiles() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("koda-update-cleanup-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let stale = root.appendingPathComponent("koda-update-\(UUID().uuidString)")
+        let fresh = root.appendingPathComponent("koda-update-\(UUID().uuidString)")
+        let unrelated = root.appendingPathComponent("other-\(UUID().uuidString)")
+        let linked = root.appendingPathComponent("koda-update-\(UUID().uuidString)")
+        for directory in [stale, fresh, unrelated] {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+            try Data("keep".utf8).write(to: directory.appendingPathComponent("package.pkg"))
+        }
+        try FileManager.default.createSymbolicLink(at: linked, withDestinationURL: unrelated)
+        let now = Date()
+        try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(-2 * 86_400)],
+                                              ofItemAtPath: stale.path)
+        try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(-2 * 86_400)],
+                                              ofItemAtPath: unrelated.path)
+
+        ReleaseUpdates.cleanupStaleDownloads(in: root, now: now)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stale.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fresh.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: unrelated.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: linked.path))
+
+        let staged = FileManager.default.temporaryDirectory
+            .appendingPathComponent("koda-update-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: staged, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: staged) }
+        let package = staged.appendingPathComponent("Koda.pkg")
+        try Data("download".utf8).write(to: package)
+        ReleaseUpdates.discardDownloadedPackage(at: package)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: staged.path))
+    }
+
     func testNodeSignerAndSwiftVerifierRejectTampering() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("koda-update-metadata-\(UUID().uuidString)")

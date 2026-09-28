@@ -24,6 +24,40 @@ enum ReleaseUpdates {
 
     static var hasTrustRoot: Bool { (try? loadTrustRoot()) != nil }
 
+    static func cleanupStaleDownloads(in directory: URL = FileManager.default.temporaryDirectory,
+                                      now: Date = Date()) {
+        let keys: Set<URLResourceKey> = [.isDirectoryKey, .isSymbolicLinkKey,
+                                         .contentModificationDateKey]
+        guard let entries = try? FileManager.default.contentsOfDirectory(
+            at: directory, includingPropertiesForKeys: Array(keys), options: []
+        ) else { return }
+        for entry in entries {
+            guard isManagedUpdateDirectory(entry),
+                  let values = try? entry.resourceValues(forKeys: keys),
+                  values.isDirectory == true, values.isSymbolicLink != true,
+                  let modified = values.contentModificationDate,
+                  now.timeIntervalSince(modified) > 24 * 60 * 60 else { continue }
+            try? FileManager.default.removeItem(at: entry)
+        }
+    }
+
+    static func discardDownloadedPackage(at packageURL: URL) {
+        guard packageURL.isFileURL else { return }
+        let directory = packageURL.deletingLastPathComponent()
+        guard isManagedUpdateDirectory(directory),
+              directory.deletingLastPathComponent().standardizedFileURL ==
+                FileManager.default.temporaryDirectory.standardizedFileURL else { return }
+        try? FileManager.default.removeItem(at: directory)
+    }
+
+    private static func isManagedUpdateDirectory(_ url: URL) -> Bool {
+        let prefix = "koda-update-"
+        let name = url.lastPathComponent
+        guard name.hasPrefix(prefix),
+              let uuid = UUID(uuidString: String(name.dropFirst(prefix.count))) else { return false }
+        return name == prefix + uuid.uuidString
+    }
+
     static func check(installedVersion: String, session: URLSession = .shared) async throws -> ReleaseUpdate? {
         var request = URLRequest(url: endpoint)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
