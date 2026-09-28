@@ -781,11 +781,7 @@ mod tests {
             })
         ));
 
-        for resources in [
-            r#"{"process_cpu_time_ms":1001}"#,
-            r#"{"process_address_space_bytes":4096}"#,
-            r#"{"unknown_limit":1}"#,
-        ] {
+        for resources in [r#"{"process_cpu_time_ms":1001}"#, r#"{"unknown_limit":1}"#] {
             let invalid = parse_arguments(
                 [
                     "command-bootstrap",
@@ -803,6 +799,22 @@ mod tests {
             );
             assert!(invalid.is_err());
         }
+        let address_space = parse_arguments(
+            [
+                "command-bootstrap",
+                "--gate-fd",
+                "3",
+                "--resource-confirm-fd",
+                "6",
+                "--resources",
+                r#"{"process_address_space_bytes":4096}"#,
+                "--",
+                "/usr/bin/true",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        );
+        assert_eq!(address_space.is_ok(), cfg!(target_os = "linux"));
     }
 
     #[test]
