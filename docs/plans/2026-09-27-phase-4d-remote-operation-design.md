@@ -10,7 +10,6 @@
   lists authorized Threads, replays assistant updates and event status, and
   previews verified Thread artifacts in bounded UTF-8 ranges. Scoped remote
   write/command approvals and allowlisted stdio/HTTPS MCP scopes are locally tested;
-  full event payload projection,
   approval recovery after host restart, automatic pairing, and physical two-device
   acceptance remain open.
   Swift client tests now exercise the actual local HTTPS/WSS listener with
@@ -54,6 +53,13 @@ host paths or sensitive diagnostics. The `/activity` endpoint and WSS
 `view=activity` project every event type with only selected status fields;
 tool arguments, approval details, process security evidence, and structured
 host paths remain on the owner host. Assistant text can quote workspace content.
+Devices additionally granted `thread:events:full` can read the original
+payload-bearing events through `/events/full` or WSS `view=full`. That explicit
+grant exposes tool inputs, outputs, diagnostics, and paths; both routes recheck
+the Thread binding and grant. HTTP responses remain capped at 3 MiB and WSS
+frames at 512 KiB. For a larger event, `GET /events/:sequence?afterByte=<offset>`
+returns up to 16 KiB of Base64 encoded event JSON with total size, byte offsets,
+and a full-event SHA-256 so the client can reconstruct and verify it.
 The separate assistant-update endpoint
 returns assistant text and limited Turn status only. Assistant text can quote
 workspace content, so devices need `thread:read` and must be trusted by the owner.
@@ -236,12 +242,14 @@ a Thread and journals the request ID before execution. The owner-host CLI can
 register workspaces, explicitly expose an existing Thread
 after verifying its workspace, issue scoped device credentials, revoke devices,
 and start a restricted HTTPS listener on an explicit private address. The
-listener authenticates each request and projects only opaque workspace IDs,
+listener authenticates each request and defaults to opaque workspace IDs,
 bound Thread summaries, payload-free event envelopes, assistant updates,
-safe all-type activity status, and verified Thread artifact ranges.
+safe all-type activity status, and verified Thread artifact ranges. Complete
+event payload replay requires a separate `thread:events:full` grant. An
+oversized event can be reconstructed from the bounded range endpoint.
 The SwiftUI preview verifies an out-of-band pinned server certificate and
 replays authorized assistant updates and event status. Automatic pairing, the full app-server
-method set, complete event payloads, crash-recoverable approval ownership,
+method set, crash-recoverable approval ownership,
 OAuth and physical two-device acceptance remain open before Phase 4D can
 close. Scoped remote writes, commands, and exact-call approvals have local
 macOS and HTTPS fixture coverage as described above.

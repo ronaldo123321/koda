@@ -12,6 +12,7 @@ const idSchema = z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u);
 export const remotePermissionSchema = z.enum([
   "workspace:read",
   "thread:read",
+  "thread:events:full",
   "turn:start",
   "turn:control",
   "approval:resolve",

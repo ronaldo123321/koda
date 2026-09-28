@@ -92,6 +92,12 @@ describe.skipIf(process.platform === "win32")(
           permissions: ["workspace:read", "thread:read"],
         },
       ]);
+      const fullReader = await devices.issue("full-reader", [
+        {
+          workspaceId: "project",
+          permissions: ["workspace:read", "thread:read", "thread:events:full"],
+        },
+      ]);
       const secondWriter = await devices.issue("laptop", [
         {
           workspaceId: "project",
@@ -570,6 +576,80 @@ describe.skipIf(process.platform === "win32")(
           nextAfterSequence: 3,
         });
         expect(JSON.stringify(failed.body)).not.toContain(home);
+        expect(
+          (
+            await get(
+              port,
+              certificate,
+              "/v1/threads/thread-1/events/full?after=2&limit=1",
+              issued.token,
+            )
+          ).status,
+        ).toBe(404);
+        const fullEvents = await get(
+          port,
+          certificate,
+          "/v1/threads/thread-1/events/full?after=2&limit=1",
+          fullReader.token,
+        );
+        expect(fullEvents.body).toMatchObject({
+          events: [
+            {
+              sequence: 3,
+              type: "turn.failed",
+              payload: { code: "TEST_FAILURE", message: `private ${home}` },
+            },
+          ],
+          nextAfterSequence: 3,
+        });
+        expect(
+          (
+            await get(
+              port,
+              certificate,
+              "/v1/threads/thread-1/events/2",
+              issued.token,
+            )
+          ).status,
+        ).toBe(404);
+        const chunks: Buffer[] = [];
+        let afterByte = 0;
+        let fullEventDigest: string | undefined;
+        let totalBytes = -1;
+        for (let pageIndex = 0; pageIndex < 8; pageIndex += 1) {
+          const range = await get(
+            port,
+            certificate,
+            `/v1/threads/thread-1/events/2?afterByte=${afterByte}`,
+            fullReader.token,
+          );
+          expect(range.status).toBe(200);
+          const body = range.body as {
+            sequence: number;
+            sha256: string;
+            startByte: number;
+            endByte: number;
+            totalBytes: number;
+            hasLater: boolean;
+            contentBase64: string;
+          };
+          expect(body.sequence).toBe(2);
+          expect(body.startByte).toBe(afterByte);
+          fullEventDigest ??= body.sha256;
+          expect(body.sha256).toBe(fullEventDigest);
+          totalBytes = body.totalBytes;
+          chunks.push(Buffer.from(body.contentBase64, "base64"));
+          afterByte = body.endByte;
+          if (!body.hasLater) break;
+        }
+        const reconstructed = Buffer.concat(chunks);
+        expect(afterByte).toBe(totalBytes);
+        expect(createHash("sha256").update(reconstructed).digest("hex")).toBe(
+          fullEventDigest,
+        );
+        expect(JSON.parse(reconstructed.toString("utf8"))).toEqual(
+          replayEvents[2],
+        );
         const activityStart = await get(
           port,
           certificate,
@@ -630,6 +710,40 @@ describe.skipIf(process.platform === "win32")(
         );
         activitySubscription.close();
         await activityClosed;
+        const deniedFullSubscription = new WebSocket(
+          `${subscriptionUrl}?after=2&limit=1&view=full`,
+          {
+            ca: certificate,
+            headers: { authorization: `Bearer ${issued.token}` },
+          },
+        );
+        await expect(openWebSocket(deniedFullSubscription)).rejects.toThrow(
+          "Unexpected server response: 404",
+        );
+        const fullSubscription = new WebSocket(
+          `${subscriptionUrl}?after=2&limit=1&view=full`,
+          {
+            ca: certificate,
+            headers: { authorization: `Bearer ${fullReader.token}` },
+          },
+        );
+        const fullFrames = collectWebSocketFrames(fullSubscription, 2);
+        await openWebSocket(fullSubscription);
+        expect(await fullFrames).toMatchObject([
+          {
+            kind: "update",
+            event: {
+              sequence: 3,
+              payload: { message: `private ${home}` },
+            },
+          },
+          { kind: "cursor", nextAfterSequence: 3 },
+        ]);
+        const fullClosed = new Promise<void>((resolveClose) =>
+          fullSubscription.once("close", () => resolveClose()),
+        );
+        fullSubscription.close();
+        await fullClosed;
         const invalidActivityView = new WebSocket(
           `${subscriptionUrl}?after=-1&view=raw`,
           {

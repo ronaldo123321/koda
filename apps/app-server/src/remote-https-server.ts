@@ -1,4 +1,4 @@
-import { X509Certificate } from "node:crypto";
+import { createHash, X509Certificate } from "node:crypto";
 import { constants } from "node:fs";
 import { open, readFile } from "node:fs/promises";
 import { createServer, type Server } from "node:https";
@@ -458,13 +458,83 @@ async function handleRequest(
       return;
     }
     const match =
-      /^\/v1\/threads\/([A-Za-z0-9][A-Za-z0-9_-]{0,127})(\/(?:events|updates|activity))?$/u.exec(
+      /^\/v1\/threads\/([A-Za-z0-9][A-Za-z0-9_-]{0,127})(\/(?:events\/full|events|updates|activity))?$/u.exec(
         url.pathname,
       );
     const artifactsMatch =
       /^\/v1\/threads\/([A-Za-z0-9][A-Za-z0-9_-]{0,127})\/artifacts(?:\/(sha256:[a-f0-9]{64}))?$/u.exec(
         url.pathname,
       );
+    const fullEventRangeMatch =
+      /^\/v1\/threads\/([A-Za-z0-9][A-Za-z0-9_-]{0,127})\/events\/(0|[1-9]\d*)$/u.exec(
+        url.pathname,
+      );
+    if (fullEventRangeMatch !== null) {
+      const threadIdText = fullEventRangeMatch[1];
+      const sequenceText = fullEventRangeMatch[2];
+      if (threadIdText === undefined || sequenceText === undefined) {
+        throw new RemoteInvalidRequestError();
+      }
+      const threadId = threadIdSchema.parse(threadIdText);
+      const sequence = parseBoundedInteger(
+        sequenceText,
+        0,
+        Number.MAX_SAFE_INTEGER,
+      );
+      const cursor = parseFullEventRangeCursor(url);
+      if (sequence === undefined || cursor === undefined) {
+        throw new RemoteInvalidRequestError();
+      }
+      const binding = await threads.get(threadId);
+      const root = await catalog.authorizeThread(
+        verified.principal,
+        binding,
+        "thread:read",
+      );
+      await catalog.authorizeThread(
+        verified.principal,
+        binding,
+        "thread:events:full",
+      );
+      const metadata = (await application.getThread(threadId)).value;
+      if (metadata?.workspaceRoot !== root) throw new RemoteAccessDeniedError();
+      const page = await application.readThreadEvents({
+        threadId,
+        afterSequence: sequence - 1,
+        limit: 1,
+      });
+      const event = page.events[0];
+      if (event?.sequence !== sequence) {
+        send(response, 404, { error: "Unavailable" });
+        return;
+      }
+      const bytes = Buffer.from(JSON.stringify(event));
+      if (cursor.afterByte > bytes.byteLength) {
+        send(response, 416, { error: "Range unavailable" });
+        return;
+      }
+      const endByte = Math.min(
+        bytes.byteLength,
+        cursor.afterByte + cursor.maxBytes,
+      );
+      send(
+        response,
+        200,
+        {
+          sequence,
+          sha256: createHash("sha256").update(bytes).digest("hex"),
+          startByte: cursor.afterByte,
+          endByte,
+          totalBytes: bytes.byteLength,
+          hasLater: endByte < bytes.byteLength,
+          contentBase64: bytes
+            .subarray(cursor.afterByte, endByte)
+            .toString("base64"),
+        },
+        MAX_ARTIFACT_RESPONSE_BYTES,
+      );
+      return;
+    }
     if (artifactsMatch !== null) {
       const threadIdText = artifactsMatch[1];
       if (threadIdText === undefined) throw new RemoteInvalidRequestError();
@@ -541,9 +611,18 @@ async function handleRequest(
       }
       if (
         match[2] === "/events" ||
+        match[2] === "/events/full" ||
         match[2] === "/updates" ||
         match[2] === "/activity"
       ) {
+        const full = match[2] === "/events/full";
+        if (full) {
+          await catalog.authorizeThread(
+            verified.principal,
+            binding,
+            "thread:events:full",
+          );
+        }
         const cursor = parseEventCursor(url);
         if (cursor === undefined) {
           send(response, 400, { error: "Invalid event cursor" });
@@ -560,12 +639,14 @@ async function handleRequest(
           ? page.events.flatMap(projectRemoteUpdate)
           : activity
             ? page.events.map(projectRemoteActivity)
-            : page.events.map((event) => ({
-                sequence: event.sequence,
-                timestamp: event.timestamp,
-                turnId: event.turnId,
-                type: event.type,
-              }));
+            : full
+              ? page.events
+              : page.events.map((event) => ({
+                  sequence: event.sequence,
+                  timestamp: event.timestamp,
+                  turnId: event.turnId,
+                  type: event.type,
+                }));
         send(
           response,
           200,
@@ -574,7 +655,9 @@ async function handleRequest(
             hasMore: page.hasLater,
             nextAfterSequence: page.events.at(-1)?.sequence ?? cursor.after,
           },
-          updates || activity ? MAX_UPDATE_RESPONSE_BYTES : MAX_RESPONSE_BYTES,
+          updates || activity || full
+            ? MAX_UPDATE_RESPONSE_BYTES
+            : MAX_RESPONSE_BYTES,
         );
         return;
       }
@@ -664,11 +747,19 @@ async function acceptSubscription(
       await workspaces.list(),
       verified.grants,
     );
+    const binding = await threads.get(threadId);
     const root = await catalog.authorizeThread(
       verified.principal,
-      await threads.get(threadId),
+      binding,
       "thread:read",
     );
+    if (url.searchParams.get("view") === "full") {
+      await catalog.authorizeThread(
+        verified.principal,
+        binding,
+        "thread:events:full",
+      );
+    }
     const metadata = (await application.getThread(threadId)).value;
     if (metadata?.workspaceRoot !== root) throw new RemoteAccessDeniedError();
     subscriptions.handleUpgrade(request, socket, head, (client) => {
@@ -680,7 +771,8 @@ async function acceptSubscription(
         threadId,
         cursor.after,
         cursor.limit,
-        url.searchParams.get("view") === "activity",
+        (url.searchParams.get("view") ?? "updates") as
+          "updates" | "activity" | "full",
         application,
         devices,
         workspaces,
@@ -698,7 +790,7 @@ async function streamSubscription(
   threadId: string,
   initialAfter: number,
   limit: number,
-  activity: boolean,
+  view: "updates" | "activity" | "full",
   application: KodaApplication,
   devices: RemoteDeviceStore,
   workspaces: RemoteWorkspaceStore,
@@ -713,11 +805,19 @@ async function streamSubscription(
         await workspaces.list(),
         verified.grants,
       );
+      const binding = await threads.get(threadId);
       const root = await catalog.authorizeThread(
         verified.principal,
-        await threads.get(threadId),
+        binding,
         "thread:read",
       );
+      if (view === "full") {
+        await catalog.authorizeThread(
+          verified.principal,
+          binding,
+          "thread:events:full",
+        );
+      }
       const metadata = (await application.getThread(threadId)).value;
       if (metadata?.workspaceRoot !== root) throw new RemoteAccessDeniedError();
       const page = await application.readThreadEvents({
@@ -726,9 +826,12 @@ async function streamSubscription(
         limit,
       });
       for (const event of page.events) {
-        const projected = activity
-          ? [projectRemoteActivity(event)]
-          : projectRemoteUpdate(event);
+        const projected =
+          view === "full"
+            ? [event]
+            : view === "activity"
+              ? [projectRemoteActivity(event)]
+              : projectRemoteUpdate(event);
         for (const update of projected) {
           if (!sendWebSocket(client, { kind: "update", event: update })) return;
         }
@@ -843,7 +946,8 @@ function parseEventCursor(
     url.searchParams.getAll("limit").length > 1 ||
     url.searchParams.getAll("view").length > 1 ||
     (url.searchParams.has("view") &&
-      (!allowActivityView || url.searchParams.get("view") !== "activity"))
+      (!allowActivityView ||
+        !["activity", "full"].includes(url.searchParams.get("view") ?? "")))
   )
     return undefined;
   const afterText = url.searchParams.get("after") ?? "-1";
@@ -957,6 +1061,32 @@ function parseArtifactReadCursor(
     ...(afterByte === undefined ? {} : { afterByte }),
     maxBytes,
   };
+}
+
+function parseFullEventRangeCursor(
+  url: URL,
+): { afterByte: number; maxBytes: number } | undefined {
+  if (
+    [...url.searchParams.keys()].some(
+      (key) => key !== "afterByte" && key !== "maxBytes",
+    ) ||
+    url.searchParams.getAll("afterByte").length > 1 ||
+    url.searchParams.getAll("maxBytes").length > 1
+  ) {
+    return undefined;
+  }
+  const afterByte = parseBoundedInteger(
+    url.searchParams.get("afterByte") ?? "0",
+    0,
+    Number.MAX_SAFE_INTEGER,
+  );
+  const maxBytes = parseBoundedInteger(
+    url.searchParams.get("maxBytes") ?? "16384",
+    1,
+    16_384,
+  );
+  if (afterByte === undefined || maxBytes === undefined) return undefined;
+  return { afterByte, maxBytes };
 }
 
 function parseBoundedInteger(

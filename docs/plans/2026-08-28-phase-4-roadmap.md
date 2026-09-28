@@ -358,7 +358,8 @@ Thread exposure commands, and immutable remote Thread-binding foundation are
 implemented locally. An opt-in authenticated
 TLS listener on a private IP now exposes workspace IDs, bound Thread summaries,
 durable payload-free event envelopes, assistant updates, and safe all-type
-activity status with exclusive cursors,
+activity status with exclusive cursors; separately granted devices can request
+raw event payloads and retrieve large events in bounded verified ranges,
 authenticated WSS subscriptions with replay, and restricted
 remote Turn starts with pre-execution binding and durable request idempotency.
 Thread-scoped artifact listing and verified text-range reads are now exposed
@@ -373,7 +374,7 @@ both stdio and exact-URL HTTPS transports have local tests, along with a real
 MCP effect and its approval. An exact-call approval can be
 transferred to another authorized device without extending its expiry; the
 transfer request has a durable owner-host audit record. Approval recovery after
-host restart, full event payloads, OAuth, and physical two-Mac acceptance remain
+host restart, OAuth, and physical two-Mac acceptance remain
 open. First deployment targets LAN or an
 owner-managed VPN.
 
