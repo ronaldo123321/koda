@@ -882,6 +882,108 @@ await installManagedPluginPackage(${JSON.stringify({
     });
   });
 
+  it("recovers when an update process dies at each state publication point", async () => {
+    const fixture = await packageFixture("index.mjs", managedProtocolScript);
+    const checkpoints = [
+      "package_committed",
+      "state_file_synced",
+      "state_replaced",
+    ] as const;
+    const homes = checkpoints.map((checkpoint) =>
+      join(fixture.parent, `home-${checkpoint}`),
+    );
+    for (const home of homes) {
+      await installManagedPluginPackage({
+        kodaHome: home,
+        sourceDirectory: fixture.root,
+        trustRoot: fixture.trust,
+        capabilities: ["tools"],
+      });
+      await setManagedPluginEnabled(home, "reviewer", true);
+    }
+    await rewriteVersion(fixture, "1.1.0");
+    const moduleURL = pathToFileURL(
+      join(process.cwd(), "packages/plugin-host-node/dist/index.js"),
+    ).href;
+
+    for (const [index, checkpoint] of checkpoints.entries()) {
+      const home = homes[index]!;
+      const ready = join(fixture.parent, `ready-${checkpoint}`);
+      const runner = join(fixture.parent, `install-${checkpoint}.mjs`);
+      await writeFile(
+        runner,
+        `import { writeFileSync } from 'node:fs';
+import { installManagedPluginPackage } from ${JSON.stringify(moduleURL)};
+await installManagedPluginPackage({
+  ...${JSON.stringify({
+    kodaHome: home,
+    sourceDirectory: fixture.root,
+    trustRoot: fixture.trust,
+    capabilities: ["tools"],
+  })},
+  onCheckpoint: async (value) => {
+    if (value !== ${JSON.stringify(checkpoint)}) return;
+    writeFileSync(${JSON.stringify(ready)}, value);
+    await new Promise(() => setInterval(() => {}, 1000));
+  },
+});\n`,
+      );
+      const child = spawn(process.execPath, [runner], { stdio: "ignore" });
+      const exit = new Promise<void>((resolve) =>
+        child.once("exit", () => resolve()),
+      );
+      try {
+        let enteredCheckpoint = false;
+        for (let attempt = 0; attempt < 100; attempt += 1) {
+          enteredCheckpoint = await stat(ready).then(
+            () => true,
+            () => false,
+          );
+          if (enteredCheckpoint || child.exitCode !== null) break;
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        expect(enteredCheckpoint).toBe(true);
+      } finally {
+        child.kill("SIGKILL");
+        await exit;
+      }
+      expect(child.signalCode).toBe("SIGKILL");
+      const installed = (await listManagedPlugins(home))[0];
+      expect(installed).toMatchObject(
+        checkpoint === "state_replaced"
+          ? { version: "1.1.0", previousVersion: "1.0.0", enabled: false }
+          : { version: "1.0.0", enabled: true },
+      );
+      const loaded = await loadPluginConfiguration({
+        environment: {},
+        kodaHome: home,
+        processDirectory: fixture.parent,
+      });
+      if (checkpoint === "state_replaced") {
+        expect(loaded.plugins).toEqual([]);
+      } else {
+        expect(loaded.plugins[0]?.args[0]).toContain(installed?.manifestSha256);
+      }
+      expect(
+        await installManagedPluginPackage({
+          kodaHome: home,
+          sourceDirectory: fixture.root,
+          trustRoot: fixture.trust,
+          capabilities: ["tools"],
+        }),
+      ).toMatchObject({
+        version: "1.1.0",
+        previousVersion: "1.0.0",
+        enabled: false,
+      });
+      expect(
+        (await readdir(join(home, "managed-plugins"))).filter((name) =>
+          /^\.(?:stage|state)-/u.test(name),
+        ),
+      ).toEqual([]);
+    }
+  });
+
   it("rejects a manual configuration that shadows an enabled managed plugin", async () => {
     const fixture = await packageFixture();
     const home = join(fixture.parent, "home");

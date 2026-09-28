@@ -1,6 +1,15 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { cp, lstat, mkdir, mkdtemp, open, rename, rm } from "node:fs/promises";
+import {
+  cp,
+  lstat,
+  mkdir,
+  mkdtemp,
+  open,
+  readdir,
+  rename,
+  rm,
+} from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import { sha256CanonicalJson } from "@koda/agent-core";
@@ -78,6 +87,9 @@ export interface ManagedPluginUpdateSource {
   readonly stateSha256: string;
 }
 
+type InstallCheckpoint =
+  "package_committed" | "state_file_synced" | "state_replaced";
+
 export async function installManagedPluginPackage(options: {
   kodaHome: string;
   sourceDirectory: string;
@@ -90,6 +102,7 @@ export async function installManagedPluginPackage(options: {
   };
   rotation?: { previousTrustRoot: PluginPublisherTrustRoot };
   expectedStateSha256?: string;
+  onCheckpoint?: (checkpoint: InstallCheckpoint) => Promise<void>;
 }): Promise<ManagedPluginStatus> {
   const capabilities = validateCapabilities(options.capabilities);
   const verified = await verifyLocalPluginPackage(
@@ -101,6 +114,7 @@ export async function installManagedPluginPackage(options: {
   const lease = await ThreadLease.acquire(statePath(root));
   try {
     const state = await readState(root);
+    await removeAbandonedWrites(root);
     const old = state.plugins[verified.id];
     if (
       options.expectedStateSha256 !== undefined &&
@@ -178,6 +192,7 @@ export async function installManagedPluginPackage(options: {
         }
         await rename(copied, target);
         await syncDirectory(dirname(target));
+        await options.onCheckpoint?.("package_committed");
       } finally {
         await rm(staging, { recursive: true, force: true });
       }
@@ -209,7 +224,7 @@ export async function installManagedPluginPackage(options: {
               enabled: false,
             };
     state.plugins[verified.id] = entry;
-    await writeState(root, state);
+    await writeState(root, state, options.onCheckpoint);
     return projectStatus(verified.id, entry);
   } finally {
     await lease.release();
@@ -490,7 +505,25 @@ async function readState(root: string): Promise<ManagedState> {
   }
 }
 
-async function writeState(root: string, state: ManagedState): Promise<void> {
+async function removeAbandonedWrites(root: string): Promise<void> {
+  for (const name of await readdir(root)) {
+    if (
+      /^\.state-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(
+        name,
+      )
+    ) {
+      await rm(join(root, name), { force: true });
+    } else if (/^\.stage-[A-Za-z0-9]{6}$/u.test(name)) {
+      await rm(join(root, name), { recursive: true, force: true });
+    }
+  }
+}
+
+async function writeState(
+  root: string,
+  state: ManagedState,
+  onCheckpoint?: (checkpoint: InstallCheckpoint) => Promise<void>,
+): Promise<void> {
   const temporary = join(root, `.state-${randomUUID()}`);
   let handle;
   try {
@@ -499,7 +532,9 @@ async function writeState(root: string, state: ManagedState): Promise<void> {
     await handle.sync();
     await handle.close();
     handle = undefined;
+    await onCheckpoint?.("state_file_synced");
     await rename(temporary, statePath(root));
+    await onCheckpoint?.("state_replaced");
     await syncDirectory(root);
   } finally {
     await handle?.close().catch(() => undefined);

@@ -394,8 +394,8 @@ Linux/Windows release expansion remains deferred.
 
 ### Phase 4F: hardening acceptance
 
-Status: In progress — the 2026-09-27 local full-suite baseline passed:
-`pnpm test` completed the build, 89 Rust tests, and 817 Vitest tests
+Status: In progress — the 2026-09-28 local full-suite baseline passed:
+`pnpm test` completed the build, 89 Rust tests, and 839 Vitest tests
 (35 skipped); `pnpm typecheck` and six SwiftUI package tests also passed.
 Remote Turn request reservation and committed-binding recovery now have a real
 child-process `SIGKILL` regression test. Unbound, unlogged reserved requests now have a
