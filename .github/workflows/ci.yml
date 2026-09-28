@@ -266,6 +266,12 @@ jobs:
             packages/testkit/src/mcp-oauth-vault.test.ts \
             packages/testkit/src/mcp-oauth-login.test.ts \
             packages/testkit/src/mcp-oauth-cli.test.ts
+      - name: Run macOS approval recovery acceptance
+        run: |
+          pnpm exec vitest run \
+            packages/testkit/src/remote-approval-lease-store.test.ts \
+            packages/testkit/src/remote-turn-host.test.ts \
+            packages/testkit/src/remote-command.test.ts
 
   windows-native:
     if: github.event_name == 'workflow_dispatch'

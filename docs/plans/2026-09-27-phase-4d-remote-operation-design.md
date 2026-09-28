@@ -10,8 +10,9 @@
   lists authorized Threads, replays assistant updates and event status, and
   previews verified Thread artifacts in bounded UTF-8 ranges. Scoped remote
   write/command approvals and allowlisted stdio/HTTPS MCP scopes are locally tested;
-  durable approval ownership recovery after host restart, automatic pairing, and physical two-device
-  acceptance remain open. Owner-local HTTPS MCP OAuth now has encrypted credentials,
+  automatic pairing and physical two-device acceptance remain open. Approval
+  ownership and decisions are durably recorded; a crashed call remains
+  interrupted and requires a new Turn. Owner-local HTTPS MCP OAuth now has encrypted credentials,
   authorization-code/PKCE loopback login, refresh, local revocation, and key rotation;
   a real TLS OAuth fixture passes, including an explicitly configured
   provider-side revocation endpoint. Live-provider interoperability remains
@@ -153,15 +154,21 @@ scope requires matching device grants; the default remains read-only. An
 approval is removed before its decision is delivered, so a repeated resolution
 cannot execute twice. The ordinary activity projection excludes tool arguments;
 the separately authorized approval preview intentionally shows exact details
-and may include host paths. The approval lease is not yet durable. The current
+and may include host paths. The owner-host now persists the assignment and
+terminal decision without preview details. The current
 device may explicitly transfer one pending call to another active device with
 the same workspace, effect scope, and MCP server grants. The host writes a
 minimal transfer-request audit record before switching ownership; the old
 device then loses preview and resolution rights. Transfer never extends the
 five-minute expiry. An audit request may exist without an applied transfer if
 the Turn ends during the write. Host shutdown rejects pending approvals;
-process loss cannot resume a pending tool call. Crash-recoverable approval
-ownership remains open work.
+process loss cannot resume a pending tool call. The owner can inspect its last
+assignment with `koda remote approval inspect <thread-id> <turn-id> <call-id>`;
+an interrupted Turn reports `start_new_turn`, while the previous call stays
+non-actionable. Real child-process `SIGKILL` tests verify initial and
+transferred assignments survive, and neither device can approve the old call
+after restart. This records and
+invalidates ownership safely; it does not replay an uncertain effect.
 
 A real child-process `SIGKILL` test now covers the durable request record after
 reservation and after the request is marked started with a Thread binding.
@@ -262,7 +269,7 @@ event payload replay requires a separate `thread:events:full` grant. An
 oversized event can be reconstructed from the bounded range endpoint.
 The SwiftUI preview verifies an out-of-band pinned server certificate and
 replays authorized assistant updates and event status. Automatic pairing, the full app-server
-method set, crash-recoverable approval ownership,
+method set,
 OAuth and physical two-device acceptance remain open before Phase 4D can
 close. Scoped remote writes, commands, and exact-call approvals have local
 macOS and HTTPS fixture coverage as described above.
@@ -271,5 +278,5 @@ After a host crash, an indexed interrupted Turn is returned as `interrupted`
 when the initiating device retries the same request ID. The macOS client clears
 that pending start and directs the owner to inspect the Thread before issuing a
 new request. A `SIGKILL` test confirms an approval pending in the old process
-cannot be resolved in the new process. Pending approval assignment and transfer
-history are not yet reconstructed as durable recoverable state.
+cannot be resolved in the new process. The last assignment is durable and
+owner-inspectable; a new Turn must request any approval again.

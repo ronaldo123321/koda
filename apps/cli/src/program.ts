@@ -38,6 +38,7 @@ import { runCommand, type RunCommandInput } from "./run-command.js";
 import {
   runRemoteDeviceIssueCommand,
   runRemoteDeviceRevokeCommand,
+  runRemoteApprovalInspectCommand,
   runRemoteRequestAbandonCommand,
   runRemoteRequestInspectCommand,
   runRemoteServeCommand,
@@ -791,6 +792,23 @@ export function createProgram(runtime: ProgramRuntime): Command {
     .action(async (requestId: string) => {
       runtime.setExitCode(
         await runRemoteRequestAbandonCommand(requestId, runtime),
+      );
+    });
+  remote
+    .command("approval")
+    .description("Inspect a durable remote approval assignment")
+    .command("inspect")
+    .argument("<thread-id>")
+    .argument("<turn-id>")
+    .argument("<call-id>")
+    .action(async (threadId: string, turnId: string, callId: string) => {
+      runtime.setExitCode(
+        await runRemoteApprovalInspectCommand(
+          threadId,
+          turnId,
+          callId,
+          runtime,
+        ),
       );
     });
 

@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  RemoteApprovalLeaseStore,
   RemoteDeviceStore,
   RemoteThreadStore,
   RemoteTurnRequestStore,
@@ -170,6 +171,31 @@ describe.skipIf(process.platform === "win32")("remote owner commands", () => {
         },
       }),
     );
+
+    const approvals = await RemoteApprovalLeaseStore.open(home);
+    await approvals.begin({
+      ownerId: "owner",
+      workspaceId: "project",
+      threadId,
+      turnId: "remote-expose-turn",
+      callId: "pending-call",
+      deviceId: `device-${"1".repeat(32)}`,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const inspectedApproval = await invoke(home, [
+      "remote",
+      "approval",
+      "inspect",
+      threadId,
+      "remote-expose-turn",
+      "pending-call",
+    ]);
+    expect(inspectedApproval.exitCode).toBe(0);
+    expect(JSON.parse(inspectedApproval.stdout.value)).toMatchObject({
+      deviceId: `device-${"1".repeat(32)}`,
+      status: "interrupted",
+      recovery: "start_new_turn",
+    });
 
     const wrong = await invoke(home, [
       "remote",

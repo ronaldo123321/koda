@@ -8,6 +8,7 @@ import {
   RemoteAccessDeniedError,
   type RemotePrincipal,
 } from "./remote-access.js";
+import { RemoteApprovalLeaseStore } from "./remote-approval-lease-store.js";
 import { RemoteApprovalTransferStore } from "./remote-approval-transfer-store.js";
 import { RemoteThreadStore } from "./remote-thread-store.js";
 import {
@@ -33,7 +34,8 @@ interface PendingRemoteApproval {
   request: ApprovalRequest;
   expiresAt: number;
   transferring?: boolean;
-  settle(decision: ApprovalDecision): boolean;
+  transferDone?: Promise<void>;
+  settle(decision: ApprovalDecision): Promise<boolean>;
 }
 
 export interface RemoteApprovalPreview {
@@ -69,6 +71,7 @@ export class RemoteTurnHost {
     private readonly threads: RemoteThreadStore,
     private readonly requests: RemoteTurnRequestStore,
     private readonly transferAudit?: RemoteApprovalTransferStore,
+    private readonly approvalLeases?: RemoteApprovalLeaseStore,
   ) {
     if (!application.isRemoteRestricted) {
       throw new Error("Remote Turn host requires a restricted application.");
@@ -181,6 +184,8 @@ export class RemoteTurnHost {
                   throw new Error("Remote approval has no bound Turn.");
                 return this.requestApproval(
                   turnIds,
+                  principal.ownerId,
+                  input.workspaceId,
                   principal.deviceId,
                   input.effects ?? [],
                   mcpServerIds,
@@ -302,9 +307,14 @@ export class RemoteTurnHost {
 
   public async close(): Promise<void> {
     this.closed = true;
-    for (const pending of this.pendingApprovals.values()) {
-      pending.settle({ decision: "rejected", reason: "Remote host stopped." });
-    }
+    await Promise.all(
+      [...this.pendingApprovals.values()].map((pending) =>
+        pending.settle({
+          decision: "rejected",
+          reason: "Remote host stopped.",
+        }),
+      ),
+    );
     const handles = [...this.active.values()].map((entry) => entry.handle);
     for (const handle of handles)
       handle.cancel("Remote host is shutting down.");
@@ -419,6 +429,10 @@ export class RemoteTurnHost {
       return false;
     }
     pending.transferring = true;
+    let finishTransfer: () => void = () => undefined;
+    pending.transferDone = new Promise<void>((resolve) => {
+      finishTransfer = resolve;
+    });
     try {
       await this.transferAudit.append({
         ownerId: principal.ownerId,
@@ -437,10 +451,22 @@ export class RemoteTurnHost {
       ) {
         return false;
       }
+      await this.approvalLeases?.transfer(
+        threadId,
+        turnId,
+        callId,
+        principal.deviceId,
+        target.deviceId,
+      );
       pending.deviceId = target.deviceId;
+      if (this.closed || this.pendingApprovals.get(key) !== pending) {
+        return false;
+      }
       return true;
     } finally {
       pending.transferring = false;
+      finishTransfer();
+      delete pending.transferDone;
     }
   }
 
@@ -476,8 +502,10 @@ export class RemoteTurnHost {
     );
   }
 
-  private requestApproval(
+  private async requestApproval(
     ids: { threadId: string; turnId: string },
+    ownerId: string,
+    workspaceId: string,
     deviceId: string,
     effects: readonly ("workspace:mutate" | "process:control" | "mcp:invoke")[],
     mcpServerIds: readonly string[] | undefined,
@@ -497,27 +525,81 @@ export class RemoteTurnHost {
         reason: "Approval is already pending.",
       });
     }
+    const expiresAt = Date.now() + 5 * 60_000;
+    try {
+      await this.approvalLeases?.begin({
+        ownerId,
+        workspaceId,
+        ...ids,
+        callId: request.callId,
+        deviceId,
+        expiresAt: new Date(expiresAt).toISOString(),
+      });
+    } catch {
+      return {
+        decision: "rejected",
+        reason: "Remote approval could not be recorded.",
+      };
+    }
+    if (this.closed || this.pendingApprovals.has(key)) {
+      await this.approvalLeases
+        ?.finish(ids.threadId, ids.turnId, request.callId, deviceId, "rejected")
+        .catch(() => undefined);
+      return {
+        decision: "rejected",
+        reason: "Remote approval is unavailable.",
+      };
+    }
     return new Promise<ApprovalDecision>((resolve) => {
-      const expiresAt = Date.now() + 5 * 60_000;
       let settled = false;
-      const settle = (decision: ApprovalDecision) => {
+      const settle = async (decision: ApprovalDecision) => {
         if (settled) return false;
         settled = true;
         clearTimeout(timer);
         signal.removeEventListener("abort", onAbort);
         this.pendingApprovals.delete(key);
-        resolve(decision);
-        return true;
+        try {
+          await pending.transferDone;
+          const finalDecision: ApprovalDecision =
+            decision.decision === "approved" &&
+            (this.closed || signal.aborted || Date.now() >= expiresAt)
+              ? {
+                  decision: "rejected",
+                  reason: "Remote approval is no longer available.",
+                }
+              : decision;
+          await this.approvalLeases?.finish(
+            ids.threadId,
+            ids.turnId,
+            request.callId,
+            pending.deviceId,
+            finalDecision.decision === "approved" ? "approved" : "rejected",
+          );
+          resolve(finalDecision);
+          return finalDecision.decision === decision.decision;
+        } catch {
+          resolve({
+            decision: "rejected",
+            reason: "Remote approval could not be recorded.",
+          });
+          return false;
+        }
       };
       const onAbort = () =>
-        settle({ decision: "rejected", reason: "Remote Turn was cancelled." });
+        void settle({
+          decision: "rejected",
+          reason: "Remote Turn was cancelled.",
+        });
       const timer = setTimeout(
         () =>
-          settle({ decision: "rejected", reason: "Remote approval expired." }),
+          void settle({
+            decision: "rejected",
+            reason: "Remote approval expired.",
+          }),
         5 * 60_000,
       );
       signal.addEventListener("abort", onAbort, { once: true });
-      this.pendingApprovals.set(key, {
+      const pending: PendingRemoteApproval = {
         ...ids,
         deviceId,
         effects,
@@ -525,7 +607,8 @@ export class RemoteTurnHost {
         request,
         expiresAt,
         settle,
-      });
+      };
+      this.pendingApprovals.set(key, pending);
       if (signal.aborted) onAbort();
     });
   }
@@ -533,7 +616,10 @@ export class RemoteTurnHost {
   private rejectTurnApprovals(turnId: string): void {
     for (const pending of this.pendingApprovals.values()) {
       if (pending.turnId === turnId) {
-        pending.settle({ decision: "rejected", reason: "Remote Turn ended." });
+        void pending.settle({
+          decision: "rejected",
+          reason: "Remote Turn ended.",
+        });
       }
     }
   }

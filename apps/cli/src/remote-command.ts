@@ -2,6 +2,7 @@ import { lstat } from "node:fs/promises";
 import { join } from "node:path";
 
 import {
+  RemoteApprovalLeaseStore,
   RemoteDeviceStore,
   RemoteThreadStore,
   RemoteTurnRequestStore,
@@ -202,6 +203,46 @@ export async function runRemoteRequestAbandonCommand(
     const threads = await RemoteThreadStore.open(home, OWNER_ID);
     const record = await requests.abandon(requestId, threads);
     context.stdout.write(`Abandoned remote request ${record.requestId}\n`);
+    return 0;
+  } catch (error) {
+    return fail(context, error);
+  }
+}
+
+export async function runRemoteApprovalInspectCommand(
+  threadId: string,
+  turnId: string,
+  callId: string,
+  context: RemoteCommandContext & { processDirectory: string },
+): Promise<number> {
+  try {
+    const leases = await RemoteApprovalLeaseStore.open(
+      resolveKodaHome(context.environment),
+    );
+    const record = await leases.get(threadId, turnId, callId);
+    if (record === undefined)
+      throw new Error("Remote approval is unavailable.");
+    const application = new KodaApplication({
+      environment: context.environment,
+      processDirectory: context.processDirectory,
+    });
+    const thread = (await application.getThread(threadId)).value;
+    const interrupted =
+      record.status === "pending" &&
+      thread?.lastTurnId === turnId &&
+      thread.status === "interrupted";
+    context.stdout.write(
+      `${JSON.stringify({
+        threadId,
+        turnId,
+        callId,
+        workspaceId: record.workspaceId,
+        deviceId: record.deviceId,
+        expiresAt: record.expiresAt,
+        status: interrupted ? "interrupted" : record.status,
+        ...(interrupted ? { recovery: "start_new_turn" } : {}),
+      })}\n`,
+    );
     return 0;
   } catch (error) {
     return fail(context, error);

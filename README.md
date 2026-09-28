@@ -115,7 +115,7 @@ koda remote device issue macbook --workspace project --permissions workspace:rea
 
 若服务方不支持动态客户端注册，可先注册回调地址，并在 `oauth` 中配置服务方提供的 `"client_id":"…"`。
 
-客户端按 Turn 选择副作用范围，每次实际写入或执行仍需在当前审批设备预览并批准；审批五分钟过期，拒绝或超时不会执行该调用。当前审批设备可输入另一台已授权设备的 ID 显式转交单次审批，目标设备可从远程窗口顶部复制自己的 ID；转交不延长有效期。客户端必须核对主机证书指纹。现有 Thread 需由主机所有者显式执行 `koda remote thread expose <thread-id> --workspace project` 才会对远程设备可见。macOS 远程窗口可按游标回放助手文本和事件状态；普通活动流不投射工具参数与结构化主机路径。仅对明确授予 `thread:events:full` 的设备，主机提供 `/v1/threads/<id>/events/full` 和 WebSocket `view=full` 的原始事件载荷；其中可能包含路径、工具参数和输出。超出响应或帧上限的单条事件可通过 `/v1/threads/<id>/events/<sequence>?afterByte=<offset>` 分段读取并校验摘要。有 `approval:resolve` 权限的设备可查看待审批操作的确切参数与路径，助手文本也可能引用工作区内容。主机崩溃后，已中断请求的重试会返回 `interrupted`，旧进程的审批不会在新进程中生效；审批归属的持久恢复与双设备真实网络验收尚未完成，具体边界见 [远程操作设计](docs/plans/2026-09-27-phase-4d-remote-operation-design.md)。
+客户端按 Turn 选择副作用范围，每次实际写入或执行仍需在当前审批设备预览并批准；审批五分钟过期，拒绝或超时不会执行该调用。当前审批设备可输入另一台已授权设备的 ID 显式转交单次审批，目标设备可从远程窗口顶部复制自己的 ID；转交不延长有效期。客户端必须核对主机证书指纹。现有 Thread 需由主机所有者显式执行 `koda remote thread expose <thread-id> --workspace project` 才会对远程设备可见。macOS 远程窗口可按游标回放助手文本和事件状态；普通活动流不投射工具参数与结构化主机路径。仅对明确授予 `thread:events:full` 的设备，主机提供 `/v1/threads/<id>/events/full` 和 WebSocket `view=full` 的原始事件载荷；其中可能包含路径、工具参数和输出。超出响应或帧上限的单条事件可通过 `/v1/threads/<id>/events/<sequence>?afterByte=<offset>` 分段读取并校验摘要。有 `approval:resolve` 权限的设备可查看待审批操作的确切参数与路径，助手文本也可能引用工作区内容。主机崩溃后，已中断请求的重试会返回 `interrupted`，旧进程的审批不会在新进程中生效；主机可用 `koda remote approval inspect <thread-id> <turn-id> <call-id>` 查看审批最后归属；中断的旧调用无法再批准，须启动新 Turn；双设备真实网络验收尚未完成，具体边界见 [远程操作设计](docs/plans/2026-09-27-phase-4d-remote-operation-design.md)。
 
 ## 扩展与本地数据
 

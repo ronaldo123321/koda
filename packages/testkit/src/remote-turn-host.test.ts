@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 import { KodaApplication, type TurnClient } from "@koda/app";
 import {
   RemoteAccessCatalog,
+  RemoteApprovalLeaseStore,
   RemoteApprovalTransferStore,
   RemoteThreadStore,
   RemoteTurnHost,
@@ -267,7 +268,13 @@ describe.skipIf(process.platform === "win32")("remote Turn host", () => {
   });
 
   it("does not repeat a remote Turn or revive an approval after SIGKILL", async () => {
-    for (const stage of ["reserved", "started", "approval"] as const) {
+    for (const stage of [
+      "reserved",
+      "started",
+      "approval",
+      "approval-transfer",
+    ] as const) {
+      const hasApproval = stage === "approval" || stage === "approval-transfer";
       const home = await mkdtemp(join(tmpdir(), "koda-remote-kill-home-"));
       const workspace = await mkdtemp(
         join(tmpdir(), "koda-remote-kill-workspace-"),
@@ -294,8 +301,8 @@ describe.skipIf(process.platform === "win32")("remote Turn host", () => {
         expect(JSON.parse(String(line))).toMatchObject({
           threadId: "crash-thread",
           turnId: "crash-turn",
-          status: stage === "approval" ? "started" : stage,
-          ...(stage === "approval" ? { pendingApprovals: 1 } : {}),
+          status: hasApproval ? "started" : stage,
+          ...(hasApproval ? { pendingApprovals: 1 } : {}),
         });
       } finally {
         child.kill("SIGKILL");
@@ -305,6 +312,10 @@ describe.skipIf(process.platform === "win32")("remote Turn host", () => {
         ownerId: "owner",
         deviceId: `device-${"1".repeat(32)}`,
       };
+      const target = {
+        ownerId: "owner",
+        deviceId: `device-${"2".repeat(32)}`,
+      };
       const catalog = await RemoteAccessCatalog.create(
         "owner",
         [{ id: "project", root: await realpath(workspace) }],
@@ -312,21 +323,31 @@ describe.skipIf(process.platform === "win32")("remote Turn host", () => {
           {
             ...principal,
             workspaceId: "project",
-            permissions:
-              stage === "approval"
-                ? [
-                    "workspace:read",
-                    "thread:read",
-                    "turn:start",
-                    "workspace:mutate",
-                    "approval:resolve",
-                  ]
-                : ["workspace:read", "turn:start"],
+            permissions: hasApproval
+              ? [
+                  "workspace:read",
+                  "thread:read",
+                  "turn:start",
+                  "workspace:mutate",
+                  "approval:resolve",
+                ]
+              : ["workspace:read", "turn:start"],
+          },
+          {
+            ...target,
+            workspaceId: "project",
+            permissions: [
+              "workspace:read",
+              "thread:read",
+              "workspace:mutate",
+              "approval:resolve",
+            ],
           },
         ],
       );
       const bindings = await RemoteThreadStore.open(home, "owner");
       const requests = await RemoteTurnRequestStore.open(home, "owner");
+      const approvalLeases = await RemoteApprovalLeaseStore.open(home);
       if (stage !== "reserved") {
         expect(await bindings.get("crash-thread")).toMatchObject({
           workspaceId: "project",
@@ -363,9 +384,7 @@ describe.skipIf(process.platform === "win32")("remote Turn host", () => {
         requestId: "2".repeat(32),
         workspaceId: "project",
         prompt: "Explain the project.",
-        ...(stage === "approval"
-          ? { effects: ["workspace:mutate"] as const }
-          : {}),
+        ...(hasApproval ? { effects: ["workspace:mutate"] as const } : {}),
       });
       expect(result).toMatchObject({
         threadId: "crash-thread",
@@ -374,13 +393,36 @@ describe.skipIf(process.platform === "win32")("remote Turn host", () => {
         replayed: true,
       });
       expect(starts).toBe(0);
-      if (stage === "approval") {
+      if (hasApproval) {
+        expect(
+          await approvalLeases.get(
+            "crash-thread",
+            "crash-turn",
+            "crash-approval",
+          ),
+        ).toMatchObject({
+          deviceId:
+            stage === "approval-transfer"
+              ? target.deviceId
+              : principal.deviceId,
+          status: "pending",
+        });
         expect(
           await host.listApprovals(principal, catalog, "crash-thread"),
         ).toEqual([]);
         expect(
           await host.resolveApproval(
             principal,
+            catalog,
+            "crash-thread",
+            "crash-turn",
+            "crash-approval",
+            "approved",
+          ),
+        ).toBe(false);
+        expect(
+          await host.resolveApproval(
+            target,
             catalog,
             "crash-thread",
             "crash-turn",
@@ -658,7 +700,14 @@ describe.skipIf(process.platform === "win32")("remote Turn host", () => {
       getThread: async () => ({ value: { workspaceRoot: root } }),
     } as unknown as KodaApplication;
     const audit = await RemoteApprovalTransferStore.open(home);
-    const host = new RemoteTurnHost(application, bindings, requests, audit);
+    const approvalLeases = await RemoteApprovalLeaseStore.open(home);
+    const host = new RemoteTurnHost(
+      application,
+      bindings,
+      requests,
+      audit,
+      approvalLeases,
+    );
     await expect(
       host.start(owner, readOnly, {
         requestId: "1".repeat(32),
@@ -673,15 +722,24 @@ describe.skipIf(process.platform === "win32")("remote Turn host", () => {
       prompt: "Change one file.",
       effects: ["workspace:mutate"],
     });
-    expect(await host.listApprovals(owner, allowed, "approved-thread")).toEqual(
-      [
+    await vi.waitFor(async () => {
+      expect(
+        await host.listApprovals(owner, allowed, "approved-thread"),
+      ).toEqual([
         expect.objectContaining({
           turnId: "approved-turn",
           callId: "approved-call",
           details: "Exact patch preview.",
         }),
-      ],
-    );
+      ]);
+    });
+    expect(
+      await approvalLeases.get(
+        "approved-thread",
+        "approved-turn",
+        "approved-call",
+      ),
+    ).toMatchObject({ deviceId: owner.deviceId, status: "pending" });
     expect(await host.listApprovals(other, allowed, "approved-thread")).toEqual(
       [],
     );
@@ -768,6 +826,13 @@ describe.skipIf(process.platform === "win32")("remote Turn host", () => {
       await host.listApprovals(other, allowed, "approved-thread"),
     ).toHaveLength(1);
     expect(
+      await approvalLeases.get(
+        "approved-thread",
+        "approved-turn",
+        "approved-call",
+      ),
+    ).toMatchObject({ deviceId: other.deviceId, status: "pending" });
+    expect(
       await host.resolveApproval(
         owner,
         allowed,
@@ -797,6 +862,13 @@ describe.skipIf(process.platform === "win32")("remote Turn host", () => {
     ]);
     expect(simultaneous.sort()).toEqual([false, true]);
     await expect(decision).resolves.toMatchObject({ decision: "approved" });
+    expect(
+      await approvalLeases.get(
+        "approved-thread",
+        "approved-turn",
+        "approved-call",
+      ),
+    ).toMatchObject({ deviceId: other.deviceId, status: "approved" });
     expect(await host.listApprovals(owner, allowed, "approved-thread")).toEqual(
       [],
     );
@@ -810,6 +882,108 @@ describe.skipIf(process.platform === "win32")("remote Turn host", () => {
         "approved",
       ),
     ).toBe(false);
+    await host.close();
+  });
+
+  it("rejects an approval when its durable decision cannot be recorded", async () => {
+    const home = await mkdtemp(join(tmpdir(), "koda-approval-fail-home-"));
+    const workspace = await mkdtemp(
+      join(tmpdir(), "koda-approval-fail-workspace-"),
+    );
+    directories.push(home, workspace);
+    const root = await realpath(workspace);
+    const owner = { ownerId: "owner", deviceId: `device-${"1".repeat(32)}` };
+    const catalog = await RemoteAccessCatalog.create(
+      "owner",
+      [{ id: "project", root }],
+      [
+        {
+          ...owner,
+          workspaceId: "project",
+          permissions: [
+            "workspace:read",
+            "thread:read",
+            "turn:start",
+            "workspace:mutate",
+            "approval:resolve",
+          ],
+        },
+      ],
+    );
+    let decision: Promise<{ decision: string }> | undefined;
+    let finish: () => void = () => undefined;
+    const application = {
+      isRemoteRestricted: true,
+      startTurnAfter: async (
+        _input: unknown,
+        client: TurnClient,
+        beforeStart: (ids: {
+          threadId: string;
+          turnId: string;
+        }) => Promise<void>,
+      ) => {
+        const ids = { threadId: "failed-thread", turnId: "failed-turn" };
+        await beforeStart(ids);
+        decision = client.approvals.request(
+          {
+            callId: toolCallIdSchema.parse("failed-call"),
+            name: "apply_patch",
+            title: "Review one patch",
+            summary: "Update one file.",
+            details: "Exact patch preview.",
+            reason: "A write requires approval.",
+          },
+          new AbortController().signal,
+        );
+        return {
+          ...ids,
+          completion: new Promise<void>((resolve) => {
+            finish = resolve;
+          }),
+          cancel: () => {
+            finish();
+            return true;
+          },
+        };
+      },
+      getThread: async () => ({ value: { workspaceRoot: root } }),
+    } as unknown as KodaApplication;
+    const leases = await RemoteApprovalLeaseStore.open(home);
+    const host = new RemoteTurnHost(
+      application,
+      await RemoteThreadStore.open(home, "owner"),
+      await RemoteTurnRequestStore.open(home, "owner"),
+      await RemoteApprovalTransferStore.open(home),
+      leases,
+    );
+    await host.start(owner, catalog, {
+      requestId: "7".repeat(32),
+      workspaceId: "project",
+      prompt: "Change one file.",
+      effects: ["workspace:mutate"],
+    });
+    await vi.waitFor(async () => {
+      expect(
+        await host.listApprovals(owner, catalog, "failed-thread"),
+      ).toHaveLength(1);
+    });
+    vi.spyOn(leases, "finish").mockRejectedValueOnce(
+      new Error("disk unavailable"),
+    );
+    expect(
+      await host.resolveApproval(
+        owner,
+        catalog,
+        "failed-thread",
+        "failed-turn",
+        "failed-call",
+        "approved",
+      ),
+    ).toBe(false);
+    await expect(decision).resolves.toMatchObject({ decision: "rejected" });
+    expect(
+      await leases.get("failed-thread", "failed-turn", "failed-call"),
+    ).toMatchObject({ status: "pending" });
     await host.close();
   });
 });

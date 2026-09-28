@@ -22,6 +22,7 @@ import {
   type RemoteThreadSummary,
 } from "./remote-access.js";
 import { RemoteApprovalTransferStore } from "./remote-approval-transfer-store.js";
+import { RemoteApprovalLeaseStore } from "./remote-approval-lease-store.js";
 import { RemoteDeviceStore } from "./remote-device-store.js";
 import { RemoteThreadStore } from "./remote-thread-store.js";
 import {
@@ -112,19 +113,27 @@ export async function startRemoteHttpsServer(
   const certificateSha256 = new X509Certificate(certificate).fingerprint256
     .replaceAll(":", "")
     .toLowerCase();
-  const [devices, workspaces, threads, requests, transferAudit] =
-    await Promise.all([
-      RemoteDeviceStore.open(options.kodaHome, OWNER_ID),
-      RemoteWorkspaceStore.open(options.kodaHome, OWNER_ID),
-      RemoteThreadStore.open(options.kodaHome, OWNER_ID),
-      RemoteTurnRequestStore.open(options.kodaHome, OWNER_ID),
-      RemoteApprovalTransferStore.open(options.kodaHome),
-    ]);
+  const [
+    devices,
+    workspaces,
+    threads,
+    requests,
+    transferAudit,
+    approvalLeases,
+  ] = await Promise.all([
+    RemoteDeviceStore.open(options.kodaHome, OWNER_ID),
+    RemoteWorkspaceStore.open(options.kodaHome, OWNER_ID),
+    RemoteThreadStore.open(options.kodaHome, OWNER_ID),
+    RemoteTurnRequestStore.open(options.kodaHome, OWNER_ID),
+    RemoteApprovalTransferStore.open(options.kodaHome),
+    RemoteApprovalLeaseStore.open(options.kodaHome),
+  ]);
   const turnHost = new RemoteTurnHost(
     options.application,
     threads,
     requests,
     transferAudit,
+    approvalLeases,
   );
   const subscriptions = new WebSocketServer({
     noServer: true,

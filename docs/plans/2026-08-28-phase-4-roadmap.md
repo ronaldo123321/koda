@@ -373,9 +373,11 @@ explicitly granted host-configured MCP servers and host-allowlisted tool names;
 both stdio and exact-URL HTTPS transports have local tests, along with a real
 MCP effect and its approval. An exact-call approval can be
 transferred to another authorized device without extending its expiry; the
-transfer request has a durable owner-host audit record. Approval recovery after
-host restart remains limited to fail-closed interruption reporting; durable
-approval ownership recovery, OAuth, and physical two-Mac acceptance remain
+transfer request has a durable owner-host audit record. Each pending approval's
+owner and terminal decision now have an owner-only durable record. After a
+host crash, the owner can inspect the assignment, but the old call remains
+interrupted and cannot be approved in the new process. Automatic pairing,
+live-provider OAuth interoperability, and physical two-Mac acceptance remain
 open. First deployment targets LAN or an
 owner-managed VPN.
 
