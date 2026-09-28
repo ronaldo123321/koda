@@ -2,10 +2,11 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { ToolRegistry } from "@koda/agent-core";
+import { ToolRegistry, sha256CanonicalJson } from "@koda/agent-core";
 import {
   McpClientError,
   McpTurnSession,
+  inspectMcpServerTools,
   loadMcpConfiguration,
   materializeMcpToolResult,
   type McpConnection,
@@ -135,6 +136,20 @@ describe("MCP configuration", () => {
         code: "MCP_CONFIGURATION_INVALID",
       });
     }
+    await writeConfiguration(fixture, {
+      version: 1,
+      servers: {
+        remote: {
+          transport: "streamable_http",
+          url: "https://mcp.example.test/tools",
+          remote_tools: ["inspect"],
+          remote_tool_digests: { unlisted: "a".repeat(64) },
+        },
+      },
+    });
+    await expect(loadMcpConfiguration(options)).rejects.toMatchObject({
+      code: "MCP_CONFIGURATION_INVALID",
+    });
   });
 
   it.each([
@@ -173,7 +188,11 @@ describe("McpTurnSession", () => {
     await writeConfiguration(fixture, {
       version: 1,
       servers: {
-        reviewed: { command: "reviewed-server", remote_tools: ["value"] },
+        reviewed: {
+          command: "reviewed-server",
+          remote_tools: ["value"],
+          remote_tool_digests: { value: sha256CanonicalJson(tool("value")) },
+        },
         private: { command: "private-server" },
       },
     });
@@ -195,6 +214,23 @@ describe("McpTurnSession", () => {
       },
       serverIds: ["reviewed"],
     };
+    await expect(
+      inspectMcpServerTools(
+        {
+          environment: options.environment,
+          kodaHome: options.kodaHome,
+          processDirectory: options.processDirectory,
+          signal: options.signal,
+          connectionFactory: options.connectionFactory,
+        },
+        "reviewed",
+      ),
+    ).resolves.toContainEqual({
+      name: "value",
+      definitionSha256: sha256CanonicalJson(tool("value")),
+      definition: tool("value"),
+    });
+    connected.length = 0;
     const session = await McpTurnSession.open(options);
     const registry = new ToolRegistry();
     session.registerTools(registry);
@@ -202,6 +238,12 @@ describe("McpTurnSession", () => {
     expect(registry.definitions().map((tool) => tool.name)).toEqual([
       "mcp__reviewed__value",
     ]);
+    definitions = [
+      { ...tool("value"), description: "Changed after owner review." },
+    ];
+    await expect(session.refreshTools(2, options.signal)).rejects.toMatchObject(
+      { code: "MCP_TOOL_CATALOG_INVALID" },
+    );
     definitions = [tool("value"), tool("new_unreviewed")];
     expect(await session.refreshTools(2, options.signal)).toBeUndefined();
     expect(registry.definitions().map((tool) => tool.name)).toEqual([
@@ -220,6 +262,16 @@ describe("McpTurnSession", () => {
     await expect(
       McpTurnSession.open({ ...options, serverIds: ["private"] }),
     ).rejects.toMatchObject({ code: "MCP_CONFIGURATION_INVALID" });
+    definitions = [tool("value")];
+    await writeConfiguration(fixture, {
+      version: 1,
+      servers: {
+        reviewed: { command: "reviewed-server", remote_tools: ["value"] },
+      },
+    });
+    await expect(McpTurnSession.open(options)).rejects.toMatchObject({
+      code: "MCP_TOOL_CATALOG_INVALID",
+    });
   });
 
   it("registers stable aliases with fail-closed effects and bounded results", async () => {

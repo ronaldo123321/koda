@@ -37,6 +37,9 @@ const commonServerShape = {
     .max(64)
     .default([])
     .refine((names) => new Set(names).size === names.length),
+  remote_tool_digests: z
+    .record(z.string().min(1).max(128), z.string().regex(/^[a-f0-9]{64}$/u))
+    .default({}),
   startup_timeout_ms: z
     .number()
     .int()
@@ -125,6 +128,7 @@ interface McpServerCommonConfiguration {
   id: string;
   tools: Readonly<Record<string, McpToolPolicyConfiguration>>;
   remoteToolNames: readonly string[];
+  remoteToolDigests: Readonly<Record<string, string>>;
   startupTimeoutMs: number;
   callTimeoutMs: number;
 }
@@ -222,10 +226,19 @@ export async function loadMcpConfiguration(
   for (const [id, server] of Object.entries(parsed.data.servers).sort(
     ([left], [right]) => left.localeCompare(right),
   )) {
+    for (const name of Object.keys(server.remote_tool_digests)) {
+      if (!server.remote_tools.includes(name)) {
+        throw new McpClientError(
+          "MCP_CONFIGURATION_INVALID",
+          `MCP server '${id}' pins a tool outside its remote_tools allowlist.`,
+        );
+      }
+    }
     const common = {
       id,
       tools: server.tools,
       remoteToolNames: [...server.remote_tools],
+      remoteToolDigests: server.remote_tool_digests,
       startupTimeoutMs: server.startup_timeout_ms,
       callTimeoutMs: server.call_timeout_ms,
     };

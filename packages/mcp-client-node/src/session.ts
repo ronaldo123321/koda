@@ -23,6 +23,7 @@ import { materializeMcpToolResult, stableJsonStringify } from "./result.js";
 
 const MAX_TOOLS = 256;
 const MAX_TOOL_SCHEMA_BYTES = 65_536;
+const MAX_TOOL_DEFINITION_BYTES = 65_536;
 const MAX_CATALOG_BYTES = 524_288;
 const MAX_APPROVAL_DETAILS = 4_000;
 
@@ -51,6 +52,47 @@ export interface OpenMcpTurnSessionOptions {
   signal: AbortSignal;
   connectionFactory?: McpConnectionFactory;
   serverIds?: readonly string[];
+}
+
+export async function inspectMcpServerTools(
+  options: Pick<
+    OpenMcpTurnSessionOptions,
+    | "environment"
+    | "kodaHome"
+    | "processDirectory"
+    | "signal"
+    | "connectionFactory"
+  >,
+  serverId: string,
+): Promise<
+  readonly { name: string; definitionSha256: string; definition: Tool }[]
+> {
+  const configuration = await loadMcpConfiguration(options);
+  const server = configuration.servers.find((item) => item.id === serverId);
+  if (server === undefined) {
+    throw new McpClientError(
+      "MCP_CONFIGURATION_INVALID",
+      `MCP server '${serverId}' is unavailable.`,
+    );
+  }
+  const connection = await (
+    options.connectionFactory ?? connectOfficialMcpClient
+  )(server, options.environment, options.signal);
+  try {
+    const tools = await discoverTools(
+      [{ server, connection }],
+      options.signal,
+      true,
+      false,
+    );
+    return tools.map((tool) => ({
+      name: tool.originalName,
+      definitionSha256: tool.definitionSha256,
+      definition: tool.definition,
+    }));
+  } finally {
+    await connection.close();
+  }
 }
 
 export class McpTurnSession {
@@ -249,6 +291,14 @@ function normalizeTool(
   definition: Tool,
 ): RegisteredMcpTool {
   const definitionSnapshot = structuredClone(definition);
+  if (
+    Buffer.byteLength(JSON.stringify(definitionSnapshot)) >
+    MAX_TOOL_DEFINITION_BYTES
+  ) {
+    throw catalogError(
+      `MCP tool '${server.id}/${definitionSnapshot.name}' definition exceeds the ${MAX_TOOL_DEFINITION_BYTES}-byte limit.`,
+    );
+  }
   const alias = `mcp__${server.id}__${definitionSnapshot.name}`;
   if (!/^[A-Za-z0-9_-]{1,64}$/u.test(alias)) {
     throw catalogError(
@@ -312,6 +362,14 @@ async function discoverTools(
         );
       }
       const tool = normalizeTool(server, connection, definition);
+      if (
+        remoteSelection &&
+        server.remoteToolDigests[tool.originalName] !== tool.definitionSha256
+      ) {
+        throw catalogError(
+          `MCP server '${server.id}' remote tool '${tool.originalName}' has no matching reviewed definition digest.`,
+        );
+      }
       if (discoveredNames.has(tool.originalName)) {
         throw catalogError(
           `MCP server '${server.id}' returned duplicate tool '${tool.originalName}'.`,
@@ -323,7 +381,7 @@ async function discoverTools(
       }
       aliases.add(tool.alias);
       catalogBytes += Buffer.byteLength(
-        `${tool.alias}\n${tool.description}\n${stableJsonStringify(tool.inputSchema)}\n${tool.definitionSha256}`,
+        `${tool.alias}\n${JSON.stringify(tool.definition)}`,
       );
       if (catalogBytes > MAX_CATALOG_BYTES) {
         throw catalogError(

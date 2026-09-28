@@ -27,6 +27,7 @@
     "@koda/agent-core": "workspace:*",
     "@koda/app-server-client-node": "workspace:*",
     "@koda/distribution": "workspace:*",
+    "@koda/mcp-client-node": "workspace:*",
     "@koda/plugin-host-node": "workspace:*",
     "@koda/protocol": "workspace:*",
     "@koda/providers": "workspace:*",

@@ -196,12 +196,15 @@ stdio or HTTPS Streamable HTTP MCP servers only when its workspace grant
 includes `mcp:invoke` and exact server IDs. The host's `mcp.json` must
 independently list `remote_tools` for each selected server. HTTPS endpoints
 must be configured with an exact URL, use system TLS trust, reject redirects,
-and limit responses to 8 MiB. Other servers and tools are not connected or advertised;
+and limit responses to 8 MiB. The owner inspects definitions with
+`koda mcp inspect <server-id>` and pins each allowed definition SHA-256 in
+`remote_tool_digests`; missing or changed digests fail closed on discovery and
+refresh. Other servers and tools are not connected or advertised;
 configured read tools retain their read classification, while unknown effects
 require a fresh exact-call approval. Swift client TLS, device-grant, catalog
 isolation, real stdio invocation, and approval tests cover this subset. The
-host still lacks OAuth registration/redirect/token lifecycle and a pinned
-definition review workflow, so 4D4 is not complete. Servers requiring OAuth
+host still lacks OAuth registration/redirect/token lifecycle, so 4D4 is not
+complete. Servers requiring OAuth
 cannot yet be used through this transport.
 
 ## 6. Delivery and acceptance
@@ -239,6 +242,6 @@ safe all-type activity status, and verified Thread artifact ranges.
 The SwiftUI preview verifies an out-of-band pinned server certificate and
 replays authorized assistant updates and event status. Automatic pairing, the full app-server
 method set, complete event payloads, crash-recoverable approval ownership,
-OAuth, pinned MCP definition review, and physical two-device acceptance remain open before Phase 4D can
+OAuth and physical two-device acceptance remain open before Phase 4D can
 close. Scoped remote writes, commands, and exact-call approvals have local
 macOS and HTTPS fixture coverage as described above.

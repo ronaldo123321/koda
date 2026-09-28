@@ -373,7 +373,7 @@ both stdio and exact-URL HTTPS transports have local tests, along with a real
 MCP effect and its approval. An exact-call approval can be
 transferred to another authorized device without extending its expiry; the
 transfer request has a durable owner-host audit record. Approval recovery after
-host restart, full event payloads, OAuth and pinned MCP definition review, and physical two-Mac acceptance remain
+host restart, full event payloads, OAuth, and physical two-Mac acceptance remain
 open. First deployment targets LAN or an
 owner-managed VPN.
 

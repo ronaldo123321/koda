@@ -1,6 +1,7 @@
 import { Command, Option } from "commander";
 
 import { KODA_VERSION } from "@koda/distribution";
+import { inspectMcpServerTools } from "@koda/mcp-client-node";
 
 import { runArtifactGarbageCollectionCommand } from "./artifact-command.js";
 import type { TextWriter } from "./console-event-sink.js";
@@ -40,6 +41,7 @@ import {
   runRemoteWorkspaceListCommand,
 } from "./remote-command.js";
 import { runSetupCommand } from "./setup-command.js";
+import { resolveKodaHome } from "./config.js";
 import {
   runThreadChildrenCommand,
   runThreadListCommand,
@@ -550,6 +552,39 @@ export function createProgram(runtime: ProgramRuntime): Command {
           stderr: runtime.stderr,
         }),
       );
+    });
+
+  const mcp = program
+    .command("mcp")
+    .description("Inspect owner-host MCP tools");
+  mcp
+    .command("inspect")
+    .description("Show tool definition digests for remote review")
+    .argument("<server-id>", "configured MCP server ID")
+    .action(async (serverId: string) => {
+      const controller = new AbortController();
+      const onSigint = () => controller.abort("Interrupted by user.");
+      process.once("SIGINT", onSigint);
+      try {
+        const tools = await inspectMcpServerTools(
+          {
+            environment: runtime.environment,
+            kodaHome: resolveKodaHome(runtime.environment),
+            processDirectory: runtime.processDirectory,
+            signal: controller.signal,
+          },
+          serverId,
+        );
+        runtime.stdout.write(`${JSON.stringify(tools, null, 2)}\n`);
+        runtime.setExitCode(0);
+      } catch (error) {
+        runtime.stderr.write(
+          `[koda] ${error instanceof Error ? error.message : String(error)}\n`,
+        );
+        runtime.setExitCode(1);
+      } finally {
+        process.removeListener("SIGINT", onSigint);
+      }
     });
 
   const remote = program

@@ -9,6 +9,7 @@ import {
   type TurnClient,
 } from "@koda/app";
 import type { ModelProvider } from "@koda/agent-core";
+import { inspectMcpServerTools } from "@koda/mcp-client-node";
 import {
   threadIdSchema,
   toolCallIdSchema,
@@ -44,22 +45,38 @@ afterEach(async () => {
 describe("KodaApplication MCP integration", () => {
   it("exposes only a selected owner MCP server to a remote Turn and approves its effect", async () => {
     const fixture = await createFixture("remote-scope");
-    await writeFile(
-      join(fixture.kodaHome, "mcp.json"),
-      JSON.stringify({
-        version: 1,
-        servers: {
-          fixture: {
-            command: process.execPath,
-            args: [fixtureServer],
-            cwd: fixture.workspaceRoot,
-            env: ["KODA_MCP_FIXTURE_SECRET"],
-            remote_tools: ["environment"],
-          },
-          private: { command: "/nonexistent-private-mcp-server" },
+    const config = {
+      version: 1,
+      servers: {
+        fixture: {
+          command: process.execPath,
+          args: [fixtureServer],
+          cwd: fixture.workspaceRoot,
+          env: ["KODA_MCP_FIXTURE_SECRET"],
+          remote_tools: ["environment"],
+          remote_tool_digests: {} as Record<string, string>,
         },
-      }),
+        private: { command: "/nonexistent-private-mcp-server" },
+      },
+    };
+    await writeFile(join(fixture.kodaHome, "mcp.json"), JSON.stringify(config));
+    const reviewed = await inspectMcpServerTools(
+      {
+        environment: { KODA_MCP_FIXTURE_SECRET: "allowed-secret" },
+        kodaHome: fixture.kodaHome,
+        processDirectory: fixture.root,
+        signal: new AbortController().signal,
+      },
+      "fixture",
     );
+    const environmentTool = reviewed.find(
+      (tool) => tool.name === "environment",
+    );
+    expect(environmentTool).toBeDefined();
+    if (environmentTool === undefined) throw new Error("Missing fixture tool.");
+    config.servers.fixture.remote_tool_digests.environment =
+      environmentTool.definitionSha256;
+    await writeFile(join(fixture.kodaHome, "mcp.json"), JSON.stringify(config));
     const provider = new ScriptedModelProvider([
       {
         assertRequest: (request) => {

@@ -125,7 +125,11 @@ describe.skipIf(process.platform === "win32")("HTTPS MCP transport", () => {
           JSON.stringify({
             version: 1,
             servers: {
-              fixture: { transport: "streamable_http", url: `${url}${path}` },
+              fixture: {
+                transport: "streamable_http",
+                url: `${url}${path}`,
+                remote_tools: ["echo"],
+              },
             },
           }),
         );
@@ -146,6 +150,7 @@ describe.skipIf(process.platform === "win32")("HTTPS MCP transport", () => {
       const { stdout } = await runClient("/mcp");
       expect(JSON.parse(stdout)).toMatchObject({
         tools: ["echo"],
+        remoteTools: ["mcp__fixture__echo"],
         result: { content: [{ type: "text", text: "hello" }] },
       });
       expect(paths).toContain("/mcp");
