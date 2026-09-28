@@ -8,8 +8,10 @@
   idempotency and authenticated WSS replay implemented; a native macOS client
   preview now verifies a pinned certificate, stores its device token in Keychain,
   lists authorized Threads, replays assistant updates and event status, and
-  previews verified Thread artifacts in bounded UTF-8 ranges. Full event payload
-  projection, approvals, automatic pairing, and two-device acceptance remain open.
+  previews verified Thread artifacts in bounded UTF-8 ranges. Scoped remote
+  write/command approvals are locally tested; full event payload projection,
+  durable approval transfer, automatic pairing, and physical two-device
+  acceptance remain open.
   Swift client tests now exercise the actual local HTTPS/WSS listener with
   temporary devices, restricted Turn idempotency, and replay, and reject late
   subscription frames after switching Threads. A separately authorized
@@ -54,16 +56,18 @@ host paths remain on the owner host. Assistant text can quote workspace content.
 The separate assistant-update endpoint
 returns assistant text and limited Turn status only. Assistant text can quote
 workspace content, so devices need `thread:read` and must be trusted by the owner.
-The enabled Turn start mode uses read-only tools. It binds a new Thread before execution, uses a durable request ID
-to prevent duplicate starts, and does not cancel on an HTTP client disconnect.
-Plugin, MCP, write, execute, approval, and plan-control tools are unavailable
-in this mode. A separate no-body cancellation request checks the Thread binding,
+The default Turn start mode uses read-only tools. It binds a new Thread before
+execution, uses a durable request ID to prevent duplicate starts, and does not
+cancel on an HTTP client disconnect. A separate per-Turn effect scope can
+expose workspace patching or command tools only when the device has matching
+workspace, Thread, and approval grants; every actual effect still asks for an
+exact approval. Plugin, MCP, and plan-control tools remain unavailable to
+remote Turns. A separate no-body cancellation request checks the Thread binding,
 authoritative workspace root, and `turn:control` grant before signaling an active
 Turn; it never retries automatically after an uncertain response. WSS subscriptions are read-only, authenticate the device and
 Thread before upgrade and during polling, replay by an exclusive durable
 cursor, and close on revocation or bounded-buffer pressure without cancelling
-the Turn. Other remote effectful operations stay disabled until their authorization
-and disconnect tests pass.
+the Turn. Remote MCP and other unreviewed effects stay disabled.
 
 Artifact access uses `GET /v1/threads/:threadId/artifacts` with an optional
 `before` sequence and limit of 25, and
@@ -211,5 +215,7 @@ bound Thread summaries, payload-free event envelopes, assistant updates,
 safe all-type activity status, and verified Thread artifact ranges.
 The SwiftUI preview verifies an out-of-band pinned server certificate and
 replays authorized assistant updates and event status. Automatic pairing, the full app-server
-method set, complete event payloads, remote approvals and effects, and physical
-two-device acceptance remain open before Phase 4D can close.
+method set, complete event payloads, durable approval transfer, remote
+MCP/OAuth, and physical two-device acceptance remain open before Phase 4D can
+close. Scoped remote writes, commands, and exact-call approvals have local
+macOS and HTTPS fixture coverage as described above.
