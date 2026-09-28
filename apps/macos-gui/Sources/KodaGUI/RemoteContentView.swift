@@ -111,6 +111,11 @@ struct RemoteContentView: View {
                 .frame(maxWidth: 300)
                 .disabled(!model.connected)
                 Spacer()
+                if let deviceID = model.deviceID {
+                    Text("本设备 ID：\(deviceID)")
+                        .font(.caption.monospaced())
+                        .textSelection(.enabled)
+                }
             }
             Text("活动流按游标显示助手文本和事件状态；待审批详情仅向有审批权限的设备显示，助手文本可能引用工作区内容。")
                 .font(.caption)

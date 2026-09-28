@@ -80,6 +80,13 @@ final class RemoteModel: ObservableObject {
         return !stopPendingTurns.contains(turnID)
     }
 
+    var deviceID: String? {
+        guard let token = client?.settings.token else { return nil }
+        let parts = token.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 3, parts[0] == "koda-r1" else { return nil }
+        return String(parts[1])
+    }
+
     func connectSaved() {
         guard !connected && !connecting else { return }
         do {
