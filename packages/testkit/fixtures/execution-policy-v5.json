@@ -450,5 +450,44 @@
       },
       "valid": true
     }
-  ]
+  ],
+  "linux_rlimit_capability": {
+    "resource_limits": {
+      "process_cpu_time_ms": {
+        "status": "supported",
+        "backend": "posix_rlimit",
+        "scope": "process",
+        "enforcement": "kernel_hard",
+        "granularity": 1000
+      },
+      "process_address_space_bytes": {
+        "status": "supported",
+        "backend": "posix_rlimit",
+        "scope": "process",
+        "enforcement": "kernel_hard",
+        "granularity": 1
+      },
+      "job_task_count": {
+        "status": "unsupported"
+      },
+      "process_open_files": {
+        "status": "supported",
+        "backend": "posix_rlimit",
+        "scope": "process",
+        "enforcement": "kernel_hard",
+        "granularity": 1
+      },
+      "process_file_size_bytes": {
+        "status": "supported",
+        "backend": "posix_rlimit",
+        "scope": "process",
+        "enforcement": "kernel_hard",
+        "granularity": 1
+      }
+    },
+    "resource_canonical": "{\"process_cpu_time_ms\":{\"status\":\"supported\",\"backend\":\"posix_rlimit\",\"scope\":\"process\",\"enforcement\":\"kernel_hard\",\"granularity\":1000},\"process_address_space_bytes\":{\"status\":\"supported\",\"backend\":\"posix_rlimit\",\"scope\":\"process\",\"enforcement\":\"kernel_hard\",\"granularity\":1},\"job_task_count\":{\"status\":\"unsupported\"},\"process_open_files\":{\"status\":\"supported\",\"backend\":\"posix_rlimit\",\"scope\":\"process\",\"enforcement\":\"kernel_hard\",\"granularity\":1},\"process_file_size_bytes\":{\"status\":\"supported\",\"backend\":\"posix_rlimit\",\"scope\":\"process\",\"enforcement\":\"kernel_hard\",\"granularity\":1}}",
+    "resource_sha256": "0cd70539ad9fc2a45ce2d76d1e1821a096a77a614f918e3dbb6e3ac9f0aacee8",
+    "canonical": "{\"schema_version\":5,\"platform\":\"linux\",\"backend\":\"native_posix\",\"sandbox_runtime\":{\"schema_version\":1,\"mechanism\":\"linux_bubblewrap\",\"canonical_path\":\"/usr/bin/bwrap\",\"device\":\"2049\",\"inode\":\"123456789\",\"size\":123456,\"mtime_ns\":\"1788076800123456789\",\"sha256\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"version\":\"bubblewrap 0.11.0\",\"probe_revision\":1},\"filesystem\":{\"supported\":[\"unrestricted\",\"read_only\",\"workspace_write\"],\"mechanism\":\"linux_bubblewrap_mount_namespace\"},\"network\":{\"supported\":[\"inherit\",\"deny\"],\"mechanism\":\"linux_network_namespace_seccomp\"},\"process_isolation\":{\"supported\":[\"inherit\"],\"mechanism\":\"none\"},\"environment\":{\"supported\":[\"explicit\"],\"mechanism\":\"explicit_environment\",\"layer\":\"application\"},\"supervision\":{\"mechanism\":\"posix_process_group\",\"layer\":\"os\",\"durable\":true},\"resource_limits\":{\"process_cpu_time_ms\":{\"status\":\"supported\",\"backend\":\"posix_rlimit\",\"scope\":\"process\",\"enforcement\":\"kernel_hard\",\"granularity\":1000},\"process_address_space_bytes\":{\"status\":\"supported\",\"backend\":\"posix_rlimit\",\"scope\":\"process\",\"enforcement\":\"kernel_hard\",\"granularity\":1},\"job_task_count\":{\"status\":\"unsupported\"},\"process_open_files\":{\"status\":\"supported\",\"backend\":\"posix_rlimit\",\"scope\":\"process\",\"enforcement\":\"kernel_hard\",\"granularity\":1},\"process_file_size_bytes\":{\"status\":\"supported\",\"backend\":\"posix_rlimit\",\"scope\":\"process\",\"enforcement\":\"kernel_hard\",\"granularity\":1}}}",
+    "sha256": "634af7f3fbf07cf8d0969be1eba4d152e4701f69365f94058eef8dfd1e43983d"
+  }
 }

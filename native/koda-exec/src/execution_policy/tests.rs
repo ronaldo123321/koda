@@ -512,6 +512,75 @@ fn macos_rlimit_capability_admits_only_the_exact_supported_subset() {
 }
 
 #[test]
+fn linux_rlimit_capability_admits_exact_process_limits_without_task_count() {
+    let golden = &resource_fixtures()["linux_rlimit_capability"];
+    let runtime =
+        LinuxBubblewrapRuntimeDescriptor::parse(linux_fixtures()["runtime"].clone()).unwrap();
+    let capabilities = linux_resource_execution_capabilities(&runtime).unwrap();
+    capabilities.validate().unwrap();
+    assert_eq!(
+        capabilities.resource_limits,
+        Some(ExecutionResourceCapabilities::linux_rlimit())
+    );
+    assert_eq!(
+        capabilities
+            .resource_limits
+            .as_ref()
+            .unwrap()
+            .canonical_json()
+            .unwrap(),
+        golden["resource_canonical"].as_str().unwrap()
+    );
+    assert_eq!(
+        capabilities
+            .resource_limits
+            .as_ref()
+            .unwrap()
+            .digest()
+            .unwrap(),
+        golden["resource_sha256"].as_str().unwrap()
+    );
+    assert_eq!(
+        capabilities.canonical_json().unwrap(),
+        golden["canonical"].as_str().unwrap()
+    );
+    assert_eq!(
+        capabilities.digest().unwrap(),
+        golden["sha256"].as_str().unwrap()
+    );
+    let mut policy =
+        ExecutionPolicy::parse(resource_fixtures()["policy_cases"][0]["input"].clone()).unwrap();
+    policy.resources = Some(ExecutionResourceLimits {
+        process_cpu_time_ms: Some(1_000),
+        process_address_space_bytes: Some(16_777_216),
+        job_process_count: None,
+        job_task_count: None,
+        process_open_files: Some(64),
+        process_file_size_bytes: Some(4_096),
+    });
+    assert!(
+        evaluate_execution_policy(&policy, &capabilities)
+            .unwrap()
+            .allowed
+    );
+    create_execution_admission_snapshot(&policy, &capabilities)
+        .unwrap()
+        .validate()
+        .unwrap();
+    policy.resources.as_mut().unwrap().job_task_count = Some(2);
+    assert_eq!(
+        create_execution_admission_snapshot(&policy, &capabilities).unwrap_err(),
+        ExecutionPolicyError::ResourceLimitUnavailable
+    );
+    policy.resources.as_mut().unwrap().job_task_count = None;
+    policy.resources.as_mut().unwrap().process_cpu_time_ms = Some(1_001);
+    assert_eq!(
+        create_execution_admission_snapshot(&policy, &capabilities).unwrap_err(),
+        ExecutionPolicyError::ResourceLimitUnavailable
+    );
+}
+
+#[test]
 fn shared_v5_snapshots_preserve_resource_absence_without_inference() {
     for case in resource_fixtures()["snapshot_cases"].as_array().unwrap() {
         let parsed = ExecutionSecuritySnapshot::parse(case["input"].clone());

@@ -13,54 +13,95 @@ import { agentEventSchema } from "@koda/protocol";
 import { ArtifactStore, JsonlEventStore } from "@koda/runtime-node";
 import { join } from "node:path";
 
-const [home, workspacePath, certificatePath, privateKeyPath] = process.argv.slice(2);
+const [home, workspacePath, certificatePath, privateKeyPath] =
+  process.argv.slice(2);
 const workspaceRoot = await realpath(workspacePath);
 const workspaces = await RemoteWorkspaceStore.open(home, "owner");
 await workspaces.register("project", workspaceRoot);
 const devices = await RemoteDeviceStore.open(home, "owner");
-const full = await devices.issue("macbook", [{
-  workspaceId: "project",
-  permissions: ["workspace:read", "thread:read", "turn:start", "turn:control"],
-}]);
-const workspaceOnly = await devices.issue("tablet", [{
-  workspaceId: "project",
-  permissions: ["workspace:read"],
-}]);
+const full = await devices.issue("macbook", [
+  {
+    workspaceId: "project",
+    permissions: [
+      "workspace:read",
+      "thread:read",
+      "turn:start",
+      "turn:control",
+    ],
+  },
+]);
+const workspaceOnly = await devices.issue("tablet", [
+  {
+    workspaceId: "project",
+    permissions: ["workspace:read"],
+  },
+]);
 const threads = await RemoteThreadStore.open(home, "owner");
-await threads.bind({ ownerId: "owner", workspaceId: "project", threadId: "thread-1" });
+await threads.bind({
+  ownerId: "owner",
+  workspaceId: "project",
+  threadId: "thread-1",
+});
 const requests = await RemoteTurnRequestStore.open(home, "owner");
 await requests.claim({
   requestId: "b".repeat(32),
   deviceId: full.deviceId,
   workspaceId: "project",
-  bodySha256: createHash("sha256").update(JSON.stringify({
-    workspaceId: "project", prompt: "uncertain request", resumeThreadId: null,
-  })).digest("hex"),
+  bodySha256: createHash("sha256")
+    .update(
+      JSON.stringify({
+        workspaceId: "project",
+        prompt: "uncertain request",
+        resumeThreadId: null,
+      }),
+    )
+    .digest("hex"),
   threadId: "reserved-thread",
   turnId: "reserved-turn",
 });
 const artifactStore = await ArtifactStore.open(join(home, "artifacts"));
 const artifactText = "A".repeat(16_383) + "中文 artifact";
-const published = await artifactStore.materializeText(artifactText, { inlineBytes: 4 });
-if (published.artifact === undefined) throw new Error("Expected a stored artifact.");
+const published = await artifactStore.materializeText(artifactText, {
+  inlineBytes: 4,
+});
+if (published.artifact === undefined)
+  throw new Error("Expected a stored artifact.");
 const artifact = published.artifact;
-const artifactLog = new JsonlEventStore(join(home, "threads", "thread-1.jsonl"));
-await artifactLog.append(agentEventSchema.parse({
-  schemaVersion: 1, sequence: 0, timestamp: "2026-09-27T00:00:00.000Z",
-  threadId: "thread-1", turnId: "turn-1", type: "turn.context",
-  payload: {
-    provider: "openai", model: "gpt-test", workspaceRoot,
-    approvalMode: "on-request", instructionsSha256: "0".repeat(64),
-    repositoryInstructions: [],
-  },
-}));
-await artifactLog.append(agentEventSchema.parse({
-  schemaVersion: 1, sequence: 1, timestamp: "2026-09-27T00:00:01.000Z",
-  threadId: "thread-1", turnId: "turn-1", type: "artifact.recorded",
-  payload: { callId: "artifact-call", name: "read_file", artifact },
-}));
+const artifactLog = new JsonlEventStore(
+  join(home, "threads", "thread-1.jsonl"),
+);
+await artifactLog.append(
+  agentEventSchema.parse({
+    schemaVersion: 1,
+    sequence: 0,
+    timestamp: "2026-09-27T00:00:00.000Z",
+    threadId: "thread-1",
+    turnId: "turn-1",
+    type: "turn.context",
+    payload: {
+      provider: "openai",
+      model: "gpt-test",
+      workspaceRoot,
+      approvalMode: "on-request",
+      instructionsSha256: "0".repeat(64),
+      repositoryInstructions: [],
+    },
+  }),
+);
+await artifactLog.append(
+  agentEventSchema.parse({
+    schemaVersion: 1,
+    sequence: 1,
+    timestamp: "2026-09-27T00:00:01.000Z",
+    threadId: "thread-1",
+    turnId: "turn-1",
+    type: "artifact.recorded",
+    payload: { callId: "artifact-call", name: "read_file", artifact },
+  }),
+);
 const artifactApplication = new KodaApplication({
-  environment: { KODA_HOME: home }, processDirectory: workspaceRoot,
+  environment: { KODA_HOME: home },
+  processDirectory: workspaceRoot,
 });
 
 const metadata = {
@@ -85,10 +126,34 @@ const metadata = {
   },
 };
 const events = [
-  { sequence: 0, timestamp: metadata.createdAt, turnId: "turn-1", type: "turn.started", payload: {} },
-  { sequence: 1, timestamp: metadata.createdAt, turnId: "turn-1", type: "assistant.delta", payload: { text: "first" } },
-  { sequence: 2, timestamp: metadata.createdAt, turnId: "turn-1", type: "assistant.delta", payload: { text: "second" } },
-  { sequence: 3, timestamp: metadata.updatedAt, turnId: "turn-1", type: "turn.completed", payload: {} },
+  {
+    sequence: 0,
+    timestamp: metadata.createdAt,
+    turnId: "turn-1",
+    type: "turn.started",
+    payload: {},
+  },
+  {
+    sequence: 1,
+    timestamp: metadata.createdAt,
+    turnId: "turn-1",
+    type: "assistant.delta",
+    payload: { text: "first" },
+  },
+  {
+    sequence: 2,
+    timestamp: metadata.createdAt,
+    turnId: "turn-1",
+    type: "assistant.delta",
+    payload: { text: "second" },
+  },
+  {
+    sequence: 3,
+    timestamp: metadata.updatedAt,
+    turnId: "turn-1",
+    type: "turn.completed",
+    payload: {},
+  },
 ];
 const application = {
   isRemoteRestricted: true,
@@ -104,13 +169,16 @@ const application = {
       hasLater: matching.length > limit,
     };
   },
-  listThreadArtifacts: artifactApplication.listThreadArtifacts.bind(artifactApplication),
+  listThreadArtifacts:
+    artifactApplication.listThreadArtifacts.bind(artifactApplication),
   readArtifact: artifactApplication.readArtifact.bind(artifactApplication),
   startTurnAfter: async (_input, _client, beforeStart) => {
     const ids = { threadId: "thread-1", turnId: "turn-2" };
     await beforeStart(ids);
     let finish;
-    const completion = new Promise((resolve) => { finish = resolve; });
+    const completion = new Promise((resolve) => {
+      finish = resolve;
+    });
     return {
       ...ids,
       completion,
@@ -122,17 +190,23 @@ const application = {
   },
 };
 let server = await startRemoteHttpsServer({
-  application, kodaHome: home, host: "127.0.0.1", port: 0,
-  certificatePath, privateKeyPath,
+  application,
+  kodaHome: home,
+  host: "127.0.0.1",
+  port: 0,
+  certificatePath,
+  privateKeyPath,
 });
 const port = Number(server.address.split(":").at(-1));
-process.stdout.write(JSON.stringify({
-  origin: `https://${server.address}`,
-  fingerprint: server.certificateSha256,
-  token: full.token,
-  workspaceOnlyToken: workspaceOnly.token,
-  artifactId: artifact.id,
-}) + "\n");
+process.stdout.write(
+  JSON.stringify({
+    origin: `https://${server.address}`,
+    fingerprint: server.certificateSha256,
+    token: full.token,
+    workspaceOnlyToken: workspaceOnly.token,
+    artifactId: artifact.id,
+  }) + "\n",
+);
 process.stdin.on("data", (chunk) => {
   const command = chunk.toString("utf8").trim();
   if (command === "abandon") {
@@ -146,12 +220,28 @@ process.stdin.on("data", (chunk) => {
   void (async () => {
     await server.close();
     events.push(
-      { sequence: 4, timestamp: metadata.updatedAt, turnId: "turn-3", type: "turn.started", payload: {} },
-      { sequence: 5, timestamp: metadata.updatedAt, turnId: "turn-3", type: "assistant.delta", payload: { text: "after reconnect" } },
+      {
+        sequence: 4,
+        timestamp: metadata.updatedAt,
+        turnId: "turn-3",
+        type: "turn.started",
+        payload: {},
+      },
+      {
+        sequence: 5,
+        timestamp: metadata.updatedAt,
+        turnId: "turn-3",
+        type: "assistant.delta",
+        payload: { text: "after reconnect" },
+      },
     );
     server = await startRemoteHttpsServer({
-      application, kodaHome: home, host: "127.0.0.1", port,
-      certificatePath, privateKeyPath,
+      application,
+      kodaHome: home,
+      host: "127.0.0.1",
+      port,
+      certificatePath,
+      privateKeyPath,
     });
   })().catch((error) => {
     process.stderr.write(String(error) + "\n");

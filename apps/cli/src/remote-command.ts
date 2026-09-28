@@ -218,7 +218,9 @@ export async function runRemoteServeCommand(
     });
     try {
       context.stdout.write(`Remote HTTPS listening at ${server.address}\n`);
-      context.stdout.write(`Certificate SHA-256: ${server.certificateSha256}\n`);
+      context.stdout.write(
+        `Certificate SHA-256: ${server.certificateSha256}\n`,
+      );
       if (!signal.aborted) {
         await new Promise<void>((resolveAbort) =>
           signal.addEventListener("abort", () => resolveAbort(), {

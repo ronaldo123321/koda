@@ -26,8 +26,8 @@ use crate::durable::{JobLock, JobRecord, JobStore, StoredJobState, sha256_hex};
 use crate::execution_policy::{
     ExecutionCapabilities, ExecutionPlatform, ExecutionSecuritySnapshot, c1_execution_capabilities,
     historical_resource_contract_execution_capabilities, linux_bubblewrap_execution_capabilities,
-    macos_resource_execution_capabilities, macos_seatbelt_execution_capabilities,
-    resource_contract_execution_capabilities,
+    linux_resource_execution_capabilities, macos_resource_execution_capabilities,
+    macos_seatbelt_execution_capabilities, resource_contract_execution_capabilities,
 };
 #[cfg(unix)]
 use crate::execution_policy::{ExecutionResourceLimits, FilesystemPolicy};
@@ -250,10 +250,15 @@ fn worker_execution_capabilities(
             };
             let wrapped = resource_contract_execution_capabilities(&legacy)
                 .map_err(execution_security::policy_error)?;
-            let current = if security.platform == Some(ExecutionPlatform::Macos) {
-                Some(macos_resource_execution_capabilities())
-            } else {
-                None
+            let current = match (security.platform, security.sandbox_runtime.as_ref()) {
+                (Some(ExecutionPlatform::Macos), None) => {
+                    Some(macos_resource_execution_capabilities())
+                }
+                (Some(ExecutionPlatform::Linux), Some(runtime)) => Some(
+                    linux_resource_execution_capabilities(runtime)
+                        .map_err(execution_security::policy_error)?,
+                ),
+                _ => None,
             };
             [Some(wrapped), current]
                 .into_iter()
@@ -2089,7 +2094,7 @@ impl UnixResourceChannels {
         ResourceBootstrapChannels {
             confirmation_read: &self.confirmation_read,
             confirmation_write: &self.confirmation_write,
-            confirmation_target: crate::macos_resource_limits::RESOURCE_CONFIRMATION_FD,
+            confirmation_target: crate::posix_resource_limits::RESOURCE_CONFIRMATION_FD,
         }
     }
 
@@ -2294,8 +2299,18 @@ fn prepare_unix_launch(
                 false,
             )
             .map_err(execution_security::policy_error)?,
-            5 => resource_contract_execution_capabilities(&legacy_linux_capabilities)
-                .map_err(execution_security::policy_error)?,
+            5 => {
+                let unsupported =
+                    resource_contract_execution_capabilities(&legacy_linux_capabilities)
+                        .map_err(execution_security::policy_error)?;
+                let current = linux_resource_execution_capabilities(sandbox_runtime)
+                    .map_err(execution_security::policy_error)?;
+                if runtime.execution_capabilities == current {
+                    current
+                } else {
+                    unsupported
+                }
+            }
             _ => return Err(execution_security::corrupt()),
         };
         if runtime.execution_capabilities != expected_linux_capabilities {
@@ -2382,7 +2397,7 @@ fn create_unix_sandbox_channels() -> Result<UnixSandboxChannels, ProtocolError> 
 }
 
 #[cfg(unix)]
-fn requested_macos_resources(
+fn requested_posix_resources(
     runtime: &WorkerRuntime,
     params: &crate::protocol::StartParams,
 ) -> Result<Option<ExecutionResourceLimits>, ProtocolError> {
@@ -2392,8 +2407,17 @@ fn requested_macos_resources(
         .and_then(|policy| policy.resources.as_ref())
         .filter(|resources| !resources.is_empty())
         .cloned();
+    let linux_supported = cfg!(target_os = "linux")
+        && runtime.execution_capabilities.platform == Some(ExecutionPlatform::Linux)
+        && runtime
+            .execution_capabilities
+            .sandbox_runtime
+            .as_ref()
+            .and_then(|descriptor| linux_resource_execution_capabilities(descriptor).ok())
+            .is_some_and(|capabilities| capabilities == runtime.execution_capabilities);
     if requested.is_some()
         && runtime.execution_capabilities != macos_resource_execution_capabilities()
+        && !linux_supported
     {
         return Err(execution_security::policy_error(
             crate::execution_policy::ExecutionPolicyError::ExecutionPolicyChanged,
@@ -2420,7 +2444,7 @@ fn prepare_resource_launch(
     runtime: &WorkerRuntime,
     params: &crate::protocol::StartParams,
 ) -> Result<Option<UnixResourceLaunch>, ProtocolError> {
-    requested_macos_resources(runtime, params)?
+    requested_posix_resources(runtime, params)?
         .map(|requested| {
             Ok(UnixResourceLaunch {
                 channels: create_resource_channels()?,
@@ -2448,7 +2472,7 @@ fn configure_command_bootstrap_arguments(
         })?;
         command
             .arg("--resource-confirm-fd")
-            .arg(crate::macos_resource_limits::RESOURCE_CONFIRMATION_FD.to_string())
+            .arg(crate::posix_resource_limits::RESOURCE_CONFIRMATION_FD.to_string())
             .arg("--resources")
             .arg(json);
         if let Some(fault) = resource_bootstrap_test_fault() {
@@ -2465,7 +2489,7 @@ async fn wait_for_resource_confirmation(
     resources: ExecutionResourceLimits,
 ) -> io::Result<()> {
     tokio::task::spawn_blocking(move || {
-        crate::macos_resource_limits::wait_for_confirmation(
+        crate::posix_resource_limits::wait_for_confirmation(
             read,
             &resources,
             RESOURCE_CONFIRMATION_TIMEOUT,
@@ -3466,12 +3490,12 @@ pub fn run_command_bootstrap(
     gate_fd: RawFd,
     resource_confirmation_fd: Option<RawFd>,
     resources: Option<ExecutionResourceLimits>,
-    resource_test_fault: Option<crate::macos_resource_limits::ResourceTestFault>,
+    resource_test_fault: Option<crate::posix_resource_limits::ResourceTestFault>,
     argv: Vec<String>,
 ) -> io::Result<()> {
     match (resource_confirmation_fd, resources.as_ref()) {
         (Some(confirmation_fd), Some(resources)) => {
-            crate::macos_resource_limits::apply_and_confirm(
+            crate::posix_resource_limits::apply_and_confirm(
                 confirmation_fd,
                 resources,
                 resource_test_fault,

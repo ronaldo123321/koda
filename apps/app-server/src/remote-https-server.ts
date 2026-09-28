@@ -88,8 +88,8 @@ export async function startRemoteHttpsServer(
     readFile(resolve(options.certificatePath)),
     readPrivateKey(options.privateKeyPath),
   ]);
-  const certificateSha256 = new X509Certificate(certificate)
-    .fingerprint256.replaceAll(":", "")
+  const certificateSha256 = new X509Certificate(certificate).fingerprint256
+    .replaceAll(":", "")
     .toLowerCase();
   const [devices, workspaces, threads, requests] = await Promise.all([
     RemoteDeviceStore.open(options.kodaHome, OWNER_ID),
@@ -323,7 +323,8 @@ async function handleRequest(
       }
       const visible: RemoteThreadSummary[] = [];
       for (const binding of await threads.list(workspaceId)) {
-        if (cursor.after !== undefined && binding.threadId <= cursor.after) continue;
+        if (cursor.after !== undefined && binding.threadId <= cursor.after)
+          continue;
         const metadata = (await application.getThread(binding.threadId)).value;
         if (metadata === undefined) continue;
         try {
@@ -711,7 +712,8 @@ function parseEventCursor(
   if (
     url.searchParams.getAll("after").length > 1 ||
     url.searchParams.getAll("limit").length > 1
-  ) return undefined;
+  )
+    return undefined;
   const afterText = url.searchParams.get("after") ?? "-1";
   const limitText = url.searchParams.get("limit") ?? "100";
   if (!/^(?:-1|0|[1-9]\d*)$/u.test(afterText) || !/^[1-9]\d*$/u.test(limitText))
@@ -741,9 +743,11 @@ function parseThreadCursor(
   const after = url.searchParams.get("after") ?? undefined;
   const limitText = url.searchParams.get("limit") ?? "25";
   if (
-    (after !== undefined && !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u.test(after)) ||
+    (after !== undefined &&
+      !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u.test(after)) ||
     !/^[1-9]\d*$/u.test(limitText)
-  ) return undefined;
+  )
+    return undefined;
   const limit = Number(limitText);
   if (!Number.isSafeInteger(limit) || limit > 25) return undefined;
   return { ...(after === undefined ? {} : { after }), limit };

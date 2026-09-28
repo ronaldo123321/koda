@@ -8,9 +8,9 @@ mod executor_runtime;
 mod framing;
 mod internal_protocol;
 mod linux_bubblewrap;
-mod macos_resource_limits;
 mod macos_seatbelt;
 mod platform;
+mod posix_resource_limits;
 mod protocol;
 mod pty_output;
 pub mod secret_policy;
@@ -138,7 +138,7 @@ fn run_command_bootstrap(
     gate_fd: i32,
     resource_confirmation_fd: Option<i32>,
     resources: Option<execution_policy::ExecutionResourceLimits>,
-    resource_test_fault: Option<macos_resource_limits::ResourceTestFault>,
+    resource_test_fault: Option<posix_resource_limits::ResourceTestFault>,
     argv: Vec<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     worker::run_command_bootstrap(
@@ -156,7 +156,7 @@ fn run_command_bootstrap(
     _gate_fd: i32,
     _resource_confirmation_fd: Option<i32>,
     _resources: Option<execution_policy::ExecutionResourceLimits>,
-    _resource_test_fault: Option<macos_resource_limits::ResourceTestFault>,
+    _resource_test_fault: Option<posix_resource_limits::ResourceTestFault>,
     _argv: Vec<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     Err("PLATFORM_CAPABILITY_UNAVAILABLE: Windows command startup requires Phase 4B4B".into())
@@ -210,7 +210,7 @@ enum Arguments {
         gate_fd: i32,
         resource_confirmation_fd: Option<i32>,
         resources: Option<execution_policy::ExecutionResourceLimits>,
-        resource_test_fault: Option<macos_resource_limits::ResourceTestFault>,
+        resource_test_fault: Option<posix_resource_limits::ResourceTestFault>,
         argv: Vec<String>,
     },
     SandboxBootstrap {
@@ -293,7 +293,7 @@ fn parse_arguments(
                         .next()
                         .ok_or("--resource-confirm-fd is required")?
                         .parse::<i32>()?;
-                    if descriptor != macos_resource_limits::RESOURCE_CONFIRMATION_FD
+                    if descriptor != posix_resource_limits::RESOURCE_CONFIRMATION_FD
                         || descriptor == gate_fd
                         || arguments.next().as_deref() != Some("--resources")
                     {
@@ -306,13 +306,13 @@ fn parse_arguments(
                     let value = serde_json::from_str(&json)?;
                     let resources = execution_policy::ExecutionResourceLimits::parse(value)
                         .map_err(|_| "command bootstrap resources are invalid")?;
-                    macos_resource_limits::confirmation_frame(&resources)
+                    posix_resource_limits::confirmation_frame(&resources)
                         .map_err(|_| "command bootstrap resources are unsupported")?;
                     next = arguments.next();
                     let resource_test_fault = if next.as_deref()
                         == Some("--resource-test-fault")
                     {
-                        let fault = macos_resource_limits::ResourceTestFault::parse(
+                        let fault = posix_resource_limits::ResourceTestFault::parse(
                             &arguments
                                 .next()
                                 .ok_or("--resource-test-fault is required")?,

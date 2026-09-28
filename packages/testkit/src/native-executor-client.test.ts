@@ -1,6 +1,7 @@
 import { ToolRegistry, type ToolOperationalEvent } from "@koda/agent-core";
 import {
   MACOS_EXECUTION_RESOURCE_CAPABILITIES,
+  LINUX_EXECUTION_RESOURCE_CAPABILITIES,
   threadIdSchema,
   toolCallIdSchema,
   turnIdSchema,
@@ -24,6 +25,10 @@ import { join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 const describeNative = describe.runIf(process.platform !== "win32");
+const supportsResourceTests =
+  process.platform === "darwin" ||
+  (process.platform === "linux" &&
+    process.env.KODA_REQUIRE_LINUX_BUBBLEWRAP === "1");
 
 describeNative("NativeExecutorClient", () => {
   let root: string;
@@ -65,11 +70,17 @@ describeNative("NativeExecutorClient", () => {
         platform: "macos",
         resource_limits: MACOS_EXECUTION_RESOURCE_CAPABILITIES,
       });
+    } else if (supportsResourceTests) {
+      expect(hello.execution_security).toMatchObject({
+        schema_version: 5,
+        platform: "linux",
+        resource_limits: LINUX_EXECUTION_RESOURCE_CAPABILITIES,
+      });
     }
   });
 
-  it.runIf(process.platform === "darwin")(
-    "applies the exact macOS rlimit subset before a Pipe command runs",
+  it.runIf(supportsResourceTests)(
+    "applies the exact POSIX rlimit subset before a Pipe command runs",
     async () => {
       const workspace = await mkdtemp(join(root, "resource-pipe-"));
       const resources = {
@@ -101,7 +112,35 @@ describeNative("NativeExecutorClient", () => {
     },
   );
 
-  it.runIf(process.platform === "darwin")(
+  it.runIf(process.platform === "linux" && supportsResourceTests)(
+    "rejects an allocation beyond RLIMIT_AS",
+    async () => {
+      const resources = {
+        process_address_space_bytes: 128 * 1024 * 1024,
+      } satisfies ExecutionResourceLimits;
+      const started = await client.start({
+        argv: [
+          "/usr/bin/python3",
+          "-c",
+          "try:\n bytearray(512*1024*1024)\n print('unlimited')\nexcept MemoryError:\n print('limited')",
+        ],
+        cwd: root,
+        policy: await resourcePolicyFor(root, resources),
+        environment: { PATH: process.env.PATH },
+        timeoutMs: 3_000,
+        outputLimitBytes: 1_024,
+        terminationGraceMs: 25,
+        terminationConfirmationMs: 1_000,
+      });
+      const terminal = await waitTerminal(client, started.job_id);
+      const output = await client.readOutput(terminal.job_id, "stdout", 0);
+      expect(terminal).toMatchObject({ state: "exited", exit_code: 0 });
+      expect(output.data.toString("utf8").trim()).toBe("limited");
+      expectAppliedResources(terminal, resources);
+    },
+  );
+
+  it.runIf(supportsResourceTests)(
     "terminates a CPU-bound process through RLIMIT_CPU before wall timeout",
     async () => {
       const resources = {
@@ -131,7 +170,7 @@ describeNative("NativeExecutorClient", () => {
     },
   );
 
-  it.runIf(process.platform === "darwin")(
+  it.runIf(supportsResourceTests)(
     "prevents a file from growing past RLIMIT_FSIZE",
     async () => {
       const workspace = await mkdtemp(join(root, "resource-file-size-"));
@@ -163,7 +202,7 @@ describeNative("NativeExecutorClient", () => {
     },
   );
 
-  it.runIf(process.platform === "darwin")(
+  it.runIf(supportsResourceTests)(
     "reports EMFILE when descriptor allocation reaches RLIMIT_NOFILE",
     async () => {
       const resources = {
@@ -200,7 +239,7 @@ describeNative("NativeExecutorClient", () => {
     },
   );
 
-  it.runIf(process.platform === "darwin")(
+  it.runIf(supportsResourceTests)(
     "retains applied evidence across protected background PTY attach and termination",
     async () => {
       const workspace = await mkdtemp(join(root, "resource-pty-"));
@@ -255,7 +294,7 @@ describeNative("NativeExecutorClient", () => {
   );
 
   it
-    .runIf(process.platform === "darwin")
+    .runIf(supportsResourceTests)
     .each([
       "resource_apply_failed",
       "resource_confirmation_corrupt",
@@ -1242,11 +1281,14 @@ function expectAppliedResources(
   snapshot: Pick<NativeJobSnapshot, "security">,
   resources: ExecutionResourceLimits,
 ): void {
+  const available =
+    process.platform === "linux"
+      ? LINUX_EXECUTION_RESOURCE_CAPABILITIES
+      : MACOS_EXECUTION_RESOURCE_CAPABILITIES;
   const applied = Object.fromEntries(
     Object.entries(resources).map(([rawName, limit]) => {
-      const name =
-        rawName as keyof typeof MACOS_EXECUTION_RESOURCE_CAPABILITIES;
-      const capability = MACOS_EXECUTION_RESOURCE_CAPABILITIES[name];
+      const name = rawName as keyof typeof available;
+      const capability = available[name];
       if (capability.status !== "supported") {
         throw new Error(`Test requested unsupported resource '${name}'.`);
       }
@@ -1260,7 +1302,7 @@ function expectAppliedResources(
     resources: {
       status: "applied",
       requested: resources,
-      available: MACOS_EXECUTION_RESOURCE_CAPABILITIES,
+      available,
       applied,
     },
   });

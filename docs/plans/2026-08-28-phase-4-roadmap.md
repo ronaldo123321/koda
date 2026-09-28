@@ -333,12 +333,13 @@ The approved next resource slice is
 C4C1 is implemented: current policy v3, capability/security v5, native
 protocol/durable v8, and app-server v18 use `job_task_count`, while historical
 policy-v2/security-v4 `job_process_count` records remain readable without
-reinterpretation. C4C2 will add exact Linux rlimits; C4C3 will advertise cgroup
+reinterpretation. C4C2 implements exact Linux rlimits and has passed local
+cross-language tests; Linux CI remains pending. C4C3 will advertise cgroup
 v2 `pids.max` only when Koda owns a verified delegated subtree and can prevent
 same-UID command code from modifying it. C4C4 remains the acceptance and
 closure slice.
 
-Mac Release 1A does not claim that C4C2-C4C4 are complete. It reuses the
+Mac Release 1A does not claim that Phase 4C4C is complete. It reuses the
 already-complete macOS Seatbelt, secret, resource, PTY, and recovery paths while
 keeping all current Linux/Windows compatibility tests active.
 
@@ -395,8 +396,8 @@ Linux/Windows release expansion remains deferred.
 ### Phase 4F: hardening acceptance
 
 Status: In progress — the 2026-09-28 local full-suite baseline passed:
-`pnpm test` completed the build, 89 Rust tests, and 840 Vitest tests
-(35 skipped); `pnpm typecheck` and six SwiftUI package tests also passed.
+`pnpm test` completed the build, 90 Rust tests, and 841 Vitest tests
+(36 skipped); `pnpm typecheck` and six SwiftUI package tests also passed.
 Remote Turn request reservation and committed-binding recovery now have a real
 child-process `SIGKILL` regression test. Unbound, unlogged reserved requests now have a
 lease-guarded, owner-local abandon command that preserves the used request ID;

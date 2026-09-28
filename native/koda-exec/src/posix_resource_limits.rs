@@ -1,6 +1,6 @@
-#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#![cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
 
-//! Exact macOS per-process rlimit application and bootstrap confirmation.
+//! Exact POSIX per-process rlimit application and bootstrap confirmation.
 
 use std::io;
 use std::time::Duration;
@@ -41,7 +41,7 @@ pub fn confirmation_frame(resources: &ExecutionResourceLimits) -> io::Result<Vec
     Ok(frame)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub fn apply_and_confirm(
     confirmation_fd: i32,
     resources: &ExecutionResourceLimits,
@@ -73,6 +73,14 @@ pub fn apply_and_confirm(
             milliseconds / 1_000,
         )?;
     }
+    #[cfg(target_os = "linux")]
+    if let Some(address_space) = resources.process_address_space_bytes {
+        apply_one(
+            "process_address_space_bytes",
+            libc::RLIMIT_AS,
+            address_space,
+        )?;
+    }
     if let Some(open_files) = resources.process_open_files {
         apply_one("process_open_files", libc::RLIMIT_NOFILE, open_files)?;
     }
@@ -95,7 +103,7 @@ pub fn apply_and_confirm(
     Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub fn apply_and_confirm(
     _confirmation_fd: i32,
     _resources: &ExecutionResourceLimits,
@@ -103,12 +111,17 @@ pub fn apply_and_confirm(
 ) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
-        "macOS resource limits are unavailable on this platform",
+        "POSIX resource limits are unavailable on this platform",
     ))
 }
 
 #[cfg(target_os = "macos")]
-fn apply_one(name: &str, resource: libc::c_int, value: u64) -> io::Result<()> {
+type RlimitResource = libc::c_int;
+#[cfg(target_os = "linux")]
+type RlimitResource = libc::__rlimit_resource_t;
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn apply_one(name: &str, resource: RlimitResource, value: u64) -> io::Result<()> {
     let requested = libc::rlimit {
         rlim_cur: value,
         rlim_max: value,
@@ -134,7 +147,7 @@ fn apply_one(name: &str, resource: libc::c_int, value: u64) -> io::Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn apply_error(name: &str) -> io::Error {
     let kind = io::Error::last_os_error().kind();
     io::Error::new(kind, format!("resource limit {name} could not be applied"))
@@ -145,11 +158,15 @@ fn validate_supported_request(resources: &ExecutionResourceLimits) -> io::Result
         .validate()
         .map_err(|_| invalid_request("resource request is invalid"))?;
     if resources.is_empty()
-        || resources.process_address_space_bytes.is_some()
         || resources.job_process_count.is_some()
         || resources.job_task_count.is_some()
     {
-        return Err(invalid_request("resource request is unsupported on macOS"));
+        return Err(invalid_request("resource request is unsupported"));
+    }
+    if !cfg!(target_os = "linux") && resources.process_address_space_bytes.is_some() {
+        return Err(invalid_request(
+            "address-space limit is unsupported on this platform",
+        ));
     }
     if resources
         .process_cpu_time_ms
@@ -160,7 +177,7 @@ fn validate_supported_request(resources: &ExecutionResourceLimits) -> io::Result
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub fn wait_for_confirmation(
     read: crate::platform::bootstrap::BootstrapRead,
     resources: &ExecutionResourceLimits,
@@ -179,7 +196,7 @@ pub fn wait_for_confirmation(
     Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub fn wait_for_confirmation(
     _read: crate::platform::bootstrap::BootstrapRead,
     _resources: &ExecutionResourceLimits,
@@ -187,11 +204,11 @@ pub fn wait_for_confirmation(
 ) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
-        "macOS resource confirmation is unavailable on this platform",
+        "POSIX resource confirmation is unavailable on this platform",
     ))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn read_exact_with_timeout(
     descriptor: i32,
     length: usize,
@@ -296,7 +313,10 @@ mod tests {
             process_open_files: None,
             process_file_size_bytes: None,
         };
-        assert!(confirmation_frame(&address_space).is_err());
+        assert_eq!(
+            confirmation_frame(&address_space).is_ok(),
+            cfg!(target_os = "linux")
+        );
         let cpu = ExecutionResourceLimits {
             process_cpu_time_ms: Some(1_001),
             process_address_space_bytes: None,

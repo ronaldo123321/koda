@@ -3,6 +3,7 @@ import {
   EXECUTION_RESOURCE_LIMIT_NAMES,
   EXECUTION_RESOURCE_LIMIT_NAMES_V2,
   MACOS_EXECUTION_RESOURCE_CAPABILITIES,
+  LINUX_EXECUTION_RESOURCE_CAPABILITIES,
   executionBackendSchema,
   executionCapabilitiesSchema,
   executionResourceCapabilitiesSchema,
@@ -388,6 +389,22 @@ export function macosResourceExecutionCapabilities(): ExecutionCapabilities {
         ...legacy,
         schema_version: 5,
         resource_limits: MACOS_EXECUTION_RESOURCE_CAPABILITIES,
+      },
+      "INVALID_EXECUTION_POLICY",
+    ),
+  );
+}
+
+export function linuxResourceExecutionCapabilities(
+  runtime: LinuxBubblewrapRuntimeDescriptor,
+): ExecutionCapabilities {
+  return freezeRecord(
+    parse(
+      executionCapabilitiesSchema,
+      {
+        ...linuxBubblewrapExecutionCapabilities(runtime),
+        schema_version: 5,
+        resource_limits: LINUX_EXECUTION_RESOURCE_CAPABILITIES,
       },
       "INVALID_EXECUTION_POLICY",
     ),
@@ -793,6 +810,7 @@ export function validateExecutionSecuritySnapshot(
         resourceContractExecutionCapabilities(
           linuxBubblewrapExecutionCapabilities(snapshot.sandbox_runtime),
         ),
+        linuxResourceExecutionCapabilities(snapshot.sandbox_runtime),
       ];
     })();
     const capabilities = capabilityCandidates.find(

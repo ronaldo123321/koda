@@ -532,6 +532,38 @@ export const MACOS_EXECUTION_RESOURCE_CAPABILITIES = {
   },
 } as const satisfies z.infer<typeof executionResourceCapabilitiesSchema>;
 
+export const LINUX_EXECUTION_RESOURCE_CAPABILITIES = {
+  process_cpu_time_ms: {
+    status: "supported",
+    backend: "posix_rlimit",
+    scope: "process",
+    enforcement: "kernel_hard",
+    granularity: 1_000,
+  },
+  process_address_space_bytes: {
+    status: "supported",
+    backend: "posix_rlimit",
+    scope: "process",
+    enforcement: "kernel_hard",
+    granularity: 1,
+  },
+  job_task_count: { status: "unsupported" },
+  process_open_files: {
+    status: "supported",
+    backend: "posix_rlimit",
+    scope: "process",
+    enforcement: "kernel_hard",
+    granularity: 1,
+  },
+  process_file_size_bytes: {
+    status: "supported",
+    backend: "posix_rlimit",
+    scope: "process",
+    enforcement: "kernel_hard",
+    granularity: 1,
+  },
+} as const satisfies z.infer<typeof executionResourceCapabilitiesSchema>;
+
 const executionCapabilitiesV4CommonShape = {
   schema_version: z.literal(4),
   backend: executionBackendSchema,
@@ -702,7 +734,14 @@ function refineExecutionCapabilitiesV5(
         JSON.stringify(value.resource_limits[name]) ===
         JSON.stringify(MACOS_EXECUTION_RESOURCE_CAPABILITIES[name]),
     );
-  if (!legacy.success || (!unsupported && !macosRlimits)) {
+  const linuxRlimits =
+    legacyVersion === 3 &&
+    EXECUTION_RESOURCE_LIMIT_NAMES.every(
+      (name) =>
+        JSON.stringify(value.resource_limits[name]) ===
+        JSON.stringify(LINUX_EXECUTION_RESOURCE_CAPABILITIES[name]),
+    );
+  if (!legacy.success || (!unsupported && !macosRlimits && !linuxRlimits)) {
     context.addIssue({
       code: "custom",
       message: "Inconsistent resource capability.",

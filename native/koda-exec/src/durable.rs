@@ -855,12 +855,18 @@ fn validate_manifest(manifest: &JobManifest) -> Result<(), ProtocolError> {
                     let wrapped =
                         crate::execution_policy::resource_contract_execution_capabilities(&legacy)
                             .map_err(|_| execution_security::corrupt())?;
-                    let current = if policy.platform
-                        == Some(crate::execution_policy::ExecutionPlatform::Macos)
-                    {
-                        Some(crate::execution_policy::macos_resource_execution_capabilities())
-                    } else {
-                        None
+                    let current = match (policy.platform, policy.sandbox_runtime.as_ref()) {
+                        (Some(crate::execution_policy::ExecutionPlatform::Macos), None) => {
+                            Some(crate::execution_policy::macos_resource_execution_capabilities())
+                        }
+                        (
+                            Some(crate::execution_policy::ExecutionPlatform::Linux),
+                            Some(runtime),
+                        ) => Some(
+                            crate::execution_policy::linux_resource_execution_capabilities(runtime)
+                                .map_err(|_| execution_security::corrupt())?,
+                        ),
+                        _ => None,
                     };
                     [Some(wrapped), current]
                         .into_iter()

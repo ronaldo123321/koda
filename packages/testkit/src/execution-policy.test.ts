@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import {
   MACOS_EXECUTION_RESOURCE_CAPABILITIES,
+  LINUX_EXECUTION_RESOURCE_CAPABILITIES,
   EXECUTION_RESOURCE_LIMIT_MAX,
   executionCapabilitiesSchema,
   linuxBubblewrapRuntimeDescriptorSchema,
@@ -37,6 +38,7 @@ import {
   executionPolicyPreview,
   ExecutionPolicyError,
   linuxBubblewrapExecutionCapabilities,
+  linuxResourceExecutionCapabilities,
   macosSeatbeltExecutionCapabilities,
   macosResourceExecutionCapabilities,
   normalizeExecutionPolicy,
@@ -98,6 +100,13 @@ interface ResourceContractFixtures {
   resource_canonical: string;
   resource_sha256: string;
   macos_rlimit_capability: {
+    resource_limits: unknown;
+    resource_canonical: string;
+    resource_sha256: string;
+    canonical: string;
+    sha256: string;
+  };
+  linux_rlimit_capability: {
     resource_limits: unknown;
     resource_canonical: string;
     resource_sha256: string;
@@ -978,6 +987,61 @@ describe("Phase 4C4C1 resource policy contract", () => {
       capabilities_digest: executionCapabilitiesDigest(capability),
       resources: { status: "not_requested" },
     });
+  });
+
+  it("admits exact Linux process rlimits while rejecting job task counts", () => {
+    const runtime = linuxBubblewrapRuntimeDescriptorSchema.parse(
+      linuxFixtures.runtime,
+    );
+    const capability = linuxResourceExecutionCapabilities(runtime);
+    const golden = resourceFixtures.linux_rlimit_capability;
+    expect(executionCapabilitiesSchema.parse(capability)).toEqual(capability);
+    if (capability.schema_version !== 5)
+      throw new Error("Expected v5 capabilities.");
+    expect(capability.resource_limits).toEqual(golden.resource_limits);
+    expect(capability.resource_limits).toEqual(
+      LINUX_EXECUTION_RESOURCE_CAPABILITIES,
+    );
+    expect(
+      canonicalExecutionResourceCapabilities(capability.resource_limits),
+    ).toBe(golden.resource_canonical);
+    expect(
+      executionResourceCapabilitiesDigest(capability.resource_limits),
+    ).toBe(golden.resource_sha256);
+    expect(canonicalExecutionCapabilities(capability)).toBe(golden.canonical);
+    expect(executionCapabilitiesDigest(capability)).toBe(golden.sha256);
+    const policy = {
+      ...(resourceFixtures.policy_cases[0]!.normalized as ExecutionPolicy),
+      resources: {
+        process_cpu_time_ms: 1_000,
+        process_address_space_bytes: 16_777_216,
+        process_open_files: 64,
+        process_file_size_bytes: 4_096,
+      },
+    };
+    const snapshot = createExecutionAdmissionSnapshot(policy, capability);
+    if (snapshot.schema_version !== 5) throw new Error("Expected v5 evidence.");
+    expect(snapshot.resources?.status).toBe("not_applied");
+    expect(validateExecutionSecuritySnapshot(snapshot)).toEqual(snapshot);
+    expectCode(
+      () =>
+        createExecutionAdmissionSnapshot(
+          { ...policy, resources: { ...policy.resources, job_task_count: 2 } },
+          capability,
+        ),
+      "RESOURCE_LIMIT_UNAVAILABLE",
+    );
+    expectCode(
+      () =>
+        createExecutionAdmissionSnapshot(
+          {
+            ...policy,
+            resources: { ...policy.resources, process_cpu_time_ms: 1_001 },
+          },
+          capability,
+        ),
+      "RESOURCE_LIMIT_UNAVAILABLE",
+    );
   });
 
   it("rejects fabricated v5 support and wrapping an already wrapped capability", () => {

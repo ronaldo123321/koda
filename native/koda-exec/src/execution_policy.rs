@@ -495,6 +495,23 @@ impl ExecutionResourceCapabilities {
         }
     }
 
+    pub fn linux_rlimit() -> Self {
+        let supported = |granularity| ResourceLimitCapability::Supported {
+            backend: ResourceLimitBackend::PosixRlimit,
+            scope: ResourceLimitScope::Process,
+            enforcement: ResourceLimitEnforcement::KernelHard,
+            granularity,
+        };
+        Self {
+            process_cpu_time_ms: supported(1_000),
+            process_address_space_bytes: supported(1),
+            job_process_count: None,
+            job_task_count: Some(ResourceLimitCapability::Unsupported {}),
+            process_open_files: supported(1),
+            process_file_size_bytes: supported(1),
+        }
+    }
+
     fn macos_rlimit_v4() -> Self {
         let mut resources = Self::macos_rlimit();
         resources.job_process_count = resources.job_task_count.take();
@@ -773,12 +790,28 @@ pub fn macos_resource_execution_capabilities() -> ExecutionCapabilities {
     capabilities
 }
 
+pub fn linux_resource_execution_capabilities(
+    runtime: &LinuxBubblewrapRuntimeDescriptor,
+) -> Result<ExecutionCapabilities, ExecutionPolicyError> {
+    let mut capabilities = linux_bubblewrap_execution_capabilities(runtime)?;
+    capabilities.schema_version = 5;
+    capabilities.resource_limits = Some(ExecutionResourceCapabilities::linux_rlimit());
+    Ok(capabilities)
+}
+
 pub fn current_resource_execution_capabilities(
     legacy: &ExecutionCapabilities,
 ) -> Result<ExecutionCapabilities, ExecutionPolicyError> {
     legacy.validate()?;
     if legacy == &macos_seatbelt_execution_capabilities() {
         Ok(macos_resource_execution_capabilities())
+    } else if legacy.platform == Some(ExecutionPlatform::Linux) {
+        linux_resource_execution_capabilities(
+            legacy
+                .sandbox_runtime
+                .as_ref()
+                .ok_or(ExecutionPolicyError::InvalidExecutionPolicy)?,
+        )
     } else {
         resource_contract_execution_capabilities(legacy)
     }
@@ -820,6 +853,9 @@ impl ExecutionCapabilities {
                                     == Some(ExecutionResourceCapabilities::macos_rlimit_v4()))
                     } else {
                         self.resource_limits == Some(ExecutionResourceCapabilities::unsupported())
+                            || (self.platform == Some(ExecutionPlatform::Linux)
+                                && self.resource_limits
+                                    == Some(ExecutionResourceCapabilities::linux_rlimit()))
                             || (self.platform == Some(ExecutionPlatform::Macos)
                                 && self.resource_limits
                                     == Some(ExecutionResourceCapabilities::macos_rlimit()))
@@ -1269,10 +1305,14 @@ impl ExecutionSecuritySnapshot {
                 };
                 let wrapped =
                     resource_contract_execution_capabilities(&legacy).map_err(|_| corrupt)?;
-                let current = if snapshot.platform == Some(ExecutionPlatform::Macos) {
-                    Some(macos_resource_execution_capabilities())
-                } else {
-                    None
+                let current = match (snapshot.platform, snapshot.sandbox_runtime.as_ref()) {
+                    (Some(ExecutionPlatform::Macos), None) => {
+                        Some(macos_resource_execution_capabilities())
+                    }
+                    (Some(ExecutionPlatform::Linux), Some(runtime)) => {
+                        Some(linux_resource_execution_capabilities(runtime).map_err(|_| corrupt)?)
+                    }
+                    _ => None,
                 };
                 [Some(wrapped), current]
                     .into_iter()
