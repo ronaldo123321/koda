@@ -311,13 +311,15 @@ describe("Phase 4C2 native admission and evidence", () => {
               "process_address_space_bytes",
               "job_task_count",
             ]
-          : [
-              "process_cpu_time_ms",
-              "process_address_space_bytes",
-              "job_task_count",
-              "process_open_files",
-              "process_file_size_bytes",
-            ];
+          : process.platform === "linux"
+            ? ["process_cpu_time_ms", "job_task_count"]
+            : [
+                "process_cpu_time_ms",
+                "process_address_space_bytes",
+                "job_task_count",
+                "process_open_files",
+                "process_file_size_bytes",
+              ];
       const restrictions = [
         ...isolationRestrictions.map((restriction) => ({
           restriction,
