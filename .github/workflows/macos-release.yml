@@ -93,6 +93,21 @@ jobs:
           test ! -L "$KODA_PREVIEW_BIN_DIR/koda"
           test ! -e "$KODA_PREVIEW_BIN_DIR/koda-chat"
           test ! -L "$KODA_PREVIEW_BIN_DIR/koda-chat"
+      - name: Build and verify unsigned macOS GUI preview
+        shell: bash
+        run: |
+          app="$RUNNER_TEMP/Koda.app"
+          apps/macos-gui/package-preview.sh "$app" "dist/release/${{ matrix.arch }}/koda"
+          plutil -lint "$app/Contents/Info.plist"
+          test "$(lipo -archs "$app/Contents/MacOS/KodaGUI")" = "${{ matrix.uname }}"
+          "$app/Contents/Resources/runtime/koda/bin/koda" doctor --bundle-only --json
+          swift test --package-path apps/macos-gui --filter RemoteClientTests
+          archive="dist/release/${{ matrix.arch }}/Koda-unsigned-${{ matrix.arch }}-${GITHUB_SHA}.zip"
+          ditto -c -k --keepParent "$app" "$archive"
+          shasum -a 256 "$archive" > "$archive.sha256"
+          mkdir -p "$RUNNER_TEMP/koda-gui-unpacked"
+          ditto -x -k "$archive" "$RUNNER_TEMP/koda-gui-unpacked"
+          "$RUNNER_TEMP/koda-gui-unpacked/Koda.app/Contents/Resources/runtime/koda/bin/koda" doctor --bundle-only --json
       - name: Retain unsigned release candidate
         uses: actions/upload-artifact@v4
         with:
@@ -101,6 +116,8 @@ jobs:
             dist/release/${{ matrix.arch }}/*.tar.gz
             dist/release/${{ matrix.arch }}/*.tar.gz.sha256
             dist/release/${{ matrix.arch }}/*.release.json
+            dist/release/${{ matrix.arch }}/Koda-unsigned-*.zip
+            dist/release/${{ matrix.arch }}/Koda-unsigned-*.zip.sha256
           if-no-files-found: error
           retention-days: 14
 
