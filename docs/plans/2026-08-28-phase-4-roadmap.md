@@ -25,8 +25,8 @@ The roadmap is reordered rather than replaced. Mac Release 1A pulls forward
 the macOS packaging/signing portion of Phase 4E and the macOS acceptance portion
 of Phase 4F. Linux C4C2-C4C4 and new Windows sandbox/resource/secret work pause
 until the macOS preview is in user hands. Phase 4D remote operation, the rest of
-Phase 4E/4F, and Phase 5 remain later work. Existing Linux and Windows behavior
-continues to run as a shared regression gate.
+Phase 4E/4F, and Phase 5 remain later work. Linux and Windows specialist CI
+jobs are manual during the macOS focus; the shared suite still runs automatically.
 
 Delivery status: MR1A1 (release runtime contract, unified command dispatcher,
 strict installed-runtime resolution, integrity doctor, and deterministic

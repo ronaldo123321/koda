@@ -119,6 +119,7 @@ jobs:
           fi
 
   linux-native:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     env:
       KODA_REQUIRE_LINUX_BUBBLEWRAP: "1"
@@ -260,6 +261,7 @@ jobs:
           packages/testkit/src/native-execution-policy.test.ts
 
   windows-native:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
