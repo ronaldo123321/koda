@@ -24,9 +24,21 @@ const deviceIdSchema = z.string().regex(/^device-[a-f0-9]{32}$/u);
 const grantSchema = z
   .object({
     workspaceId: idSchema,
-    permissions: z.array(remotePermissionSchema).min(1).max(7),
+    permissions: z.array(remotePermissionSchema).min(1).max(8),
+    mcpServerIds: z
+      .array(z.string().regex(/^[a-z][a-z0-9_-]{0,23}$/u))
+      .min(1)
+      .max(16)
+      .optional(),
   })
-  .strict();
+  .strict()
+  .refine(
+    (grant) =>
+      grant.permissions.includes("mcp:invoke") ===
+        (grant.mcpServerIds !== undefined) &&
+      (grant.mcpServerIds === undefined ||
+        new Set(grant.mcpServerIds).size === grant.mcpServerIds.length),
+  );
 const deviceFileSchema = z
   .object({
     version: z.literal(1),
@@ -42,6 +54,7 @@ const deviceFileSchema = z
 export interface RemoteDeviceGrantInput {
   workspaceId: string;
   permissions: readonly z.infer<typeof remotePermissionSchema>[];
+  mcpServerIds?: readonly string[];
 }
 
 export interface IssuedRemoteDevice {
@@ -156,6 +169,9 @@ export class RemoteDeviceStore {
           deviceId,
           workspaceId: grant.workspaceId,
           permissions: grant.permissions,
+          ...(grant.mcpServerIds === undefined
+            ? {}
+            : { mcpServerIds: grant.mcpServerIds }),
         })),
       };
     } catch {

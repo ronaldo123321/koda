@@ -125,6 +125,60 @@ describe("MCP configuration", () => {
 });
 
 describe("McpTurnSession", () => {
+  it("connects only explicitly selected MCP servers", async () => {
+    const fixture = await createFixture();
+    await writeConfiguration(fixture, {
+      version: 1,
+      servers: {
+        reviewed: { command: "reviewed-server", remote_tools: ["value"] },
+        private: { command: "private-server" },
+      },
+    });
+    const connected: string[] = [];
+    let definitions = [tool("value"), tool("unreviewed")];
+    const options = {
+      environment: {},
+      kodaHome: fixture.kodaHome,
+      processDirectory: fixture.root,
+      artifactStore: await ArtifactStore.open(
+        join(fixture.kodaHome, "artifacts"),
+      ),
+      signal: new AbortController().signal,
+      connectionFactory: async (server: { id: string }) => {
+        connected.push(server.id);
+        return fakeConnection(server.id, {
+          definitions: () => definitions,
+        });
+      },
+      serverIds: ["reviewed"],
+    };
+    const session = await McpTurnSession.open(options);
+    const registry = new ToolRegistry();
+    session.registerTools(registry);
+    expect(connected).toEqual(["reviewed"]);
+    expect(registry.definitions().map((tool) => tool.name)).toEqual([
+      "mcp__reviewed__value",
+    ]);
+    definitions = [tool("value"), tool("new_unreviewed")];
+    expect(await session.refreshTools(2, options.signal)).toBeUndefined();
+    expect(registry.definitions().map((tool) => tool.name)).toEqual([
+      "mcp__reviewed__value",
+    ]);
+    definitions = [tool("new_unreviewed")];
+    await expect(session.refreshTools(3, options.signal)).rejects.toMatchObject(
+      {
+        code: "MCP_TOOL_CATALOG_INVALID",
+      },
+    );
+    await session.close();
+    await expect(
+      McpTurnSession.open({ ...options, serverIds: ["missing"] }),
+    ).rejects.toMatchObject({ code: "MCP_CONFIGURATION_INVALID" });
+    await expect(
+      McpTurnSession.open({ ...options, serverIds: ["private"] }),
+    ).rejects.toMatchObject({ code: "MCP_CONFIGURATION_INVALID" });
+  });
+
   it("registers stable aliases with fail-closed effects and bounded results", async () => {
     const fixture = await createFixture();
     await writeConfiguration(fixture, {

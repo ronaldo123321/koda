@@ -20,7 +20,7 @@ export interface RemoteTurnStartInput {
   workspaceId: string;
   prompt: string;
   resumeThreadId?: string;
-  effects?: readonly ("workspace:mutate" | "process:control")[];
+  effects?: readonly ("workspace:mutate" | "process:control" | "mcp:invoke")[];
 }
 
 interface PendingRemoteApproval {
@@ -89,6 +89,9 @@ export class RemoteTurnHost {
     for (const effect of input.effects ?? []) {
       await catalog.authorizeWorkspace(principal, input.workspaceId, effect);
     }
+    const mcpServerIds = input.effects?.includes("mcp:invoke")
+      ? await catalog.authorizedMcpServers(principal, input.workspaceId)
+      : undefined;
     if ((input.effects?.length ?? 0) > 0) {
       await catalog.authorizeWorkspace(
         principal,
@@ -157,6 +160,7 @@ export class RemoteTurnHost {
                     ...(input.effects.includes("process:control")
                       ? { processExecution: true as const }
                       : {}),
+                    ...(mcpServerIds === undefined ? {} : { mcpServerIds }),
                   },
                 }
               : {}),

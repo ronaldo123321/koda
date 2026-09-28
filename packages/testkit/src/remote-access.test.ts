@@ -103,6 +103,45 @@ describe("remote access catalog", () => {
     ).rejects.toBeInstanceOf(RemoteAccessDeniedError);
   });
 
+  it("reveals only the MCP servers granted to the exact device", async () => {
+    const root = await mkdtemp(join(tmpdir(), "koda-remote-mcp-access-"));
+    directories.push(root);
+    const owner = { ownerId: "owner", deviceId: "macbook" };
+    const other = { ownerId: "owner", deviceId: "iphone" };
+    const catalog = await RemoteAccessCatalog.create(
+      "owner",
+      [{ id: "project", root: await realpath(root) }],
+      [
+        {
+          ...owner,
+          workspaceId: "project",
+          permissions: ["mcp:invoke"],
+          mcpServerIds: ["reviewed"],
+        },
+        { ...other, workspaceId: "project", permissions: ["workspace:read"] },
+      ],
+    );
+    await expect(
+      catalog.authorizedMcpServers(owner, "project"),
+    ).resolves.toEqual(["reviewed"]);
+    await expect(
+      catalog.authorizedMcpServers(other, "project"),
+    ).rejects.toBeInstanceOf(RemoteAccessDeniedError);
+    await expect(
+      RemoteAccessCatalog.create(
+        "owner",
+        [{ id: "project", root: await realpath(root) }],
+        [
+          {
+            ...owner,
+            workspaceId: "project",
+            permissions: ["mcp:invoke"],
+          },
+        ],
+      ),
+    ).rejects.toThrow("Remote MCP grant configuration is invalid");
+  });
+
   it("requires an owner/workspace/thread binding and removes host details", async () => {
     const { catalog, owner, otherDevice, binding, workspaceRoot } =
       await fixture();

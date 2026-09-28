@@ -184,9 +184,11 @@ final class RemoteClient: NSObject, URLSessionDelegate, URLSessionTaskDelegate {
             of: "^[a-z][a-z0-9-]{0,63}$", options: .regularExpression
         ) != nil else { throw RemoteError(message: "远程工作区 ID 无效。") }
         if let effects {
-            guard !effects.isEmpty, effects.count <= 2,
+            guard !effects.isEmpty, effects.count <= 3,
                   effects.count == Set(effects).count,
-                  effects.allSatisfy({ $0 == "workspace:mutate" || $0 == "process:control" }) else {
+                  effects.allSatisfy({
+                    $0 == "workspace:mutate" || $0 == "process:control" || $0 == "mcp:invoke"
+                  }) else {
                 throw RemoteError(message: "远程副作用范围无效。")
             }
         }

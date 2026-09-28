@@ -50,6 +50,7 @@ export interface OpenMcpTurnSessionOptions {
   artifactStore: ArtifactStore;
   signal: AbortSignal;
   connectionFactory?: McpConnectionFactory;
+  serverIds?: readonly string[];
 }
 
 export class McpTurnSession {
@@ -60,17 +61,36 @@ export class McpTurnSession {
     private readonly connections: McpServerConnection[],
     private tools: RegisteredMcpTool[],
     private readonly artifactStore: ArtifactStore,
+    private readonly remoteSelection: boolean,
   ) {}
 
   public static async open(
     options: OpenMcpTurnSessionOptions,
   ): Promise<McpTurnSession> {
     const configuration = await loadMcpConfiguration(options);
+    const selected = options.serverIds;
+    if (
+      selected !== undefined &&
+      (selected.length === 0 ||
+        new Set(selected).size !== selected.length ||
+        selected.some(
+          (id) =>
+            !configuration.servers.some(
+              (server) => server.id === id && server.remoteToolNames.length > 0,
+            ),
+        ))
+    ) {
+      throw new McpClientError(
+        "MCP_CONFIGURATION_INVALID",
+        "Selected MCP servers are unavailable.",
+      );
+    }
     const connections: McpServerConnection[] = [];
     const connectionFactory =
       options.connectionFactory ?? connectOfficialMcpClient;
     try {
       for (const server of configuration.servers) {
+        if (selected !== undefined && !selected.includes(server.id)) continue;
         options.signal.throwIfAborted();
         const connection = await connectionFactory(
           server,
@@ -79,8 +99,18 @@ export class McpTurnSession {
         );
         connections.push({ server, connection });
       }
-      const tools = await discoverTools(connections, options.signal, true);
-      return new McpTurnSession(connections, tools, options.artifactStore);
+      const tools = await discoverTools(
+        connections,
+        options.signal,
+        true,
+        selected !== undefined,
+      );
+      return new McpTurnSession(
+        connections,
+        tools,
+        options.artifactStore,
+        selected !== undefined,
+      );
     } catch (error) {
       await closeConnections(connections);
       if (options.signal.aborted) {
@@ -121,7 +151,12 @@ export class McpTurnSession {
     if (registry === undefined) {
       throw catalogError("MCP tools must be registered before refresh.");
     }
-    const candidate = await discoverTools(this.connections, signal, false);
+    const candidate = await discoverTools(
+      this.connections,
+      signal,
+      false,
+      this.remoteSelection,
+    );
     if (sameTools(this.tools, candidate)) {
       return undefined;
     }
@@ -252,6 +287,7 @@ async function discoverTools(
   connections: readonly McpServerConnection[],
   signal: AbortSignal,
   startup: boolean,
+  remoteSelection: boolean,
 ): Promise<RegisteredMcpTool[]> {
   const tools: RegisteredMcpTool[] = [];
   const aliases = new Set<string>();
@@ -264,6 +300,12 @@ async function discoverTools(
     );
     const discoveredNames = new Set<string>();
     for (const definition of definitions) {
+      if (
+        remoteSelection &&
+        !server.remoteToolNames.includes(definition.name)
+      ) {
+        continue;
+      }
       if (tools.length >= MAX_TOOLS) {
         throw catalogError(
           `MCP tool catalog exceeds the ${MAX_TOOLS}-tool limit.`,
@@ -291,10 +333,22 @@ async function discoverTools(
       tools.push(tool);
     }
     for (const configuredName of Object.keys(server.tools)) {
-      if (!discoveredNames.has(configuredName)) {
+      if (
+        (!remoteSelection || server.remoteToolNames.includes(configuredName)) &&
+        !discoveredNames.has(configuredName)
+      ) {
         throw catalogError(
           `MCP server '${server.id}' configures unknown read tool '${configuredName}'.`,
         );
+      }
+    }
+    if (remoteSelection) {
+      for (const allowedName of server.remoteToolNames) {
+        if (!discoveredNames.has(allowedName)) {
+          throw catalogError(
+            `MCP server '${server.id}' has no reviewed remote tool '${allowedName}'.`,
+          );
+        }
       }
     }
   }

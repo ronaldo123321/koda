@@ -109,7 +109,9 @@ koda remote serve --host 192.168.1.10 --port 8443 --cert /absolute/path/server.p
 koda remote device issue macbook --workspace project --permissions workspace:read,thread:read,turn:start,workspace:mutate,approval:resolve
 ```
 
-客户端按 Turn 选择副作用范围，每次工具调用仍需在同一设备预览并批准；审批五分钟过期，拒绝或超时不会执行该调用。客户端必须核对主机证书指纹。现有 Thread 需由主机所有者显式执行 `koda remote thread expose <thread-id> --workspace project` 才会对远程设备可见。macOS 远程窗口可按游标回放助手文本和事件状态；普通活动流不投射工具参数与结构化主机路径。有 `approval:resolve` 权限的设备可查看待审批操作的确切参数与路径，助手文本也可能引用工作区内容。远程 MCP/OAuth、审批所有权转移和双设备真实网络验收尚未完成；具体边界见 [远程操作设计](docs/plans/2026-09-27-phase-4d-remote-operation-design.md)。
+主机现有 `mcp.json` 的服务器可通过 `remote_tools: ["tool_name"]` 显式允许远程工具名，再用 `--permissions workspace:read,thread:read,turn:start,approval:resolve,mcp:invoke --mcp-servers <server-id>` 仅向指定设备授予该服务器。未列出的服务器和工具不进入远程目录；有副作用的 MCP 调用仍需逐项审批。此能力使用主机配置的本地 MCP 服务器，HTTPS MCP 传输与 OAuth 尚未完成。
+
+客户端按 Turn 选择副作用范围，每次实际写入或执行仍需在同一设备预览并批准；审批五分钟过期，拒绝或超时不会执行该调用。客户端必须核对主机证书指纹。现有 Thread 需由主机所有者显式执行 `koda remote thread expose <thread-id> --workspace project` 才会对远程设备可见。macOS 远程窗口可按游标回放助手文本和事件状态；普通活动流不投射工具参数与结构化主机路径。有 `approval:resolve` 权限的设备可查看待审批操作的确切参数与路径，助手文本也可能引用工作区内容。审批所有权转移和双设备真实网络验收尚未完成；具体边界见 [远程操作设计](docs/plans/2026-09-27-phase-4d-remote-operation-design.md)。
 
 ## 扩展与本地数据
 

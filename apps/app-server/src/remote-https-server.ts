@@ -52,9 +52,9 @@ const turnStartSchema = z
       .regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u)
       .optional(),
     effects: z
-      .array(z.enum(["workspace:mutate", "process:control"]))
+      .array(z.enum(["workspace:mutate", "process:control", "mcp:invoke"]))
       .min(1)
-      .max(2)
+      .max(3)
       .refine((effects) => new Set(effects).size === effects.length)
       .optional(),
   })

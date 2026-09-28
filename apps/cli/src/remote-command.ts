@@ -69,16 +69,35 @@ export async function runRemoteDeviceIssueCommand(
   workspaceId: string,
   permissionInput: string | undefined,
   context: RemoteCommandContext,
+  mcpServerInput?: string,
 ): Promise<number> {
   try {
     const permissions = parsePermissions(permissionInput);
+    const mcpServerIds = mcpServerInput
+      ?.split(",")
+      .map((value) => value.trim());
+    if (
+      permissions.includes("mcp:invoke") !== (mcpServerIds !== undefined) ||
+      (mcpServerIds !== undefined &&
+        (mcpServerIds.length === 0 ||
+          new Set(mcpServerIds).size !== mcpServerIds.length ||
+          mcpServerIds.some((id) => !/^[a-z][a-z0-9_-]{0,23}$/u.test(id))))
+    ) {
+      throw new Error("Remote MCP server grants are invalid.");
+    }
     const home = resolveKodaHome(context.environment);
     const workspaces = await RemoteWorkspaceStore.open(home, OWNER_ID);
     if ((await workspaces.get(workspaceId)) === undefined) {
       throw new Error("Remote workspace is unavailable.");
     }
     const devices = await RemoteDeviceStore.open(home, OWNER_ID);
-    const issued = await devices.issue(label, [{ workspaceId, permissions }]);
+    const issued = await devices.issue(label, [
+      {
+        workspaceId,
+        permissions,
+        ...(mcpServerIds === undefined ? {} : { mcpServerIds }),
+      },
+    ]);
     context.stdout.write(`Device ID: ${issued.deviceId}\n`);
     context.stdout.write(`Expires: ${issued.expiresAt}\n`);
     context.stdout.write(`Token (shown once): ${issued.token}\n`);

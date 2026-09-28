@@ -48,6 +48,19 @@ const effectful = await devices.issue("mac-approver", [
     ],
   },
 ]);
+const mcpDevice = await devices.issue("mac-mcp", [
+  {
+    workspaceId: "project",
+    permissions: [
+      "workspace:read",
+      "thread:read",
+      "turn:start",
+      "approval:resolve",
+      "mcp:invoke",
+    ],
+    mcpServerIds: ["reviewed"],
+  },
+]);
 const threads = await RemoteThreadStore.open(home, "owner");
 await threads.bind({
   ownerId: "owner",
@@ -185,7 +198,9 @@ const application = {
     artifactApplication.listThreadArtifacts.bind(artifactApplication),
   readArtifact: artifactApplication.readArtifact.bind(artifactApplication),
   startTurnAfter: async (input, client, beforeStart) => {
-    const isEffectful = input.remoteEffects?.workspaceMutations === true;
+    const isMcp = input.remoteEffects?.mcpServerIds !== undefined;
+    const isEffectful =
+      input.remoteEffects?.workspaceMutations === true || isMcp;
     const ids = {
       threadId: "thread-1",
       turnId: isEffectful ? `turn-effect-${++effectfulTurns}` : "turn-2",
@@ -196,12 +211,20 @@ const application = {
       const completion = client.approvals
         .request(
           {
-            callId: `patch-${effectfulTurns}`,
-            name: "apply_patch",
-            title: "Approve one file patch",
-            summary: "Update remote-note.txt.",
-            details: "remote-note.txt: before -> after",
-            reason: "Remote write needs approval.",
+            callId: isMcp ? `mcp-${effectfulTurns}` : `patch-${effectfulTurns}`,
+            name: isMcp ? "mcp__reviewed__effect" : "apply_patch",
+            title: isMcp
+              ? "Approve reviewed MCP call"
+              : "Approve one file patch",
+            summary: isMcp
+              ? "Call a reviewed MCP tool."
+              : "Update remote-note.txt.",
+            details: isMcp
+              ? "reviewed/effect arguments: {}"
+              : "remote-note.txt: before -> after",
+            reason: isMcp
+              ? "Remote MCP effect needs approval."
+              : "Remote write needs approval.",
           },
           controller.signal,
         )
@@ -245,6 +268,7 @@ process.stdout.write(
     fingerprint: server.certificateSha256,
     token: full.token,
     effectfulToken: effectful.token,
+    mcpToken: mcpDevice.token,
     workspaceOnlyToken: workspaceOnly.token,
     artifactId: artifact.id,
   }) + "\n",

@@ -32,6 +32,7 @@ final class RemoteModel: ObservableObject {
     @Published var prompt = ""
     @Published var allowWrites = false
     @Published var allowCommands = false
+    @Published var allowMcp = false
     @Published var notice: String?
     @Published var hasPendingStart = false
     @Published var startRetrying = false
@@ -376,7 +377,8 @@ final class RemoteModel: ObservableObject {
     func startTurn() {
         guard canSend, let workspaceID = selectedWorkspaceID, let client else { return }
         let effects = (allowWrites ? ["workspace:mutate"] : []) +
-            (allowCommands ? ["process:control"] : [])
+            (allowCommands ? ["process:control"] : []) +
+            (allowMcp ? ["mcp:invoke"] : [])
         let request = PendingRemoteStart(
             origin: client.settings.origin,
             certificateSha256: client.settings.certificateSha256,
@@ -437,6 +439,7 @@ final class RemoteModel: ObservableObject {
                 prompt = ""
                 allowWrites = false
                 allowCommands = false
+                allowMcp = false
                 notice = nil
                 if let previous = activeTurns.updateValue(result.turnId, forKey: result.threadId) {
                     stopPendingTurns.remove(previous)

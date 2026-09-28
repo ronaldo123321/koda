@@ -264,6 +264,29 @@ describe.skipIf(process.platform === "win32")("remote owner commands", () => {
       },
     ]);
 
+    const mcpIssued = await invoke(home, [
+      "remote",
+      "device",
+      "issue",
+      "mcpbook",
+      "--workspace",
+      "project",
+      "--permissions",
+      "workspace:read,thread:read,turn:start,approval:resolve,mcp:invoke",
+      "--mcp-servers",
+      "reviewed",
+    ]);
+    expect(mcpIssued.exitCode).toBe(0);
+    const mcpToken = /Token \(shown once\): (\S+)/u.exec(
+      mcpIssued.stdout.value,
+    )?.[1];
+    expect(mcpToken).toBeDefined();
+    if (mcpToken !== undefined) {
+      expect((await store.verify(mcpToken)).grants[0]?.mcpServerIds).toEqual([
+        "reviewed",
+      ]);
+    }
+
     const revoked = await invoke(home, [
       "remote",
       "device",
@@ -299,6 +322,18 @@ describe.skipIf(process.platform === "win32")("remote owner commands", () => {
     ]);
     expect(invalid.exitCode).toBe(1);
     expect(invalid.stdout.value).toBe("");
+    const missingMcpServers = await invoke(home, [
+      "remote",
+      "device",
+      "issue",
+      "phone",
+      "--workspace",
+      "missing",
+      "--permissions",
+      "mcp:invoke",
+    ]);
+    expect(missingMcpServers.exitCode).toBe(1);
+    expect(missingMcpServers.stdout.value).toBe("");
   });
 });
 

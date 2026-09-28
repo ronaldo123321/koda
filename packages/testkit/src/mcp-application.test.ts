@@ -42,6 +42,92 @@ afterEach(async () => {
 });
 
 describe("KodaApplication MCP integration", () => {
+  it("exposes only a selected owner MCP server to a remote Turn and approves its effect", async () => {
+    const fixture = await createFixture("remote-scope");
+    await writeFile(
+      join(fixture.kodaHome, "mcp.json"),
+      JSON.stringify({
+        version: 1,
+        servers: {
+          fixture: {
+            command: process.execPath,
+            args: [fixtureServer],
+            cwd: fixture.workspaceRoot,
+            env: ["KODA_MCP_FIXTURE_SECRET"],
+            remote_tools: ["environment"],
+          },
+          private: { command: "/nonexistent-private-mcp-server" },
+        },
+      }),
+    );
+    const provider = new ScriptedModelProvider([
+      {
+        assertRequest: (request) => {
+          const names = request.tools.map((tool) => tool.name);
+          expect(names).toContain("mcp__fixture__environment");
+          expect(names).not.toContain("mcp__fixture__echo");
+          expect(names.some((name) => name.startsWith("mcp__private__"))).toBe(
+            false,
+          );
+          expect(names).not.toContain("exec_command");
+          expect(names).not.toContain("apply_patch");
+        },
+        events: [
+          {
+            type: "tool_call",
+            callId: toolCallIdSchema.parse("remote-mcp-call"),
+            name: "mcp__fixture__environment",
+            arguments: {},
+          },
+          { type: "completed", finishReason: "tool_calls" },
+        ],
+      },
+      {
+        assertRequest: (request) => {
+          expect(latestToolResult(request.items)).toMatchObject({
+            name: "mcp__fixture__environment",
+            status: "success",
+          });
+        },
+        events: [{ type: "completed", finishReason: "stop" }],
+      },
+    ]);
+    const application = new KodaApplication({
+      environment: {
+        KODA_HOME: fixture.kodaHome,
+        OPENAI_API_KEY: "offline-test-key",
+        KODA_MCP_FIXTURE_SECRET: "allowed-secret",
+      },
+      processDirectory: fixture.root,
+      remoteRestricted: true,
+      dependencies: dependencies(provider, "remote-mcp"),
+    });
+    let approvals = 0;
+    const handle = application.startTurn(
+      {
+        prompt: "Use the selected MCP server.",
+        cwd: fixture.workspaceRoot,
+        approvalMode: "on-request",
+        remoteEffects: { mcpServerIds: ["fixture"] },
+      },
+      {
+        events: { append: async () => undefined },
+        approvals: {
+          request: async (request) => {
+            approvals += 1;
+            expect(request.callId).toBe("remote-mcp-call");
+            expect(request.name).toBe("mcp__fixture__environment");
+            return { decision: "approved" };
+          },
+        },
+      },
+    );
+    await expect(handle.completion).resolves.toMatchObject({
+      status: "completed",
+    });
+    expect(approvals).toBe(1);
+  });
+
   it("runs real stdio tools under Koda policy and closes the child", async () => {
     const fixture = await createFixture("success");
     const exitFile = join(fixture.root, "server-exited.txt");

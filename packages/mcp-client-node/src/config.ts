@@ -65,6 +65,11 @@ const serverSchema = z
     tools: z
       .record(z.string().min(1).max(128), configuredToolSchema)
       .default({}),
+    remote_tools: z
+      .array(z.string().min(1).max(128))
+      .max(64)
+      .default([])
+      .refine((names) => new Set(names).size === names.length),
     startup_timeout_ms: z
       .number()
       .int()
@@ -110,6 +115,7 @@ export interface McpServerConfiguration {
   cwd?: string;
   environmentNames: string[];
   tools: Readonly<Record<string, McpToolPolicyConfiguration>>;
+  remoteToolNames: readonly string[];
   startupTimeoutMs: number;
   callTimeoutMs: number;
 }
@@ -225,6 +231,7 @@ export async function loadMcpConfiguration(
       ...(cwd === undefined ? {} : { cwd }),
       environmentNames: [...server.env],
       tools: server.tools,
+      remoteToolNames: [...server.remote_tools],
       startupTimeoutMs: server.startup_timeout_ms,
       callTimeoutMs: server.call_timeout_ms,
     });

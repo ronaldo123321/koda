@@ -75,5 +75,38 @@ describe.skipIf(process.platform === "win32")(
         RemoteAccessDeniedError,
       );
     });
+
+    it("stores an exact MCP server allowlist with the MCP permission", async () => {
+      const home = await mkdtemp(join(tmpdir(), "koda-remote-device-mcp-"));
+      directories.push(home);
+      const store = await RemoteDeviceStore.open(home, "owner");
+      const issued = await store.issue("MacBook", [
+        {
+          workspaceId: "project",
+          permissions: ["workspace:read", "mcp:invoke"],
+          mcpServerIds: ["reviewed_server"],
+        },
+      ]);
+      expect((await store.verify(issued.token)).grants[0]).toMatchObject({
+        mcpServerIds: ["reviewed_server"],
+      });
+      await expect(
+        store.issue("bad", [
+          {
+            workspaceId: "project",
+            permissions: ["mcp:invoke"],
+          },
+        ]),
+      ).rejects.toThrow();
+      await expect(
+        store.issue("bad", [
+          {
+            workspaceId: "project",
+            permissions: ["mcp:invoke"],
+            mcpServerIds: ["reviewed_server", "reviewed_server"],
+          },
+        ]),
+      ).rejects.toThrow();
+    });
   },
 );

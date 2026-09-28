@@ -9,7 +9,8 @@
   preview now verifies a pinned certificate, stores its device token in Keychain,
   lists authorized Threads, replays assistant updates and event status, and
   previews verified Thread artifacts in bounded UTF-8 ranges. Scoped remote
-  write/command approvals are locally tested; full event payload projection,
+  write/command approvals and allowlisted host-local MCP scopes are locally tested;
+  full event payload projection,
   durable approval transfer, automatic pairing, and physical two-device
   acceptance remain open.
   Swift client tests now exercise the actual local HTTPS/WSS listener with
@@ -61,13 +62,15 @@ execution, uses a durable request ID to prevent duplicate starts, and does not
 cancel on an HTTP client disconnect. A separate per-Turn effect scope can
 expose workspace patching or command tools only when the device has matching
 workspace, Thread, and approval grants; every actual effect still asks for an
-exact approval. Plugin, MCP, and plan-control tools remain unavailable to
-remote Turns. A separate no-body cancellation request checks the Thread binding,
+exact approval. The `mcp:invoke` scope loads only server IDs explicitly granted
+to the device and tool names in each host server's `remote_tools` allowlist.
+Unknown-effect MCP tools ask for approval. Plugin and plan-control tools remain
+unavailable to remote Turns. A separate no-body cancellation request checks the Thread binding,
 authoritative workspace root, and `turn:control` grant before signaling an active
 Turn; it never retries automatically after an uncertain response. WSS subscriptions are read-only, authenticate the device and
 Thread before upgrade and during polling, replay by an exclusive durable
 cursor, and close on revocation or bounded-buffer pressure without cancelling
-the Turn. Remote MCP and other unreviewed effects stay disabled.
+the Turn. HTTPS MCP transport, OAuth, and other unreviewed effects stay disabled.
 
 Artifact access uses `GET /v1/threads/:threadId/artifacts` with an optional
 `before` sequence and limit of 25, and
@@ -94,7 +97,8 @@ Listing is filtered before projection.
 
 The permission set is explicit: `workspace:read`, `thread:read`,
 `turn:start`, `turn:control`, `approval:resolve`, `process:control`, and
-`workspace:mutate`. A grant is bound to one workspace ID and device, and
+`workspace:mutate`, and `mcp:invoke`. An MCP grant also names exact host server
+IDs; host configuration must name exact remote tool names. A grant is bound to one workspace ID and device, and
 revision. No method infers write authority from a read grant. Unknown or
 ungranted IDs return the same non-disclosing result. Remote projections omit
 host paths, secret names not needed by the client, and raw diagnostics.
@@ -181,6 +185,16 @@ remain in a dedicated encrypted secret store with rotation and revocation.
 Reconnect never replays an uncertain tool call. Resource, prompt, and other
 non-Tool MCP capabilities require separate policy before exposure.
 
+Current implementation permits a remote device to invoke selected host-local
+stdio MCP servers only when its workspace grant includes `mcp:invoke` and exact
+server IDs. The host's `mcp.json` must independently list `remote_tools` for
+each selected server. Other servers and tools are not connected or advertised;
+configured read tools retain their read classification, while unknown effects
+require a fresh exact-call approval. Swift client TLS, device-grant, catalog
+isolation, real stdio invocation, and approval tests cover this subset. The
+host still lacks HTTPS MCP transport, OAuth registration/redirect/token
+lifecycle, and a pinned definition review workflow, so 4D4 is not complete.
+
 ## 6. Delivery and acceptance
 
 1. **4D1 identity and authorization:** strict owner/device/grant/workspace/thread
@@ -215,7 +229,7 @@ bound Thread summaries, payload-free event envelopes, assistant updates,
 safe all-type activity status, and verified Thread artifact ranges.
 The SwiftUI preview verifies an out-of-band pinned server certificate and
 replays authorized assistant updates and event status. Automatic pairing, the full app-server
-method set, complete event payloads, durable approval transfer, remote
-MCP/OAuth, and physical two-device acceptance remain open before Phase 4D can
+method set, complete event payloads, durable approval transfer, HTTPS MCP
+transport/OAuth, and physical two-device acceptance remain open before Phase 4D can
 close. Scoped remote writes, commands, and exact-call approvals have local
 macOS and HTTPS fixture coverage as described above.

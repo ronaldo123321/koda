@@ -168,11 +168,12 @@ struct RemoteContentView: View {
             HStack(spacing: 16) {
                 Toggle("允许工作区写入", isOn: $model.allowWrites)
                 Toggle("允许命令执行", isOn: $model.allowCommands)
+                Toggle("允许 MCP 工具", isOn: $model.allowMcp)
                 Spacer()
             }
             .toggleStyle(.checkbox)
             .disabled(model.hasPendingStart)
-            Text("仅对本次请求生效；主机须授予对应权限，每次实际写入或执行仍需单独审批。")
+            Text("仅对本次请求生效；主机须授予对应权限，写入、命令及有副作用的 MCP 调用仍需单独审批。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)

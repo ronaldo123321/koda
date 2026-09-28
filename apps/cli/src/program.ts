@@ -618,10 +618,15 @@ export function createProgram(runtime: ProgramRuntime): Command {
       "--permissions <list>",
       "comma-separated permissions; defaults to read-only",
     )
+    .option("--mcp-servers <list>", "MCP server IDs granted with mcp:invoke")
     .action(
       async (
         label: string,
-        options: { workspace: string; permissions?: string },
+        options: {
+          workspace: string;
+          permissions?: string;
+          mcpServers?: string;
+        },
       ) => {
         runtime.setExitCode(
           await runRemoteDeviceIssueCommand(
@@ -629,6 +634,7 @@ export function createProgram(runtime: ProgramRuntime): Command {
             options.workspace,
             options.permissions,
             runtime,
+            options.mcpServers,
           ),
         );
       },

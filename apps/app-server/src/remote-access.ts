@@ -17,6 +17,7 @@ export const remotePermissionSchema = z.enum([
   "approval:resolve",
   "process:control",
   "workspace:mutate",
+  "mcp:invoke",
 ]);
 
 export type RemotePermission = z.infer<typeof remotePermissionSchema>;
@@ -36,6 +37,7 @@ export interface RemoteWorkspaceGrant {
   deviceId: string;
   workspaceId: string;
   permissions: readonly RemotePermission[];
+  mcpServerIds?: readonly string[];
 }
 
 export interface RemoteThreadBinding {
@@ -73,15 +75,18 @@ export class RemoteAccessCatalog {
   private readonly ownerId: string;
   private readonly workspaces: ReadonlyMap<string, string>;
   private readonly grants: ReadonlyMap<string, ReadonlySet<RemotePermission>>;
+  private readonly mcpServers: ReadonlyMap<string, ReadonlySet<string>>;
 
   private constructor(
     ownerId: string,
     workspaces: ReadonlyMap<string, string>,
     grants: ReadonlyMap<string, ReadonlySet<RemotePermission>>,
+    mcpServers: ReadonlyMap<string, ReadonlySet<string>>,
   ) {
     this.ownerId = ownerId;
     this.workspaces = workspaces;
     this.grants = grants;
+    this.mcpServers = mcpServers;
   }
 
   public static async create(
@@ -105,6 +110,7 @@ export class RemoteAccessCatalog {
       usedRoots.add(root);
     }
     const allowed = new Map<string, ReadonlySet<RemotePermission>>();
+    const mcpServers = new Map<string, ReadonlySet<string>>();
     for (const grant of grants) {
       idSchema.parse(grant.ownerId);
       idSchema.parse(grant.deviceId);
@@ -127,9 +133,27 @@ export class RemoteAccessCatalog {
       if (permissions.size !== grant.permissions.length) {
         throw new Error("Remote grant configuration is invalid.");
       }
+      const serverIds = grant.mcpServerIds ?? [];
+      if (
+        serverIds.length > 16 ||
+        serverIds.some((id) => !/^[a-z][a-z0-9_-]{0,23}$/u.test(id)) ||
+        new Set(serverIds).size !== serverIds.length ||
+        permissions.has("mcp:invoke") !== serverIds.length > 0
+      ) {
+        throw new Error("Remote MCP grant configuration is invalid.");
+      }
       allowed.set(key, permissions);
+      mcpServers.set(key, new Set(serverIds));
     }
-    return new RemoteAccessCatalog(ownerId, roots, allowed);
+    return new RemoteAccessCatalog(ownerId, roots, allowed, mcpServers);
+  }
+
+  public async authorizedMcpServers(
+    principal: RemotePrincipal,
+    workspaceId: string,
+  ): Promise<readonly string[]> {
+    await this.authorizeWorkspace(principal, workspaceId, "mcp:invoke");
+    return [...(this.mcpServers.get(grantKey(principal, workspaceId)) ?? [])];
   }
 
   public async authorizeWorkspace(

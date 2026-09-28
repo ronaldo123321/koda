@@ -261,6 +261,25 @@ final class RemoteClientTests: XCTestCase {
         }
         approver.close()
 
+        let mcpClient = try RemoteClient(settings: RemoteSettings(
+            origin: setup.origin, certificateSha256: setup.fingerprint,
+            token: setup.mcpToken
+        ))
+        let mcpTurn = try await mcpClient.startTurn(
+            workspaceID: "project", prompt: "Use reviewed MCP.",
+            requestID: String(repeating: "e", count: 32),
+            resumeThreadID: "thread-1", effects: ["mcp:invoke"]
+        )
+        let mcpApprovals = try await mcpClient.listApprovals(threadID: mcpTurn.threadId)
+        XCTAssertEqual(mcpApprovals.first?.name, "mcp__reviewed__effect")
+        if let mcpApproval = mcpApprovals.first {
+            try await mcpClient.resolveApproval(
+                threadID: mcpTurn.threadId, turnID: mcpTurn.turnId,
+                callID: mcpApproval.callId, decision: "approved"
+            )
+        }
+        mcpClient.close()
+
         let reconnectModel = await RemoteModel()
         await reconnectModel.connect(RemoteSettings(
             origin: setup.origin, certificateSha256: setup.fingerprint, token: setup.token
@@ -349,6 +368,7 @@ private struct FixtureSetup: Decodable {
     let fingerprint: String
     let token: String
     let effectfulToken: String
+    let mcpToken: String
     let workspaceOnlyToken: String
     let artifactId: String
 }

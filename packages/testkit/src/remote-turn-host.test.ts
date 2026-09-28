@@ -32,6 +32,92 @@ afterEach(async () => {
 });
 
 describe.skipIf(process.platform === "win32")("remote Turn host", () => {
+  it("passes only the initiating device's reviewed MCP servers to a remote Turn", async () => {
+    const home = await mkdtemp(join(tmpdir(), "koda-remote-mcp-home-"));
+    const workspace = await mkdtemp(
+      join(tmpdir(), "koda-remote-mcp-workspace-"),
+    );
+    directories.push(home, workspace);
+    const root = await realpath(workspace);
+    const owner = { ownerId: "owner", deviceId: `device-${"1".repeat(32)}` };
+    const other = { ownerId: "owner", deviceId: `device-${"2".repeat(32)}` };
+    const catalog = await RemoteAccessCatalog.create(
+      "owner",
+      [{ id: "project", root }],
+      [
+        {
+          ...owner,
+          workspaceId: "project",
+          permissions: [
+            "workspace:read",
+            "thread:read",
+            "turn:start",
+            "approval:resolve",
+            "mcp:invoke",
+          ],
+          mcpServerIds: ["reviewed"],
+        },
+        {
+          ...other,
+          workspaceId: "project",
+          permissions: ["workspace:read", "thread:read", "turn:start"],
+        },
+      ],
+    );
+    let seenEffects: unknown;
+    let finish: () => void = () => undefined;
+    const application = {
+      isRemoteRestricted: true,
+      startTurnAfter: async (
+        input: { remoteEffects?: unknown },
+        _client: TurnClient,
+        beforeStart: (ids: {
+          threadId: string;
+          turnId: string;
+        }) => Promise<void>,
+      ) => {
+        seenEffects = input.remoteEffects;
+        const ids = { threadId: "mcp-thread", turnId: "mcp-turn" };
+        await beforeStart(ids);
+        return {
+          ...ids,
+          completion: new Promise<void>((resolve) => {
+            finish = resolve;
+          }),
+          cancel: () => {
+            finish();
+            return true;
+          },
+        };
+      },
+      getThread: async () => ({ value: { workspaceRoot: root } }),
+    } as unknown as KodaApplication;
+    const host = new RemoteTurnHost(
+      application,
+      await RemoteThreadStore.open(home, "owner"),
+      await RemoteTurnRequestStore.open(home, "owner"),
+    );
+    try {
+      await expect(
+        host.start(other, catalog, {
+          requestId: "a".repeat(32),
+          workspaceId: "project",
+          prompt: "Use MCP.",
+          effects: ["mcp:invoke"],
+        }),
+      ).rejects.toThrow("Remote resource is unavailable");
+      await host.start(owner, catalog, {
+        requestId: "b".repeat(32),
+        workspaceId: "project",
+        prompt: "Use MCP.",
+        effects: ["mcp:invoke"],
+      });
+      expect(seenEffects).toEqual({ mcpServerIds: ["reviewed"] });
+    } finally {
+      await host.close();
+    }
+  });
+
   it("runs a real remote patch only after approval and leaves a rejected patch unchanged", async () => {
     for (const decision of ["approved", "rejected"] as const) {
       const home = await mkdtemp(join(tmpdir(), "koda-remote-real-home-"));

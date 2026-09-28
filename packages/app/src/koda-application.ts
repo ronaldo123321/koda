@@ -197,6 +197,7 @@ export interface StartTurnInput {
   remoteEffects?: {
     workspaceMutations?: true;
     processExecution?: true;
+    mcpServerIds?: readonly string[];
   };
 }
 
@@ -553,14 +554,28 @@ export class KodaApplication {
         remoteEffects === null ||
         typeof remoteEffects !== "object" ||
         (remoteEffects.workspaceMutations !== true &&
-          remoteEffects.processExecution !== true) ||
+          remoteEffects.processExecution !== true &&
+          remoteEffects.mcpServerIds === undefined) ||
         Object.keys(remoteEffects).some(
-          (key) => key !== "workspaceMutations" && key !== "processExecution",
+          (key) =>
+            key !== "workspaceMutations" &&
+            key !== "processExecution" &&
+            key !== "mcpServerIds",
         ) ||
         (remoteEffects.workspaceMutations !== undefined &&
           remoteEffects.workspaceMutations !== true) ||
         (remoteEffects.processExecution !== undefined &&
-          remoteEffects.processExecution !== true))
+          remoteEffects.processExecution !== true) ||
+        (remoteEffects.mcpServerIds !== undefined &&
+          (!Array.isArray(remoteEffects.mcpServerIds) ||
+            remoteEffects.mcpServerIds.length === 0 ||
+            remoteEffects.mcpServerIds.length > 16 ||
+            new Set(remoteEffects.mcpServerIds).size !==
+              remoteEffects.mcpServerIds.length ||
+            remoteEffects.mcpServerIds.some(
+              (id) =>
+                typeof id !== "string" || !/^[a-z][a-z0-9_-]{0,23}$/u.test(id),
+            ))))
     ) {
       throw new ConfigurationError("Remote effect scope is invalid.");
     }
@@ -590,7 +605,14 @@ export class KodaApplication {
       ...(parentThreadId === undefined ? {} : { parentThreadId }),
       ...(remoteEffects === undefined
         ? {}
-        : { remoteEffects: { ...remoteEffects } }),
+        : {
+            remoteEffects: {
+              ...remoteEffects,
+              ...(remoteEffects.mcpServerIds === undefined
+                ? {}
+                : { mcpServerIds: [...remoteEffects.mcpServerIds] }),
+            },
+          }),
     };
   }
 
@@ -2108,12 +2130,21 @@ export class KodaApplication {
         this.worktreeChild === undefined
       ) {
         pluginSession?.registerTools(tools);
+      }
+      if (
+        this.worktreeChild === undefined &&
+        ((!this.remoteRestricted && mutationJournal !== undefined) ||
+          (this.remoteRestricted && remoteEffects?.mcpServerIds !== undefined))
+      ) {
         mcpSession = await McpTurnSession.open({
           environment: this.environment,
           kodaHome: configuration.kodaHome,
           processDirectory: this.processDirectory,
           artifactStore,
           signal: controller.signal,
+          ...(remoteEffects?.mcpServerIds === undefined
+            ? {}
+            : { serverIds: remoteEffects.mcpServerIds }),
         });
         mcpSession.registerTools(tools);
       }
@@ -2165,7 +2196,10 @@ export class KodaApplication {
           if (input.effect === "read") return { decision: "allow" };
           if (
             (input.effect === "write" && remoteEffects?.workspaceMutations) ||
-            (input.effect === "execute" && remoteEffects?.processExecution)
+            (input.effect === "execute" &&
+              (remoteEffects?.processExecution ||
+                (remoteEffects?.mcpServerIds !== undefined &&
+                  input.name.startsWith("mcp__"))))
           ) {
             return {
               decision: "ask",

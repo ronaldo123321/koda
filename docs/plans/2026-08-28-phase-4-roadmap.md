@@ -367,8 +367,10 @@ uses pinned TLS and cursor replay and can display authorized text artifacts
 in bounded ranges. Optional per-Turn workspace write or command scope now
 requires matching device grants and an exact, expiring approval on the
 initiating device. A real host patch, rejection, HTTPS authorization, and
-macOS client approval transport have local tests. Approval ownership transfer,
-full event payloads, remote MCP/OAuth, and physical two-Mac acceptance remain
+macOS client approval transport have local tests. Devices can invoke only
+explicitly granted host-local MCP servers and host-allowlisted tool names; a real
+MCP effect and its approval are locally tested. Approval ownership transfer,
+full event payloads, HTTPS MCP/OAuth, and physical two-Mac acceptance remain
 open. First deployment targets LAN or an
 owner-managed VPN.
 
