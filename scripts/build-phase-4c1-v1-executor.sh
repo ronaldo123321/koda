@@ -35,7 +35,9 @@ trap cleanup EXIT
 
 mkdir -p "$source_root"
 git -C "$repository_root" cat-file -e "$legacy_revision^{commit}"
-git -C "$repository_root" archive "$legacy_revision" | tar -x -C "$source_root"
+readonly archive_path="$fixture_root/source.tar"
+git -C "$repository_root" archive --output="$archive_path" "$legacy_revision"
+tar -xf "$archive_path" -C "$source_root"
 cargo build \
   --manifest-path "$source_root/Cargo.toml" \
   --package koda-exec \
