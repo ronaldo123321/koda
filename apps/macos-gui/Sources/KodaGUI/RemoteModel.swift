@@ -467,6 +467,15 @@ final class RemoteModel: ObservableObject {
                     notice = "主机所有者已放弃这次未启动的请求。可以重新发送并生成新请求 ID。"
                     return
                 }
+                if result.status == "interrupted" {
+                    try RemoteSettingsStore.deletePendingStart()
+                    self.pendingStart = nil
+                    hasPendingStart = false
+                    notice = "主机在审批或执行期间中断了这次请求；旧审批已失效。请查看原对话后发起新请求。"
+                    selectThread(result.threadId)
+                    refreshThreads()
+                    return
+                }
                 guard result.status == "started" else {
                     throw RemoteError(message: "远程请求状态无效。")
                 }

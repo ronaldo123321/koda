@@ -10,7 +10,7 @@
   lists authorized Threads, replays assistant updates and event status, and
   previews verified Thread artifacts in bounded UTF-8 ranges. Scoped remote
   write/command approvals and allowlisted stdio/HTTPS MCP scopes are locally tested;
-  approval recovery after host restart, automatic pairing, and physical two-device
+  durable approval ownership recovery after host restart, automatic pairing, and physical two-device
   acceptance remain open.
   Swift client tests now exercise the actual local HTTPS/WSS listener with
   temporary devices, restricted Turn idempotency, and replay, and reject late
@@ -253,3 +253,10 @@ method set, crash-recoverable approval ownership,
 OAuth and physical two-device acceptance remain open before Phase 4D can
 close. Scoped remote writes, commands, and exact-call approvals have local
 macOS and HTTPS fixture coverage as described above.
+
+After a host crash, an indexed interrupted Turn is returned as `interrupted`
+when the initiating device retries the same request ID. The macOS client clears
+that pending start and directs the owner to inspect the Thread before issuing a
+new request. A `SIGKILL` test confirms an approval pending in the old process
+cannot be resolved in the new process. Pending approval assignment and transfer
+history are not yet reconstructed as durable recoverable state.

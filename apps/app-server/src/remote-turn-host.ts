@@ -51,7 +51,7 @@ export interface RemoteTurnStartResult {
   requestId: string;
   threadId: string;
   turnId: string;
-  status: "started" | "reserved" | "abandoned";
+  status: "started" | "reserved" | "abandoned" | "interrupted";
   replayed: boolean;
 }
 
@@ -135,13 +135,13 @@ export class RemoteTurnHost {
       .digest("hex");
     const existing = await this.requests.get(input.requestId);
     if (existing !== undefined) {
-      return replay(existing, principal, input, bodySha256);
+      return this.replay(existing, principal, input, bodySha256);
     }
     const lease = await this.requests.acquireLease(input.requestId);
     try {
       const inFlight = await this.requests.get(input.requestId);
       if (inFlight !== undefined) {
-        return replay(inFlight, principal, input, bodySha256);
+        return this.replay(inFlight, principal, input, bodySha256);
       }
       if (this.active.size + this.pendingStarts >= 8) {
         throw new RemoteTurnHostCapacityError();
@@ -221,7 +221,7 @@ export class RemoteTurnHost {
           error instanceof ExistingRemoteTurnRequest &&
           duplicate !== undefined
         ) {
-          return replay(duplicate, principal, input, bodySha256);
+          return this.replay(duplicate, principal, input, bodySha256);
         }
         throw error;
       }
@@ -283,6 +283,21 @@ export class RemoteTurnHost {
     const handle = this.active.get(turnId)?.handle;
     if (handle?.threadId !== threadId) return false;
     return handle.cancel("Cancelled by an authorized remote device.");
+  }
+
+  private async replay(
+    record: RemoteTurnRequestRecord,
+    principal: RemotePrincipal,
+    input: RemoteTurnStartInput,
+    bodySha256: string,
+  ): Promise<RemoteTurnStartResult> {
+    const result = replay(record, principal, input, bodySha256);
+    if (result.status !== "started") return result;
+    const metadata = (await this.application.getThread(record.threadId)).value;
+    return metadata?.lastTurnId === record.turnId &&
+      metadata.status === "interrupted"
+      ? { ...result, status: "interrupted" }
+      : result;
   }
 
   public async close(): Promise<void> {

@@ -17,7 +17,16 @@ const catalog = await RemoteAccessCatalog.create(
     {
       ...principal,
       workspaceId: "project",
-      permissions: ["workspace:read", "turn:start"],
+      permissions:
+        stage === "approval"
+          ? [
+              "workspace:read",
+              "thread:read",
+              "turn:start",
+              "workspace:mutate",
+              "approval:resolve",
+            ]
+          : ["workspace:read", "turn:start"],
     },
   ],
 );
@@ -47,15 +56,31 @@ if (stage === "reserved") {
   const host = new RemoteTurnHost(
     {
       isRemoteRestricted: true,
-      startTurnAfter: async (_input, _client, beforeStart) => {
+      startTurnAfter: async (_input, client, beforeStart) => {
         const ids = { threadId: "crash-thread", turnId: "crash-turn" };
         await beforeStart(ids);
+        if (stage === "approval") {
+          void client.approvals.request(
+            {
+              callId: "crash-approval",
+              name: "apply_patch",
+              title: "Review a patch",
+              summary: "Update one file.",
+              details: "Exact change.",
+              reason: "Remote write needs approval.",
+            },
+            new AbortController().signal,
+          );
+        }
         return {
           ...ids,
           completion: new Promise(() => undefined),
           cancel: () => true,
         };
       },
+      getThread: async () => ({
+        value: { workspaceRoot: await realpath(workspace) },
+      }),
     },
     bindings,
     requests,
@@ -64,7 +89,16 @@ if (stage === "reserved") {
     requestId: "2".repeat(32),
     workspaceId: "project",
     prompt: "Explain the project.",
+    ...(stage === "approval" ? { effects: ["workspace:mutate"] } : {}),
   });
+  if (stage === "approval") {
+    const approvals = await host.listApprovals(
+      principal,
+      catalog,
+      result.threadId,
+    );
+    result = { ...result, pendingApprovals: approvals.length };
+  }
 }
 process.stdout.write(`${JSON.stringify(result)}\n`);
 process.stdin.resume();

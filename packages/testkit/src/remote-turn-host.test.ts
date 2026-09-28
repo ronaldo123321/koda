@@ -266,8 +266,8 @@ describe.skipIf(process.platform === "win32")("remote Turn host", () => {
     }
   });
 
-  it("does not repeat a remote Turn after SIGKILL at reservation or commit", async () => {
-    for (const stage of ["reserved", "started"] as const) {
+  it("does not repeat a remote Turn or revive an approval after SIGKILL", async () => {
+    for (const stage of ["reserved", "started", "approval"] as const) {
       const home = await mkdtemp(join(tmpdir(), "koda-remote-kill-home-"));
       const workspace = await mkdtemp(
         join(tmpdir(), "koda-remote-kill-workspace-"),
@@ -294,7 +294,8 @@ describe.skipIf(process.platform === "win32")("remote Turn host", () => {
         expect(JSON.parse(String(line))).toMatchObject({
           threadId: "crash-thread",
           turnId: "crash-turn",
-          status: stage,
+          status: stage === "approval" ? "started" : stage,
+          ...(stage === "approval" ? { pendingApprovals: 1 } : {}),
         });
       } finally {
         child.kill("SIGKILL");
@@ -311,13 +312,22 @@ describe.skipIf(process.platform === "win32")("remote Turn host", () => {
           {
             ...principal,
             workspaceId: "project",
-            permissions: ["workspace:read", "turn:start"],
+            permissions:
+              stage === "approval"
+                ? [
+                    "workspace:read",
+                    "thread:read",
+                    "turn:start",
+                    "workspace:mutate",
+                    "approval:resolve",
+                  ]
+                : ["workspace:read", "turn:start"],
           },
         ],
       );
       const bindings = await RemoteThreadStore.open(home, "owner");
       const requests = await RemoteTurnRequestStore.open(home, "owner");
-      if (stage === "started") {
+      if (stage !== "reserved") {
         expect(await bindings.get("crash-thread")).toMatchObject({
           workspaceId: "project",
         });
@@ -325,7 +335,7 @@ describe.skipIf(process.platform === "win32")("remote Turn host", () => {
         expect(await bindings.get("crash-thread")).toBeUndefined();
       }
       expect(await requests.get("2".repeat(32))).toMatchObject({
-        status: stage,
+        status: stage === "reserved" ? "reserved" : "started",
       });
       let starts = 0;
       const host = new RemoteTurnHost(
@@ -335,6 +345,16 @@ describe.skipIf(process.platform === "win32")("remote Turn host", () => {
             starts += 1;
             throw new Error("Turn must not restart.");
           },
+          getThread: async () => ({
+            value:
+              stage !== "reserved"
+                ? {
+                    status: "interrupted",
+                    lastTurnId: "crash-turn",
+                    workspaceRoot: await realpath(workspace),
+                  }
+                : undefined,
+          }),
         } as unknown as KodaApplication,
         bindings,
         requests,
@@ -343,14 +363,32 @@ describe.skipIf(process.platform === "win32")("remote Turn host", () => {
         requestId: "2".repeat(32),
         workspaceId: "project",
         prompt: "Explain the project.",
+        ...(stage === "approval"
+          ? { effects: ["workspace:mutate"] as const }
+          : {}),
       });
       expect(result).toMatchObject({
         threadId: "crash-thread",
         turnId: "crash-turn",
-        status: stage,
+        status: stage === "reserved" ? "reserved" : "interrupted",
         replayed: true,
       });
       expect(starts).toBe(0);
+      if (stage === "approval") {
+        expect(
+          await host.listApprovals(principal, catalog, "crash-thread"),
+        ).toEqual([]);
+        expect(
+          await host.resolveApproval(
+            principal,
+            catalog,
+            "crash-thread",
+            "crash-turn",
+            "crash-approval",
+            "approved",
+          ),
+        ).toBe(false);
+      }
       if (stage === "reserved") {
         expect(await requests.abandon("2".repeat(32), bindings)).toMatchObject({
           status: "abandoned",
