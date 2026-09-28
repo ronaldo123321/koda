@@ -94,6 +94,49 @@ describe("MCP configuration", () => {
     ).rejects.toMatchObject({ code: "MCP_CONFIGURATION_INVALID" });
   });
 
+  it("accepts an exact HTTPS MCP endpoint and rejects unsafe URLs", async () => {
+    const fixture = await createFixture();
+    const options = {
+      environment: {},
+      kodaHome: fixture.kodaHome,
+      processDirectory: fixture.root,
+    };
+    await writeConfiguration(fixture, {
+      version: 1,
+      servers: {
+        remote: {
+          transport: "streamable_http",
+          url: "https://mcp.example.test/tools",
+          remote_tools: ["inspect"],
+        },
+      },
+    });
+    await expect(loadMcpConfiguration(options)).resolves.toMatchObject({
+      servers: [
+        {
+          id: "remote",
+          transport: "streamable_http",
+          url: "https://mcp.example.test/tools",
+          remoteToolNames: ["inspect"],
+        },
+      ],
+    });
+    for (const url of [
+      "http://mcp.example.test/tools",
+      "https://name:secret@mcp.example.test/tools",
+      "https://mcp.example.test/tools?token=secret",
+      "https://mcp.example.test/tools#fragment",
+    ]) {
+      await writeConfiguration(fixture, {
+        version: 1,
+        servers: { remote: { transport: "streamable_http", url } },
+      });
+      await expect(loadMcpConfiguration(options)).rejects.toMatchObject({
+        code: "MCP_CONFIGURATION_INVALID",
+      });
+    }
+  });
+
   it.each([
     [
       "unsafe server id",

@@ -3,6 +3,7 @@ import {
   ProtocolError,
   SdkError,
   SdkErrorCode,
+  StreamableHTTPClientTransport,
   type CallToolResult,
   type Tool,
 } from "@modelcontextprotocol/client";
@@ -14,6 +15,8 @@ import type { JsonObject } from "@koda/protocol";
 
 import type { McpServerConfiguration } from "./config.js";
 import { McpClientError, errorMessage } from "./errors.js";
+
+const MAX_HTTP_RESPONSE_BYTES = 8 * 1_024 * 1_024;
 
 export interface McpConnection {
   readonly serverId: string;
@@ -38,27 +41,73 @@ export const connectOfficialMcpClient: McpConnectionFactory = async (
   environment,
   signal,
 ) => {
-  const childEnvironment = getDefaultEnvironment();
-  for (const name of configuration.environmentNames) {
-    const value = environment[name];
-    if (value === undefined) {
-      throw new McpClientError(
-        "MCP_CONFIGURATION_INVALID",
-        `MCP server '${configuration.id}' requires environment variable '${name}'.`,
-      );
+  const transport = (() => {
+    if (configuration.transport === "streamable_http") {
+      const endpoint = new URL(configuration.url);
+      return new StreamableHTTPClientTransport(endpoint, {
+        fetch: async (input, init) => {
+          if (new URL(input.toString()).href !== endpoint.href) {
+            throw new McpClientError(
+              "MCP_PROTOCOL_ERROR",
+              `MCP server '${configuration.id}' requested an unconfigured URL.`,
+            );
+          }
+          const response = await fetch(input, { ...init, redirect: "error" });
+          const declaredBytes = Number(response.headers.get("content-length"));
+          if (declaredBytes > MAX_HTTP_RESPONSE_BYTES) {
+            await response.body?.cancel();
+            throw new McpClientError(
+              "MCP_PROTOCOL_ERROR",
+              `MCP server '${configuration.id}' response exceeds the byte limit.`,
+            );
+          }
+          if (response.body === null) return response;
+          let receivedBytes = 0;
+          const bounded = response.body.pipeThrough(
+            new TransformStream<Uint8Array, Uint8Array>({
+              transform(chunk, controller) {
+                receivedBytes += chunk.byteLength;
+                if (receivedBytes > MAX_HTTP_RESPONSE_BYTES) {
+                  throw new McpClientError(
+                    "MCP_PROTOCOL_ERROR",
+                    `MCP server '${configuration.id}' response exceeds the byte limit.`,
+                  );
+                }
+                controller.enqueue(chunk);
+              },
+            }),
+          );
+          return new Response(bounded, {
+            status: response.status,
+            statusText: response.statusText,
+            headers: response.headers,
+          });
+        },
+      });
     }
-    childEnvironment[name] = value;
-  }
-  const transport = new StdioClientTransport({
-    command: configuration.command,
-    args: configuration.args,
-    env: childEnvironment,
-    stderr: "pipe",
-    ...(configuration.cwd === undefined ? {} : { cwd: configuration.cwd }),
-  });
-  transport.stderr?.on("data", () => {
-    // Consume untrusted server diagnostics without forwarding possible secrets.
-  });
+    const childEnvironment = getDefaultEnvironment();
+    for (const name of configuration.environmentNames) {
+      const value = environment[name];
+      if (value === undefined) {
+        throw new McpClientError(
+          "MCP_CONFIGURATION_INVALID",
+          `MCP server '${configuration.id}' requires environment variable '${name}'.`,
+        );
+      }
+      childEnvironment[name] = value;
+    }
+    const stdio = new StdioClientTransport({
+      command: configuration.command,
+      args: configuration.args,
+      env: childEnvironment,
+      stderr: "pipe",
+      ...(configuration.cwd === undefined ? {} : { cwd: configuration.cwd }),
+    });
+    stdio.stderr?.on("data", () => {
+      // Consume untrusted server diagnostics without forwarding possible secrets.
+    });
+    return stdio;
+  })();
   const client = new Client(
     { name: "koda", version: "0.1.0" },
     { listMaxPages: 64 },

@@ -30,8 +30,30 @@ const environmentNameSchema = z
 
 const configuredToolSchema = z.object({ effect: z.literal("read") }).strict();
 
-const serverSchema = z
+const commonServerShape = {
+  tools: z.record(z.string().min(1).max(128), configuredToolSchema).default({}),
+  remote_tools: z
+    .array(z.string().min(1).max(128))
+    .max(64)
+    .default([])
+    .refine((names) => new Set(names).size === names.length),
+  startup_timeout_ms: z
+    .number()
+    .int()
+    .min(MIN_TIMEOUT_MS)
+    .max(MAX_TIMEOUT_MS)
+    .default(DEFAULT_STARTUP_TIMEOUT_MS),
+  call_timeout_ms: z
+    .number()
+    .int()
+    .min(MIN_TIMEOUT_MS)
+    .max(MAX_TIMEOUT_MS)
+    .default(DEFAULT_CALL_TIMEOUT_MS),
+};
+
+const stdioServerSchema = z
   .object({
+    transport: z.literal("stdio").optional(),
     command: safeString,
     args: z
       .array(safeString)
@@ -62,28 +84,19 @@ const serverSchema = z
           });
         }
       }),
-    tools: z
-      .record(z.string().min(1).max(128), configuredToolSchema)
-      .default({}),
-    remote_tools: z
-      .array(z.string().min(1).max(128))
-      .max(64)
-      .default([])
-      .refine((names) => new Set(names).size === names.length),
-    startup_timeout_ms: z
-      .number()
-      .int()
-      .min(MIN_TIMEOUT_MS)
-      .max(MAX_TIMEOUT_MS)
-      .default(DEFAULT_STARTUP_TIMEOUT_MS),
-    call_timeout_ms: z
-      .number()
-      .int()
-      .min(MIN_TIMEOUT_MS)
-      .max(MAX_TIMEOUT_MS)
-      .default(DEFAULT_CALL_TIMEOUT_MS),
+    ...commonServerShape,
   })
   .strict();
+
+const httpsServerSchema = z
+  .object({
+    transport: z.literal("streamable_http"),
+    url: z.url(),
+    ...commonServerShape,
+  })
+  .strict();
+
+const serverSchema = z.union([stdioServerSchema, httpsServerSchema]);
 
 const configurationSchema = z
   .object({
@@ -108,17 +121,25 @@ export interface McpToolPolicyConfiguration {
   effect: Extract<ToolEffect, "read">;
 }
 
-export interface McpServerConfiguration {
+interface McpServerCommonConfiguration {
   id: string;
-  command: string;
-  args: string[];
-  cwd?: string;
-  environmentNames: string[];
   tools: Readonly<Record<string, McpToolPolicyConfiguration>>;
   remoteToolNames: readonly string[];
   startupTimeoutMs: number;
   callTimeoutMs: number;
 }
+
+export type McpServerConfiguration = McpServerCommonConfiguration &
+  (
+    | {
+        transport: "stdio";
+        command: string;
+        args: string[];
+        cwd?: string;
+        environmentNames: string[];
+      }
+    | { transport: "streamable_http"; url: string }
+  );
 
 export interface McpConfiguration {
   sourcePath?: string;
@@ -201,6 +222,30 @@ export async function loadMcpConfiguration(
   for (const [id, server] of Object.entries(parsed.data.servers).sort(
     ([left], [right]) => left.localeCompare(right),
   )) {
+    const common = {
+      id,
+      tools: server.tools,
+      remoteToolNames: [...server.remote_tools],
+      startupTimeoutMs: server.startup_timeout_ms,
+      callTimeoutMs: server.call_timeout_ms,
+    };
+    if (server.transport === "streamable_http") {
+      const url = new URL(server.url);
+      if (
+        url.protocol !== "https:" ||
+        url.username !== "" ||
+        url.password !== "" ||
+        url.hash !== "" ||
+        url.search !== ""
+      ) {
+        throw new McpClientError(
+          "MCP_CONFIGURATION_INVALID",
+          `MCP server '${id}' must use an HTTPS endpoint without credentials, query, or fragment.`,
+        );
+      }
+      servers.push({ ...common, transport: "streamable_http", url: url.href });
+      continue;
+    }
     let cwd: string | undefined;
     if (server.cwd !== undefined) {
       if (!isAbsolute(server.cwd)) {
@@ -225,15 +270,12 @@ export async function loadMcpConfiguration(
       }
     }
     servers.push({
-      id,
+      ...common,
+      transport: "stdio",
       command: server.command,
       args: [...server.args],
       ...(cwd === undefined ? {} : { cwd }),
       environmentNames: [...server.env],
-      tools: server.tools,
-      remoteToolNames: [...server.remote_tools],
-      startupTimeoutMs: server.startup_timeout_ms,
-      callTimeoutMs: server.call_timeout_ms,
     });
   }
   return { sourcePath, servers };

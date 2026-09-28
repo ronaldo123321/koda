@@ -9,7 +9,7 @@
   preview now verifies a pinned certificate, stores its device token in Keychain,
   lists authorized Threads, replays assistant updates and event status, and
   previews verified Thread artifacts in bounded UTF-8 ranges. Scoped remote
-  write/command approvals and allowlisted host-local MCP scopes are locally tested;
+  write/command approvals and allowlisted stdio/HTTPS MCP scopes are locally tested;
   full event payload projection,
   approval recovery after host restart, automatic pairing, and physical two-device
   acceptance remain open.
@@ -70,7 +70,7 @@ authoritative workspace root, and `turn:control` grant before signaling an activ
 Turn; it never retries automatically after an uncertain response. WSS subscriptions are read-only, authenticate the device and
 Thread before upgrade and during polling, replay by an exclusive durable
 cursor, and close on revocation or bounded-buffer pressure without cancelling
-the Turn. HTTPS MCP transport, OAuth, and other unreviewed effects stay disabled.
+the Turn. OAuth and other unreviewed effects stay disabled.
 
 Artifact access uses `GET /v1/threads/:threadId/artifacts` with an optional
 `before` sequence and limit of 25, and
@@ -191,15 +191,18 @@ remain in a dedicated encrypted secret store with rotation and revocation.
 Reconnect never replays an uncertain tool call. Resource, prompt, and other
 non-Tool MCP capabilities require separate policy before exposure.
 
-Current implementation permits a remote device to invoke selected host-local
-stdio MCP servers only when its workspace grant includes `mcp:invoke` and exact
-server IDs. The host's `mcp.json` must independently list `remote_tools` for
-each selected server. Other servers and tools are not connected or advertised;
+Current implementation permits a remote device to invoke selected owner-host
+stdio or HTTPS Streamable HTTP MCP servers only when its workspace grant
+includes `mcp:invoke` and exact server IDs. The host's `mcp.json` must
+independently list `remote_tools` for each selected server. HTTPS endpoints
+must be configured with an exact URL, use system TLS trust, reject redirects,
+and limit responses to 8 MiB. Other servers and tools are not connected or advertised;
 configured read tools retain their read classification, while unknown effects
 require a fresh exact-call approval. Swift client TLS, device-grant, catalog
 isolation, real stdio invocation, and approval tests cover this subset. The
-host still lacks HTTPS MCP transport, OAuth registration/redirect/token
-lifecycle, and a pinned definition review workflow, so 4D4 is not complete.
+host still lacks OAuth registration/redirect/token lifecycle and a pinned
+definition review workflow, so 4D4 is not complete. Servers requiring OAuth
+cannot yet be used through this transport.
 
 ## 6. Delivery and acceptance
 
@@ -235,7 +238,7 @@ bound Thread summaries, payload-free event envelopes, assistant updates,
 safe all-type activity status, and verified Thread artifact ranges.
 The SwiftUI preview verifies an out-of-band pinned server certificate and
 replays authorized assistant updates and event status. Automatic pairing, the full app-server
-method set, complete event payloads, crash-recoverable approval ownership, HTTPS MCP
-transport/OAuth, and physical two-device acceptance remain open before Phase 4D can
+method set, complete event payloads, crash-recoverable approval ownership,
+OAuth, pinned MCP definition review, and physical two-device acceptance remain open before Phase 4D can
 close. Scoped remote writes, commands, and exact-call approvals have local
 macOS and HTTPS fixture coverage as described above.
