@@ -27,12 +27,30 @@ if ! grep -qw pids "$delegated_root/cgroup.controllers"; then
   echo "the delegated root does not expose the pids controller" >&2
   exit 1
 fi
-if ! grep -qw pids "$delegated_root/cgroup.subtree_control"; then
-  echo +pids > "$delegated_root/cgroup.subtree_control"
+echo "delegated root type: $(< "$delegated_root/cgroup.type")"
+echo "initial subtree controllers: $(< "$delegated_root/cgroup.subtree_control")"
+
+# Keep the delegated root empty before enabling the threaded-capable pids
+# controller. Otherwise a newly created domain child can be invalid and
+# cgroup.procs/cgroup.kill cannot provide the job-tree contract.
+if grep -qw pids "$delegated_root/cgroup.subtree_control"; then
+  echo -pids > "$delegated_root/cgroup.subtree_control"
 fi
+readonly manager="$delegated_root/koda-manager-$$"
+mkdir -- "$manager"
+echo "$$" > "$manager/cgroup.procs"
+if [[ "$(< "$manager/cgroup.type")" != "domain" ]]; then
+  echo "the manager cgroup is not a valid domain" >&2
+  exit 1
+fi
+echo +pids > "$delegated_root/cgroup.subtree_control"
 
 readonly probe="$delegated_root/koda-preflight-$$"
 mkdir -- "$probe"
+if [[ "$(< "$probe/cgroup.type")" != "domain" ]]; then
+  echo "the probe cgroup is not a valid domain" >&2
+  exit 1
+fi
 probe_pid=""
 cleanup() {
   if [[ -n "$probe_pid" ]]; then
