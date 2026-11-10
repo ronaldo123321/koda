@@ -26,6 +26,7 @@ export interface CreateRegisteredProviderOptions {
   model: string;
   instructions: string;
   maxOutputTokens: number;
+  resumableStreams?: boolean;
 }
 
 const profiles = Object.freeze({
@@ -108,6 +109,9 @@ export function createRegisteredProvider(
       model: options.model,
       instructions: options.instructions,
       reasoningEffort: "medium",
+      ...(options.resumableStreams === undefined
+        ? {}
+        : { resumableStreams: options.resumableStreams }),
       maxOutputTokens: options.maxOutputTokens,
     });
   }

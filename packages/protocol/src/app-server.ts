@@ -152,6 +152,10 @@ export const jsonRpcResponseSchema = z.union([
 export const initializeParamsSchema = z
   .object({
     protocolVersion: z.literal(APP_SERVER_PROTOCOL_VERSION),
+    requiredCapabilities: z
+      .array(z.string().regex(/^[A-Za-z][A-Za-z0-9]{0,63}$/u))
+      .max(64)
+      .optional(),
     client: z
       .object({
         name: z.string().min(1).max(128),
@@ -208,7 +212,7 @@ export const initializeResultSchema = z
         secretEvidence: z.literal(true),
         resourceEvidence: z.literal(true),
       })
-      .strict(),
+      .catchall(z.boolean()),
     providers: z.array(runtimeProviderMetadataSchema).min(1),
   })
   .strict();

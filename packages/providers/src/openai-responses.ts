@@ -1,3 +1,5 @@
+import { recoverOpenAIStream } from "./openai-stream-recovery.js";
+import { streamWithRetry } from "./request-retry.js";
 import type {
   ModelEvent,
   ModelProvider,
@@ -25,6 +27,12 @@ export type OpenAIReasoningEffort =
 
 export interface OpenAIResponsesClient {
   responses: {
+    retrieve?(
+      id: string,
+      query: OpenAI.Responses.ResponseRetrieveParamsStreaming,
+      options?: { signal?: AbortSignal },
+    ): Promise<AsyncIterable<OpenAI.Responses.ResponseStreamEvent>>;
+    cancel?(id: string, options?: { signal?: AbortSignal }): Promise<unknown>;
     create(
       body: OpenAI.Responses.ResponseCreateParamsStreaming,
       options?: { signal?: AbortSignal },
@@ -38,6 +46,7 @@ export interface OpenAIResponsesProviderOptions {
   instructions: string;
   reasoningEffort?: OpenAIReasoningEffort;
   maxOutputTokens?: number;
+  resumableStreams?: boolean;
 }
 
 export interface CreateOpenAIResponsesProviderOptions extends Omit<
@@ -101,25 +110,30 @@ export class OpenAIResponsesProvider implements ModelProvider {
     let completed = false;
     let functionCallCount = 0;
     try {
-      const stream = await this.options.client.responses.create(
-        {
-          model: this.options.model,
-          instructions: this.options.instructions,
-          input,
-          tools: request.tools.map(toOpenAIFunctionTool),
-          parallel_tool_calls: true,
-          reasoning: { effort: this.reasoningEffort },
-          store: true,
-          stream: true,
-          ...(this.options.maxOutputTokens === undefined
-            ? {}
-            : { max_output_tokens: this.options.maxOutputTokens }),
-          ...(previousResponseId === undefined
-            ? {}
-            : { previous_response_id: previousResponseId }),
-        },
-        { signal },
-      );
+      const create = () =>
+        this.options.client.responses.create(
+          {
+            model: this.options.model,
+            instructions: this.options.instructions,
+            input,
+            tools: request.tools.map(toOpenAIFunctionTool),
+            parallel_tool_calls: true,
+            reasoning: { effort: this.reasoningEffort },
+            store: true,
+            stream: true,
+            ...(this.options.resumableStreams ? { background: true } : {}),
+            ...(this.options.maxOutputTokens === undefined
+              ? {}
+              : { max_output_tokens: this.options.maxOutputTokens }),
+            ...(previousResponseId === undefined
+              ? {}
+              : { previous_response_id: previousResponseId }),
+          },
+          { signal },
+        );
+      const stream = this.options.resumableStreams
+        ? recoverOpenAIStream(create, this.options.client.responses, signal)
+        : streamWithRetry(create, signal);
 
       for await (const event of stream) {
         signal.throwIfAborted();
@@ -353,11 +367,14 @@ function toOpenAIReplayInput(
 export function createOpenAIResponsesProvider(
   options: CreateOpenAIResponsesProviderOptions,
 ): OpenAIResponsesProvider {
-  const client = new OpenAI({ apiKey: options.apiKey });
+  const client = new OpenAI({ apiKey: options.apiKey, maxRetries: 0 });
   return new OpenAIResponsesProvider({
     client,
     model: options.model,
     instructions: options.instructions,
+    ...(options.resumableStreams === undefined
+      ? {}
+      : { resumableStreams: options.resumableStreams }),
     ...(options.reasoningEffort === undefined
       ? {}
       : { reasoningEffort: options.reasoningEffort }),

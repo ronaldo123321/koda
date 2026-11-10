@@ -65,6 +65,85 @@ describe("recoverThread", () => {
     );
   });
 
+  it("normalizes interleaved parallel read results without changing event order", () => {
+    const firstCall = toolCallIdSchema.parse("parallel-read-a");
+    const secondCall = toolCallIdSchema.parse("parallel-read-b");
+    const events = [
+      event(0, "turn.started", {}),
+      contextEvent(1),
+      recorded(2, {
+        type: "user_message",
+        id: itemIdSchema.parse("parallel-user"),
+        content: "Read both files.",
+      }),
+      recorded(3, {
+        type: "tool_call",
+        id: itemIdSchema.parse("call-a"),
+        callId: firstCall,
+        name: "read_file",
+        arguments: { path: "a" },
+      }),
+      recorded(4, {
+        type: "tool_call",
+        id: itemIdSchema.parse("call-b"),
+        callId: secondCall,
+        name: "read_file",
+        arguments: { path: "b" },
+      }),
+      recorded(5, {
+        type: "tool_result",
+        id: itemIdSchema.parse("result-b"),
+        callId: secondCall,
+        name: "read_file",
+        status: "success",
+        output: "B",
+      }),
+      recorded(6, {
+        type: "tool_result",
+        id: itemIdSchema.parse("result-a"),
+        callId: firstCall,
+        name: "read_file",
+        status: "success",
+        output: "A",
+      }),
+      event(7, "turn.completed", { steps: 1 }),
+    ];
+    const before = JSON.stringify(events);
+    const recovered = recoverThread(readResult(events), threadId);
+    expect(recovered.history.map((item) => item.id)).toEqual([
+      "parallel-user",
+      "call-a",
+      "result-a",
+      "call-b",
+      "result-b",
+    ]);
+    expect(recovered.uncertainToolCalls).toEqual([]);
+    expect(recovered.nextSequence).toBe(8);
+    expect(JSON.stringify(events)).toBe(before);
+    const compacted = [
+      ...events.slice(0, -1),
+      recorded(7, {
+        type: "compaction",
+        id: itemIdSchema.parse("parallel-compaction"),
+        reason: "context_budget",
+        retainedItemIds: recovered.history.map((item) => item.id),
+        estimatedTokensBefore: 100,
+        estimatedTokensAfter: 90,
+        summary: {
+          objective: "Read both files.",
+          decisions: [],
+          modifiedFiles: [],
+          completedWork: [],
+          pendingWork: [],
+          failedAttempts: [],
+          criticalFacts: [],
+        },
+      }),
+      event(8, "turn.completed", { steps: 1 }),
+    ];
+    expect(recoverThread(readResult(compacted), threadId).nextSequence).toBe(9);
+  });
+
   it("recovers the final durable tool catalog generation", () => {
     const first = catalogGeneration("1", 2);
     const second = catalogGeneration("2", 2);

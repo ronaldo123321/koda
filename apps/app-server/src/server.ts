@@ -355,45 +355,56 @@ export class KodaAppServer {
         "PROTOCOL_VERSION_MISMATCH",
       );
     }
-    parseParams(initializeParamsSchema, params);
+    const input = parseParams(initializeParamsSchema, params);
+    const result = initializeResultSchema.parse({
+      protocolVersion: APP_SERVER_PROTOCOL_VERSION,
+      server: { name: "koda-app-server", version: this.serverVersion },
+      capabilities: {
+        threadQueries: true,
+        turnStart: true,
+        turnResume: true,
+        turnCancellation: true,
+        turnSteering: true,
+        interactiveApproval: true,
+        durableEventNotifications: true,
+        threadEvents: true,
+        threadSearch: true,
+        bidirectionalThreadEvents: true,
+        runtimeSettings: true,
+        artifactInspection: true,
+        contextInspection: true,
+        multiFileChanges: true,
+        patchDocuments: true,
+        approvalGrants: true,
+        planning: true,
+        planCheckpoints: true,
+        stageAcceptance: true,
+        extensionInspection: true,
+        skills: true,
+        commandTemplates: true,
+        dynamicToolCatalog: true,
+        plugins: true,
+        workspaceMutationRecovery: true,
+        interactiveProcesses: this.interactiveProcessService !== undefined,
+        secretEvidence: true,
+        resourceEvidence: true,
+      },
+      providers: this.application.listProviders(),
+    });
+    for (const capability of input.requiredCapabilities ?? []) {
+      if (
+        !Object.hasOwn(result.capabilities, capability) ||
+        result.capabilities[capability] !== true
+      ) {
+        throw rpcError(
+          APP_SERVER_RPC_ERROR_CODE.INVALID_PARAMS,
+          `Required capability '${capability}' is unavailable.`,
+          "REQUIRED_CAPABILITY_UNAVAILABLE",
+        );
+      }
+    }
     this.initialized = true;
-    return jsonValueSchema.parse(
-      initializeResultSchema.parse({
-        protocolVersion: APP_SERVER_PROTOCOL_VERSION,
-        server: { name: "koda-app-server", version: this.serverVersion },
-        capabilities: {
-          threadQueries: true,
-          turnStart: true,
-          turnResume: true,
-          turnCancellation: true,
-          turnSteering: true,
-          interactiveApproval: true,
-          durableEventNotifications: true,
-          threadEvents: true,
-          threadSearch: true,
-          bidirectionalThreadEvents: true,
-          runtimeSettings: true,
-          artifactInspection: true,
-          contextInspection: true,
-          multiFileChanges: true,
-          patchDocuments: true,
-          approvalGrants: true,
-          planning: true,
-          planCheckpoints: true,
-          stageAcceptance: true,
-          extensionInspection: true,
-          skills: true,
-          commandTemplates: true,
-          dynamicToolCatalog: true,
-          plugins: true,
-          workspaceMutationRecovery: true,
-          interactiveProcesses: this.interactiveProcessService !== undefined,
-          secretEvidence: true,
-          resourceEvidence: true,
-        },
-        providers: this.application.listProviders(),
-      }),
-    );
+    return jsonValueSchema.parse(result);
   }
 
   private async listThreads(params: JsonValue | undefined): Promise<JsonValue> {

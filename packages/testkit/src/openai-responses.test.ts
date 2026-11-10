@@ -70,6 +70,114 @@ const toolDefinition = {
 };
 
 describe("OpenAIResponsesProvider", () => {
+  it("recovers a transient request failure without failing the turn session", async () => {
+    let attempts = 0;
+    const client: OpenAIResponsesClient = {
+      responses: {
+        create: async () => {
+          attempts += 1;
+          if (attempts === 1) throw { status: 503 };
+          return toAsyncIterable([completedEvent("recovered-response")]);
+        },
+      },
+    };
+    const provider = new OpenAIResponsesProvider({
+      client,
+      model: "test-model",
+      instructions: "Inspect the repository.",
+    });
+    const events = await collect(provider, {
+      threadId,
+      turnId,
+      step: 1,
+      items: [userItem],
+      tools: [],
+    });
+    expect(attempts).toBe(2);
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: "completed" }),
+    );
+  });
+
+  it("recovers before the first stream event and emits a tool call only once", async () => {
+    let attempts = 0;
+    const client: OpenAIResponsesClient = {
+      responses: {
+        create: async () => {
+          attempts += 1;
+          if (attempts === 1)
+            return (async function* () {
+              throw new TypeError("terminated", {
+                cause: { code: "ECONNRESET" },
+              });
+              yield completedEvent("unreachable");
+            })();
+          return toAsyncIterable([
+            functionCallEvent(callId, "recovered-tool"),
+            completedEvent("recovered-response"),
+          ]);
+        },
+      },
+    };
+    const provider = new OpenAIResponsesProvider({
+      client,
+      model: "test-model",
+      instructions: "Read.",
+    });
+    const events = await collect(provider, {
+      threadId,
+      turnId,
+      step: 1,
+      items: [userItem],
+      tools: [toolDefinition],
+    });
+    expect(attempts).toBe(2);
+    expect(events.filter((event) => event.type === "tool_call")).toHaveLength(
+      1,
+    );
+    expect(events.at(-1)).toMatchObject({
+      type: "completed",
+      finishReason: "tool_calls",
+    });
+  });
+
+  it("does not retry after a response stream has produced output", async () => {
+    let attempts = 0;
+    const client: OpenAIResponsesClient = {
+      responses: {
+        create: async () => {
+          attempts += 1;
+          return (async function* () {
+            yield streamEvent({
+              type: "response.output_text.delta",
+              delta: "partial",
+            });
+            throw { status: 503 };
+          })();
+        },
+      },
+    };
+    const provider = new OpenAIResponsesProvider({
+      client,
+      model: "test-model",
+      instructions: "Inspect.",
+    });
+    const stream = provider
+      .stream(
+        { threadId, turnId, step: 1, items: [userItem], tools: [] },
+        new AbortController().signal,
+      )
+      [Symbol.asyncIterator]();
+    expect((await stream.next()).value).toEqual({
+      type: "assistant_delta",
+      text: "partial",
+    });
+    await expect(stream.next()).rejects.toMatchObject({
+      code: "PROVIDER_REQUEST_FAILED",
+    });
+    expect(attempts).toBe(1);
+  });
+
   it("maps streaming text, function calls, and follow-up outputs", async () => {
     const client = new FakeOpenAIClient([
       [

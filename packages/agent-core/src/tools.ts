@@ -191,6 +191,17 @@ export class ToolRegistry {
     this.toolOwners.set(registration.spec.name, undefined);
   }
 
+  public canRunInParallel(name: string): boolean {
+    const tool = this.tools.get(name);
+    return (
+      tool !== undefined &&
+      tool.effect === "read" &&
+      tool.concurrency === "parallel" &&
+      tool.prepare === undefined &&
+      this.toolOwners.get(name) === undefined
+    );
+  }
+
   public definitions(): readonly ModelToolDefinition[] {
     return [...this.tools.values()]
       .map((tool) => tool.spec)
