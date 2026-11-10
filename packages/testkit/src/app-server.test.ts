@@ -185,7 +185,7 @@ describe("KodaAppServer", () => {
         resourceEvidence: true,
       },
       providers: [
-        { id: "openai", defaultModel: "gpt-5.6-terra", configured: true },
+        { id: "openai", defaultModel: "gpt-6.1-terra", configured: true },
         {
           id: "anthropic",
           defaultModel: "claude-sonnet-5",

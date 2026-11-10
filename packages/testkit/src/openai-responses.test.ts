@@ -214,7 +214,7 @@ describe("OpenAIResponsesProvider", () => {
     ]);
     const provider = new OpenAIResponsesProvider({
       client,
-      model: "gpt-5.6-terra",
+      model: "gpt-6.1-terra",
       instructions: "Inspect the repository.",
       reasoningEffort: "medium",
       maxOutputTokens: 16_384,
@@ -244,7 +244,7 @@ describe("OpenAIResponsesProvider", () => {
       },
     ]);
     expect(client.requests[0]?.body).toMatchObject({
-      model: "gpt-5.6-terra",
+      model: "gpt-6.1-terra",
       instructions: "Inspect the repository.",
       input: [{ role: "user", content: "Read the README." }],
       reasoning: { effort: "medium" },
@@ -336,7 +336,7 @@ describe("OpenAIResponsesProvider", () => {
     ]);
     const provider = new OpenAIResponsesProvider({
       client,
-      model: "gpt-5.6-terra",
+      model: "gpt-6.1-terra",
       instructions: "Inspect the repository.",
     });
     const pinnedPlan = planState();
@@ -396,7 +396,7 @@ describe("OpenAIResponsesProvider", () => {
     const client = new FakeOpenAIClient([[completedEvent("resp-resumed")]]);
     const provider = new OpenAIResponsesProvider({
       client,
-      model: "gpt-5.6-terra",
+      model: "gpt-6.1-terra",
       instructions: "Inspect.",
     });
     const historicalCall = toolCallItemSchema.parse({
@@ -491,7 +491,7 @@ describe("OpenAIResponsesProvider", () => {
     ]);
     const provider = new OpenAIResponsesProvider({
       client,
-      model: "gpt-5.6-terra",
+      model: "gpt-6.1-terra",
       instructions: "Inspect.",
     });
     await collect(provider, {
@@ -585,7 +585,7 @@ describe("OpenAIResponsesProvider", () => {
     ]);
     const provider = new OpenAIResponsesProvider({
       client,
-      model: "gpt-5.6-terra",
+      model: "gpt-6.1-terra",
       instructions: "Inspect.",
     });
 
@@ -614,7 +614,7 @@ describe("OpenAIResponsesProvider", () => {
     ]);
     const provider = new OpenAIResponsesProvider({
       client,
-      model: "gpt-5.6-terra",
+      model: "gpt-6.1-terra",
       instructions: "Inspect.",
     });
     const firstResult = toolResultItemSchema.parse({
@@ -687,7 +687,7 @@ describe("OpenAIResponsesProvider", () => {
     ]);
     const provider = new OpenAIResponsesProvider({
       client,
-      model: "gpt-5.6-terra",
+      model: "gpt-6.1-terra",
       instructions: "Inspect.",
     });
 
@@ -739,7 +739,7 @@ describe("OpenAIResponsesProvider", () => {
     ]);
     const provider = new OpenAIResponsesProvider({
       client,
-      model: "gpt-5.6-terra",
+      model: "gpt-6.1-terra",
       instructions: "Inspect.",
     });
 
@@ -758,7 +758,7 @@ describe("OpenAIResponsesProvider", () => {
     const client = new FakeOpenAIClient([[completedEvent("resp-signal")]]);
     const provider = new OpenAIResponsesProvider({
       client,
-      model: "gpt-5.6-terra",
+      model: "gpt-6.1-terra",
       instructions: "Inspect.",
     });
     const controller = new AbortController();
@@ -799,7 +799,7 @@ describe("OpenAIResponsesProvider", () => {
     const client = new FakeOpenAIClient([[event]]);
     const provider = new OpenAIResponsesProvider({
       client,
-      model: "gpt-5.6-terra",
+      model: "gpt-6.1-terra",
       instructions: "Inspect.",
     });
 

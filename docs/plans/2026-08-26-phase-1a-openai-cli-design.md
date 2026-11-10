@@ -46,7 +46,7 @@ This state is intentionally process-local in Phase 1A. Persisting response ident
 
 ### 3.2 Default model
 
-The default is `gpt-5.6-terra`, chosen as the capability/cost balance for local development. `--model` and `KODA_MODEL` allow overrides. Koda does not hard-code assumptions about model context length or pricing.
+The default is `gpt-6.1-terra`, selected as the project default. `--model` and `KODA_MODEL` allow overrides. Koda does not hard-code assumptions about model context length or pricing.
 
 ### 3.3 CLI parser
 
@@ -222,7 +222,7 @@ CLI option
 Phase 1A configuration:
 
 - `OPENAI_API_KEY`: required secret, never logged or persisted.
-- `--model` / `KODA_MODEL`: default `gpt-5.6-terra`.
+- `--model` / `KODA_MODEL`: default `gpt-6.1-terra`.
 - `--cwd`: default current process directory.
 - `KODA_HOME`: default `~/.koda`.
 

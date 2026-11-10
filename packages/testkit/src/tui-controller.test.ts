@@ -267,7 +267,7 @@ describe("TuiController", () => {
     await controller.applyRuntimeSettings();
     expect(controller.getSnapshot()).toMatchObject({
       threadId: "tui-thread",
-      configuration: { provider: "openai", model: "gpt-5.6-terra" },
+      configuration: { provider: "openai", model: "gpt-6.1-terra" },
       nextThreadConfiguration: {
         provider: "deepseek",
         model: "deepseek-next",
@@ -415,7 +415,7 @@ describe("TuiController", () => {
       runtimeSettings: undefined,
       nextThreadConfiguration: {
         provider: "openai",
-        model: "gpt-5.6-terra",
+        model: "gpt-6.1-terra",
       },
     });
   });
@@ -1461,7 +1461,7 @@ describe("TuiController", () => {
       "first-thread",
       "completed",
       "openai",
-      "gpt-5.6-terra",
+      "gpt-6.1-terra",
     );
     const selected = threadMetadata(
       "selected-thread",
@@ -1519,7 +1519,7 @@ describe("TuiController", () => {
       },
       nextThreadConfiguration: {
         provider: "openai",
-        model: "gpt-5.6-terra",
+        model: "gpt-6.1-terra",
       },
       threadBrowser: undefined,
     });
@@ -1541,7 +1541,7 @@ describe("TuiController", () => {
       "invalid-thread",
       "invalid",
       "openai",
-      "gpt-5.6-terra",
+      "gpt-6.1-terra",
     );
     client.threadListResult = { threads: [invalid], diagnostics: [] };
     client.threadEventsResult = {
@@ -1570,7 +1570,7 @@ describe("TuiController", () => {
     expect(controller.getSnapshot()).toMatchObject({
       mode: "chat",
       threadId: undefined,
-      configuration: { provider: "openai", model: "gpt-5.6-terra" },
+      configuration: { provider: "openai", model: "gpt-6.1-terra" },
     });
   });
 
@@ -1580,7 +1580,7 @@ describe("TuiController", () => {
       "failure-thread",
       "completed",
       "openai",
-      "gpt-5.6-terra",
+      "gpt-6.1-terra",
     );
     const controller = createController(client);
     await controller.startPrompt("Keep this thread");
@@ -1615,7 +1615,7 @@ describe("TuiController", () => {
     expect(controller.getSnapshot()).toMatchObject({
       mode: "thread_preview",
       threadId: "tui-thread",
-      configuration: { provider: "openai", model: "gpt-5.6-terra" },
+      configuration: { provider: "openai", model: "gpt-6.1-terra" },
       notice: expect.stringContaining("does not match"),
     });
   });
@@ -1641,7 +1641,7 @@ describe("TuiController", () => {
       "search-thread",
       "completed",
       "openai",
-      "gpt-5.6-terra",
+      "gpt-6.1-terra",
     );
     const match = searchMatch(
       "search-thread",
@@ -1746,7 +1746,7 @@ describe("TuiController", () => {
       "paged-thread",
       "completed",
       "openai",
-      "gpt-5.6-terra",
+      "gpt-6.1-terra",
     );
     client.threadListResult = { threads: [selected], diagnostics: [] };
     const latest: ThreadEventsResult = {
@@ -1940,7 +1940,7 @@ describe("TuiController", () => {
       "preview-artifacts",
       "completed",
       "openai",
-      "gpt-5.6-terra",
+      "gpt-6.1-terra",
     );
     client.threadListResult = { threads: [previewed], diagnostics: [] };
     client.threadEventsResult = {
@@ -1982,7 +1982,7 @@ describe("TuiController", () => {
       timestamp: "2026-08-27T00:00:00.000Z",
       precise: true,
       provider: "openai" as const,
-      model: "gpt-5.6-terra",
+      model: "gpt-6.1-terra",
       estimatedInputTokens: 220,
       inputBudgetTokens: 8_000,
       measuredInputTokens: 210,
@@ -2001,7 +2001,7 @@ describe("TuiController", () => {
       request,
       turnContext: {
         provider: "openai",
-        model: "gpt-5.6-terra",
+        model: "gpt-6.1-terra",
         workspaceRoot: "/workspace",
         approvalMode: "on-request",
         instructionsSha256: hash,
@@ -2198,7 +2198,7 @@ describe("TuiController", () => {
       "preview-context",
       "completed",
       "openai",
-      "gpt-5.6-terra",
+      "gpt-6.1-terra",
     );
     client.threadListResult = { threads: [previewed], diagnostics: [] };
     client.threadEventsResult = {
@@ -2429,7 +2429,7 @@ class FakeAppServerClient implements AppServerClientApi {
         resourceEvidence: true,
       },
       providers: [
-        provider("openai", "OpenAI", "OPENAI_API_KEY", "gpt-5.6-terra"),
+        provider("openai", "OpenAI", "OPENAI_API_KEY", "gpt-6.1-terra"),
         provider(
           "anthropic",
           "Anthropic",
@@ -3057,12 +3057,12 @@ function legacyContextResult(threadIdInput: string): ContextReadResult {
       timestamp: "2026-08-27T00:00:00.000Z",
       precise: false,
       provider: "openai",
-      model: "gpt-5.6-terra",
+      model: "gpt-6.1-terra",
       measuredInputTokens: 10,
     },
     turnContext: {
       provider: "openai",
-      model: "gpt-5.6-terra",
+      model: "gpt-6.1-terra",
       workspaceRoot: "/workspace",
       approvalMode: "on-request",
       instructionsSha256: hash,
@@ -3113,7 +3113,7 @@ function searchMatch(
     threadUpdatedAt: "2026-08-27T00:01:00.000Z",
     status: "completed" as const,
     provider: "openai" as const,
-    model: "gpt-5.6-terra",
+    model: "gpt-6.1-terra",
     turnCount: 1,
   };
 }

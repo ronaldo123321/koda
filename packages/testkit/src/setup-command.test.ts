@@ -492,7 +492,7 @@ function providers(
   configured: Partial<Record<ModelProviderId, boolean>>,
 ): RuntimeProviderMetadata[] {
   const definitions = [
-    ["openai", "OpenAI", "OPENAI_API_KEY", "gpt-5.6-terra"],
+    ["openai", "OpenAI", "OPENAI_API_KEY", "gpt-6.1-terra"],
     ["anthropic", "Anthropic", "ANTHROPIC_API_KEY", "claude-sonnet-5"],
     ["deepseek", "DeepSeek", "DEEPSEEK_API_KEY", "deepseek-v4-pro"],
     ["kimi", "Kimi", "MOONSHOT_API_KEY", "kimi-k2.6"],

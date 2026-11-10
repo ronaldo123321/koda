@@ -37,7 +37,17 @@ umask, three existing mutation-journal fixtures disagree with their hard-coded
 0644 expectations; a four-worker run also exceeded the default five-second deadline
 in two process-fault tests. Standard permissions and reduced concurrency pass.
 
-No provider credentials are configured here, so live model summary quality and
-OpenAI background API compatibility are not claimed. Native macOS/Windows checks
-remain platform-dependent. All live-stream recovery tests use scripted streams;
-an additional test exercises the actual OpenAI SDK against a mocked HTTP response.
+## Follow-up model evaluation
+
+The OpenAI default is now `gpt-6.1-terra`; explicit model selections still win.
+OpenAI credentials were subsequently configured and real API evaluation was run.
+Summary quality, tool roundtrip, injected-429 retry, same-response resume and early
+remote cancellation now have live evidence. The evaluation CLI is offline by
+default and requires an explicit provider and model for paid runs.
+
+See [model evaluation results](../evaluations/model-quality.md) for observations,
+conservative rubric corrections, cancellation lifecycle boundaries and current
+validation counts. Original failed reports are retained separately from rescoring.
+Anthropic live validation remains unavailable without its credential. Native
+macOS/Windows acceptance remains platform-dependent; Linux tests do not establish
+those platforms' behavior.
