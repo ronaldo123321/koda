@@ -11,6 +11,7 @@ export async function* recoverOpenAIStream(
   create: () => Promise<AsyncIterable<Event>>,
   responses: OpenAIResponsesClient["responses"],
   signal: AbortSignal,
+  durable?: { replay?: readonly Event[]; append(event: Event): Promise<void> },
 ): AsyncIterable<Event> {
   if (!responses.retrieve || !responses.cancel)
     throw protocolError(
@@ -19,7 +20,13 @@ export async function* recoverOpenAIStream(
   let responseId: string | undefined;
   let cursor = -1;
   let terminal = false;
-  let acquire = create;
+  let replaying = durable?.replay !== undefined;
+  let acquire: () => Promise<AsyncIterable<Event>> = replaying
+    ? async () =>
+        (async function* () {
+          yield* durable!.replay!;
+        })()
+    : create;
   const seen = new Map<number, string>();
   const budget = new RequestRetryBudget();
   try {
@@ -35,6 +42,13 @@ export async function* recoverOpenAIStream(
           signal.throwIfAborted();
           if (next.done) {
             drained = true;
+            if (replaying && !terminal) {
+              if (!responseId)
+                throw protocolError(
+                  "The interrupted request has no durable response ID; its remote outcome is unknown. A new inference will not be started.",
+                );
+              break;
+            }
             if (!terminal)
               throw Object.assign(
                 new Error("Response stream disconnected before completion."),
@@ -69,6 +83,14 @@ export async function* recoverOpenAIStream(
                 throw protocolError(
                   "Recovery requires a background response.created event.",
                 );
+              if (
+                sequence !== 0 ||
+                typeof event.response.id !== "string" ||
+                !/^[A-Za-z0-9_-]{1,256}$/.test(event.response.id)
+              )
+                throw protocolError(
+                  "Invalid initial response identity or sequence.",
+                );
               responseId = event.response.id;
             } else if (event.response.id !== responseId)
               throw protocolError("Response identity changed during recovery.");
@@ -79,6 +101,7 @@ export async function* recoverOpenAIStream(
             throw protocolError("Response stream exceeded its event limit.");
           seen.set(sequence, digest);
           cursor = sequence;
+          if (!replaying) await durable?.append(event);
           terminal = [
             "response.completed",
             "response.failed",
@@ -94,7 +117,9 @@ export async function* recoverOpenAIStream(
       }
       signal.throwIfAborted();
       if (!responseId || terminal) throw failure;
-      await budget.wait(failure, signal);
+      if (!replaying || failure !== undefined)
+        await budget.wait(failure, signal);
+      replaying = false;
       const id = responseId;
       const startingAfter = cursor;
       acquire = () =>

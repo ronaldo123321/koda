@@ -39,5 +39,7 @@ export type ModelEvent =
     };
 
 export interface ModelProvider {
+  /** Retrieve a durably identified interrupted response without starting inference. */
+  recoverPendingStream?(signal: AbortSignal): AsyncIterable<ModelEvent>;
   stream(request: ModelRequest, signal: AbortSignal): AsyncIterable<ModelEvent>;
 }

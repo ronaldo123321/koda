@@ -1,4 +1,4 @@
-import { appendFile, mkdir, readFile, truncate } from "node:fs/promises";
+import { appendFile, mkdir, open, readFile, truncate } from "node:fs/promises";
 import { dirname } from "node:path";
 
 import type { EventReader, EventReadResult, EventSink } from "@koda/agent-core";
@@ -44,6 +44,16 @@ export class JsonlEventStore implements EventSink, EventReader {
       await appendFile(this.filePath, line, "utf8");
     });
     await this.writeChain;
+  }
+
+  public async sync(): Promise<void> {
+    await this.writeChain;
+    const file = await open(this.filePath, "r");
+    try {
+      await file.sync();
+    } finally {
+      await file.close();
+    }
   }
 
   public async readAll(): Promise<JsonlEventReadResult> {

@@ -1,3 +1,5 @@
+import { ResponseJournal } from "@koda/providers";
+import { reconcileResponseJournal } from "./response-recovery-service.js";
 import { ChildTaskService } from "./child-task-service.js";
 
 import { ThreadHistoryService } from "./thread-history-service.js";
@@ -298,6 +300,7 @@ export class TurnExecutionService {
       );
       controller.signal.throwIfAborted();
       const eventStore = new JsonlEventStore(eventLogPath);
+      const responseJournal = new ResponseJournal(`${eventLogPath}.response`);
       const artifactStore = await ArtifactStore.open(
         join(configuration.kodaHome, "artifacts"),
       );
@@ -343,6 +346,41 @@ export class TurnExecutionService {
         (this.host.worktreeChild === undefined
           ? ""
           : "\nThis is an approved isolated Git worktree child. You may edit only this worktree using apply_patch, apply_changes, or apply_patchset. Process execution, plugins, MCP, further delegation, and edits to the source checkout are unavailable. Leave changes in this worktree for parent review; do not claim they were merged.");
+      const pendingResponse = await responseJournal.load();
+      if (pendingResponse && configuration.resumeThreadId === undefined)
+        throw new ConfigurationError(
+          "A pending model response requires resuming its thread.",
+        );
+      if (
+        pendingResponse &&
+        recoveredTurn?.previousStatus === "interrupted" &&
+        (configuration.provider !== "openai" || !configuration.resumableStreams)
+      )
+        throw new ConfigurationError(
+          "Enable KODA_OPENAI_RESUMABLE_STREAMS=1 with the original OpenAI model to recover the pending response.",
+        );
+      if (pendingResponse) {
+        const recoveryProvider = this.host.dependencies.createProvider(
+          configuration,
+          instructions,
+          responseJournal,
+        );
+        const restored = await reconcileResponseJournal(
+          responseJournal,
+          eventStore,
+          recoveryProvider,
+          ids.threadId,
+          controller.signal,
+        );
+        recoveredTurn = recoverThread(await eventStore.readAll(), ids.threadId);
+        if (restored)
+          await emitDiagnostic(client, {
+            level: "warning",
+            code: "MODEL_STREAM_RECOVERED",
+            message:
+              "Recovered the interrupted response. Existing tool results were retained; no tools were automatically replayed.",
+          });
+      }
       const instructionSnapshots = repositoryInstructions.sources.map(
         (source) => ({
           path: source.path,
@@ -642,6 +680,9 @@ export class TurnExecutionService {
       const provider = this.host.dependencies.createProvider(
         configuration,
         instructions,
+        configuration.provider === "openai" && configuration.resumableStreams
+          ? responseJournal
+          : undefined,
       );
       const worktreePolicy: ToolPolicy = {
         evaluate: (input) =>
@@ -749,6 +790,22 @@ export class TurnExecutionService {
           toolCatalogGeneration,
         }),
       });
+      if (
+        configuration.provider === "openai" &&
+        configuration.resumableStreams
+      ) {
+        try {
+          await eventStore.sync();
+          await responseJournal.clear();
+        } catch {
+          await emitDiagnostic(client, {
+            level: "warning",
+            code: "MODEL_RESPONSE_JOURNAL_CLEANUP_FAILED",
+            message:
+              "The terminal turn is recorded, but its response journal could not be cleaned up. It will not be replayed on resume.",
+          });
+        }
+      }
       if (result.status === "completed") {
         return completion(ids, "completed", 0);
       }

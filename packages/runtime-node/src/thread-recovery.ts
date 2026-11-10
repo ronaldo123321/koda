@@ -1016,7 +1016,9 @@ function findUncertainToolCalls(
       event.type === "item.recorded" &&
       event.payload.item.type === "tool_result"
     ) {
-      completed.add(event.payload.item.callId);
+      // A recovery placeholder is an audit of uncertainty, not proof of completion.
+      if (event.payload.item.error?.code !== "TOOL_OUTCOME_UNKNOWN")
+        completed.add(event.payload.item.callId);
     }
   }
   for (const [callId, processState] of processes) {

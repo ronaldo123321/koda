@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { ResponseJournal } from "./response-journal.js";
 import { recoverOpenAIStream } from "./openai-stream-recovery.js";
 import { streamWithRetry } from "./request-retry.js";
 import type {
@@ -47,6 +49,7 @@ export interface OpenAIResponsesProviderOptions {
   reasoningEffort?: OpenAIReasoningEffort;
   maxOutputTokens?: number;
   resumableStreams?: boolean;
+  responseJournal?: ResponseJournal;
 }
 
 export interface CreateOpenAIResponsesProviderOptions extends Omit<
@@ -107,7 +110,6 @@ export class OpenAIResponsesProvider implements ModelProvider {
     }
     session.inFlight = true;
 
-    let completed = false;
     let functionCallCount = 0;
     try {
       const create = () =>
@@ -131,87 +133,49 @@ export class OpenAIResponsesProvider implements ModelProvider {
           },
           { signal },
         );
+      const journal = this.options.resumableStreams
+        ? this.options.responseJournal
+        : undefined;
+      if (journal) {
+        const previous = await journal.load();
+        if (
+          previous &&
+          previous.header.turnId === request.turnId &&
+          previous.header.step === session.lastCompletedStep &&
+          request.step === session.lastCompletedStep + 1
+        )
+          await journal.clear();
+        else if (previous)
+          throw new OpenAIProviderError(
+            "PROVIDER_PROTOCOL_ERROR",
+            "A pending response journal must be reconciled before starting another inference.",
+          );
+        await journal.begin({
+          version: 1,
+          threadId: request.threadId,
+          turnId: request.turnId,
+          step: request.step,
+          binding: this.journalBinding(),
+        });
+      }
       const stream = this.options.resumableStreams
-        ? recoverOpenAIStream(create, this.options.client.responses, signal)
+        ? recoverOpenAIStream(
+            create,
+            this.options.client.responses,
+            signal,
+            journal ? { append: (event) => journal.append(event) } : undefined,
+          )
         : streamWithRetry(create, signal);
 
-      for await (const event of stream) {
-        signal.throwIfAborted();
-
-        if (event.type === "response.output_text.delta") {
-          if (event.delta.length > 0) {
-            yield { type: "assistant_delta", text: event.delta };
-          }
-          continue;
-        }
-
-        if (
-          event.type === "response.output_item.done" &&
-          event.item.type === "function_call"
-        ) {
-          const parsedArguments = parseFunctionArguments(
-            event.item.arguments,
-            event.item.name,
-          );
-          functionCallCount += 1;
-          yield {
-            type: "tool_call",
-            callId: toolCallIdSchema.parse(event.item.call_id),
-            name: event.item.name,
-            arguments: parsedArguments,
-          };
-          continue;
-        }
-
-        if (event.type === "error") {
-          throw new OpenAIProviderError(
-            "PROVIDER_REQUEST_FAILED",
-            "The OpenAI response stream reported an error.",
-          );
-        }
-
-        if (event.type === "response.failed") {
-          throw new OpenAIProviderError(
-            "PROVIDER_REQUEST_FAILED",
-            "The OpenAI response failed.",
-          );
-        }
-
-        if (event.type === "response.incomplete") {
-          throw new OpenAIProviderError(
-            "PROVIDER_OUTPUT_INVALID",
-            "The OpenAI response ended before it completed.",
-          );
-        }
-
-        if (event.type === "response.completed") {
-          if (completed) {
-            throw new OpenAIProviderError(
-              "PROVIDER_PROTOCOL_ERROR",
-              "OpenAI emitted more than one response.completed event.",
-            );
-          }
-          completed = true;
-          session.previousResponseId = event.response.id;
+      for await (const event of this.decode(stream, signal)) {
+        if (event.type === "tool_call") functionCallCount += 1;
+        if (event.type === "completed") {
+          session.previousResponseId = event.responseId!;
           session.lastCompletedStep = request.step;
-          for (const item of request.items) {
+          for (const item of request.items)
             session.submittedItemIds.add(item.id);
-          }
-          const usage = normalizeOpenAIUsage(event.response.usage);
-          yield {
-            type: "completed",
-            finishReason: functionCallCount > 0 ? "tool_calls" : "stop",
-            responseId: event.response.id,
-            ...(usage === undefined ? {} : { usage }),
-          };
         }
-      }
-
-      if (!completed) {
-        throw new OpenAIProviderError(
-          "PROVIDER_PROTOCOL_ERROR",
-          "The OpenAI stream ended without response.completed.",
-        );
+        yield event;
       }
 
       if (functionCallCount === 0) {
@@ -225,6 +189,133 @@ export class OpenAIResponsesProvider implements ModelProvider {
       throw mapProviderRequestError("OpenAI", error, signal);
     } finally {
       session.inFlight = false;
+    }
+  }
+
+  private journalBinding(): string {
+    return createHash("sha256")
+      .update(
+        JSON.stringify({
+          model: this.options.model,
+          instructions: this.options.instructions,
+          reasoningEffort: this.reasoningEffort,
+          maxOutputTokens: this.options.maxOutputTokens,
+        }),
+      )
+      .digest("hex");
+  }
+
+  public async *recoverPendingStream(
+    signal: AbortSignal,
+  ): AsyncIterable<ModelEvent> {
+    const journal = this.options.responseJournal;
+    if (!journal || !this.options.resumableStreams)
+      throw new OpenAIProviderError(
+        "PROVIDER_PROTOCOL_ERROR",
+        "Durable stream recovery is not enabled.",
+      );
+    const snapshot = await journal.load();
+    if (!snapshot || snapshot.header.binding !== this.journalBinding())
+      throw new OpenAIProviderError(
+        "PROVIDER_PROTOCOL_ERROR",
+        "The pending response does not match the current model or instructions.",
+      );
+    const stream = recoverOpenAIStream(
+      async () => {
+        throw new OpenAIProviderError(
+          "PROVIDER_PROTOCOL_ERROR",
+          "Recovery must never create a new response.",
+        );
+      },
+      this.options.client.responses,
+      signal,
+      { replay: snapshot.events, append: (event) => journal.append(event) },
+    );
+    try {
+      yield* this.decode(stream, signal);
+    } catch (error) {
+      throw mapProviderRequestError("OpenAI", error, signal);
+    }
+  }
+
+  private async *decode(
+    stream: AsyncIterable<OpenAI.Responses.ResponseStreamEvent>,
+    signal: AbortSignal,
+  ): AsyncIterable<ModelEvent> {
+    let completed = false;
+    let functionCallCount = 0;
+    for await (const event of stream) {
+      signal.throwIfAborted();
+
+      if (event.type === "response.output_text.delta") {
+        if (event.delta.length > 0) {
+          yield { type: "assistant_delta", text: event.delta };
+        }
+        continue;
+      }
+
+      if (
+        event.type === "response.output_item.done" &&
+        event.item.type === "function_call"
+      ) {
+        const parsedArguments = parseFunctionArguments(
+          event.item.arguments,
+          event.item.name,
+        );
+        functionCallCount += 1;
+        yield {
+          type: "tool_call",
+          callId: toolCallIdSchema.parse(event.item.call_id),
+          name: event.item.name,
+          arguments: parsedArguments,
+        };
+        continue;
+      }
+
+      if (event.type === "error") {
+        throw new OpenAIProviderError(
+          "PROVIDER_REQUEST_FAILED",
+          "The OpenAI response stream reported an error.",
+        );
+      }
+
+      if (event.type === "response.failed") {
+        throw new OpenAIProviderError(
+          "PROVIDER_REQUEST_FAILED",
+          "The OpenAI response failed.",
+        );
+      }
+
+      if (event.type === "response.incomplete") {
+        throw new OpenAIProviderError(
+          "PROVIDER_OUTPUT_INVALID",
+          "The OpenAI response ended before it completed.",
+        );
+      }
+
+      if (event.type === "response.completed") {
+        if (completed) {
+          throw new OpenAIProviderError(
+            "PROVIDER_PROTOCOL_ERROR",
+            "OpenAI emitted more than one response.completed event.",
+          );
+        }
+        completed = true;
+        const usage = normalizeOpenAIUsage(event.response.usage);
+        yield {
+          type: "completed",
+          finishReason: functionCallCount > 0 ? "tool_calls" : "stop",
+          responseId: event.response.id,
+          ...(usage === undefined ? {} : { usage }),
+        };
+      }
+    }
+
+    if (!completed) {
+      throw new OpenAIProviderError(
+        "PROVIDER_PROTOCOL_ERROR",
+        "The OpenAI stream ended without response.completed.",
+      );
     }
   }
 
@@ -370,6 +461,9 @@ export function createOpenAIResponsesProvider(
   const client = new OpenAI({ apiKey: options.apiKey, maxRetries: 0 });
   return new OpenAIResponsesProvider({
     client,
+    ...(options.responseJournal
+      ? { responseJournal: options.responseJournal }
+      : {}),
     model: options.model,
     instructions: options.instructions,
     ...(options.resumableStreams === undefined
