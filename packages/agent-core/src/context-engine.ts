@@ -523,6 +523,26 @@ function buildSummary(
   const priorSummaries = omitted.flatMap((item) =>
     item.type === "compaction" ? [item.summary] : [],
   );
+  // Preserve user-authored context separately from the latest request. Do not
+  // infer whether a message is a progress question, a constraint, or a new task.
+  // Historical requests are evidence, not instructions overriding newer input.
+  const userRequestPrefix = "Historical user request ";
+  const priorFacts = priorSummaries.flatMap((summary) => summary.criticalFacts);
+  const userRequests = [
+    ...priorFacts.filter((fact) => fact.startsWith(userRequestPrefix)),
+    ...omitted.flatMap((item) =>
+      item.type === "user_message"
+        ? [`${userRequestPrefix}[${item.id}]: ${excerpt(item.content, 300)}`]
+        : [],
+    ),
+  ];
+  const distinctRequests = [...new Set(userRequests)];
+  // Keep the original request and the two latest omitted updates. Reserving
+  // slots prevents tool artifacts from evicting all user-authored context.
+  const retainedRequests =
+    distinctRequests.length <= 3
+      ? distinctRequests
+      : [distinctRequests[0]!, ...distinctRequests.slice(-2)];
   const successfulTools = omitted.flatMap((item) =>
     item.type === "tool_result" && item.status === "success"
       ? [`${item.name} completed successfully.`]
@@ -588,11 +608,14 @@ function buildSummary(
       ...priorSummaries.flatMap((summary) => summary.failedAttempts),
       ...failedAttempts,
     ]),
-    criticalFacts: uniqueBounded([
-      ...priorSummaries.flatMap((summary) => summary.criticalFacts),
-      ...recoveryFacts,
-      ...artifacts,
-    ]),
+    criticalFacts: [
+      ...retainedRequests,
+      ...uniqueBounded([
+        ...priorFacts.filter((fact) => !fact.startsWith(userRequestPrefix)),
+        ...recoveryFacts,
+        ...artifacts,
+      ]).slice(-(6 - retainedRequests.length)),
+    ],
   };
 }
 

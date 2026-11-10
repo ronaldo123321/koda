@@ -293,6 +293,80 @@ describe("ContextEngine", () => {
     expect(second.compaction?.summary.objective).toBe("Start the next task.");
   });
 
+  it("preserves the task and user constraints when the latest input asks for progress", () => {
+    const engine = createEngine({ contextWindowTokens: 2_000 });
+    const transcript = [
+      user("goal", "Implement CSV export."),
+      user("constraint", "Keep the existing API compatible."),
+      assistant("long-answer", "x".repeat(20_000)),
+      user("progress", "现在进度如何？"),
+    ];
+    const first = engine.prepare(transcript, []);
+    expect(first.compaction?.summary.criticalFacts).toEqual(
+      expect.arrayContaining([
+        "Historical user request [goal]: Implement CSV export.",
+        "Historical user request [constraint]: Keep the existing API compatible.",
+      ]),
+    );
+    expect(first.compaction?.summary.objective).toBe("现在进度如何？");
+
+    const second = engine.prepare(
+      [
+        ...transcript,
+        first.compaction!,
+        assistant("long-followup", "y".repeat(20_000)),
+        user(
+          "replacement",
+          "Cancel CSV export; implement JSON export instead.",
+        ),
+      ],
+      [],
+    );
+    expect(second.compaction?.summary.objective).toBe(
+      "Cancel CSV export; implement JSON export instead.",
+    );
+    expect(second.compaction?.summary.criticalFacts).toContain(
+      "Historical user request [goal]: Implement CSV export.",
+    );
+    expect(second.compaction?.summary.criticalFacts).toContain(
+      "Historical user request [constraint]: Keep the existing API compatible.",
+    );
+    expect(second.estimatedInputTokens).toBeLessThanOrEqual(
+      second.inputBudgetTokens,
+    );
+    expect(
+      projectActiveContext([
+        ...transcript,
+        first.compaction!,
+        assistant("long-followup", "y".repeat(20_000)),
+        user(
+          "replacement",
+          "Cancel CSV export; implement JSON export instead.",
+        ),
+        second.compaction!,
+      ]),
+    ).toEqual(second.items);
+  });
+
+  it("bounds omitted user history while retaining the original and latest updates", () => {
+    const requests = Array.from({ length: 10 }, (_, index) =>
+      user(`request-${index}`, `Request ${index}`),
+    );
+    const prepared = createEngine({ contextWindowTokens: 2_000 }).prepare(
+      [
+        ...requests,
+        assistant("large-history-answer", "x".repeat(20_000)),
+        user("history-latest", "Continue."),
+      ],
+      [],
+    );
+    expect(prepared.compaction?.summary.criticalFacts).toEqual([
+      "Historical user request [request-0]: Request 0",
+      "Historical user request [request-8]: Request 8",
+      "Historical user request [request-9]: Request 9",
+    ]);
+  });
+
   it("uses measured input usage to raise later estimates", () => {
     const engine = createEngine({ contextWindowTokens: 10_000 });
     const items = [user("calibration-user", "Measure this request.")];
