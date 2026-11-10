@@ -38,6 +38,8 @@ node apps/cli/dist/main.js run "继续任务" --cwd . --resume <thread-id>
 pnpm chat --cwd .
 ```
 
+OpenAI 可选启用 `KODA_OPENAI_RESUMABLE_STREAMS=1`：后台响应的 ID、游标和事件会在本地持久化，进程意外退出后可用同一 Thread ID 续取原响应。恢复会核对已记录的文本与工具结果，不自动重放工具或沿用旧审批；响应 ID 丢失、响应过期或日志不匹配时会停止恢复。启用方式和完整边界见[跨进程流恢复](docs/plans/cross-process-stream-recovery.md)。
+
 可以从已有 Thread 启动一个独立的子 Thread，并查询其来源与直接子项：
 
 ```bash

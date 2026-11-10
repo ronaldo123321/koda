@@ -42,14 +42,20 @@ Sequence numbers must be contiguous; duplicate sequences must match the already
 seen event digest. Conflicts, missing sequences, gaps, response-ID changes and
 protocol errors fail closed. Text deltas and completed tool-call events are yielded
 only once. AgentLoop still waits for model completion before executing tools.
-The deduplication ledger is bounded to 100,000 events and exists only for the live
-stream; this does not provide cross-process resume of a partially delivered turn.
+The deduplication ledger is bounded to 100,000 events. The application also
+provides a durable response journal when this mode is enabled; see the
+[cross-process recovery contract](cross-process-stream-recovery.md). Standalone
+provider callers without a journal retain in-process-only recovery.
 
 Each disconnected iterator closes before GET. User cancellation, early consumer
 exit and recovery exhaustion attempt to cancel an identified nonterminal background
 response, with a separate five-second SDK abort deadline. If creation never yielded
 an ID, or remote cancellation fails, the remote job's termination cannot be confirmed.
-Existing durable thread recovery remains the mechanism after process restart.
+After process restart, the application reconciles an identified pending response
+with the durable thread audit before starting a new turn.
 
-The behavior is covered with scripted streams. Live OpenAI integration requires
-provider credentials and has not been exercised in this environment.
+Scripted streams cover protocol failures and retry budgets. Live OpenAI tool
+roundtrips, injected-429 retry, same-response retrieval and queued/in-progress
+cancellation have also been exercised; see [evaluation evidence](../evaluations/model-quality.md).
+Those live probes do not establish cross-process crash recovery: that path has
+separate real-process SIGKILL tests with a controlled provider.

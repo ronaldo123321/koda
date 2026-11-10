@@ -51,3 +51,16 @@ validation counts. Original failed reports are retained separately from rescorin
 Anthropic live validation remains unavailable without its credential. Native
 macOS/Windows acceptance remains platform-dependent; Linux tests do not establish
 those platforms' behavior.
+
+## Cross-process response recovery
+
+Opt-in OpenAI resumable streams now journal response metadata and raw events to a
+private bounded file before delivering output. On resume, the application retrieves
+the same response after its durable cursor, reconstructs cached output, and
+reconciles it with the original turn's text and tool audit. It does not execute
+recovered tool intents or repeat completed tools. Unknown execution outcomes remain
+explicit and require reassessment under the current turn's policy.
+
+See [the recovery contract](cross-process-stream-recovery.md) for limits and crash
+coverage. This is independent of semantic-summary evaluation and leaves other
+provider protocols unchanged.

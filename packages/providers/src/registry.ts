@@ -1,3 +1,4 @@
+import type { ResponseJournal } from "./response-journal.js";
 import type { ModelProvider } from "@koda/agent-core";
 import {
   modelProviderIdSchema,
@@ -27,6 +28,7 @@ export interface CreateRegisteredProviderOptions {
   instructions: string;
   maxOutputTokens: number;
   resumableStreams?: boolean;
+  responseJournal?: ResponseJournal;
 }
 
 const profiles = Object.freeze({
@@ -109,6 +111,9 @@ export function createRegisteredProvider(
       model: options.model,
       instructions: options.instructions,
       reasoningEffort: "medium",
+      ...(options.responseJournal
+        ? { responseJournal: options.responseJournal }
+        : {}),
       ...(options.resumableStreams === undefined
         ? {}
         : { resumableStreams: options.resumableStreams }),

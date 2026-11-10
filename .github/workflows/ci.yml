@@ -266,6 +266,11 @@ jobs:
             packages/testkit/src/mcp-oauth-vault.test.ts \
             packages/testkit/src/mcp-oauth-login.test.ts \
             packages/testkit/src/mcp-oauth-cli.test.ts
+      - name: Run macOS cross-process stream recovery acceptance
+        run: >-
+          pnpm exec vitest run
+          packages/testkit/src/durable-stream-recovery.test.ts
+          --maxWorkers=2 --testTimeout=15000
       - name: Run macOS approval recovery acceptance
         run: |
           pnpm exec vitest run \

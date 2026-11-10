@@ -109,6 +109,7 @@ import {
 } from "@koda/protocol";
 import {
   BUILT_IN_PROVIDER_METADATA,
+  type ResponseJournal,
   createRegisteredProvider,
 } from "@koda/providers";
 import {
@@ -305,6 +306,7 @@ export interface KodaApplicationDependencies {
   createProvider(
     configuration: RunConfiguration,
     instructions: string,
+    responseJournal?: ResponseJournal,
   ): ModelProvider;
   createIds(resumeThreadId?: ThreadId): {
     threadId: ThreadId;
@@ -315,12 +317,13 @@ export interface KodaApplicationDependencies {
 
 const productionDependencies: KodaApplicationDependencies = {
   openWorkspace: (root) => ReadOnlyWorkspace.open(root),
-  createProvider: (configuration, instructions) =>
+  createProvider: (configuration, instructions, responseJournal) =>
     createRegisteredProvider({
       provider: configuration.provider,
       apiKey: configuration.apiKey,
       model: configuration.model,
       instructions,
+      ...(responseJournal ? { responseJournal } : {}),
       maxOutputTokens: configuration.maxOutputTokens,
       ...(configuration.resumableStreams === undefined
         ? {}
