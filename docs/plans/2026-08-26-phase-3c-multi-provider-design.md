@@ -35,7 +35,7 @@ openai | anthropic | deepseek | kimi | glm
 
 | Provider  | Credential          | Default model     | Endpoint strategy                             |
 | --------- | ------------------- | ----------------- | --------------------------------------------- |
-| OpenAI    | `OPENAI_API_KEY`    | `gpt-5.6-terra`   | official SDK default                          |
+| OpenAI    | `OPENAI_API_KEY`    | `gpt-6.1-terra`   | official SDK default                          |
 | Anthropic | `ANTHROPIC_API_KEY` | `claude-sonnet-5` | official SDK default                          |
 | DeepSeek  | `DEEPSEEK_API_KEY`  | `deepseek-v4-pro` | fixed `https://api.deepseek.com`              |
 | Kimi      | `MOONSHOT_API_KEY`  | `kimi-k2.6`       | fixed `https://api.moonshot.cn/v1`            |

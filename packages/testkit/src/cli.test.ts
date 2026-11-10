@@ -96,6 +96,7 @@ describe("Phase 1A CLI", () => {
       "/workspace",
     );
     expect(approvalFromCli.approvalMode).toBe("never");
+    expect(approvalFromCli.model).toBe("gpt-6.1-terra");
     expect(
       resolveRunConfiguration(
         { resume: "thread_123" },

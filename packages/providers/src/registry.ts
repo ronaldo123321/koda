@@ -34,7 +34,7 @@ const profiles = Object.freeze({
     id: "openai",
     displayName: "OpenAI",
     credentialEnvironmentVariable: "OPENAI_API_KEY",
-    defaultModel: "gpt-5.6-terra",
+    defaultModel: "gpt-6.1-terra",
     protocol: "openai-responses",
   }),
   anthropic: Object.freeze({

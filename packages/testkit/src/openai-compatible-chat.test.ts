@@ -390,7 +390,7 @@ describe("OpenAICompatibleChatProvider", () => {
 
   it("publishes the finite built-in provider registry", () => {
     expect(BUILT_IN_PROVIDER_METADATA).toEqual([
-      expect.objectContaining({ id: "openai", defaultModel: "gpt-5.6-terra" }),
+      expect.objectContaining({ id: "openai", defaultModel: "gpt-6.1-terra" }),
       expect.objectContaining({
         id: "anthropic",
         defaultModel: "claude-sonnet-5",
