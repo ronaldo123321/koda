@@ -1,3 +1,4 @@
+import { streamWithRetry } from "./request-retry.js";
 import type {
   ModelEvent,
   ModelProvider,
@@ -90,19 +91,24 @@ export class AnthropicMessagesProvider implements ModelProvider {
     let messageStopSeen = false;
 
     try {
-      const stream = await this.options.client.messages.create(
-        {
-          model: this.options.model,
-          max_tokens: this.options.maxOutputTokens,
-          system: [this.options.instructions, ...projected.systemNotices].join(
-            "\n\n",
+      const stream = streamWithRetry(
+        () =>
+          this.options.client.messages.create(
+            {
+              model: this.options.model,
+              max_tokens: this.options.maxOutputTokens,
+              system: [
+                this.options.instructions,
+                ...projected.systemNotices,
+              ].join("\n\n"),
+              messages: projected.messages,
+              tools: request.tools.map(toAnthropicTool),
+              thinking: { type: "adaptive" },
+              stream: true,
+            },
+            { signal },
           ),
-          messages: projected.messages,
-          tools: request.tools.map(toAnthropicTool),
-          thinking: { type: "adaptive" },
-          stream: true,
-        },
-        { signal },
+        signal,
       );
 
       for await (const event of stream) {
@@ -286,7 +292,7 @@ export class AnthropicMessagesProvider implements ModelProvider {
 export function createAnthropicMessagesProvider(
   options: CreateAnthropicMessagesProviderOptions,
 ): AnthropicMessagesProvider {
-  const client = new Anthropic({ apiKey: options.apiKey });
+  const client = new Anthropic({ apiKey: options.apiKey, maxRetries: 0 });
   return new AnthropicMessagesProvider({
     client: client as unknown as AnthropicMessagesClient,
     model: options.model,

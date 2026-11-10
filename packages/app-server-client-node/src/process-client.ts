@@ -168,6 +168,7 @@ export interface NodeAppServerClientOptions {
   maximumStderrBytes?: number;
   requestTimeoutMs?: number;
   shutdownTimeoutMs?: number;
+  requiredCapabilities?: readonly string[];
   clientName?: string;
   clientVersion?: string;
 }
@@ -324,6 +325,9 @@ export class NodeAppServerClient implements AppServerClientApi {
         "initialize",
         jsonValueSchema.parse({
           protocolVersion: APP_SERVER_PROTOCOL_VERSION,
+          ...(options.requiredCapabilities === undefined
+            ? {}
+            : { requiredCapabilities: options.requiredCapabilities }),
           client: {
             name: options.clientName ?? "koda-tui",
             ...(options.clientVersion === undefined
@@ -333,6 +337,16 @@ export class NodeAppServerClient implements AppServerClientApi {
         }),
         initializeResultSchema,
       );
+      for (const capability of options.requiredCapabilities ?? []) {
+        if (
+          !Object.hasOwn(initialization.capabilities, capability) ||
+          initialization.capabilities[capability] !== true
+        ) {
+          throw new Error(
+            `Required capability '${capability}' is unavailable.`,
+          );
+        }
+      }
       return new NodeAppServerClient(
         child,
         connection,

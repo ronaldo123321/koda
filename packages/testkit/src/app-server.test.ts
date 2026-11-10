@@ -22,6 +22,7 @@ import {
 import type { ModelProvider } from "@koda/agent-core";
 import {
   APP_SERVER_PROTOCOL_VERSION,
+  initializeResultSchema,
   agentEventSchema,
   itemIdSchema,
   threadIdSchema,
@@ -68,6 +69,73 @@ class MemoryProtocolWriter implements ProtocolMessageWriter {
 }
 
 describe("KodaAppServer", () => {
+  it("accepts additive boolean capabilities while validating safety requirements", async () => {
+    const fixture = await createFixture();
+    const writer = new MemoryProtocolWriter();
+    const server = createServer(fixture, writer);
+    await initialize(server, 1);
+    const result = initializeResultSchema.parse(responseResult(writer, 1));
+    expect(
+      initializeResultSchema.parse({
+        ...result,
+        capabilities: {
+          ...result.capabilities,
+          futureFeature: true,
+        },
+      }).capabilities.futureFeature,
+    ).toBe(true);
+    for (const capabilities of [
+      { ...result.capabilities, futureFeature: "enabled" },
+      { ...result.capabilities, interactiveApproval: false },
+      { ...result.capabilities, resourceEvidence: undefined },
+    ]) {
+      expect(
+        initializeResultSchema.safeParse({ ...result, capabilities }).success,
+      ).toBe(false);
+    }
+  });
+
+  it("keeps the macOS handshake version aligned with the server", async () => {
+    const source = await readFile(
+      resolve("apps/macos-gui/Sources/KodaGUI/KodaModel.swift"),
+      "utf8",
+    );
+    const version = source.match(
+      /private let appServerProtocolVersion = (\d+)/u,
+    )?.[1];
+    expect(Number(version)).toBe(APP_SERVER_PROTOCOL_VERSION);
+    expect(source).toContain('"protocolVersion": appServerProtocolVersion');
+    expect(source).toContain("as? Int == appServerProtocolVersion");
+  });
+
+  it("rejects unavailable required capabilities without completing initialization", async () => {
+    const fixture = await createFixture();
+    const writer = new MemoryProtocolWriter();
+    const server = createServer(fixture, writer);
+    for (const [index, capability] of [
+      "futureFeature",
+      "interactiveProcesses",
+      "constructor",
+    ].entries()) {
+      await request(server, index + 1, "initialize", {
+        protocolVersion: APP_SERVER_PROTOCOL_VERSION,
+        client: { name: "capability-test" },
+        requiredCapabilities: [capability],
+      });
+      expect(errorDataCode(writer, index + 1)).toBe(
+        "REQUIRED_CAPABILITY_UNAVAILABLE",
+      );
+    }
+    await request(server, 4, "initialize", {
+      protocolVersion: APP_SERVER_PROTOCOL_VERSION,
+      client: { name: "capability-test" },
+      requiredCapabilities: ["interactiveApproval", "resourceEvidence"],
+    });
+    expect(errorDataCode(writer, 4)).toBeUndefined();
+    await request(server, 5, "thread/list", {});
+    expect(errorDataCode(writer, 5)).toBeUndefined();
+  });
+
   it("enforces initialization and returns stable JSON-RPC errors", async () => {
     const fixture = await createFixture();
     const writer = new MemoryProtocolWriter();

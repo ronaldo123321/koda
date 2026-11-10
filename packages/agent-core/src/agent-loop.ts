@@ -33,6 +33,7 @@ import {
 } from "./events.js";
 import {
   ContextBudgetError,
+  normalizeToolHistory,
   digestContextItems,
   digestModelTools,
   summarizeContextItemTypes,
@@ -41,6 +42,7 @@ import {
 import type { ModelEvent, ModelProvider } from "./model.js";
 import {
   denySideEffectsPolicy,
+  EffectToolPolicy,
   rejectApprovalsBroker,
   type ApprovalBroker,
   type ApprovalGrantManager,
@@ -151,6 +153,7 @@ export class AgentLoop {
   private readonly maxTurnDurationMs: number;
   private readonly monotonicNow: () => number;
   private readonly toolCatalogRefresher: ToolCatalogRefresher | undefined;
+  private readonly parallelReadsEnabled: boolean;
   private readonly mailbox: TurnMailbox | undefined;
 
   public constructor(options: AgentLoopOptions) {
@@ -172,6 +175,9 @@ export class AgentLoop {
     this.monotonicNow = options.monotonicNow ?? Date.now;
     this.toolCatalogRefresher = options.toolCatalogRefresher;
     this.mailbox = options.mailbox;
+    this.parallelReadsEnabled =
+      options.policy === undefined ||
+      options.policy.constructor === EffectToolPolicy;
 
     if (!Number.isInteger(this.maxSteps) || this.maxSteps < 1) {
       throw new Error("maxSteps must be a positive integer.");
@@ -330,9 +336,27 @@ export class AgentLoop {
       let rawEstimatedInputTokens: number | undefined;
       if (this.contextEngine !== undefined) {
         try {
-          const prepared = this.contextEngine.prepare(
+          const prepared = await this.contextEngine.prepareAsync(
             contextItems,
             toolDefinitions,
+            signal,
+            {
+              requested: () => {
+                usage.modelRequests += 1;
+              },
+              reported: async (tokens, responseId) => {
+                addTokenUsage(usage, tokens);
+                await recorder.record({
+                  type: "model.usage",
+                  payload: {
+                    step,
+                    usage: tokens,
+                    purpose: "context_summary",
+                    ...(responseId === undefined ? {} : { responseId }),
+                  },
+                });
+              },
+            },
           );
           modelItems = prepared.items;
           rawEstimatedInputTokens = prepared.rawEstimatedInputTokens;
@@ -379,6 +403,14 @@ export class AgentLoop {
             },
           });
         } catch (error) {
+          if (signal.aborted)
+            return this.cancel(
+              recorder,
+              items,
+              completedSteps,
+              signal.reason,
+              usage,
+            );
           return this.fail(
             recorder,
             items,
@@ -584,16 +616,10 @@ export class AgentLoop {
         });
       }
 
-      for (const call of toolCalls) {
-        if (signal.aborted) {
-          return this.cancel(
-            recorder,
-            items,
-            completedSteps,
-            signal.reason,
-            usage,
-          );
-        }
+      const executeCall = async (
+        call: Extract<ModelEvent, { type: "tool_call" }>,
+      ) => {
+        signal.throwIfAborted();
 
         const callItem = toolCallItemSchema.parse({
           type: "tool_call",
@@ -771,25 +797,8 @@ export class AgentLoop {
             }
           }
         } catch (error) {
-          if (signal.aborted) {
-            return this.cancel(
-              recorder,
-              items,
-              completedSteps,
-              signal.reason,
-              usage,
-            );
-          }
-          if (error instanceof ToolOperationalEventError) {
-            return this.fail(
-              recorder,
-              items,
-              completedSteps,
-              "EVENT_PERSISTENCE_FAILED",
-              error.message,
-              usage,
-            );
-          }
+          if (signal.aborted || error instanceof ToolOperationalEventError)
+            throw error;
           result = {
             status: "error",
             error: {
@@ -836,6 +845,51 @@ export class AgentLoop {
             [{ kind: "tool_call", callId: call.callId }],
           );
         }
+      };
+      for (let index = 0; index < toolCalls.length;) {
+        const batch = [toolCalls[index]!];
+        index += 1;
+        if (
+          this.parallelReadsEnabled &&
+          this.planState?.currentPlan() === undefined &&
+          this.tools.canRunInParallel(batch[0]!.name)
+        ) {
+          while (
+            batch.length < 4 &&
+            index < toolCalls.length &&
+            this.tools.canRunInParallel(toolCalls[index]!.name)
+          ) {
+            batch.push(toolCalls[index++]!);
+          }
+        }
+        // Await every started read before emitting a terminal event or admitting
+        // the next batch. Exclusive calls form barriers in both directions.
+        const outcomes = await Promise.allSettled(batch.map(executeCall));
+        const failure = outcomes.find(
+          (outcome) => outcome.status === "rejected",
+        );
+        if (signal.aborted)
+          return this.cancel(
+            recorder,
+            items,
+            completedSteps,
+            signal.reason,
+            usage,
+          );
+        if (failure?.status === "rejected") {
+          return this.fail(
+            recorder,
+            items,
+            completedSteps,
+            "EVENT_PERSISTENCE_FAILED",
+            failure.reason instanceof Error
+              ? failure.reason.message
+              : String(failure.reason),
+            usage,
+          );
+        }
+        const normalized = normalizeToolHistory(items);
+        items.splice(0, items.length, ...normalized);
       }
 
       if (

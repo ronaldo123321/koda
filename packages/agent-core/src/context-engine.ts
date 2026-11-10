@@ -11,6 +11,11 @@ import {
   type ItemId,
 } from "@koda/protocol";
 
+import type {
+  ContextSummarizer,
+  SummaryObserver,
+} from "./context-summarizer.js";
+
 import type { ModelToolDefinition } from "./model.js";
 
 export interface ContextItemIdFactory {
@@ -23,6 +28,8 @@ export interface ContextEngineOptions {
   ids: ContextItemIdFactory;
   safetyMarginTokens?: number;
   fixedInputTokens?: number;
+  summarizer?: ContextSummarizer;
+  summaryTimeoutMs?: number;
 }
 
 export interface PreparedModelContext {
@@ -205,6 +212,136 @@ export class ContextEngine {
     };
   }
 
+  public async prepareAsync(
+    transcript: readonly ConversationItem[],
+    tools: readonly ModelToolDefinition[],
+    signal: AbortSignal,
+    observer: SummaryObserver,
+  ): Promise<PreparedModelContext> {
+    signal.throwIfAborted();
+    const fallback = this.prepare(transcript, tools);
+    const original = fallback.compaction;
+    if (!original || !this.options.summarizer) return fallback;
+    const retained = new Set(original.retainedItemIds);
+    const omitted = projectActiveContext(transcript).filter(
+      (item) => !retained.has(item.id) && item.type !== "plan_state",
+    );
+    // Bound the auxiliary request independently of the main prompt. Preserve the
+    // deterministic evidence and sample recent omitted entries with explicit truncation.
+    const maxBytes = Math.min(
+      24_000,
+      Math.max(0, this.inputBudgetTokens * 2 - 4_000),
+    );
+    const excerpts: string[] = [];
+    let bytes = Buffer.byteLength(
+      JSON.stringify({ evidence: original.summary, excerpts }),
+    );
+    if (bytes >= maxBytes) return fallback;
+    for (const item of [...omitted].reverse()) {
+      const serialized = JSON.stringify(item);
+      const excerpt =
+        serialized.length > 1800
+          ? serialized.slice(0, 1800) + " [truncated]"
+          : serialized;
+      const size = Buffer.byteLength(JSON.stringify(excerpt)) + 1;
+      if (bytes + size > maxBytes) break;
+      excerpts.unshift(excerpt);
+      bytes += size;
+    }
+    const controller = new AbortController();
+    const abort = () => controller.abort(signal.reason);
+    signal.addEventListener("abort", abort, { once: true });
+    const timer = setTimeout(
+      () => controller.abort(new Error("Context summary timed out.")),
+      this.options.summaryTimeoutMs ?? 20_000,
+    );
+    let observerError: unknown;
+    let usageWrite: Promise<void> | undefined;
+    let rejectAbort: (() => void) | undefined;
+    try {
+      const cancelled = new Promise<never>((_, reject) => {
+        rejectAbort = () => reject(controller.signal.reason);
+        controller.signal.addEventListener("abort", rejectAbort, {
+          once: true,
+        });
+      });
+      const generated = await Promise.race([
+        this.options.summarizer(
+          JSON.stringify({ evidence: original.summary, excerpts }),
+          controller.signal,
+          {
+            requested: () => {
+              controller.signal.throwIfAborted();
+              observer.requested();
+            },
+            reported: async (tokens, responseId) => {
+              controller.signal.throwIfAborted();
+              try {
+                usageWrite = observer.reported(tokens, responseId);
+                await usageWrite;
+              } catch (error) {
+                observerError = error;
+                throw error;
+              }
+            },
+          },
+        ),
+        cancelled,
+      ]);
+      const parsed = compactionItemSchema.shape.summary.parse(generated);
+      for (const value of Object.values(parsed)) {
+        if (
+          typeof value === "string"
+            ? value.length > 1000
+            : value.length > 6 || value.some((entry) => entry.length > 300)
+        )
+          return fallback;
+      }
+      // The latest objective and retained item references are authoritative.
+      // Preserve deterministic historical requirements even if the model omits them.
+      const summary = {
+        ...parsed,
+        objective: original.summary.objective,
+        criticalFacts: [
+          ...new Set([
+            ...original.summary.criticalFacts,
+            ...parsed.criticalFacts,
+          ]),
+        ].slice(0, 12),
+      };
+      const compaction = compactionItemSchema.parse({ ...original, summary });
+      const items = fallback.items.map((item) =>
+        item.id === original.id ? compaction : item,
+      );
+      compaction.estimatedTokensAfter = this.calibrate(
+        this.estimateRaw(items, tools),
+      );
+      const rawEstimatedInputTokens = this.estimateRaw(items, tools);
+      const estimatedInputTokens = this.calibrate(rawEstimatedInputTokens);
+      if (estimatedInputTokens > this.inputBudgetTokens) return fallback;
+      signal.throwIfAborted();
+      return {
+        ...fallback,
+        items,
+        compaction,
+        rawEstimatedInputTokens,
+        estimatedInputTokens,
+      };
+    } catch {
+      signal.throwIfAborted();
+      if (observerError !== undefined) throw observerError;
+      return fallback;
+    } finally {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", abort);
+      if (rejectAbort)
+        controller.signal.removeEventListener("abort", rejectAbort);
+      controller.abort();
+      // Never let a started durable usage write outlive context preparation.
+      await usageWrite;
+    }
+  }
+
   public observe(
     rawEstimatedInputTokens: number,
     measuredInputTokens: number,
@@ -324,6 +461,60 @@ function estimateJsonTokens(value: unknown): number {
   return estimateTextTokens(JSON.stringify(value));
 }
 
+/** Project interleaved tool events into call/approval/result groups for models.
+ * Raw event order remains authoritative; never move items across other content.
+ */
+export function normalizeToolHistory(
+  items: readonly ConversationItem[],
+): ConversationItem[] {
+  const output: ConversationItem[] = [];
+  let region: ConversationItem[] = [];
+  const flush = () => {
+    const calls = region.filter((item) => item.type === "tool_call");
+    const seen = new Set<string>();
+    let valid = true;
+    for (const item of region) {
+      if (item.type === "tool_call") {
+        if (seen.has(item.callId)) valid = false;
+        seen.add(item.callId);
+      } else if (
+        (item.type === "approval" || item.type === "tool_result") &&
+        !seen.has(item.callId)
+      ) {
+        valid = false;
+      }
+    }
+    if (!valid) output.push(...region);
+    else
+      for (const call of calls) {
+        output.push(
+          ...region.filter(
+            (item) =>
+              (item.type === "tool_call" ||
+                item.type === "approval" ||
+                item.type === "tool_result") &&
+              item.callId === call.callId,
+          ),
+        );
+      }
+    region = [];
+  };
+  for (const item of items) {
+    if (
+      item.type === "tool_call" ||
+      item.type === "approval" ||
+      item.type === "tool_result"
+    )
+      region.push(item);
+    else {
+      flush();
+      output.push(item);
+    }
+  }
+  flush();
+  return output;
+}
+
 export function projectActiveContext(
   transcript: readonly ConversationItem[],
 ): ConversationItem[] {
@@ -340,7 +531,7 @@ export function projectActiveContext(
     }
   }
   if (compactionIndex < 0) {
-    return [...transcript];
+    return normalizeToolHistory(transcript);
   }
   const compaction = transcript[compactionIndex];
   if (
@@ -371,7 +562,7 @@ export function projectActiveContext(
   const later = transcript
     .slice(compactionIndex + 1)
     .filter((item) => item.type !== "compaction");
-  return [compaction, ...retained, ...later];
+  return normalizeToolHistory([compaction, ...retained, ...later]);
 }
 
 export function summarizeContextItemTypes(

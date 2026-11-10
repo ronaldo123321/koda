@@ -176,6 +176,7 @@ export const agentEventSchema = z.discriminatedUnion("type", [
     ...metadataShape,
     type: z.literal("model.usage"),
     payload: z.object({
+      purpose: z.literal("context_summary").optional(),
       step: z.number().int().positive(),
       responseId: z.string().min(1).optional(),
       usage: tokenUsageSchema,

@@ -1,3 +1,4 @@
+import { streamWithRetry } from "./request-retry.js";
 import type {
   ModelEvent,
   ModelProvider,
@@ -103,9 +104,10 @@ export class OpenAICompatibleChatProvider implements ModelProvider {
           : { max_tokens: this.options.maxOutputTokens }),
         ...(this.options.profile.requestExtensions ?? {}),
       } as OpenAI.Chat.ChatCompletionCreateParamsStreaming;
-      const stream = await this.options.client.chat.completions.create(body, {
+      const stream = streamWithRetry(
+        () => this.options.client.chat.completions.create(body, { signal }),
         signal,
-      });
+      );
 
       for await (const chunk of stream) {
         signal.throwIfAborted();
@@ -240,6 +242,7 @@ export function createOpenAICompatibleChatProvider(
   const client = new OpenAI({
     apiKey: options.apiKey,
     baseURL: options.profile.baseURL,
+    maxRetries: 0,
   });
   return new OpenAICompatibleChatProvider({
     client,

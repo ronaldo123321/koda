@@ -1,5 +1,6 @@
 import {
   PlanReducerError,
+  normalizeToolHistory,
   reducePlanAcceptance,
   reducePlanUpdate,
   type EventReadResult,
@@ -755,7 +756,7 @@ function reconstructHistory(events: readonly AgentEvent[]): {
     .filter(
       (item) => item.type !== "tool_call" || !unmatchedIds.has(item.callId),
     );
-  return { history, unmatchedCalls };
+  return { history: normalizeToolHistory(history), unmatchedCalls };
 }
 
 function validateCompactionHistory(history: readonly ConversationItem[]): void {

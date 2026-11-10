@@ -1,6 +1,8 @@
 import Combine
 import Foundation
 
+private let appServerProtocolVersion = 19
+
 struct ProviderOption: Identifiable {
     let id: String
     let name: String
@@ -95,7 +97,7 @@ final class KodaModel: ObservableObject {
                 self.notice = "app-server 已断开。请重新连接。"
             }
             client.request("initialize", params: [
-                "protocolVersion": 18,
+                "protocolVersion": appServerProtocolVersion,
                 "client": ["name": "koda-macos-gui", "version": "0.1.0"],
             ]) { [weak self] response in
                 guard let self else { return }
@@ -103,7 +105,7 @@ final class KodaModel: ObservableObject {
                 case .failure(let error): self.notice = error.localizedDescription
                 case .success(let result):
                     self.notice = nil
-                    guard result["protocolVersion"] as? Int == 18 else {
+                    guard result["protocolVersion"] as? Int == appServerProtocolVersion else {
                         self.notice = "app-server 协议版本不兼容。"
                         return
                     }

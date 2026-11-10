@@ -47,6 +47,7 @@ export interface Clock {
 
 export class TurnEventRecorder {
   private sequence: number;
+  private pending: Promise<void> = Promise.resolve();
 
   public constructor(
     private readonly sink: EventSink,
@@ -58,19 +59,28 @@ export class TurnEventRecorder {
     this.sequence = initialSequence;
   }
 
-  public async record(data: AgentEventData): Promise<AgentEvent> {
-    const event = agentEventSchema.parse({
-      schemaVersion: 1,
-      sequence: this.sequence,
-      timestamp: this.clock.now(),
-      threadId: this.threadId,
-      turnId: this.turnId,
-      ...data,
-    });
+  public record(data: AgentEventData): Promise<AgentEvent> {
+    const recorded = this.pending.then(async () => {
+      const event = agentEventSchema.parse({
+        schemaVersion: 1,
+        sequence: this.sequence,
+        timestamp: this.clock.now(),
+        threadId: this.threadId,
+        turnId: this.turnId,
+        ...data,
+      });
 
-    await this.sink.append(event);
-    this.sequence += 1;
-    return event;
+      await this.sink.append(event);
+      this.sequence += 1;
+      return event;
+    });
+    // Serialize sequence allocation and persistence together. Preserve the
+    // caller's rejection without poisoning later attempts to record a failure.
+    this.pending = recorded.then(
+      () => {},
+      () => {},
+    );
+    return recorded;
   }
 
   public lastRecordedSequence(): number | undefined {

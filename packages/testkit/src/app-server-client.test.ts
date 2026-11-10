@@ -251,6 +251,7 @@ describe("NodeAppServerClient", () => {
         OPENAI_API_KEY: "offline-settings-key",
       },
       clientName: "app-server-client-test",
+      requiredCapabilities: ["interactiveApproval", "resourceEvidence"],
     });
 
     expect(client.initialization).toMatchObject({
@@ -472,6 +473,19 @@ describe("NodeAppServerClient", () => {
     expect(client.diagnostics()).toBe("");
     await expect(client.shutdown()).resolves.toBeUndefined();
     await expect(client.shutdown()).resolves.toBeUndefined();
+  });
+
+  it("rejects a server that ignores required capability negotiation", async () => {
+    await expect(
+      NodeAppServerClient.connect({
+        command: process.execPath,
+        args: ["-e", fixtureServerScript({})],
+        requiredCapabilities: ["unavailableFeature"],
+        shutdownTimeoutMs: 500,
+      }),
+    ).rejects.toThrow(
+      "Required capability 'unavailableFeature' is unavailable.",
+    );
   });
 
   it("bounds child diagnostics and waits for graceful fixture shutdown", async () => {

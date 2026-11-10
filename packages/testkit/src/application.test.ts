@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import {
   appendFile,
+  chmod,
   mkdir,
   mkdtemp,
   readFile,
@@ -1740,6 +1741,8 @@ describe("KodaApplication", () => {
     const before = Buffer.from("before\n");
     const after = Buffer.from("after\n");
     await writeFile(join(fixture.workspaceRoot, "tracked.txt"), before);
+    // Match the journal fixture explicitly, independent of the runner umask.
+    await chmod(join(fixture.workspaceRoot, "tracked.txt"), 0o644);
     const originEvents = new JsonlEventStore(
       join(fixture.kodaHome, "threads", `${originThreadId}.jsonl`),
     );
@@ -2666,6 +2669,120 @@ describe("KodaApplication", () => {
         afterSequence: 1,
       }),
     ).rejects.toMatchObject({ code: "INVALID_THREAD_EVENT_CURSOR" });
+  });
+
+  it("keeps summary usage separate from replayable main context inspection", async () => {
+    const fixture = await createFixture();
+    const threadId = threadIdSchema.parse("semantic-inspection-thread");
+    let turn = 0;
+    let mainRequests = 0;
+    const application = new KodaApplication({
+      environment: {
+        OPENAI_API_KEY: "offline-test-key",
+        KODA_HOME: fixture.kodaHome,
+        KODA_CONTEXT_WINDOW_TOKENS: "20000",
+        KODA_MAX_OUTPUT_TOKENS: "512",
+      },
+      processDirectory: fixture.root,
+      dependencies: {
+        openWorkspace: (root) => ReadOnlyWorkspace.open(root),
+        createIds: () => ({
+          threadId,
+          turnId: turnIdSchema.parse(`semantic-turn-${++turn}`),
+          itemIds: new DeterministicItemIdFactory(`semantic-${turn}`),
+        }),
+        createProvider: (_configuration, instructions) => {
+          const summary = instructions.startsWith(
+            "Summarize conversation evidence",
+          );
+          if (!summary) mainRequests += 1;
+          return new ScriptedModelProvider([
+            {
+              events: [
+                {
+                  type: "assistant_delta",
+                  text: summary
+                    ? JSON.stringify({
+                        objective: "old",
+                        decisions: [],
+                        modifiedFiles: [],
+                        completedWork: ["Inspected parsing."],
+                        pendingWork: ["Validate parsing."],
+                        failedAttempts: [],
+                        criticalFacts: [],
+                      })
+                    : mainRequests === 1
+                      ? "Evidence ".repeat(6000)
+                      : "Validated.",
+                },
+                {
+                  type: "completed",
+                  finishReason: "stop",
+                  responseId: summary
+                    ? "summary-response"
+                    : `main-${mainRequests}`,
+                  usage: {
+                    inputTokens: summary ? 777 : 42,
+                    cachedInputTokens: 0,
+                    cacheWriteInputTokens: 0,
+                    outputTokens: 8,
+                    reasoningOutputTokens: 0,
+                    totalTokens: summary ? 785 : 50,
+                  },
+                },
+              ],
+            },
+          ]);
+        },
+      },
+    });
+    const client = {
+      events: { append: async () => undefined },
+      approvals: rejectApprovals(),
+    };
+    await expect(
+      application.startTurn(
+        {
+          prompt: "Inspect parsing, preserving APIs.",
+          cwd: fixture.workspaceRoot,
+        },
+        client,
+      ).completion,
+    ).resolves.toMatchObject({ status: "completed" });
+    await expect(
+      application.startTurn(
+        {
+          prompt: "Now validate it.",
+          cwd: fixture.workspaceRoot,
+          resume: threadId,
+        },
+        client,
+      ).completion,
+    ).resolves.toMatchObject({ status: "completed" });
+    const contexts = await application.listThreadContexts({
+      workspace: fixture.workspaceRoot,
+      threadId,
+    });
+    expect(contexts.requests).toHaveLength(2);
+    expect(
+      contexts.requests.map((request) => request.measuredInputTokens),
+    ).toEqual([42, 42]);
+    const latest = contexts.requests[0]!;
+    expect(latest.compactionItemId).toBeDefined();
+    const detail = await application.readContext({
+      workspace: fixture.workspaceRoot,
+      threadId,
+      anchorSequence: latest.anchorSequence,
+    });
+    expect(detail).toMatchObject({ usage: { responseId: "main-2" } });
+    const events = await application.readThreadEvents({ threadId });
+    expect(
+      events.events.filter(
+        (event) =>
+          event.type === "model.usage" &&
+          event.payload.purpose === "context_summary",
+      ),
+    ).toHaveLength(1);
   });
 
   it("audits precise and legacy context requests with bounded current instructions", async () => {

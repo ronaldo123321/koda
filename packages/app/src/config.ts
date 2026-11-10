@@ -30,6 +30,7 @@ export interface RunConfiguration {
   provider: ModelProviderId;
   contextWindowTokens: number;
   maxOutputTokens: number;
+  resumableStreams?: boolean;
   resumeThreadId?: ThreadId;
 }
 
@@ -133,6 +134,9 @@ export function resolveRunConfiguration(
     provider,
     contextWindowTokens,
     maxOutputTokens,
+    ...(environment.KODA_OPENAI_RESUMABLE_STREAMS === "1"
+      ? { resumableStreams: true }
+      : {}),
     ...(resumeThreadId === undefined ? {} : { resumeThreadId }),
   };
 }
